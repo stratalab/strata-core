@@ -14,7 +14,8 @@
 # command.
 #
 # The remaining entries need harnesses this replay lane does not provide: a
-# closed runtime (runtime_closed), a live inference provider (inference.*), Arrow
+# closed runtime (runtime_closed), a live inference provider or an environment
+# the fake runtime's fixed world does not have (inference.*, see S2b), Arrow
 # feature builds and IO faults (*.executor.arrow*), a configured hub
 # (*.hub_*), or state/fault setup not yet authored. Corruption- and
 # data-loss-class codes are covered separately by TCP3.15.
@@ -41,7 +42,20 @@
 # group with its sibling missing_model — the replay lane's fake runtime does not
 # resolve model specs, so no fixture can raise it until the fake composes the
 # real resolver (S2b, tracker #3261), which drains the resolution-time codes.
-budget: 115
+# 115 -> 112 (S2b, #3226/#3252): inference.unknown_model, inference.invalid_request
+# and inference.unsupported_operation leave the group — the replay lane's fake
+# runtime now composes the real resolver over the real catalog, so a name the
+# catalog does not know, a malformed spec, and a model held to its catalogued
+# task are replayed from `inference.*` and `vector --text` error cases. The
+# fake's world is one where every catalogued model is present, every provider
+# is built, the network is on and every key is set — it rewrites those
+# environment answers after the resolver has spoken, and only a test that opts
+# a model out with `FakeInferenceService::with_undownloaded` sees NotDownloaded.
+# The replay lane's fake opts nothing out, so missing_model, missing_api_key,
+# download_disabled and unsupported_provider stay: they are environment facts
+# the fake world fixes, covered by the inference resolution matrix and the
+# real-runtime executor tests instead.
+budget: 112
 unreplayed:
   - already_exists.engine.json_index
   - failed_precondition.engine.graph_negative_weight
@@ -57,7 +71,6 @@ unreplayed:
   - inference.download_disabled
   - inference.download_failed
   - inference.download_verification_failed
-  - inference.invalid_request
   - inference.io_failure
   - inference.local_runtime_failed
   - inference.missing_api_key
@@ -71,8 +84,6 @@ unreplayed:
   - inference.provider_timeout
   - inference.provider_unavailable
   - inference.registry_corrupt
-  - inference.unknown_model
-  - inference.unsupported_operation
   - inference.unsupported_parameter
   - inference.unsupported_provider
   - internal.executor.arrow

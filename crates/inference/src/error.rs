@@ -430,18 +430,18 @@ fn provider_code(message: &str) -> &'static str {
     }
 }
 
+/// Classifies the string `Registry` variant that the download path still
+/// raises. A missing or unknown model never arrives here: resolution raises
+/// `RegistryFailed` with its kind decided at the site (S2b), so no wording
+/// can make a download failure a model that "was not found".
 fn registry_code(message: &str) -> &'static str {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("unknown model") || lower.contains("not found locally") {
-        "inference.missing_model"
-    } else if lower.contains("download disabled") || lower.contains("network access") {
+    if lower.contains("download disabled") || lower.contains("network access") {
         "inference.download_disabled"
     } else if lower.contains("sha-256") || lower.contains("hash mismatch") {
         "inference.download_verification_failed"
     } else if lower.contains("download") {
         "inference.download_failed"
-    } else if lower.contains("corrupt") {
-        "inference.registry_corrupt"
     } else {
         "inference.registry_corrupt"
     }

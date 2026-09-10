@@ -1,0 +1,7 @@
+{
+  "class": "not_found",
+  "code": "inference.unknown_model",
+  "commit_outcome": "not_applicable",
+  "retry_policy": "never",
+  "retryable": false
+}

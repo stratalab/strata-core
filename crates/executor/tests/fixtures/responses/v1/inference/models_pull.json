@@ -1,7 +1,7 @@
 {
   "data": {
     "model": "miniLM",
-    "path": "fake-models/miniLM.gguf"
+    "path": "/fake/models/all-MiniLM-L6-v2.F16.gguf"
   },
   "type": "inference_model_pulled"
 }

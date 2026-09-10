@@ -8,7 +8,8 @@
 //! the checks in their own order, and the code a caller saw depended on which
 //! site it happened to reach first (#3255, #3260, #3262, #3263, #3264).
 //!
-//! [`resolve`] errs only for a malformed spec. Every other outcome is data —
+//! [`resolve`] errs only for a malformed spec or a filesystem that cannot
+//! say whether a file is there. Every other outcome is data —
 //! an [`Availability`] — so that `capability` can report it, an error can
 //! carry it, and [`ResolvedModel::require_ready`] can turn it into exactly
 //! one typed [`InferenceError`] by a match the compiler keeps total. No code
@@ -23,7 +24,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::registry::{format_size, CatalogEntry, CatalogLookup, ModelRegistry, QuantVariant};
+use crate::registry::{
+    format_size, probe_model_file, CatalogEntry, CatalogLookup, ModelRegistry, QuantVariant,
+};
 use crate::runtime::{InferenceRuntime, ModelAbilities, LOCAL_UNAVAILABLE_REMEDY};
 use crate::{
     api_key_env_var, generation_provider_feature_enabled, parse_model_spec, InferenceError,
@@ -216,7 +219,15 @@ pub struct AvailabilityDetails {
     pub pull_spec: Option<String>,
     /// The download size in bytes. Present only for
     /// [`AvailabilityKind::NotDownloaded`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Readable from its decimal string as well as a number: the envelope's
+    /// `details` carry every value as a string, and a client reading the
+    /// answer back must not have to know which field was a number.
+    #[serde(
+        default,
+        deserialize_with = "u64_or_decimal_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub size_bytes: Option<u64>,
     /// The environment variable that would hold the provider key. Present
     /// only for [`AvailabilityKind::KeyMissing`].
@@ -230,6 +241,30 @@ pub struct AvailabilityDetails {
     /// the refusal says which record named the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
+}
+
+/// `size_bytes` as a number or as the decimal string the envelope's details
+/// render it as. Exact: no sign, no whitespace, no unit — the string is the
+/// number's own rendering or it is not the number.
+fn u64_or_decimal_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Number(u64),
+        Text(String),
+    }
+    match Option::<Raw>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Raw::Number(size)) => Ok(Some(size)),
+        Some(Raw::Text(text)) => text.parse().map(Some).map_err(|error| {
+            serde::de::Error::custom(format!("`{text}` is not a byte count: {error}"))
+        }),
+    }
 }
 
 impl ResolvedModel {
@@ -420,6 +455,72 @@ impl ResolvedModel {
     }
 }
 
+/// What a pull does for a resolved model. Decided once, by
+/// [`ResolvedModel::pull_action`], for the runtime and the testkit fake, so a
+/// fixture replayed against the fake answers a pull the way the runtime would.
+#[derive(Debug)]
+pub(crate) enum PullAction<'a> {
+    /// The file is already on disk; there is nothing to fetch.
+    Present(&'a Path),
+    /// Fetch this catalogued variant into the models directory.
+    Download {
+        /// The catalog entry.
+        entry: &'static CatalogEntry,
+        /// The variant to fetch.
+        variant: &'static QuantVariant,
+    },
+}
+
+impl ResolvedModel {
+    /// What `pull` does for this model, or why it refuses.
+    ///
+    /// A cloud model has nothing to pull — refused on its source, whatever
+    /// its availability. A file that is there is reported without the
+    /// network. A catalogued file that is not there is a download when the
+    /// runtime may use the network and `download_disabled` when it may not.
+    /// Every other availability is refused exactly as [`Self::require_ready`]
+    /// refuses it: a pull asks whether the model *exists*, never whether it
+    /// can run here.
+    pub(crate) fn pull_action(
+        &self,
+        network_enabled: bool,
+    ) -> Result<PullAction<'_>, InferenceError> {
+        match (&self.source, &self.availability) {
+            (ModelSource::Cloud, _) => Err(InferenceError::Unsupported {
+                kind: UnsupportedKind::Operation,
+                message: format!(
+                    "`{}` is a cloud model; there is nothing to pull. Only local catalog \
+                     models are fetched to disk.",
+                    self.spec
+                ),
+                details: Some(Box::new(self.details())),
+            }),
+            (
+                ModelSource::Catalog { path, .. } | ModelSource::GgufPath(path),
+                Availability::Ready,
+            ) => Ok(PullAction::Present(path)),
+            (ModelSource::Catalog { entry, variant, .. }, Availability::NotDownloaded { .. }) => {
+                if network_enabled {
+                    Ok(PullAction::Download { entry, variant })
+                } else {
+                    Err(InferenceError::RegistryFailed {
+                        kind: RegistryFailure::DownloadDisabled,
+                        message: "model download requires network access".to_owned(),
+                        details: Some(Box::new(self.details())),
+                    })
+                }
+            }
+            _ => {
+                self.require_ready()?;
+                unreachable!(
+                    "`require_ready` refuses every availability a pull cannot act on: {:?}",
+                    self.availability
+                )
+            }
+        }
+    }
+}
+
 /// Resolves a spec against a registry and this build.
 ///
 /// A pure function of its inputs: the spec, the catalog and models
@@ -429,8 +530,9 @@ impl ResolvedModel {
 /// the check before it passed, so a network-disabled runtime never touches
 /// the key at all.
 ///
-/// Errs only when the spec is malformed. Everything else is an
-/// [`Availability`].
+/// Errs when the spec is malformed (`invalid_request`) or the filesystem
+/// cannot say whether a local file is there (`io_failure`,
+/// [`probe_model_file`]). Everything else is an [`Availability`].
 pub(crate) fn resolve(
     registry: &ModelRegistry,
     network_enabled: bool,
@@ -440,7 +542,7 @@ pub(crate) fn resolve(
 ) -> Result<ResolvedModel, InferenceError> {
     let (provider, name) = parse_model_spec(spec)?;
     let (source, availability) = if provider == ProviderKind::Local {
-        resolve_local(registry, &name, use_)
+        resolve_local(registry, &name, use_)?
     } else {
         resolve_cloud(provider, network_enabled, key_present, use_)
     };
@@ -457,20 +559,21 @@ fn resolve_local(
     registry: &ModelRegistry,
     name: &str,
     use_: Option<ModelUse>,
-) -> (ModelSource, Availability) {
+) -> Result<(ModelSource, Availability), InferenceError> {
     if looks_like_path(name) {
         let path = PathBuf::from(name);
-        let availability = if !path.is_file() {
+        let is_file = probe_model_file(&path)?.is_some_and(|meta| meta.is_file());
+        let availability = if !is_file {
             Availability::PathMissing
         } else if use_.is_some() && !cfg!(feature = "local") {
             Availability::LocalExecutionNotBuilt
         } else {
             Availability::Ready
         };
-        return (ModelSource::GgufPath(path), availability);
+        return Ok((ModelSource::GgufPath(path), availability));
     }
 
-    match registry.lookup(name) {
+    Ok(match registry.lookup(name)? {
         CatalogLookup::UnknownModel => (
             ModelSource::Uncatalogued { entry: None },
             Availability::NotInCatalog,
@@ -506,7 +609,7 @@ fn resolve_local(
                 availability,
             )
         }
-    }
+    })
 }
 
 fn resolve_cloud(
@@ -550,7 +653,7 @@ fn supports(abilities: ModelAbilities, use_: ModelUse) -> bool {
 
 /// The spec `strata inference models pull` takes for this variant: the
 /// catalog name alone selects the default quant, otherwise `name:quant`.
-fn pull_spec(entry: &CatalogEntry, variant: &QuantVariant) -> String {
+pub(crate) fn pull_spec(entry: &CatalogEntry, variant: &QuantVariant) -> String {
     if variant.name.eq_ignore_ascii_case(entry.default_quant) {
         entry.name.to_owned()
     } else {
@@ -631,7 +734,7 @@ mod tests {
     }
 
     fn plant_minilm(registry: &ModelRegistry) -> PathBuf {
-        let CatalogLookup::Found { path, .. } = registry.lookup("miniLM") else {
+        let CatalogLookup::Found { path, .. } = registry.lookup("miniLM").expect("readable") else {
             panic!("miniLM is catalogued")
         };
         std::fs::write(&path, b"not a real model").expect("plant");
@@ -641,7 +744,7 @@ mod tests {
     // --- identity ---------------------------------------------------------
 
     #[test]
-    fn a_malformed_spec_is_the_only_error() {
+    fn a_malformed_spec_is_an_invalid_request() {
         let (_dir, registry) = registry();
         for spec in ["", "   ", "openai:", "local:"] {
             let err = resolve(&registry, true, &|_| true, spec, None).expect_err(spec);
@@ -724,6 +827,70 @@ mod tests {
         let spec = dir.path().to_string_lossy().into_owned();
         let resolved = resolve_in(&registry, true, true, &spec, None);
         assert_eq!(resolved.availability, Availability::PathMissing);
+    }
+
+    // --- the filesystem ---------------------------------------------------
+
+    /// A directory whose entries cannot be stat'ed: a symlink to itself.
+    /// `metadata` on anything beneath it fails with ELOOP for every user,
+    /// root included, so the test does not depend on permissions.
+    #[cfg(unix)]
+    fn unreadable_dir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let looped = dir.path().join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).expect("symlink loop");
+        (dir, looped)
+    }
+
+    /// "Not there" and "cannot tell" are different answers. An absent file
+    /// is an availability the caller can act on (pull it, fix the path); a
+    /// filesystem that will not say is an I/O failure, and answering
+    /// "not downloaded" over it would send the caller to download a model
+    /// that may be sitting right there (#3252).
+    #[cfg(unix)]
+    #[test]
+    fn a_filesystem_that_cannot_answer_is_an_io_failure_not_an_availability() {
+        let (_dir, looped) = unreadable_dir();
+        let registry = ModelRegistry::with_dir(looped.clone());
+
+        // Catalog form: the variant's presence check reads under the loop.
+        let err = resolve(&registry, true, &|_| true, "miniLM", None)
+            .expect_err("the models directory cannot be read");
+        assert_eq!(err.code(), "inference.io_failure");
+
+        // Path form: the file itself sits under the loop.
+        let spec = looped.join("model.gguf").to_string_lossy().into_owned();
+        let err =
+            resolve(&registry, true, &|_| true, &spec, None).expect_err("the path cannot be read");
+        assert_eq!(err.code(), "inference.io_failure");
+    }
+
+    /// Direction control: a models directory that is a regular file, or
+    /// does not exist, answers — nothing is downloaded there. Only a read
+    /// that fails for another reason is an I/O failure.
+    #[test]
+    fn a_models_directory_that_is_not_a_directory_answers_not_downloaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("models");
+        std::fs::write(&file, b"not a directory").expect("write");
+        for models_dir in [file, dir.path().join("never-created")] {
+            let registry = ModelRegistry::with_dir(models_dir.clone());
+            let resolved = resolve_in(&registry, true, true, "miniLM", None);
+            assert!(
+                matches!(resolved.availability, Availability::NotDownloaded { .. }),
+                "{}: {:?}",
+                models_dir.display(),
+                resolved.availability
+            );
+            let spec = models_dir.join("model.gguf").to_string_lossy().into_owned();
+            let resolved = resolve_in(&registry, true, true, &spec, None);
+            assert_eq!(
+                resolved.availability,
+                Availability::PathMissing,
+                "{}",
+                models_dir.display()
+            );
+        }
     }
 
     #[test]
@@ -1243,6 +1410,51 @@ mod tests {
     }
 
     #[test]
+    fn details_read_size_bytes_back_from_the_wire_string() {
+        // The envelope renders every detail as a string, so the answer a
+        // client reads back has `"size_bytes": "42"` where the resolver wrote
+        // `42`. Both spell the same number; anything else is not a number.
+        let read = |size: serde_json::Value| {
+            serde_json::from_value::<AvailabilityDetails>(serde_json::json!({
+                "model": "tinyllama",
+                "provider": "local",
+                "availability": "not_downloaded",
+                "pull_spec": "tinyllama",
+                "size_bytes": size,
+            }))
+        };
+        assert_eq!(
+            read(serde_json::json!(42)).expect("a number").size_bytes,
+            Some(42)
+        );
+        assert_eq!(
+            read(serde_json::json!("42"))
+                .expect("its decimal string")
+                .size_bytes,
+            Some(42)
+        );
+        assert_eq!(
+            read(serde_json::Value::Null)
+                .expect("null is absent")
+                .size_bytes,
+            None
+        );
+        let absent: AvailabilityDetails = serde_json::from_value(serde_json::json!({
+            "model": "tinyllama",
+            "provider": "local",
+            "availability": "ready",
+        }))
+        .expect("an absent field");
+        assert_eq!(absent.size_bytes, None);
+        for wrong in ["42 MB", " 42", "-1", ""] {
+            assert!(
+                read(serde_json::json!(wrong)).is_err(),
+                "`{wrong}` is not a byte count"
+            );
+        }
+    }
+
+    #[test]
     fn every_refusal_carries_the_same_details_capability_would_report() {
         let (_dir, registry) = registry();
         for resolved in one_of_each_availability(&registry) {
@@ -1290,6 +1502,82 @@ mod tests {
         let details = err.availability().expect("carried");
         assert_eq!(details.availability, AvailabilityKind::NotDownloaded);
         assert_eq!(details.pull_spec.as_deref(), Some("miniLM"));
+    }
+
+    // --- pull -----------------------------------------------------------------
+
+    #[test]
+    fn a_pull_reports_a_present_file_without_the_network() {
+        let (_dir, registry) = registry();
+        let path = plant_minilm(&registry);
+        let path_spec = path.to_str().expect("utf-8 tempdir").to_owned();
+        // By catalog name and by path, with the network off: what is there
+        // needs nothing fetched.
+        for spec in ["miniLM", path_spec.as_str()] {
+            let resolved = resolve_in(&registry, false, false, spec, None);
+            let action = resolved.pull_action(false).expect("present");
+            let PullAction::Present(reported) = action else {
+                panic!("{spec}: nothing to fetch, got {action:?}")
+            };
+            assert_eq!(reported, path, "{spec}");
+        }
+    }
+
+    #[test]
+    fn a_pull_fetches_a_catalogued_model_only_with_the_network() {
+        let (_dir, registry) = registry();
+        let resolved = resolve_in(&registry, true, true, "miniLM", None);
+        assert!(matches!(
+            resolved.availability,
+            Availability::NotDownloaded { .. }
+        ));
+
+        let action = resolved.pull_action(true).expect("a download");
+        let PullAction::Download { entry, variant } = action else {
+            panic!("not on disk, so a fetch: got {action:?}")
+        };
+        assert_eq!(entry.name, "miniLM");
+        assert_eq!(variant.hf_file, "all-MiniLM-L6-v2.F16.gguf");
+
+        let err = resolved.pull_action(false).expect_err("no network");
+        assert_eq!(err.code(), "inference.download_disabled");
+        // The refusal still says what a pull would fetch, so a caller can
+        // act on it once the network is back.
+        assert_eq!(err.availability(), Some(&resolved.details()));
+        assert_eq!(
+            err.availability().and_then(|d| d.pull_spec.as_deref()),
+            Some("miniLM")
+        );
+    }
+
+    #[test]
+    fn a_pull_refuses_a_cloud_model_on_its_source_and_the_rest_as_require_ready_does() {
+        let (dir, registry) = registry();
+        // Cloud: nothing to pull, whatever the network and key say.
+        for (network, key) in [(true, true), (true, false), (false, false)] {
+            let resolved = resolve_in(&registry, network, key, "openai:gpt-4o", None);
+            let err = resolved.pull_action(network).expect_err("nothing to pull");
+            assert_eq!(
+                err.code(),
+                "inference.unsupported_operation",
+                "network={network} key={key}: {err:?}"
+            );
+            assert_eq!(err.availability(), Some(&resolved.details()));
+        }
+        // Unknown name, unknown quant, absent path: the refusal a run gets.
+        let absent = dir
+            .path()
+            .join("absent.gguf")
+            .to_string_lossy()
+            .into_owned();
+        for spec in ["nope", "tinyllama:q99", absent.as_str()] {
+            let resolved = resolve_in(&registry, true, true, spec, None);
+            for network in [true, false] {
+                let err = resolved.pull_action(network).expect_err("unknown");
+                assert_eq!(err.code(), "inference.unknown_model", "{spec}: {err:?}");
+                assert_eq!(err.availability(), Some(&resolved.details()), "{spec}");
+            }
+        }
     }
 
     // --- helpers --------------------------------------------------------------

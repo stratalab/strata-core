@@ -1,0 +1,11 @@
+{
+  "type": "inference_rank",
+  "model": "anthropic:claude-3-5-haiku-latest",
+  "request": {
+    "query": "vector database",
+    "passages": [
+      "Strata stores embeddings for retrieval.",
+      "The weather is sunny today."
+    ]
+  }
+}

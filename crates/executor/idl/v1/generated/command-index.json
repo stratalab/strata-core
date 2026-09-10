@@ -5060,11 +5060,21 @@
         {
           "code": "inference.invalid_request",
           "docs": "https://stratadb.org/e/inference.invalid_request"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
         }
       ],
       "fixtures": {
         "request": "requests/v1/inference/capability.json",
-        "response": "responses/v1/inference/capability.json"
+        "response": "responses/v1/inference/capability.json",
+        "error_cases": [
+          {
+            "request": "requests/v1/inference/capability_malformed_spec.json",
+            "expected_error": "responses/v1/errors/inference/invalid_request.json"
+          }
+        ]
       },
       "source": {
         "command": "crates/executor/idl/v1/commands/inference.yaml",
@@ -5128,6 +5138,10 @@
         {
           "code": "inference.unknown_model",
           "docs": "https://stratadb.org/e/inference.unknown_model"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
         },
         {
           "code": "inference.model_load_failed",
@@ -5210,6 +5224,10 @@
           "docs": "https://stratadb.org/e/inference.unknown_model"
         },
         {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
           "code": "inference.model_load_failed",
           "docs": "https://stratadb.org/e/inference.model_load_failed"
         },
@@ -5264,7 +5282,21 @@
       ],
       "fixtures": {
         "request": "requests/v1/inference/embed.json",
-        "response": "responses/v1/inference/embed.json"
+        "response": "responses/v1/inference/embed.json",
+        "error_cases": [
+          {
+            "request": "requests/v1/inference/embed_unknown_model.json",
+            "expected_error": "responses/v1/errors/inference/unknown_model.json"
+          },
+          {
+            "request": "requests/v1/inference/embed_malformed_spec.json",
+            "expected_error": "responses/v1/errors/inference/invalid_request.json"
+          },
+          {
+            "request": "requests/v1/inference/embed_wrong_task.json",
+            "expected_error": "responses/v1/errors/inference/unsupported_operation.json"
+          }
+        ]
       },
       "source": {
         "command": "crates/executor/idl/v1/commands/inference.yaml",
@@ -5330,6 +5362,10 @@
           "docs": "https://stratadb.org/e/inference.unknown_model"
         },
         {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
           "code": "inference.model_load_failed",
           "docs": "https://stratadb.org/e/inference.model_load_failed"
         },
@@ -5384,7 +5420,17 @@
       ],
       "fixtures": {
         "request": "requests/v1/inference/generate.json",
-        "response": "responses/v1/inference/generate.json"
+        "response": "responses/v1/inference/generate.json",
+        "error_cases": [
+          {
+            "request": "requests/v1/inference/generate_unknown_model.json",
+            "expected_error": "responses/v1/errors/inference/unknown_model.json"
+          },
+          {
+            "request": "requests/v1/inference/generate_wrong_task.json",
+            "expected_error": "responses/v1/errors/inference/unsupported_operation.json"
+          }
+        ]
       },
       "source": {
         "command": "crates/executor/idl/v1/commands/inference.yaml",
@@ -5579,7 +5625,17 @@
       ],
       "fixtures": {
         "request": "requests/v1/inference/models_pull.json",
-        "response": "responses/v1/inference/models_pull.json"
+        "response": "responses/v1/inference/models_pull.json",
+        "error_cases": [
+          {
+            "request": "requests/v1/inference/models_pull_unknown_model.json",
+            "expected_error": "responses/v1/errors/inference/unknown_model.json"
+          },
+          {
+            "request": "requests/v1/inference/models_pull_cloud_model.json",
+            "expected_error": "responses/v1/errors/inference/unsupported_operation.json"
+          }
+        ]
       },
       "source": {
         "command": "crates/executor/idl/v1/commands/inference.yaml",
@@ -5645,6 +5701,10 @@
           "docs": "https://stratadb.org/e/inference.unknown_model"
         },
         {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
           "code": "inference.model_load_failed",
           "docs": "https://stratadb.org/e/inference.model_load_failed"
         },
@@ -5659,7 +5719,13 @@
       ],
       "fixtures": {
         "request": "requests/v1/inference/rank.json",
-        "response": "responses/v1/inference/rank.json"
+        "response": "responses/v1/inference/rank.json",
+        "error_cases": [
+          {
+            "request": "requests/v1/inference/rank_wrong_task.json",
+            "expected_error": "responses/v1/errors/inference/unsupported_operation.json"
+          }
+        ]
       },
       "source": {
         "command": "crates/executor/idl/v1/commands/inference.yaml",
@@ -5777,6 +5843,10 @@
           "docs": "https://stratadb.org/e/inference.unknown_model"
         },
         {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
           "code": "inference.model_load_failed",
           "docs": "https://stratadb.org/e/inference.model_load_failed"
         },
@@ -5791,7 +5861,13 @@
       ],
       "fixtures": {
         "request": "requests/v1/inference/tokenize.json",
-        "response": "responses/v1/inference/tokenize.json"
+        "response": "responses/v1/inference/tokenize.json",
+        "error_cases": [
+          {
+            "request": "requests/v1/inference/tokenize_unknown_model.json",
+            "expected_error": "responses/v1/errors/inference/unknown_model.json"
+          }
+        ]
       },
       "source": {
         "command": "crates/executor/idl/v1/commands/inference.yaml",
@@ -9644,6 +9720,10 @@
           "docs": "https://stratadb.org/e/inference.unknown_model"
         },
         {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
           "code": "inference.model_load_failed",
           "docs": "https://stratadb.org/e/inference.model_load_failed"
         },
@@ -9718,6 +9798,13 @@
             ],
             "request": "requests/v1/vector/query_vector_and_text.json",
             "expected_error": "responses/v1/errors/vector/vector_input.json"
+          },
+          {
+            "setup": [
+              "requests/v1/vector/collection_create_unknown_model.json"
+            ],
+            "request": "requests/v1/vector/query_text_without_model.json",
+            "expected_error": "responses/v1/errors/inference/unknown_model.json"
           }
         ]
       },
@@ -9971,6 +10058,10 @@
           "docs": "https://stratadb.org/e/inference.unknown_model"
         },
         {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
           "code": "inference.model_load_failed",
           "docs": "https://stratadb.org/e/inference.model_load_failed"
         },
@@ -10050,6 +10141,13 @@
             ],
             "request": "requests/v1/vector/upsert_neither.json",
             "expected_error": "responses/v1/errors/vector/vector_input.json"
+          },
+          {
+            "setup": [
+              "requests/v1/vector/collection_create_unknown_model.json"
+            ],
+            "request": "requests/v1/vector/upsert_text_without_model.json",
+            "expected_error": "responses/v1/errors/inference/unknown_model.json"
           }
         ]
       },

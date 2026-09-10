@@ -11,9 +11,19 @@
 #![doc(hidden)]
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use crate::{GenerateRequest, GenerateResponse, InferenceEngine, InferenceError, StopReason};
+use crate::registry::ModelRegistry;
+use crate::resolve::{
+    pull_spec, resolve, Availability, ModelSource, ModelUse, PullAction, ResolvedModel,
+};
+use crate::runtime::ModelAbilities;
+use crate::{
+    GenerateRequest, GenerateResponse, InferenceEngine, InferenceError, ModelTask, ProviderKind,
+    RegistryFailure, StopReason,
+};
 
 /// A scripted failure the fake engine raises on every call, phrased in the
 /// same `InferenceError` vocabulary the real providers use.
@@ -34,9 +44,12 @@ pub enum ScriptedFailure {
 impl ScriptedFailure {
     fn to_error(self) -> InferenceError {
         match self {
-            Self::MissingModel => {
-                InferenceError::Registry("fake: unknown model: fake:missing".to_string())
-            }
+            // The kind carries the code; no word in the message does (#3216).
+            Self::MissingModel => InferenceError::RegistryFailed {
+                kind: RegistryFailure::MissingModel,
+                message: "fake: model fake:missing is not downloaded".to_string(),
+                details: None,
+            },
             Self::InvalidRequest => {
                 InferenceError::InvalidSpec("fake: request is invalid".to_string())
             }
@@ -290,13 +303,44 @@ impl InferenceEngine for FakeInferenceEngine {
     }
 }
 
+/// The directory the fake's registry sits over. It does not exist, and the
+/// fake never reads it: presence is the fake world's to decide.
+const FAKE_MODELS_DIR: &str = "/fake/models";
+
+/// The fake's own models, beside the real catalog. Each does every task, so
+/// a test can name a model that is unquestionably the fake's without
+/// depending on what the real catalog holds.
+const FAKE_MODELS: [(&str, ModelTask); 3] = [
+    ("fake-embed", ModelTask::Embed),
+    ("fake-generate", ModelTask::Generate),
+    ("fake-rank", ModelTask::Rank),
+];
+
 /// Deterministic runtime-level fake for the executor's
 /// [`crate::InferenceService`] surface: model management plus the wire-typed
 /// compute paths, with zero network, model files, or sleeps. Same inputs, same
 /// outputs, forever — so fixture replays are stable.
-#[derive(Clone, Debug)]
+///
+/// It fakes *execution only*. Resolution is the real resolver over the real
+/// catalog (`crate::resolve`), so a fixture replayed here meets the refusals
+/// a caller meets — a name the catalog does not know, a malformed spec, a
+/// model asked for a task it does not do — with the same codes and details.
+/// What the environment decides is fixed in the fake's favour
+/// ([`fake_availability`]): every catalogued model is downloaded — unless
+/// [`Self::with_undownloaded`] says otherwise — every provider is built in
+/// and keyed, the network is on. Beside the real catalog it has
+/// [`FAKE_MODELS`], three models of its own that do everything.
+#[derive(Debug)]
 pub struct FakeInferenceService {
     embedding_dim: usize,
+    /// The real catalog over a directory that does not exist: identity is
+    /// real, presence is the fake's to decide.
+    registry: ModelRegistry,
+    /// The pull specs of the catalogued variants this world has not
+    /// downloaded. A pull takes one out, so the refuse → pull → retry loop
+    /// a consumer runs (the CLI's download offer) plays out in-process
+    /// against the resolver's real answer.
+    undownloaded: Mutex<BTreeSet<String>>,
 }
 
 impl Default for FakeInferenceService {
@@ -308,13 +352,81 @@ impl Default for FakeInferenceService {
 impl FakeInferenceService {
     #[must_use]
     pub fn new() -> Self {
-        Self { embedding_dim: 8 }
+        Self {
+            embedding_dim: 8,
+            registry: ModelRegistry::with_dir(PathBuf::from(FAKE_MODELS_DIR)),
+            undownloaded: Mutex::new(BTreeSet::new()),
+        }
     }
 
     #[must_use]
     pub fn with_embedding_dim(mut self, dim: usize) -> Self {
         self.embedding_dim = dim;
         self
+    }
+
+    /// A world where the catalogued variant `pull_spec` names (`miniLM`,
+    /// `tinyllama:q8_0`) is not on disk until it is pulled: `capability`
+    /// reports it `not_downloaded` with the pull spec and size, a run refuses
+    /// it as `missing_model` carrying the same answer, a pull makes it
+    /// present, and a run after that succeeds.
+    #[must_use]
+    pub fn with_undownloaded(self, pull_spec: impl Into<String>) -> Self {
+        self.lock_undownloaded().insert(pull_spec.into());
+        self
+    }
+
+    fn lock_undownloaded(&self) -> MutexGuard<'_, BTreeSet<String>> {
+        // A poisoned lock still holds a whole set — nothing here writes it
+        // in more than one step — so the fake world goes on.
+        self.undownloaded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Resolves `spec` the way the runtime does, then applies the fake world.
+    ///
+    /// Errs for what the resolver errs for (a malformed spec); every other
+    /// refusal is an availability the caller turns into an error with
+    /// [`ResolvedModel::require_ready`], details and all.
+    fn locate(&self, spec: &str, use_: Option<ModelUse>) -> Result<ResolvedModel, InferenceError> {
+        // Network on and every key present are the two environment facts the
+        // resolver takes as inputs; the ones it reads from the build are
+        // fixed by `fake_availability` afterwards.
+        let mut resolved = resolve(&self.registry, true, &|_| true, spec, use_)?;
+        if is_fakes_own(&resolved) {
+            resolved.source = ModelSource::GgufPath(
+                self.registry
+                    .models_dir()
+                    .join(format!("{}.gguf", resolved.name)),
+            );
+            resolved.availability = Availability::Ready;
+        } else if let Some(absent) = self.not_downloaded(&resolved) {
+            resolved.availability = absent;
+        } else {
+            resolved.availability = fake_availability(resolved.availability);
+        }
+        Ok(resolved)
+    }
+
+    /// The runtime's answer for a catalogued variant that is not on disk,
+    /// when this world holds it undownloaded: the same pull spec and size
+    /// the resolver reports. `None` for anything else, and for a variant the
+    /// resolver already refused on identity or task — those checks come
+    /// before presence in the runtime, so they do here.
+    fn not_downloaded(&self, resolved: &ResolvedModel) -> Option<Availability> {
+        let ModelSource::Catalog { entry, variant, .. } = &resolved.source else {
+            return None;
+        };
+        if matches!(resolved.availability, Availability::TaskNotSupported { .. }) {
+            return None;
+        }
+        let pull_spec = pull_spec(entry, variant);
+        let absent = self.lock_undownloaded().contains(&pull_spec);
+        absent.then_some(Availability::NotDownloaded {
+            pull_spec,
+            size_bytes: variant.size_bytes,
+        })
     }
 
     /// A pure, platform-stable pseudo-embedding (mirrors the engine fake).
@@ -338,6 +450,56 @@ impl FakeInferenceService {
             })
             .collect()
     }
+}
+
+/// The fake world's answer, from the real resolver's.
+///
+/// Identity stays real: the catalog, whether a path names a file, what a
+/// catalogued model does. What the build decides is fixed instead of read —
+/// local execution and every provider built in, every catalogued model
+/// downloaded (a world that holds one back says so first, in
+/// [`FakeInferenceService::not_downloaded`]). Fixed rather than left to
+/// `cfg!` so a fixture replays the same under every feature set: in a build
+/// without `local` the resolver answers `LocalExecutionNotBuilt` before it
+/// looks for the file, where a build with it answers `NotDownloaded` — two
+/// codes for one fixture.
+fn fake_availability(real: Availability) -> Availability {
+    match real {
+        Availability::Ready
+        | Availability::NotInCatalog
+        | Availability::PathMissing
+        | Availability::TaskNotSupported { .. } => real,
+        Availability::LocalExecutionNotBuilt
+        | Availability::ProviderNotBuilt
+        | Availability::NotDownloaded { .. } => Availability::Ready,
+        // Never resolved: `locate` passes the network on and every key
+        // present. Listed so the match stays total when a variant is added.
+        Availability::NetworkDisabled | Availability::KeyMissing { .. } => Availability::Ready,
+    }
+}
+
+/// Whether a resolved local name is one of [`FAKE_MODELS`].
+fn is_fakes_own(resolved: &ResolvedModel) -> bool {
+    resolved.provider == ProviderKind::Local
+        && FAKE_MODELS.iter().any(|(name, _)| *name == resolved.name)
+}
+
+/// What a resolved model does in the fake world: the real ability table for
+/// a catalogued or cloud model, everything for one of the fake's own.
+fn fake_abilities(resolved: &ResolvedModel) -> ModelAbilities {
+    if is_fakes_own(resolved) {
+        return ModelAbilities {
+            generate: true,
+            tokenize: true,
+            embed: true,
+            rank: true,
+        };
+    }
+    let task = match resolved.source {
+        ModelSource::Catalog { entry, .. } => Some(entry.task),
+        ModelSource::GgufPath(_) | ModelSource::Uncatalogued { .. } | ModelSource::Cloud => None,
+    };
+    ModelAbilities::of(resolved.provider, task)
 }
 
 fn fake_model(name: &str, task: crate::ModelTask, embedding_dim: usize) -> crate::ModelInfo {
@@ -372,37 +534,73 @@ fn chat_prompt(request: &crate::ChatRequest) -> String {
 
 impl crate::InferenceService for FakeInferenceService {
     fn list_models(&self) -> Vec<crate::ModelInfo> {
-        vec![
-            fake_model("fake-embed", crate::ModelTask::Embed, self.embedding_dim),
-            fake_model("fake-generate", crate::ModelTask::Generate, 0),
-            fake_model("fake-rank", crate::ModelTask::Rank, 0),
-        ]
+        FAKE_MODELS
+            .iter()
+            .map(|&(name, task)| {
+                let embedding_dim = if task == ModelTask::Embed {
+                    self.embedding_dim
+                } else {
+                    0
+                };
+                fake_model(name, task, embedding_dim)
+            })
+            .collect()
     }
 
     fn list_local_models(&self) -> Vec<crate::ModelInfo> {
         Vec::new()
     }
 
+    /// The runtime's own pull decision over the fake world: a present model
+    /// reports its file, an undownloaded one ([`Self::with_undownloaded`])
+    /// becomes present, and a cloud or unknown spec is refused as the
+    /// runtime refuses it.
     fn pull_model(&self, model: &str) -> Result<crate::PullModelOutput, InferenceError> {
+        let resolved = self.locate(model, None)?;
+        let path = match resolved.pull_action(true)? {
+            PullAction::Present(path) => path.to_path_buf(),
+            PullAction::Download { entry, variant } => {
+                self.lock_undownloaded().remove(&pull_spec(entry, variant));
+                resolved
+                    .local_path()
+                    .expect("a catalogued variant has a path in the models directory")
+                    .to_path_buf()
+            }
+        };
         Ok(crate::PullModelOutput {
-            model: model.to_owned(),
-            path: std::path::PathBuf::from(format!("fake-models/{model}.gguf")),
+            model: resolved.spec,
+            path,
         })
     }
 
     fn capability(&self, model_spec: &str) -> Result<crate::InferenceCapability, InferenceError> {
+        // Located, never loaded, like the runtime: an unknown name is
+        // reported, not refused.
+        let resolved = self.locate(model_spec, None)?;
+        let provider = resolved.provider;
+        let details = resolved.details();
+        let abilities = fake_abilities(&resolved);
         Ok(crate::InferenceCapability {
-            provider: crate::ProviderKind::Local,
-            model: model_spec.to_owned(),
-            can_generate: true,
-            can_tokenize: true,
-            can_embed: true,
-            can_rank: true,
-            requires_network: false,
-            requires_api_key: false,
+            provider,
+            model: resolved.name,
+            availability: details.availability,
+            pull_spec: details.pull_spec,
+            size_bytes: details.size_bytes,
+            // Every feature is built into the fake world, so what the model
+            // does is what this fake can do with it.
+            can_generate: abilities.generate,
+            can_tokenize: abilities.tokenize,
+            can_embed: abilities.embed,
+            can_rank: abilities.rank,
+            requires_network: provider != ProviderKind::Local,
+            requires_api_key: provider != ProviderKind::Local,
             provider_feature_enabled: true,
-            network_enabled: false,
-            embedding_dim: self.embedding_dim,
+            network_enabled: true,
+            embedding_dim: if abilities.embed {
+                self.embedding_dim
+            } else {
+                0
+            },
             supports_tools: false,
             supports_json_object: true,
             supports_json_schema: false,
@@ -415,13 +613,15 @@ impl crate::InferenceService for FakeInferenceService {
         model_spec: &str,
         request: &crate::ChatRequest,
     ) -> Result<crate::ChatResponse, InferenceError> {
+        let resolved = self.locate(model_spec, Some(ModelUse::Run(ModelTask::Generate)))?;
+        resolved.require_ready()?;
         let prompt = chat_prompt(request);
         let content = format!("fake:{prompt}");
         let prompt_tokens = u32::try_from(prompt.split_whitespace().count()).unwrap_or(u32::MAX);
         let completion_tokens =
             u32::try_from(content.split_whitespace().count()).unwrap_or(u32::MAX);
         Ok(crate::ChatResponse {
-            model: model_spec.to_owned(),
+            model: resolved.spec,
             choices: vec![crate::ChatChoice {
                 index: 0,
                 message: crate::ChatMessage {
@@ -444,10 +644,12 @@ impl crate::InferenceService for FakeInferenceService {
 
     fn tokenize(
         &self,
-        _model_spec: &str,
+        model_spec: &str,
         text: &str,
         add_special: bool,
     ) -> Result<Vec<u32>, InferenceError> {
+        self.locate(model_spec, Some(ModelUse::Tokenize))?
+            .require_ready()?;
         let mut ids: Vec<u32> = text.bytes().map(u32::from).collect();
         if add_special {
             ids.insert(0, 1);
@@ -456,7 +658,9 @@ impl crate::InferenceService for FakeInferenceService {
         Ok(ids)
     }
 
-    fn detokenize(&self, _model_spec: &str, ids: &[u32]) -> Result<String, InferenceError> {
+    fn detokenize(&self, model_spec: &str, ids: &[u32]) -> Result<String, InferenceError> {
+        self.locate(model_spec, Some(ModelUse::Tokenize))?
+            .require_ready()?;
         Ok(ids
             .iter()
             .filter_map(|&id| u8::try_from(id).ok())
@@ -469,6 +673,8 @@ impl crate::InferenceService for FakeInferenceService {
         model_spec: &str,
         request: &crate::EmbeddingsRequest,
     ) -> Result<crate::EmbeddingsResponse, InferenceError> {
+        let resolved = self.locate(model_spec, Some(ModelUse::Run(ModelTask::Embed)))?;
+        resolved.require_ready()?;
         let texts = request.input.to_vec();
         let prompt_tokens = texts
             .iter()
@@ -483,7 +689,7 @@ impl crate::InferenceService for FakeInferenceService {
             })
             .collect();
         Ok(crate::EmbeddingsResponse {
-            model: model_spec.to_owned(),
+            model: resolved.spec,
             data,
             dimension: self.embedding_dim,
             usage: crate::Usage {
@@ -496,9 +702,11 @@ impl crate::InferenceService for FakeInferenceService {
 
     fn rank(
         &self,
-        _model_spec: &str,
+        model_spec: &str,
         request: &crate::RankRequest,
     ) -> Result<crate::RankResponse, InferenceError> {
+        self.locate(model_spec, Some(ModelUse::Run(ModelTask::Rank)))?
+            .require_ready()?;
         let query: BTreeSet<&str> = request.query.split_whitespace().collect();
         let items = request
             .passages
@@ -549,7 +757,7 @@ impl crate::InferenceService for FakeInferenceService {
                 ready: true,
                 model_prefix: "local:".to_owned(),
             }],
-            models_dir: std::path::PathBuf::from("/fake/models"),
+            models_dir: self.registry.models_dir().to_path_buf(),
             // The same two listings the real runtime counts.
             models_downloaded: self.list_local_models().len(),
             models_catalogued: self.list_models().len(),
@@ -775,5 +983,365 @@ mod tests {
         assert!(engine.supports_generate() && engine.supports_embed() && engine.supports_rank());
         assert_eq!(engine.embedding_dim(), 8);
         assert!(!engine.is_healthy());
+    }
+
+    // --- the fake service resolves like the runtime (S2b) ---
+
+    use crate::{
+        AvailabilityKind, ChatRequest, EmbedInput, EmbeddingsRequest, InferenceService, RankRequest,
+    };
+
+    const CLOUD: &str = "anthropic:claude-3-5-haiku-latest";
+
+    fn embed(text: &str) -> EmbeddingsRequest {
+        EmbeddingsRequest {
+            input: EmbedInput::One(text.to_owned()),
+            dimensions: None,
+            normalize: None,
+            input_type: None,
+            instruction: None,
+        }
+    }
+
+    fn chat(prompt: &str) -> ChatRequest {
+        ChatRequest {
+            prompt: Some(prompt.to_owned()),
+            ..ChatRequest::default()
+        }
+    }
+
+    fn rank(query: &str) -> RankRequest {
+        RankRequest {
+            query: query.to_owned(),
+            passages: vec!["a passage".to_owned()],
+        }
+    }
+
+    /// The code and the resolver's answer an error carries.
+    fn refusal(error: &InferenceError) -> (&str, AvailabilityKind) {
+        let details = error
+            .availability()
+            .unwrap_or_else(|| panic!("a resolution refusal carries details: {error:?}"));
+        (error.code(), details.availability)
+    }
+
+    #[test]
+    fn the_fake_service_refuses_what_the_catalog_does_not_know() {
+        let service = FakeInferenceService::new();
+        // Identity is the real catalog's: a name it does not know is unknown
+        // here too, with the same code and the same answer.
+        for spec in ["nope", "local:nope", "nope:q4_k_m"] {
+            let error = service
+                .embeddings(spec, &embed("hi"))
+                .expect_err("not in the catalog");
+            assert_eq!(
+                refusal(&error),
+                ("inference.unknown_model", AvailabilityKind::NotInCatalog),
+                "{spec}: {error:?}"
+            );
+        }
+        // A malformed spec is the resolver's refusal, before any catalog.
+        let error = service
+            .embeddings("openai:", &embed("hi"))
+            .expect_err("malformed spec");
+        assert_eq!(error.code(), "inference.invalid_request", "{error:?}");
+        assert_eq!(error.availability(), None);
+        // A path that names no file is missing here as it is there.
+        let error = service
+            .chat("/fake/models/absent.gguf", &chat("hi"))
+            .expect_err("no such file");
+        assert_eq!(
+            refusal(&error),
+            ("inference.unknown_model", AvailabilityKind::PathMissing),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_fake_service_holds_a_model_to_its_catalogued_task() {
+        let service = FakeInferenceService::new();
+        let mismatches: [(&str, Result<(), InferenceError>); 4] = [
+            (
+                "chat miniLM",
+                service.chat("miniLM", &chat("hi")).map(|_| ()),
+            ),
+            (
+                "rank tinyllama",
+                service.rank("tinyllama", &rank("q")).map(|_| ()),
+            ),
+            (
+                "tokenize cloud",
+                service.tokenize(CLOUD, "hi", false).map(|_| ()),
+            ),
+            (
+                "embed cloud",
+                service.embeddings(CLOUD, &embed("hi")).map(|_| ()),
+            ),
+        ];
+        for (what, result) in mismatches {
+            let error = result.expect_err(what);
+            assert_eq!(
+                refusal(&error),
+                (
+                    "inference.unsupported_operation",
+                    AvailabilityKind::TaskNotSupported
+                ),
+                "{what}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fake_world_has_every_catalogued_model_present_and_every_provider_ready() {
+        let service = FakeInferenceService::new();
+        // Execution, on a local model that is not downloaded anywhere and a
+        // cloud model with no key in any environment.
+        let response = service
+            .embeddings("miniLM", &embed("hi"))
+            .expect("every catalogued model is present");
+        assert_eq!(response.model, "miniLM");
+        assert_eq!(response.data[0].embedding.len(), 8);
+        let response = service
+            .chat(CLOUD, &chat("hi"))
+            .expect("every provider is built, on the network, with its key");
+        assert_eq!(response.model, CLOUD);
+        service
+            .chat("tinyllama", &chat("hi"))
+            .expect("local generation is built");
+        service
+            .rank("jina-reranker-v1-tiny", &rank("q"))
+            .expect("local ranking is built");
+        service
+            .tokenize("tinyllama", "hi", true)
+            .expect("local tokenization is built");
+
+        // A pull, decided the way the runtime decides it.
+        let pulled = service
+            .pull_model("miniLM")
+            .expect("present, nothing to fetch");
+        assert_eq!(pulled.model, "miniLM");
+        assert_eq!(
+            pulled.path,
+            PathBuf::from("/fake/models/all-MiniLM-L6-v2.F16.gguf")
+        );
+        let error = service
+            .pull_model("openai:gpt-4o")
+            .expect_err("nothing to pull for a cloud model");
+        assert_eq!(error.code(), "inference.unsupported_operation", "{error:?}");
+        let error = service.pull_model("nope").expect_err("unknown");
+        assert_eq!(error.code(), "inference.unknown_model", "{error:?}");
+    }
+
+    #[test]
+    fn the_fake_service_reports_capability_from_the_catalog() {
+        let service = FakeInferenceService::new();
+
+        let cloud = service.capability(CLOUD).expect("located, never loaded");
+        assert_eq!(cloud.provider, ProviderKind::Anthropic);
+        assert_eq!(cloud.model, "claude-3-5-haiku-latest");
+        assert_eq!(cloud.availability, AvailabilityKind::Ready);
+        assert!(cloud.requires_network && cloud.requires_api_key);
+        assert!(cloud.network_enabled && cloud.provider_feature_enabled);
+        assert!(cloud.can_generate && !cloud.can_embed && !cloud.can_rank && !cloud.can_tokenize);
+        assert_eq!(cloud.embedding_dim, 0);
+
+        let local = service.capability("miniLM").expect("located");
+        assert_eq!(local.provider, ProviderKind::Local);
+        assert_eq!(local.availability, AvailabilityKind::Ready);
+        assert_eq!(local.pull_spec, None);
+        assert_eq!(local.size_bytes, None);
+        assert!(!local.requires_network && !local.requires_api_key);
+        assert!(local.can_embed && local.can_tokenize && !local.can_generate && !local.can_rank);
+        assert_eq!(local.embedding_dim, 8);
+
+        // Reported, not refused, like the runtime.
+        let unknown = service.capability("nope").expect("reported");
+        assert_eq!(unknown.availability, AvailabilityKind::NotInCatalog);
+        assert!(
+            !unknown.can_generate
+                && !unknown.can_embed
+                && !unknown.can_rank
+                && !unknown.can_tokenize
+        );
+    }
+
+    #[test]
+    fn the_fakes_own_models_do_everything() {
+        let service = FakeInferenceService::new();
+        service
+            .chat("fake-generate", &chat("hi"))
+            .expect("own model generates");
+        service
+            .embeddings("fake-embed", &embed("hi"))
+            .expect("own model embeds");
+        service
+            .rank("fake-rank", &rank("q"))
+            .expect("own model ranks");
+        service
+            .tokenize("fake-embed", "hi", false)
+            .expect("own model tokenizes");
+        // Whatever the catalog would say about the name, the fake's own do
+        // every task: they exist so a consumer can pin a fixed name.
+        service
+            .chat("fake-embed", &chat("hi"))
+            .expect("own model does every task");
+
+        let own = service.capability("fake-embed").expect("located");
+        assert_eq!(own.provider, ProviderKind::Local);
+        assert_eq!(own.availability, AvailabilityKind::Ready);
+        assert!(own.can_generate && own.can_embed && own.can_rank && own.can_tokenize);
+        assert_eq!(own.embedding_dim, 8);
+
+        let pulled = service.pull_model("fake-embed").expect("present");
+        assert_eq!(pulled.path, PathBuf::from("/fake/models/fake-embed.gguf"));
+    }
+
+    #[test]
+    fn the_fake_lists_its_own_models_with_the_embedding_dim_it_was_built_with() {
+        let service = FakeInferenceService::new().with_embedding_dim(5);
+        let listed = service.list_models();
+
+        // Every own model, once, by the name a consumer pins.
+        let names: Vec<&str> = listed.iter().map(|m| m.name.as_str()).collect();
+        let own: Vec<&str> = FAKE_MODELS.iter().map(|&(name, _)| name).collect();
+        assert_eq!(names, own);
+        assert_eq!(
+            service.status().models_catalogued,
+            FAKE_MODELS.len(),
+            "status counts the listing"
+        );
+
+        // The embedding model carries the fake's dimension; the others none.
+        for model in &listed {
+            let expected = if model.task == ModelTask::Embed { 5 } else { 0 };
+            assert_eq!(model.embedding_dim, expected, "{}", model.name);
+        }
+        assert!(
+            listed.iter().any(|m| m.task == ModelTask::Embed),
+            "the catalog holds an embedding model"
+        );
+    }
+
+    #[test]
+    fn detokenize_reverses_tokenize_on_a_located_model_and_refuses_otherwise() {
+        let service = FakeInferenceService::new().with_undownloaded("miniLM");
+
+        // Own model: the bytes come back as the text they were.
+        let ids = service
+            .tokenize("fake-embed", "hi", false)
+            .expect("own model tokenizes");
+        assert_eq!(
+            service.detokenize("fake-embed", &ids).expect("round trip"),
+            "hi"
+        );
+        // Ids that are not bytes are dropped rather than invented.
+        assert_eq!(
+            service
+                .detokenize("fake-embed", &[u32::from(b'o'), 0x1_0000, u32::from(b'k')])
+                .expect("round trip"),
+            "ok"
+        );
+
+        // Resolution first, as everywhere: an unknown name and a model not on
+        // disk refuse with the code and answer the runtime would give.
+        let unknown = service.detokenize("nope", &ids).expect_err("unknown");
+        assert_eq!(
+            refusal(&unknown),
+            ("inference.unknown_model", AvailabilityKind::NotInCatalog)
+        );
+        let absent = service.detokenize("miniLM", &ids).expect_err("not on disk");
+        assert_eq!(
+            refusal(&absent),
+            ("inference.missing_model", AvailabilityKind::NotDownloaded)
+        );
+    }
+
+    #[test]
+    fn a_world_with_a_model_undownloaded_reports_refuses_then_pulls_it() {
+        let service = FakeInferenceService::new().with_undownloaded("miniLM");
+
+        // Reported with the runtime's answer: the pull spec and the size.
+        let capability = service.capability("miniLM").expect("located");
+        assert_eq!(capability.availability, AvailabilityKind::NotDownloaded);
+        assert_eq!(capability.pull_spec.as_deref(), Some("miniLM"));
+        let size = capability
+            .size_bytes
+            .expect("a catalogued variant has a size");
+        assert!(size > 0);
+
+        // Refused for a run, carrying the same answer.
+        let error = service
+            .embeddings("miniLM", &embed("hi"))
+            .expect_err("not on disk");
+        assert_eq!(
+            refusal(&error),
+            ("inference.missing_model", AvailabilityKind::NotDownloaded),
+            "{error:?}"
+        );
+        let details = error.availability().expect("carried");
+        assert_eq!(details.pull_spec.as_deref(), Some("miniLM"));
+        assert_eq!(details.size_bytes, Some(size));
+
+        // Presence comes after identity and task, as in the runtime: the
+        // model is held to its task before anyone looks for its file.
+        let error = service
+            .chat("miniLM", &chat("hi"))
+            .expect_err("an embedding model does not generate");
+        assert_eq!(refusal(&error).1, AvailabilityKind::TaskNotSupported);
+
+        // Every other catalogued model is still present.
+        service
+            .embeddings("nomic-embed", &embed("hi"))
+            .expect("only miniLM is held back");
+
+        // A pull makes it present, at the path the runtime would use …
+        let pulled = service.pull_model("miniLM").expect("fetched");
+        assert_eq!(
+            pulled.path,
+            PathBuf::from("/fake/models/all-MiniLM-L6-v2.F16.gguf")
+        );
+        // … and the same run now succeeds.
+        let response = service
+            .embeddings("miniLM", &embed("hi"))
+            .expect("present after the pull");
+        assert_eq!(response.model, "miniLM");
+        assert_eq!(
+            service.capability("miniLM").expect("located").availability,
+            AvailabilityKind::Ready
+        );
+    }
+
+    #[test]
+    fn fake_availability_fixes_the_build_and_keeps_identity() {
+        let requested = ModelUse::Run(ModelTask::Embed);
+        let kept = [
+            Availability::Ready,
+            Availability::NotInCatalog,
+            Availability::PathMissing,
+            Availability::TaskNotSupported { requested },
+        ];
+        for real in kept {
+            assert_eq!(fake_availability(real.clone()), real);
+        }
+        let fixed = [
+            Availability::LocalExecutionNotBuilt,
+            Availability::ProviderNotBuilt,
+            Availability::NotDownloaded {
+                pull_spec: "miniLM".to_owned(),
+                size_bytes: 1,
+            },
+            Availability::NetworkDisabled,
+            Availability::KeyMissing {
+                env_var: "OPENAI_API_KEY",
+                config_key: "openai.api_key".to_owned(),
+            },
+        ];
+        for real in fixed {
+            assert_eq!(
+                fake_availability(real.clone()),
+                Availability::Ready,
+                "{real:?}"
+            );
+        }
     }
 }

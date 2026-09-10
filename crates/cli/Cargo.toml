@@ -37,6 +37,15 @@ inference-anthropic = ["inference", "strata-executor/inference-anthropic"]
 inference-google = ["inference", "strata-executor/inference-google"]
 inference-local = ["inference", "strata-executor/inference-local"]
 inference-openai = ["inference", "strata-executor/inference-openai"]
+# Test-only: the download offer's call-site tests drive the refuse → pull →
+# retry loop against the executor's fake inference runtime. A named feature
+# rather than a dev-dependency feature because the executor's `testkit`
+# carries `strata-engine/testkit`, and a dev-dependency feature unifies into
+# every `--workspace` build with dev-dependencies active (clippy
+# `--all-targets`, `cargo test --workspace`) — switching engine's test seams
+# on for every crate under test. The executor's own testkit tests run the same
+# way: an explicit `--features testkit` lane in CI.
+testkit = ["strata-executor/testkit"]
 
 [dependencies]
 base64 = { workspace = true }

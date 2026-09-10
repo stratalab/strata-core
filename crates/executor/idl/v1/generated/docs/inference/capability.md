@@ -38,6 +38,7 @@ $ strata inference capability openai:gpt-4o-mini  # Pure metadata — no request
 - [`failed_precondition.engine.runtime_closed`](https://stratadb.org/e/failed_precondition.engine.runtime_closed)
 - [`not_found.engine.branch`](https://stratadb.org/e/not_found.engine.branch)
 - [`inference.invalid_request`](https://stratadb.org/e/inference.invalid_request)
+- [`inference.io_failure`](https://stratadb.org/e/inference.io_failure)
 
 ## Invocation
 

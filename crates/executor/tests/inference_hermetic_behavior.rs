@@ -48,8 +48,14 @@ fn models_local_is_empty() {
 }
 
 #[test]
-fn pull_returns_a_synthetic_relative_path() {
+fn pull_returns_a_path_under_the_directory_status_names() {
     let mut executor = executor();
+    let Output::InferenceStatus(status) = executor
+        .execute(Command::InferenceStatus {})
+        .expect("status")
+    else {
+        panic!("unexpected output");
+    };
     let Output::InferenceModelPulled(output) = executor
         .execute(Command::InferenceModelsPull {
             model: "fake-generate".to_owned(),
@@ -59,7 +65,11 @@ fn pull_returns_a_synthetic_relative_path() {
         panic!("unexpected output");
     };
     assert_eq!(output.model, "fake-generate");
-    assert!(output.path.is_relative(), "fake path must not be absolute");
+    // The fake's world is a directory that does not exist on any machine, so
+    // nothing here reads a real file — but it is one directory, and pull and
+    // status must agree on it.
+    assert_eq!(output.path, status.models_dir.join("fake-generate.gguf"));
+    assert!(!output.path.exists(), "the fake world is not on disk");
 }
 
 #[test]

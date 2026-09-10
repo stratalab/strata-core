@@ -30,9 +30,9 @@ const MEMBER_B: &str = "invalid_argument.engine.vector_filter";
 /// A third such code for the nesting tests; it shares no list with A or B.
 const MEMBER_C: &str = "invalid_argument.executor.hub_url";
 
-/// The command every mechanism test edits: one `errors+` entry, an empty
-/// family error list, and a kind without errors, so its resolved list is the
-/// two defaults codes plus whatever the test authors.
+/// The command every mechanism test edits: an `errors+` block every test
+/// rewrites, an empty family error list, and a kind without errors, so its
+/// resolved list is the two defaults codes plus whatever the test authors.
 const PROBE: &str = "inference.capability";
 /// The lines bracketing the probe's `errors+` block; `set_probe_errors`
 /// rewrites whatever lies between them, so it can be called repeatedly.
@@ -217,6 +217,8 @@ fn a_set_reference_in_errors_minus_removes_every_code_of_the_set() {
     scratch.add_sets(
         "  - id: probe.defaults\n    errors:\n      - failed_precondition.engine.runtime_closed\n      - not_found.engine.branch\n",
     );
+    // Pin the probe's own list so the verdict does not follow the real tree.
+    scratch.set_probe_errors(&["inference.invalid_request"]);
     // `errors-` alone: the probe keeps nothing but what it lists itself.
     scratch.replace_in(
         "commands/inference.yaml",
@@ -241,6 +243,8 @@ fn a_set_reference_is_accepted_on_every_layer() {
     scratch.add_sets(&format!(
         "  - id: probe.pair\n    errors:\n      - {MEMBER_A}\n      - {MEMBER_B}\n  - id: probe.kind\n    errors:\n      - {MEMBER_C}\n      - {MEMBER_A}\n"
     ));
+    // Pin the probe's own list so the verdict does not follow the real tree.
+    scratch.set_probe_errors(&["inference.invalid_request"]);
     // Family layer: the inference family declares no errors of its own.
     scratch.replace_in(
         "families.yaml",

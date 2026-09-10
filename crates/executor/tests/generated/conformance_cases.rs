@@ -25,7 +25,7 @@ fn admin_config_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_config_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/config_get.json", &["config"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/config_get.json", &["config"]);
 }
 
 // ---- admin.config_key ----
@@ -47,7 +47,7 @@ fn admin_config_key_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_config_key_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/config_key.json", &["config_value"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/config_key.json", &["config_value"]);
 }
 
 // ---- admin.describe ----
@@ -69,7 +69,7 @@ fn admin_describe_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_describe_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/describe.json", &["described"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/describe.json", &["described"]);
 }
 
 // ---- admin.health ----
@@ -91,7 +91,7 @@ fn admin_health_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_health_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/health.json", &["health"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/health.json", &["health"]);
 }
 
 // ---- admin.hub_clone ----
@@ -135,7 +135,7 @@ fn admin_info_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_info_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/info.json", &["database_info"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/info.json", &["database_info"]);
 }
 
 // ---- admin.ipc_status ----
@@ -157,7 +157,7 @@ fn admin_ipc_status_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_ipc_status_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/ipc_status.json", &["ipc_status"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/ipc_status.json", &["ipc_status"]);
 }
 
 // ---- admin.ipc_stop ----
@@ -179,7 +179,7 @@ fn admin_ipc_stop_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_ipc_stop_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/ipc_stop.json", &["ipc_stop"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/ipc_stop.json", &["ipc_stop"]);
 }
 
 // ---- admin.metrics ----
@@ -201,7 +201,7 @@ fn admin_metrics_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_metrics_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/metrics.json", &["metrics"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/metrics.json", &["metrics"]);
 }
 
 // ---- admin.ping ----
@@ -223,7 +223,7 @@ fn admin_ping_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_ping_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/ping.json", &["pong"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/ping.json", &["pong"]);
 }
 
 // ---- admin.remote ----
@@ -245,7 +245,7 @@ fn admin_remote_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn admin_remote_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/admin/remote_get.json", &["remote_origin_result"], false);
+    support::replay_observes_declared(&[], "requests/v1/admin/remote_get.json", &["remote_origin_result"]);
 }
 
 // ---- arrow.export ----
@@ -301,12 +301,12 @@ fn branch_create_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_create_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/branches/create.json"], "requests/v1/branches/create.json", "responses/v1/errors/branches/create_duplicate.json", false);
+    support::error_case_envelope_matches(&["requests/v1/branches/create.json"], "requests/v1/branches/create.json", "responses/v1/errors/branches/create_duplicate.json");
 }
 
 #[test]
 fn branch_create_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/branches/create.json", &["branch"], false);
+    support::replay_observes_declared(&[], "requests/v1/branches/create.json", &["branch"]);
 }
 
 // ---- branch.delete ----
@@ -328,7 +328,7 @@ fn branch_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/branches/create.json"], "requests/v1/branches/delete.json", &["branch_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/branches/create.json"], "requests/v1/branches/delete.json", &["branch_delete_result"]);
 }
 
 // ---- branch.diff ----
@@ -350,7 +350,7 @@ fn branch_diff_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_diff_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/branches/create.json"], "requests/v1/branches/diff.json", &["branch_comparison"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/branches/create.json"], "requests/v1/branches/diff.json", &["branch_comparison"]);
 }
 
 // ---- branch.fork ----
@@ -372,7 +372,7 @@ fn branch_fork_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_fork_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/branches/fork.json", &["branch"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/branches/fork.json", &["branch"]);
 }
 
 // ---- branch.fork_at_timestamp ----
@@ -394,7 +394,7 @@ fn branch_fork_at_timestamp_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_fork_at_timestamp_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/branches/fork_at_timestamp.json", &["branch"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/branches/fork_at_timestamp.json", &["branch"]);
 }
 
 // ---- branch.fork_at_version ----
@@ -416,7 +416,7 @@ fn branch_fork_at_version_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_fork_at_version_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/branches/fork_at_version.json", &["branch"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/branches/fork_at_version.json", &["branch"]);
 }
 
 // ---- branch.get ----
@@ -438,7 +438,7 @@ fn branch_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/branches/create.json"], "requests/v1/branches/get.json", &["branch"], false);
+    support::replay_observes_declared(&["requests/v1/branches/create.json"], "requests/v1/branches/get.json", &["branch"]);
 }
 
 // ---- branch.list ----
@@ -460,7 +460,7 @@ fn branch_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/branches/create.json"], "requests/v1/branches/list.json", &["branches"], false);
+    support::replay_observes_declared(&["requests/v1/branches/create.json"], "requests/v1/branches/list.json", &["branches"]);
 }
 
 // ---- branch.merge ----
@@ -482,17 +482,17 @@ fn branch_merge_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_merge_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/kv/put.json", "requests/v1/branches/fork.json", "requests/v1/branches/merge_source_change.json", "requests/v1/branches/merge_target_change.json"], "requests/v1/branches/merge.json", "responses/v1/errors/branches/merge_conflict.json", false);
+    support::error_case_envelope_matches(&["requests/v1/kv/put.json", "requests/v1/branches/fork.json", "requests/v1/branches/merge_source_change.json", "requests/v1/branches/merge_target_change.json"], "requests/v1/branches/merge.json", "responses/v1/errors/branches/merge_conflict.json");
 }
 
 #[test]
 fn branch_merge_error_case_1_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/branches/create.json"], "requests/v1/branches/merge_unrelated.json", "responses/v1/errors/branches/merge_unrelated.json", false);
+    support::error_case_envelope_matches(&["requests/v1/branches/create.json"], "requests/v1/branches/merge_unrelated.json", "responses/v1/errors/branches/merge_unrelated.json");
 }
 
 #[test]
 fn branch_merge_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/branches/fork.json", "requests/v1/branches/merge_source_change.json"], "requests/v1/branches/merge.json", &["branch_merge"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/branches/fork.json", "requests/v1/branches/merge_source_change.json"], "requests/v1/branches/merge.json", &["branch_merge"]);
 }
 
 // ---- branch.preview ----
@@ -514,12 +514,12 @@ fn branch_preview_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn branch_preview_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/branches/create.json"], "requests/v1/branches/preview_unrelated.json", "responses/v1/errors/branches/merge_unrelated.json", false);
+    support::error_case_envelope_matches(&["requests/v1/branches/create.json"], "requests/v1/branches/preview_unrelated.json", "responses/v1/errors/branches/merge_unrelated.json");
 }
 
 #[test]
 fn branch_preview_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/branches/fork.json", "requests/v1/branches/merge_source_change.json", "requests/v1/branches/merge_target_change.json"], "requests/v1/branches/preview.json", &["branch_preview"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/branches/fork.json", "requests/v1/branches/merge_source_change.json", "requests/v1/branches/merge_target_change.json"], "requests/v1/branches/preview.json", &["branch_preview"]);
 }
 
 // ---- event.append ----
@@ -541,12 +541,12 @@ fn event_append_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn event_append_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/event/append_empty_type.json", "responses/v1/errors/event/append_empty_type.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/event/append_empty_type.json", "responses/v1/errors/event/append_empty_type.json");
 }
 
 #[test]
 fn event_append_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/event/append.json", &["event_append_result"], false);
+    support::replay_observes_declared(&[], "requests/v1/event/append.json", &["event_append_result"]);
 }
 
 // ---- event.batch_append ----
@@ -568,7 +568,7 @@ fn event_batch_append_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn event_batch_append_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/event/batch_append.json", &["event_batch_append_results"], false);
+    support::replay_observes_declared(&[], "requests/v1/event/batch_append.json", &["event_batch_append_results"]);
 }
 
 // ---- event.count ----
@@ -590,7 +590,7 @@ fn event_count_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn event_count_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/event/append.json", "requests/v1/setup/event_append_updated.json"], "requests/v1/event/len.json", &["event_count"], false);
+    support::replay_observes_declared(&["requests/v1/event/append.json", "requests/v1/setup/event_append_updated.json"], "requests/v1/event/len.json", &["event_count"]);
 }
 
 // ---- event.exists ----
@@ -612,7 +612,7 @@ fn event_exists_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn event_exists_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/event/append.json"], "requests/v1/event/exists.json", &["bool"], false);
+    support::replay_observes_declared(&["requests/v1/event/append.json"], "requests/v1/event/exists.json", &["bool"]);
 }
 
 // ---- event.get ----
@@ -702,7 +702,7 @@ fn event_types_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn event_types_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/event/append.json", "requests/v1/setup/event_append_updated.json"], "requests/v1/event/types.json", &["event_type_list"], false);
+    support::replay_observes_declared(&["requests/v1/event/append.json", "requests/v1/setup/event_append_updated.json"], "requests/v1/event/types.json", &["event_type_list"]);
 }
 
 // ---- event.verify_chain ----
@@ -724,7 +724,7 @@ fn event_verify_chain_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn event_verify_chain_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/event/append.json", "requests/v1/setup/event_append_updated.json"], "requests/v1/event/verify_chain.json", &["event_chain_verification"], false);
+    support::replay_observes_declared(&["requests/v1/event/append.json", "requests/v1/setup/event_append_updated.json"], "requests/v1/event/verify_chain.json", &["event_chain_verification"]);
 }
 
 // ---- graph.analytics.bfs ----
@@ -746,7 +746,7 @@ fn graph_analytics_bfs_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_analytics_bfs_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_alice_carol.json"], "requests/v1/graph/bfs.json", &["graph_bfs_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_alice_carol.json"], "requests/v1/graph/bfs.json", &["graph_bfs_result"]);
 }
 
 // ---- graph.analytics.cdlp ----
@@ -768,7 +768,7 @@ fn graph_analytics_cdlp_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_analytics_cdlp_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/setup/graph_add_dave.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json", "requests/v1/setup/graph_edge_carol_alice.json"], "requests/v1/graph/cdlp.json", &["graph_cdlp_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/setup/graph_add_dave.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json", "requests/v1/setup/graph_edge_carol_alice.json"], "requests/v1/graph/cdlp.json", &["graph_cdlp_result"]);
 }
 
 // ---- graph.analytics.lcc ----
@@ -790,7 +790,7 @@ fn graph_analytics_lcc_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_analytics_lcc_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json", "requests/v1/setup/graph_edge_alice_carol.json"], "requests/v1/graph/lcc.json", &["graph_lcc_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json", "requests/v1/setup/graph_edge_alice_carol.json"], "requests/v1/graph/lcc.json", &["graph_lcc_result"]);
 }
 
 // ---- graph.analytics.pagerank ----
@@ -812,7 +812,7 @@ fn graph_analytics_pagerank_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_analytics_pagerank_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/setup/graph_add_dave.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json", "requests/v1/setup/graph_edge_carol_alice.json"], "requests/v1/graph/pagerank.json", &["graph_pagerank_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/setup/graph_add_dave.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json", "requests/v1/setup/graph_edge_carol_alice.json"], "requests/v1/graph/pagerank.json", &["graph_pagerank_result"]);
 }
 
 // ---- graph.analytics.sssp ----
@@ -834,7 +834,7 @@ fn graph_analytics_sssp_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_analytics_sssp_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json"], "requests/v1/graph/sssp.json", &["graph_sssp_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json"], "requests/v1/graph/sssp.json", &["graph_sssp_result"]);
 }
 
 // ---- graph.analytics.wcc ----
@@ -856,7 +856,7 @@ fn graph_analytics_wcc_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_analytics_wcc_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/setup/graph_add_dave.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json", "requests/v1/setup/graph_edge_carol_alice.json"], "requests/v1/graph/wcc.json", &["graph_wcc_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/setup/graph_add_dave.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json", "requests/v1/setup/graph_edge_carol_alice.json"], "requests/v1/graph/wcc.json", &["graph_wcc_result"]);
 }
 
 // ---- graph.apply_delete_policy ----
@@ -878,7 +878,7 @@ fn graph_apply_delete_policy_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_apply_delete_policy_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/setup/graph_add_bound_node.json"], "requests/v1/graph/apply_delete_policy.json", &["graph_delete_policy_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/setup/graph_add_bound_node.json"], "requests/v1/graph/apply_delete_policy.json", &["graph_delete_policy_result"]);
 }
 
 // ---- graph.batch_write ----
@@ -900,7 +900,7 @@ fn graph_batch_write_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_batch_write_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/batch_write.json", &["graph_batch_write_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/batch_write.json", &["graph_batch_write_result"]);
 }
 
 // ---- graph.bindings ----
@@ -922,7 +922,7 @@ fn graph_bindings_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_bindings_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/setup/graph_add_bound_node.json"], "requests/v1/graph/bindings_for_entity.json", &["graph_binding_page"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/setup/graph_add_bound_node.json"], "requests/v1/graph/bindings_for_entity.json", &["graph_binding_page"]);
 }
 
 // ---- graph.bulk_insert ----
@@ -944,7 +944,7 @@ fn graph_bulk_insert_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_bulk_insert_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/bulk_insert.json", &["graph_bulk_insert_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/bulk_insert.json", &["graph_bulk_insert_result"]);
 }
 
 // ---- graph.create ----
@@ -966,17 +966,17 @@ fn graph_create_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_create_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/graph/create_empty_name.json", "responses/v1/errors/graph/create_empty_name.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/graph/create_empty_name.json", "responses/v1/errors/graph/create_empty_name.json");
 }
 
 #[test]
 fn graph_create_error_case_1_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/graph/create.json"], "requests/v1/graph/create.json", "responses/v1/errors/graph/create_duplicate.json", false);
+    support::error_case_envelope_matches(&["requests/v1/graph/create.json"], "requests/v1/graph/create.json", "responses/v1/errors/graph/create_duplicate.json");
 }
 
 #[test]
 fn graph_create_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/graph/create.json", &["graph_create_result"], false);
+    support::replay_observes_declared(&[], "requests/v1/graph/create.json", &["graph_create_result"]);
 }
 
 // ---- graph.delete ----
@@ -998,7 +998,7 @@ fn graph_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/delete.json", &["graph_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/delete.json", &["graph_delete_result"]);
 }
 
 // ---- graph.edge.add ----
@@ -1020,7 +1020,7 @@ fn graph_edge_add_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_edge_add_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json"], "requests/v1/graph/edge_add.json", &["graph_edge_write_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json"], "requests/v1/graph/edge_add.json", &["graph_edge_write_result"]);
 }
 
 // ---- graph.edge.get ----
@@ -1042,7 +1042,7 @@ fn graph_edge_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_edge_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/graph/edge_add.json"], "requests/v1/graph/edge_get.json", &["graph_edge_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/graph/edge_add.json"], "requests/v1/graph/edge_get.json", &["graph_edge_result"]);
 }
 
 // ---- graph.edge.remove ----
@@ -1064,7 +1064,7 @@ fn graph_edge_remove_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_edge_remove_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/graph/edge_add.json"], "requests/v1/graph/edge_remove.json", &["graph_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/graph/edge_add.json"], "requests/v1/graph/edge_remove.json", &["graph_delete_result"]);
 }
 
 // ---- graph.list ----
@@ -1086,7 +1086,7 @@ fn graph_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/list.json", &["graph_name_page"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/list.json", &["graph_name_page"]);
 }
 
 // ---- graph.meta ----
@@ -1108,7 +1108,7 @@ fn graph_meta_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_meta_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/graph/edge_add.json"], "requests/v1/graph/meta.json", &["graph_info_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/graph/edge_add.json"], "requests/v1/graph/meta.json", &["graph_info_result"]);
 }
 
 // ---- graph.neighbors ----
@@ -1130,7 +1130,7 @@ fn graph_neighbors_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_neighbors_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_alice_carol.json"], "requests/v1/graph/neighbors.json", &["graph_neighbor_page"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_alice_carol.json"], "requests/v1/graph/neighbors.json", &["graph_neighbor_page"]);
 }
 
 // ---- graph.node.add ----
@@ -1152,7 +1152,7 @@ fn graph_node_add_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_node_add_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/node_add.json", &["graph_node_write_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/node_add.json", &["graph_node_write_result"]);
 }
 
 // ---- graph.node.get ----
@@ -1174,7 +1174,7 @@ fn graph_node_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_node_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json"], "requests/v1/graph/node_get.json", &["graph_node_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json"], "requests/v1/graph/node_get.json", &["graph_node_result"]);
 }
 
 // ---- graph.node.list ----
@@ -1196,7 +1196,7 @@ fn graph_node_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_node_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json"], "requests/v1/graph/node_list.json", &["graph_node_page"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json"], "requests/v1/graph/node_list.json", &["graph_node_page"]);
 }
 
 // ---- graph.node.remove ----
@@ -1218,7 +1218,7 @@ fn graph_node_remove_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_node_remove_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json"], "requests/v1/graph/node_remove.json", &["graph_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json"], "requests/v1/graph/node_remove.json", &["graph_delete_result"]);
 }
 
 // ---- graph.nodes_by_type ----
@@ -1240,7 +1240,7 @@ fn graph_nodes_by_type_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_nodes_by_type_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json"], "requests/v1/graph/nodes_by_type.json", &["graph_node_page"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json"], "requests/v1/graph/nodes_by_type.json", &["graph_node_page"]);
 }
 
 // ---- graph.ontology.define_link_type ----
@@ -1262,7 +1262,7 @@ fn graph_ontology_define_link_type_request_rejects_unknown_keys_at_closed_object
 
 #[test]
 fn graph_ontology_define_link_type_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json"], "requests/v1/graph/ontology_define_link_type.json", &["graph_ontology_write_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json"], "requests/v1/graph/ontology_define_link_type.json", &["graph_ontology_write_result"]);
 }
 
 // ---- graph.ontology.define_object_type ----
@@ -1284,7 +1284,7 @@ fn graph_ontology_define_object_type_request_rejects_unknown_keys_at_closed_obje
 
 #[test]
 fn graph_ontology_define_object_type_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/ontology_define_object_type.json", &["graph_ontology_write_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/ontology_define_object_type.json", &["graph_ontology_write_result"]);
 }
 
 // ---- graph.ontology.delete_link_type ----
@@ -1306,7 +1306,7 @@ fn graph_ontology_delete_link_type_request_rejects_unknown_keys_at_closed_object
 
 #[test]
 fn graph_ontology_delete_link_type_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json", "requests/v1/setup/graph_define_link_type_knows.json"], "requests/v1/graph/ontology_delete_link_type.json", &["graph_ontology_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json", "requests/v1/setup/graph_define_link_type_knows.json"], "requests/v1/graph/ontology_delete_link_type.json", &["graph_ontology_delete_result"]);
 }
 
 // ---- graph.ontology.delete_object_type ----
@@ -1328,7 +1328,7 @@ fn graph_ontology_delete_object_type_request_rejects_unknown_keys_at_closed_obje
 
 #[test]
 fn graph_ontology_delete_object_type_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/setup/graph_define_object_type_robot.json"], "requests/v1/graph/ontology_delete_object_type.json", &["graph_ontology_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/setup/graph_define_object_type_robot.json"], "requests/v1/graph/ontology_delete_object_type.json", &["graph_ontology_delete_result"]);
 }
 
 // ---- graph.ontology.freeze ----
@@ -1350,7 +1350,7 @@ fn graph_ontology_freeze_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_ontology_freeze_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json", "requests/v1/graph/ontology_define_link_type.json"], "requests/v1/graph/ontology_freeze.json", &["graph_ontology_freeze_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json", "requests/v1/graph/ontology_define_link_type.json"], "requests/v1/graph/ontology_freeze.json", &["graph_ontology_freeze_result"]);
 }
 
 // ---- graph.ontology.get ----
@@ -1372,7 +1372,7 @@ fn graph_ontology_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_ontology_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json", "requests/v1/graph/ontology_define_link_type.json", "requests/v1/graph/ontology_freeze.json"], "requests/v1/graph/ontology_get.json", &["graph_ontology_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json", "requests/v1/graph/ontology_define_link_type.json", "requests/v1/graph/ontology_freeze.json"], "requests/v1/graph/ontology_get.json", &["graph_ontology_result"]);
 }
 
 // ---- graph.ontology.summary ----
@@ -1394,7 +1394,7 @@ fn graph_ontology_summary_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_ontology_summary_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json", "requests/v1/graph/ontology_define_link_type.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json"], "requests/v1/graph/ontology_summary.json", &["graph_ontology_summary_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/ontology_define_object_type.json", "requests/v1/graph/ontology_define_link_type.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json"], "requests/v1/graph/ontology_summary.json", &["graph_ontology_summary_result"]);
 }
 
 // ---- graph.sample ----
@@ -1416,7 +1416,7 @@ fn graph_sample_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn graph_sample_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json"], "requests/v1/graph/sample.json", &["graph_sample_result"], false);
+    support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json"], "requests/v1/graph/sample.json", &["graph_sample_result"]);
 }
 
 // ---- hub.get_dataset ----
@@ -1472,7 +1472,7 @@ fn hub_list_datasets_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn hub_list_datasets_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/hub/list_datasets_bad_limit.json", "responses/v1/errors/hub/list_datasets_bad_limit.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/hub/list_datasets_bad_limit.json", "responses/v1/errors/hub/list_datasets_bad_limit.json");
 }
 
 // ---- hub.list_refs ----
@@ -1511,7 +1511,7 @@ fn hub_list_yanked_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn hub_list_yanked_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/hub/list_yanked_bad_since.json", "responses/v1/errors/hub/list_yanked_bad_since.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/hub/list_yanked_bad_since.json", "responses/v1/errors/hub/list_yanked_bad_since.json");
 }
 
 // ---- inference.cache_status ----
@@ -1533,7 +1533,7 @@ fn inference_cache_status_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn inference_cache_status_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/cache_status.json", &["inference_cache_status"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/cache_status.json", &["inference_cache_status"]);
 }
 
 // ---- inference.capability ----
@@ -1554,8 +1554,13 @@ fn inference_capability_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn inference_capability_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/capability_malformed_spec.json", "responses/v1/errors/inference/invalid_request.json");
+}
+
+#[test]
 fn inference_capability_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/capability.json", &["inference_capability"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/capability.json", &["inference_capability"]);
 }
 
 // ---- inference.detokenize ----
@@ -1577,7 +1582,7 @@ fn inference_detokenize_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn inference_detokenize_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/detokenize.json", &["inference_text"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/detokenize.json", &["inference_text"]);
 }
 
 // ---- inference.embed ----
@@ -1598,8 +1603,23 @@ fn inference_embed_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn inference_embed_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/embed_unknown_model.json", "responses/v1/errors/inference/unknown_model.json");
+}
+
+#[test]
+fn inference_embed_error_case_1_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/embed_malformed_spec.json", "responses/v1/errors/inference/invalid_request.json");
+}
+
+#[test]
+fn inference_embed_error_case_2_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/embed_wrong_task.json", "responses/v1/errors/inference/unsupported_operation.json");
+}
+
+#[test]
 fn inference_embed_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/embed.json", &["inference_embeddings"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/embed.json", &["inference_embeddings"]);
 }
 
 // ---- inference.generate ----
@@ -1620,8 +1640,18 @@ fn inference_generate_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn inference_generate_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/generate_unknown_model.json", "responses/v1/errors/inference/unknown_model.json");
+}
+
+#[test]
+fn inference_generate_error_case_1_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/generate_wrong_task.json", "responses/v1/errors/inference/unsupported_operation.json");
+}
+
+#[test]
 fn inference_generate_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/generate.json", &["inference_generation"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/generate.json", &["inference_generation"]);
 }
 
 // ---- inference.models.list ----
@@ -1643,7 +1673,7 @@ fn inference_models_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn inference_models_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/models_list.json", &["inference_models"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/models_list.json", &["inference_models"]);
 }
 
 // ---- inference.models.local ----
@@ -1665,7 +1695,7 @@ fn inference_models_local_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn inference_models_local_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/models_local.json", &["inference_models"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/models_local.json", &["inference_models"]);
 }
 
 // ---- inference.models.pull ----
@@ -1686,8 +1716,18 @@ fn inference_models_pull_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn inference_models_pull_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/models_pull_unknown_model.json", "responses/v1/errors/inference/unknown_model.json");
+}
+
+#[test]
+fn inference_models_pull_error_case_1_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/models_pull_cloud_model.json", "responses/v1/errors/inference/unsupported_operation.json");
+}
+
+#[test]
 fn inference_models_pull_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/models_pull.json", &["inference_model_pulled"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/models_pull.json", &["inference_model_pulled"]);
 }
 
 // ---- inference.rank ----
@@ -1708,8 +1748,13 @@ fn inference_rank_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn inference_rank_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/rank_wrong_task.json", "responses/v1/errors/inference/unsupported_operation.json");
+}
+
+#[test]
 fn inference_rank_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/rank.json", &["inference_ranking"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/rank.json", &["inference_ranking"]);
 }
 
 // ---- inference.status ----
@@ -1731,7 +1776,7 @@ fn inference_status_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn inference_status_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/status.json", &["inference_status"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/status.json", &["inference_status"]);
 }
 
 // ---- inference.tokenize ----
@@ -1752,8 +1797,13 @@ fn inference_tokenize_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn inference_tokenize_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/inference/tokenize_unknown_model.json", "responses/v1/errors/inference/unknown_model.json");
+}
+
+#[test]
 fn inference_tokenize_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/tokenize.json", &["inference_token_ids"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/tokenize.json", &["inference_token_ids"]);
 }
 
 // ---- inference.unload ----
@@ -1775,7 +1825,7 @@ fn inference_unload_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn inference_unload_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/inference/unload.json", &["inference_unload_result"], true);
+    support::replay_observes_declared(&[], "requests/v1/inference/unload.json", &["inference_unload_result"]);
 }
 
 // ---- json.batch_delete ----
@@ -1797,7 +1847,7 @@ fn json_batch_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_batch_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/batch_delete.json", &["json_batch_results"], false);
+    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/batch_delete.json", &["json_batch_results"]);
 }
 
 // ---- json.batch_exists ----
@@ -1819,7 +1869,7 @@ fn json_batch_exists_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_batch_exists_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/batch_exists.json", &["json_batch_exists_results"], false);
+    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/batch_exists.json", &["json_batch_exists_results"]);
 }
 
 // ---- json.batch_get ----
@@ -1841,7 +1891,7 @@ fn json_batch_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_batch_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/batch_get.json", &["json_batch_get_results"], false);
+    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/batch_get.json", &["json_batch_get_results"]);
 }
 
 // ---- json.batch_set ----
@@ -1863,7 +1913,7 @@ fn json_batch_set_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_batch_set_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/json/batch_set.json", &["json_batch_results"], false);
+    support::replay_observes_declared(&[], "requests/v1/json/batch_set.json", &["json_batch_results"]);
 }
 
 // ---- json.count ----
@@ -1885,7 +1935,7 @@ fn json_count_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_count_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/batch_set.json"], "requests/v1/json/count.json", &["uint"], false);
+    support::replay_observes_declared(&["requests/v1/json/batch_set.json"], "requests/v1/json/count.json", &["uint"]);
 }
 
 // ---- json.delete ----
@@ -1907,7 +1957,7 @@ fn json_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/json/delete.json", &["json_delete_result"], false);
+    support::replay_observes_declared(&[], "requests/v1/json/delete.json", &["json_delete_result"]);
 }
 
 // ---- json.exists ----
@@ -1929,7 +1979,7 @@ fn json_exists_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_exists_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/exists.json", &["bool"], false);
+    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/exists.json", &["bool"]);
 }
 
 // ---- json.get ----
@@ -1956,7 +2006,7 @@ fn json_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/get.json", &["json_versioned_value", "json_value"], false);
+    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/get.json", &["json_versioned_value", "json_value"]);
 }
 
 // ---- json.history ----
@@ -1978,7 +2028,7 @@ fn json_history_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_history_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/set.json", "requests/v1/setup/json_set_user_age.json"], "requests/v1/json/history.json", &["json_version_history"], false);
+    support::replay_observes_declared(&["requests/v1/json/set.json", "requests/v1/setup/json_set_user_age.json"], "requests/v1/json/history.json", &["json_version_history"]);
 }
 
 // ---- json.index.create ----
@@ -2000,7 +2050,7 @@ fn json_index_create_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_index_create_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/json/index_create.json", &["json_index_definition"], false);
+    support::replay_observes_declared(&[], "requests/v1/json/index_create.json", &["json_index_definition"]);
 }
 
 // ---- json.index.drop ----
@@ -2022,7 +2072,7 @@ fn json_index_drop_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_index_drop_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/index_create.json"], "requests/v1/json/index_drop.json", &["bool"], false);
+    support::replay_observes_declared(&["requests/v1/json/index_create.json"], "requests/v1/json/index_drop.json", &["bool"]);
 }
 
 // ---- json.index.list ----
@@ -2044,7 +2094,7 @@ fn json_index_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_index_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/index_create.json"], "requests/v1/json/index_list.json", &["json_index_list"], false);
+    support::replay_observes_declared(&["requests/v1/json/index_create.json"], "requests/v1/json/index_list.json", &["json_index_list"]);
 }
 
 // ---- json.list ----
@@ -2066,7 +2116,7 @@ fn json_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/batch_set.json"], "requests/v1/json/list.json", &["json_list_result"], false);
+    support::replay_observes_declared(&["requests/v1/json/batch_set.json"], "requests/v1/json/list.json", &["json_list_result"]);
 }
 
 // ---- json.sample ----
@@ -2088,7 +2138,7 @@ fn json_sample_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_sample_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/batch_set.json"], "requests/v1/json/sample.json", &["json_sample_result"], false);
+    support::replay_observes_declared(&["requests/v1/json/batch_set.json"], "requests/v1/json/sample.json", &["json_sample_result"]);
 }
 
 // ---- json.scan ----
@@ -2110,7 +2160,7 @@ fn json_scan_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_scan_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/batch_set.json"], "requests/v1/json/scan.json", &["json_scan_result"], false);
+    support::replay_observes_declared(&["requests/v1/json/batch_set.json"], "requests/v1/json/scan.json", &["json_scan_result"]);
 }
 
 // ---- json.set ----
@@ -2132,12 +2182,12 @@ fn json_set_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn json_set_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/json/set_empty_key.json", "responses/v1/errors/json/set_empty_key.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/json/set_empty_key.json", "responses/v1/errors/json/set_empty_key.json");
 }
 
 #[test]
 fn json_set_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/json/set.json", &["json_write_result"], false);
+    support::replay_observes_declared(&[], "requests/v1/json/set.json", &["json_write_result"]);
 }
 
 // ---- kv.batch_delete ----
@@ -2159,7 +2209,7 @@ fn kv_batch_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_batch_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/batch_delete.json", &["batch_results"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/batch_delete.json", &["batch_results"]);
 }
 
 // ---- kv.batch_exists ----
@@ -2181,7 +2231,7 @@ fn kv_batch_exists_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_batch_exists_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/batch_exists.json", &["batch_exists_results"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/batch_exists.json", &["batch_exists_results"]);
 }
 
 // ---- kv.batch_get ----
@@ -2203,7 +2253,7 @@ fn kv_batch_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_batch_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/batch_get.json", &["batch_get_results"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/batch_get.json", &["batch_get_results"]);
 }
 
 // ---- kv.batch_put ----
@@ -2225,12 +2275,12 @@ fn kv_batch_put_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_batch_put_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/kv/batch_put_duplicate_key.json", "responses/v1/errors/kv/batch_put_duplicate_key.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/kv/batch_put_duplicate_key.json", "responses/v1/errors/kv/batch_put_duplicate_key.json");
 }
 
 #[test]
 fn kv_batch_put_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/kv/batch_put.json", &["batch_results"], false);
+    support::replay_observes_declared(&[], "requests/v1/kv/batch_put.json", &["batch_results"]);
 }
 
 // ---- kv.count ----
@@ -2252,7 +2302,7 @@ fn kv_count_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_count_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/count.json", &["uint"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/count.json", &["uint"]);
 }
 
 // ---- kv.delete ----
@@ -2274,7 +2324,7 @@ fn kv_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/kv/delete.json", &["delete_result"], false);
+    support::replay_observes_declared(&[], "requests/v1/kv/delete.json", &["delete_result"]);
 }
 
 // ---- kv.exists ----
@@ -2296,7 +2346,7 @@ fn kv_exists_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_exists_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/exists.json", &["bool"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/exists.json", &["bool"]);
 }
 
 // ---- kv.get ----
@@ -2318,12 +2368,12 @@ fn kv_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_get_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/kv/get_unretained_version.json", "responses/v1/errors/kv/get_unretained_version.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/kv/get_unretained_version.json", "responses/v1/errors/kv/get_unretained_version.json");
 }
 
 #[test]
 fn kv_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/setup/kv_put_a_two.json"], "requests/v1/kv/get.json", &["kv_versioned_value"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/setup/kv_put_a_two.json"], "requests/v1/kv/get.json", &["kv_versioned_value"]);
 }
 
 // ---- kv.history ----
@@ -2345,7 +2395,7 @@ fn kv_history_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_history_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/setup/kv_put_a_two.json"], "requests/v1/kv/history.json", &["version_history"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json", "requests/v1/setup/kv_put_a_two.json"], "requests/v1/kv/history.json", &["version_history"]);
 }
 
 // ---- kv.list ----
@@ -2367,7 +2417,7 @@ fn kv_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/setup/kv_put_a1.json", "requests/v1/setup/kv_put_a2.json", "requests/v1/setup/kv_put_a3.json"], "requests/v1/kv/list.json", &["keys_page"], false);
+    support::replay_observes_declared(&["requests/v1/setup/kv_put_a1.json", "requests/v1/setup/kv_put_a2.json", "requests/v1/setup/kv_put_a3.json"], "requests/v1/kv/list.json", &["keys_page"]);
 }
 
 // ---- kv.put ----
@@ -2389,12 +2439,12 @@ fn kv_put_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_put_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/kv/put_empty_key.json", "responses/v1/errors/kv/put_empty_key.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/kv/put_empty_key.json", "responses/v1/errors/kv/put_empty_key.json");
 }
 
 #[test]
 fn kv_put_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/kv/put.json", &["write_result"], false);
+    support::replay_observes_declared(&[], "requests/v1/kv/put.json", &["write_result"]);
 }
 
 // ---- kv.sample ----
@@ -2416,7 +2466,7 @@ fn kv_sample_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_sample_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/sample.json", &["sample_result"], false);
+    support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/sample.json", &["sample_result"]);
 }
 
 // ---- kv.scan ----
@@ -2438,7 +2488,7 @@ fn kv_scan_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn kv_scan_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/setup/kv_put_a1.json", "requests/v1/setup/kv_put_a2.json", "requests/v1/setup/kv_put_a3.json"], "requests/v1/kv/scan.json", &["kv_scan_result"], false);
+    support::replay_observes_declared(&["requests/v1/setup/kv_put_a1.json", "requests/v1/setup/kv_put_a2.json", "requests/v1/setup/kv_put_a3.json"], "requests/v1/kv/scan.json", &["kv_scan_result"]);
 }
 
 // ---- space.create ----
@@ -2460,7 +2510,7 @@ fn space_create_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn space_create_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/spaces/create.json", &["space_create_result"], false);
+    support::replay_observes_declared(&[], "requests/v1/spaces/create.json", &["space_create_result"]);
 }
 
 // ---- space.delete ----
@@ -2482,12 +2532,12 @@ fn space_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn space_delete_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/spaces/delete_default.json", "responses/v1/errors/spaces/delete_default.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/spaces/delete_default.json", "responses/v1/errors/spaces/delete_default.json");
 }
 
 #[test]
 fn space_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/spaces/create.json"], "requests/v1/spaces/delete.json", &["space_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/spaces/create.json"], "requests/v1/spaces/delete.json", &["space_delete_result"]);
 }
 
 // ---- space.exists ----
@@ -2509,7 +2559,7 @@ fn space_exists_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn space_exists_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/spaces/create.json"], "requests/v1/spaces/exists.json", &["bool"], false);
+    support::replay_observes_declared(&["requests/v1/spaces/create.json"], "requests/v1/spaces/exists.json", &["bool"]);
 }
 
 // ---- space.list ----
@@ -2531,7 +2581,7 @@ fn space_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn space_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/spaces/create.json"], "requests/v1/spaces/list.json", &["space_list"], false);
+    support::replay_observes_declared(&["requests/v1/spaces/create.json"], "requests/v1/spaces/list.json", &["space_list"]);
 }
 
 // ---- vector.batch_delete ----
@@ -2553,7 +2603,7 @@ fn vector_batch_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_batch_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/batch_delete.json", &["vector_batch_delete_results"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/batch_delete.json", &["vector_batch_delete_results"]);
 }
 
 // ---- vector.batch_exists ----
@@ -2575,7 +2625,7 @@ fn vector_batch_exists_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_batch_exists_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/batch_exists.json", &["vector_batch_exists_results"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/batch_exists.json", &["vector_batch_exists_results"]);
 }
 
 // ---- vector.batch_get ----
@@ -2597,7 +2647,7 @@ fn vector_batch_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_batch_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/batch_get.json", &["vector_batch_get_results"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/batch_get.json", &["vector_batch_get_results"]);
 }
 
 // ---- vector.batch_upsert ----
@@ -2619,7 +2669,7 @@ fn vector_batch_upsert_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_batch_upsert_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/batch_upsert.json", &["vector_batch_upsert_results"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/batch_upsert.json", &["vector_batch_upsert_results"]);
 }
 
 // ---- vector.collection.create ----
@@ -2641,17 +2691,17 @@ fn vector_collection_create_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_collection_create_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/vector/collection_create_zero_dim.json", "responses/v1/errors/vector/collection_create_zero_dim.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/vector/collection_create_zero_dim.json", "responses/v1/errors/vector/collection_create_zero_dim.json");
 }
 
 #[test]
 fn vector_collection_create_error_case_1_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/vector/collection_create_empty_model.json", "responses/v1/errors/vector/embedding_model_empty.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/vector/collection_create_empty_model.json", "responses/v1/errors/vector/embedding_model_empty.json");
 }
 
 #[test]
 fn vector_collection_create_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&[], "requests/v1/vector/collection_create.json", &["vector_collection_list"], false);
+    support::replay_observes_declared(&[], "requests/v1/vector/collection_create.json", &["vector_collection_list"]);
 }
 
 // ---- vector.collection.delete ----
@@ -2673,7 +2723,7 @@ fn vector_collection_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_collection_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_delete.json", &["bool"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_delete.json", &["bool"]);
 }
 
 // ---- vector.collection.list ----
@@ -2695,7 +2745,7 @@ fn vector_collection_list_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_collection_list_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_list.json", &["vector_collection_list"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_list.json", &["vector_collection_list"]);
 }
 
 // ---- vector.collection.set_embedding_model ----
@@ -2717,22 +2767,22 @@ fn vector_collection_set_embedding_model_request_rejects_unknown_keys_at_closed_
 
 #[test]
 fn vector_collection_set_embedding_model_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_set_embedding_model_empty.json", "responses/v1/errors/vector/embedding_model_empty.json", false);
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_set_embedding_model_empty.json", "responses/v1/errors/vector/embedding_model_empty.json");
 }
 
 #[test]
 fn vector_collection_set_embedding_model_error_case_1_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/vector/collection_create_with_model.json"], "requests/v1/vector/collection_set_embedding_model_other.json", "responses/v1/errors/vector/embedding_model_mismatch.json", false);
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create_with_model.json"], "requests/v1/vector/collection_set_embedding_model_other.json", "responses/v1/errors/vector/embedding_model_mismatch.json");
 }
 
 #[test]
 fn vector_collection_set_embedding_model_error_case_2_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/vector/collection_set_embedding_model.json", "responses/v1/errors/vector/collection_missing.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/vector/collection_set_embedding_model.json", "responses/v1/errors/vector/collection_missing.json");
 }
 
 #[test]
 fn vector_collection_set_embedding_model_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_set_embedding_model.json", &["vector_collection_list"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_set_embedding_model.json", &["vector_collection_list"]);
 }
 
 // ---- vector.collection.stats ----
@@ -2754,7 +2804,7 @@ fn vector_collection_stats_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_collection_stats_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_stats.json", &["vector_collection_list"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/collection_stats.json", &["vector_collection_list"]);
 }
 
 // ---- vector.count ----
@@ -2776,7 +2826,7 @@ fn vector_count_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_count_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/count.json", &["uint"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/count.json", &["uint"]);
 }
 
 // ---- vector.delete ----
@@ -2798,7 +2848,7 @@ fn vector_delete_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_delete_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/delete.json", &["vector_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/delete.json", &["vector_delete_result"]);
 }
 
 // ---- vector.delete_all ----
@@ -2820,7 +2870,7 @@ fn vector_delete_all_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_delete_all_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/delete_all.json", &["vector_bulk_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/delete_all.json", &["vector_bulk_delete_result"]);
 }
 
 // ---- vector.delete_by_filter ----
@@ -2842,7 +2892,7 @@ fn vector_delete_by_filter_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_delete_by_filter_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/delete_by_filter.json", &["vector_bulk_delete_result"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/delete_by_filter.json", &["vector_bulk_delete_result"]);
 }
 
 // ---- vector.exists ----
@@ -2864,7 +2914,7 @@ fn vector_exists_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_exists_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/exists.json", &["bool"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/exists.json", &["bool"]);
 }
 
 // ---- vector.get ----
@@ -2886,12 +2936,12 @@ fn vector_get_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_get_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&[], "requests/v1/vector/get_missing_collection.json", "responses/v1/errors/vector/get_missing_collection.json", false);
+    support::error_case_envelope_matches(&[], "requests/v1/vector/get_missing_collection.json", "responses/v1/errors/vector/get_missing_collection.json");
 }
 
 #[test]
 fn vector_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/get.json", &["vector_data"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/get.json", &["vector_data"]);
 }
 
 // ---- vector.history ----
@@ -2913,7 +2963,7 @@ fn vector_history_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_history_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/history.json", &["vector_version_history"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/history.json", &["vector_version_history"]);
 }
 
 // ---- vector.index.query ----
@@ -2935,7 +2985,7 @@ fn vector_index_query_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_index_query_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/index_query.json", &["vector_index_query"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/index_query.json", &["vector_index_query"]);
 }
 
 // ---- vector.keys ----
@@ -2957,7 +3007,7 @@ fn vector_keys_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_keys_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/keys.json", &["vector_key_page"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/keys.json", &["vector_key_page"]);
 }
 
 // ---- vector.metadata.update ----
@@ -2979,7 +3029,7 @@ fn vector_metadata_update_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_metadata_update_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/metadata_update.json", &["vector_metadata_update_result"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/metadata_update.json", &["vector_metadata_update_result"]);
 }
 
 // ---- vector.query ----
@@ -3001,17 +3051,22 @@ fn vector_query_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_query_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/query_text_without_model.json", "responses/v1/errors/vector/embedding_model_missing.json", false);
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/query_text_without_model.json", "responses/v1/errors/vector/embedding_model_missing.json");
 }
 
 #[test]
 fn vector_query_error_case_1_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/query_vector_and_text.json", "responses/v1/errors/vector/vector_input.json", false);
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/query_vector_and_text.json", "responses/v1/errors/vector/vector_input.json");
+}
+
+#[test]
+fn vector_query_error_case_2_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create_unknown_model.json"], "requests/v1/vector/query_text_without_model.json", "responses/v1/errors/inference/unknown_model.json");
 }
 
 #[test]
 fn vector_query_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/query.json", &["vector_matches"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/query.json", &["vector_matches"]);
 }
 
 // ---- vector.sample ----
@@ -3033,7 +3088,7 @@ fn vector_sample_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_sample_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/sample.json", &["vector_sample_result"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/sample.json", &["vector_sample_result"]);
 }
 
 // ---- vector.scan ----
@@ -3055,7 +3110,7 @@ fn vector_scan_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_scan_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/scan.json", &["vector_scan_result"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/scan.json", &["vector_scan_result"]);
 }
 
 // ---- vector.upsert ----
@@ -3077,20 +3132,25 @@ fn vector_upsert_request_rejects_unknown_keys_at_closed_objects() {
 
 #[test]
 fn vector_upsert_error_case_0_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/upsert_text_without_model.json", "responses/v1/errors/vector/embedding_model_missing.json", false);
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/upsert_text_without_model.json", "responses/v1/errors/vector/embedding_model_missing.json");
 }
 
 #[test]
 fn vector_upsert_error_case_1_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/upsert_vector_and_text.json", "responses/v1/errors/vector/vector_input.json", false);
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/upsert_vector_and_text.json", "responses/v1/errors/vector/vector_input.json");
 }
 
 #[test]
 fn vector_upsert_error_case_2_envelope_matches() {
-    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/upsert_neither.json", "responses/v1/errors/vector/vector_input.json", false);
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/upsert_neither.json", "responses/v1/errors/vector/vector_input.json");
+}
+
+#[test]
+fn vector_upsert_error_case_3_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create_unknown_model.json"], "requests/v1/vector/upsert_text_without_model.json", "responses/v1/errors/inference/unknown_model.json");
 }
 
 #[test]
 fn vector_upsert_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/upsert.json", &["vector_write_result"], false);
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json"], "requests/v1/vector/upsert.json", &["vector_write_result"]);
 }

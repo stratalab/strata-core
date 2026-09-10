@@ -1237,7 +1237,7 @@
     "inference.capability": [
       {
         "in": "strata inference capability openai:gpt-4o-mini",
-        "out": "{\n  \"can_embed\": true,\n  \"can_generate\": true,\n  \"can_rank\": false,\n  \"can_tokenize\": false,\n  \"embedding_dim\": 0,\n  \"model\": \"gpt-4o-mini\",\n  \"network_enabled\": true,\n  \"provider\": \"openai\",\n  \"provider_feature_enabled\": true,\n  \"requires_api_key\": true,\n  \"requires_network\": true,\n  \"supports_json_object\": true,\n  \"supports_json_schema\": true,\n  \"supports_logprobs\": true,\n  \"supports_tools\": true\n}",
+        "out": "{\n  \"availability\": \"ready\",\n  \"can_embed\": true,\n  \"can_generate\": true,\n  \"can_rank\": false,\n  \"can_tokenize\": false,\n  \"embedding_dim\": 0,\n  \"model\": \"gpt-4o-mini\",\n  \"network_enabled\": true,\n  \"provider\": \"openai\",\n  \"provider_feature_enabled\": true,\n  \"requires_api_key\": true,\n  \"requires_network\": true,\n  \"supports_json_object\": true,\n  \"supports_json_schema\": true,\n  \"supports_logprobs\": true,\n  \"supports_tools\": true\n}",
         "reproducible": true,
         "note": "Pure metadata — no request is sent to the provider."
       }

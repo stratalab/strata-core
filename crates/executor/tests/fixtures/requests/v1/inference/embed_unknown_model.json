@@ -1,0 +1,7 @@
+{
+  "type": "inference_embed",
+  "model": "nope",
+  "request": {
+    "input": "hello world"
+  }
+}

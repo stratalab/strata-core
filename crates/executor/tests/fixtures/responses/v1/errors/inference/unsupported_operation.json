@@ -1,0 +1,7 @@
+{
+  "class": "unsupported",
+  "code": "inference.unsupported_operation",
+  "commit_outcome": "not_applicable",
+  "retry_policy": "never",
+  "retryable": false
+}

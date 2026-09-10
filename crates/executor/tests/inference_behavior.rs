@@ -108,6 +108,9 @@ fn inference_outputs_round_trip_through_json() {
     let capability = InferenceCapability {
         provider: strata_inference::ProviderKind::OpenAI,
         model: "gpt-4o-mini".to_owned(),
+        availability: strata_inference::AvailabilityKind::Ready,
+        pull_spec: None,
+        size_bytes: None,
         can_generate: true,
         can_tokenize: false,
         can_embed: false,
@@ -497,24 +500,32 @@ fn test_commands_that_embed_text_declare_every_inference_embed_error_code() {
         .expect("inference.embed is in the embedded catalog");
     let embed_codes = inference_codes(embed);
     // The set being copied has to be a real one, or a hollowed-out `embed`
-    // would make every text-embedding command pass trivially. The floor is
-    // what the runtime can construct on the provider and not-supported paths.
-    // (`inference.io_failure` has had no producer since #3249; its fate is
-    // #3252.)
+    // would make every text-embedding command pass trivially. `embed`
+    // declares exactly what the runtime can construct, less the three
+    // download outcomes: `embed` never downloads (D8 offers `pull`, a
+    // separate command, which declares them), so a not-downloaded model is
+    // its `missing_model`, not a download that failed.
     let runtime_codes: BTreeSet<&str> = every_constructible_inference_error()
         .iter()
         .filter(|error| {
-            matches!(
+            !matches!(
                 error,
-                InferenceError::ProviderFailed { .. } | InferenceError::NotSupported(_)
+                InferenceError::RegistryFailed {
+                    kind: RegistryFailure::DownloadDisabled
+                        | RegistryFailure::DownloadFailed
+                        | RegistryFailure::VerificationFailed,
+                    ..
+                }
             )
         })
         .map(InferenceError::code)
         .collect();
     let undeclared: Vec<_> = runtime_codes.difference(&embed_codes).copied().collect();
+    let unproducible: Vec<_> = embed_codes.difference(&runtime_codes).copied().collect();
     assert!(
-        undeclared.is_empty(),
-        "inference.embed declares every provider and not-supported code; missing {undeclared:?}"
+        undeclared.is_empty() && unproducible.is_empty(),
+        "inference.embed declares exactly the codes the runtime can produce on its path; \
+         undeclared {undeclared:?}, declared without a producer {unproducible:?}"
     );
 
     let mut embeds_text = BTreeSet::new();
@@ -582,6 +593,52 @@ fn model_list_and_capability_execute_with_default_cloud_providers() {
     assert!(can_embed);
     assert!(provider_feature_enabled);
     assert!(network_enabled);
+}
+
+/// A models directory the filesystem will not read is not an empty one. The
+/// resolver refuses with `inference.io_failure` instead of answering "not
+/// downloaded" — which would have offered to download a model that may be
+/// sitting right there — and the code reaches the wire through both the
+/// locating verb (`capability`) and a running one (`embed`) (#3252). A
+/// symlink to itself fails `metadata` with ELOOP for root too, so the test
+/// does not depend on permissions.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_models_directory_is_an_io_failure_on_every_resolving_verb() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let looped = dir.path().join("loop");
+    std::os::unix::fs::symlink(&looped, &looped).expect("symlink loop");
+    let runtime = InferenceRuntime::new(InferenceRuntimeConfig {
+        models_dir: Some(looped),
+        network_enabled: false,
+    });
+    let mut executor = Executor::open_cache()
+        .expect("executor opens")
+        .with_inference_runtime(runtime);
+
+    let commands = [
+        Command::InferenceModelCapability {
+            model: "miniLM".to_owned(),
+        },
+        Command::InferenceEmbed {
+            model: "miniLM".to_owned(),
+            request: EmbeddingsRequest {
+                input: EmbedInput::One("hello".to_owned()),
+                dimensions: None,
+                normalize: None,
+                input_type: None,
+                instruction: None,
+            },
+        },
+    ];
+    for command in commands {
+        let name = format!("{command:?}");
+        let err = executor
+            .execute(command)
+            .expect_err("the models directory cannot be read");
+        assert_eq!(err.code(), "inference.io_failure", "{name}");
+        assert_eq!(err.public_class(), ErrorClass::Io, "{name}");
+    }
 }
 
 #[test]

@@ -1,0 +1,7 @@
+{
+  "class": "invalid_argument",
+  "code": "inference.invalid_request",
+  "commit_outcome": "not_applicable",
+  "retry_policy": "never",
+  "retryable": false
+}

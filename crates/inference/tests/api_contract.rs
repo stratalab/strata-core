@@ -8,10 +8,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
 use strata_inference::{
-    parse_model_spec, EmbedRequest, EmbedResponse, EmbedRuntimeOutcome, GenerateRequest,
-    GenerateResponse, InferenceCapability, InferenceRuntime, InferenceRuntimeConfig,
-    ModelCacheStatus, ModelInfo, ModelTask, ProviderKind, PullModelOutput, RankRequest,
-    RankResponse, RankRuntimeOutcome, StopReason,
+    parse_model_spec, AvailabilityKind, EmbedRequest, EmbedResponse, EmbedRuntimeOutcome,
+    GenerateRequest, GenerateResponse, InferenceCapability, InferenceRuntime,
+    InferenceRuntimeConfig, ModelCacheStatus, ModelInfo, ModelTask, ProviderKind, PullModelOutput,
+    RankRequest, RankResponse, RankRuntimeOutcome, StopReason,
 };
 
 fn round_trip<T>(value: &T) -> T
@@ -91,6 +91,9 @@ fn diagnostics_dtos_round_trip_without_provider_payloads() {
     let capability = InferenceCapability {
         provider: ProviderKind::OpenAI,
         model: "text-embedding-3-small".to_owned(),
+        availability: AvailabilityKind::Ready,
+        pull_spec: None,
+        size_bytes: None,
         can_generate: true,
         can_tokenize: false,
         can_embed: true,

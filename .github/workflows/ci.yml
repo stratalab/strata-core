@@ -75,7 +75,11 @@ jobs:
         # The download module and the deterministic testkit are feature-gated
         # and invisible to the default workspace run; both are offline and
         # fast. Real provider/GGUF behavior stays in the gated nightly lanes.
-        run: cargo test --locked -p strata-inference --features download,testkit --lib
+        # The CLI's download-offer tests drive the executor's fake runtime
+        # and sit behind the CLI's own `testkit` feature for the same reason.
+        run: |
+          cargo test --locked -p strata-inference --features download,testkit --lib
+          cargo test --locked -p strata-cli --features testkit --lib
       - name: Doc tests
         run: cargo test --locked --workspace --doc
 

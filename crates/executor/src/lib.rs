@@ -52,6 +52,13 @@ pub use strata_engine::{
     CommitOutcomeStatus, DurabilityMode, DurableLocalOpenOptions, ErrorClass,
     ErrorCodeRegistryEntry, ErrorDetail, RetryPolicy,
 };
+/// The deterministic runtime a consumer's tests install with
+/// [`Executor::with_inference_runtime`]: the real resolver over the real
+/// catalog, execution faked. Re-exported so a consumer that must not depend
+/// on the inference crate directly can still drive its refuse → pull → retry
+/// loop against a world it shapes.
+#[cfg(all(feature = "inference", feature = "testkit"))]
+pub use strata_inference::testkit::FakeInferenceService;
 #[cfg(feature = "inference")]
 pub use strata_inference::{
     provider_key_info as inference_provider_key_info, ProviderKeyInfo as InferenceProviderKeyInfo,

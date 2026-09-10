@@ -1,0 +1,7 @@
+{
+  "type": "vector_create_collection",
+  "collection": "docs",
+  "dimension": 2,
+  "metric": "cosine",
+  "embedding_model": "nope"
+}

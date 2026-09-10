@@ -479,6 +479,30 @@ impl ExecutorError {
             ),
         }
     }
+
+    /// The resolver's answer this refusal carries, read back from its
+    /// details — the inverse of [`Self::from_inference`], for a consumer
+    /// that acts on `availability` rather than on the code (the CLI's
+    /// download offer). `None` when the failure did not come from model
+    /// resolution and so has no answer.
+    #[must_use]
+    pub fn inference_availability(&self) -> Option<strata_inference::AvailabilityDetails> {
+        let fields: serde_json::Map<String, serde_json::Value> = self
+            .status
+            .details()
+            .iter()
+            .map(|detail| {
+                (
+                    detail.key().to_owned(),
+                    serde_json::Value::String(detail.value().to_owned()),
+                )
+            })
+            .collect();
+        // Rationale: details that do not spell an `AvailabilityDetails` are
+        // some other operation's, not the resolver's answer — there is
+        // nothing to report, and no error to raise about an error.
+        serde_json::from_value(serde_json::Value::Object(fields)).ok()
+    }
 }
 
 /// `strata.error.details.inference.v1`: the resolver's answer as flat
@@ -866,5 +890,52 @@ mod tests {
             .iter()
             .any(|detail| detail.key() == "layer" && detail.value() == "service"));
         assert_eq!(status.hints(), ["site hint that must survive"]);
+    }
+
+    /// The resolver's answer survives the trip through the envelope: what
+    /// `from_inference` flattens into details, `inference_availability`
+    /// reads back whole — the number rendered as a string included — with
+    /// the collection the executor added. A refusal with no answer, and an
+    /// error that never came from inference, read back as nothing.
+    #[cfg(feature = "inference")]
+    #[test]
+    fn inference_availability_is_the_inverse_of_the_flattening() {
+        use super::ExecutorError;
+        use strata_inference::{AvailabilityDetails, InferenceError, RegistryFailure};
+
+        // Built from JSON: the struct is `#[non_exhaustive]`, and the wire is
+        // where a consumer meets it anyway.
+        let answer: AvailabilityDetails = serde_json::from_value(serde_json::json!({
+            "model": "tinyllama",
+            "provider": "local",
+            "availability": "not_downloaded",
+            "pull_spec": "tinyllama",
+            "size_bytes": 638_900_000_u64,
+        }))
+        .expect("an answer");
+        let refusal = InferenceError::RegistryFailed {
+            kind: RegistryFailure::MissingModel,
+            message: "not on disk".to_owned(),
+            details: Some(Box::new(answer.clone())),
+        };
+
+        let error = ExecutorError::from_inference(&refusal, Some("docs"));
+        assert_eq!(error.code(), "inference.missing_model");
+        let mut expected = answer;
+        expected.collection = Some("docs".to_owned());
+        assert_eq!(error.inference_availability(), Some(expected));
+
+        // Past resolution there is no answer to carry, collection or not.
+        let past_resolution = InferenceError::Provider("timed out".to_owned());
+        assert_eq!(
+            ExecutorError::from_inference(&past_resolution, Some("docs")).inference_availability(),
+            None
+        );
+        // Not from inference at all.
+        assert_eq!(
+            ExecutorError::new("not_found.engine.branch", "no such branch")
+                .inference_availability(),
+            None
+        );
     }
 }

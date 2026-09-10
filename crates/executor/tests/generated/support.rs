@@ -81,13 +81,8 @@ pub(crate) fn unknown_keys_rejected(request: &str, sites: &[&str]) {
 /// Replays an authored error case and asserts the five stable envelope fields
 /// (`code`, `class`, `retry_policy`, `retryable`, `commit_outcome`) match the pinned
 /// fixture — the per-command form of the TCP3.8a contract.
-pub(crate) fn error_case_envelope_matches(
-    setup: &[&str],
-    request: &str,
-    expected_error: &str,
-    needs_fake: bool,
-) {
-    let mut executor = open_executor(needs_fake);
+pub(crate) fn error_case_envelope_matches(setup: &[&str], request: &str, expected_error: &str) {
+    let mut executor = open_executor();
     run_setup(&mut executor, setup);
     let command = command_fixture(request);
     let Err(error) = executor.execute(command) else {
@@ -113,13 +108,8 @@ pub(crate) fn error_case_envelope_matches(
 /// Replays the command and asserts the observed output `type` tag is one the
 /// command's response fixtures declare (#2596: an output variant the IDL does
 /// not document must fail loudly, not ship silently).
-pub(crate) fn replay_observes_declared(
-    setup: &[&str],
-    request: &str,
-    declared_tags: &[&str],
-    needs_fake: bool,
-) {
-    let mut executor = open_executor(needs_fake);
+pub(crate) fn replay_observes_declared(setup: &[&str], request: &str, declared_tags: &[&str]) {
+    let mut executor = open_executor();
     run_setup(&mut executor, setup);
     let command = command_fixture(request);
     let output = executor
@@ -151,11 +141,12 @@ fn run_setup(executor: &mut Executor, setup: &[&str]) {
     }
 }
 
-fn open_executor(needs_fake: bool) -> Executor {
-    let executor = Executor::open_cache().expect("open scratch cache executor");
-    if needs_fake {
-        return executor
-            .with_inference_runtime(strata_inference::testkit::FakeInferenceService::new());
-    }
-    executor
+/// A scratch cache executor with the deterministic testkit fake as its
+/// inference runtime, so everything that reaches inference — the
+/// `inference.*` commands and `vector --text` — replays against the same
+/// world `strata-idl verify-fixtures` blessed the fixtures in.
+fn open_executor() -> Executor {
+    Executor::open_cache()
+        .expect("open scratch cache executor")
+        .with_inference_runtime(strata_inference::testkit::FakeInferenceService::new())
 }

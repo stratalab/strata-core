@@ -698,7 +698,17 @@ pub(crate) fn execute_parsed_command(
             connection.execute(json_command(args.command, scope)?)?
         }
         options::TopCommand::Vector(command) => {
-            connection.execute(vector_command(command.command, scope)?)?
+            let command = vector_command(command.command, scope)?;
+            // `--text` loads the collection's recorded model, so it meets the
+            // same refusal `inference embed` meets and gets the same offer.
+            #[cfg(feature = "inference")]
+            {
+                execute_with_download_offer(connection, command, format)?
+            }
+            #[cfg(not(feature = "inference"))]
+            {
+                connection.execute(command)?
+            }
         }
         options::TopCommand::Event(args) => {
             connection.execute(event_command(args.command, scope)?)?
@@ -939,7 +949,8 @@ fn user_config_get(key: &str) -> Result<serde_json::Value, CliError> {
     Err(unknown_config_key(key))
 }
 
-/// Runs an inference command, offering the download when a model is missing (D8).
+/// Runs a command that may load a model, offering the download when the model
+/// is not on disk (D8).
 ///
 /// Loading a model never downloads on its own — a silent multi-hundred-megabyte
 /// fetch is not something a caller can consent to mid-operation, and until this
@@ -956,82 +967,110 @@ fn user_config_get(key: &str) -> Result<serde_json::Value, CliError> {
 #[cfg(all(feature = "native", feature = "inference"))]
 fn execute_with_download_offer(
     connection: &Connection,
-    command: strata_executor::Command,
+    command: Command,
     format: options::Format,
 ) -> Result<strata_executor::Output, CliError> {
-    use std::io::Write as _;
+    execute_offering_download(
+        connection,
+        command,
+        format,
+        std::io::stdin().is_terminal(),
+        &mut |error, pull_spec| {
+            ask_for_download(error, pull_spec, std::io::stdin().lock(), std::io::stderr())
+        },
+    )
+}
 
+/// Shows the refusal and asks the question on `prompt`; the answer is one
+/// line of `answers`. True only for an explicit `y`.
+///
+/// The streams are parameters so the answer logic has a test without a
+/// terminal; the process's stdin and stderr are supplied by
+/// [`execute_with_download_offer`].
+#[cfg(all(feature = "native", feature = "inference"))]
+fn ask_for_download(
+    error: &ExecutorError,
+    pull_spec: &str,
+    mut answers: impl std::io::BufRead,
+    mut prompt: impl std::io::Write,
+) -> bool {
+    // Rationale: the prompt is advisory. If it cannot be written or flushed
+    // the question is lost, not the answer — the read below still decides,
+    // and reporting the failure would go to the same broken stream.
+    let _ = writeln!(prompt, "{error}")
+        .and_then(|()| write!(prompt, "\nDownload {pull_spec} now? [y/N] "))
+        .and_then(|()| prompt.flush());
+    let mut answer = String::new();
+    answers.read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("y")
+}
+
+/// The offer loop with who-is-asking and the question as inputs, so a test
+/// can run it against the fake runtime without a terminal: refuse → ask →
+/// pull → retry.
+#[cfg(all(feature = "native", feature = "inference"))]
+fn execute_offering_download(
+    connection: &Connection,
+    command: Command,
+    format: options::Format,
+    interactive: bool,
+    ask: &mut dyn FnMut(&ExecutorError, &str) -> bool,
+) -> Result<strata_executor::Output, CliError> {
     let error = match connection.execute(command.clone()) {
         Ok(value) => return Ok(value),
         Err(error) => error,
     };
-
-    // Only a missing model is offerable, and only to a human on a terminal
-    // whose output is not being parsed.
-    if !should_offer_download(std::io::stdin().is_terminal(), format, error.code()) {
-        return Err(error.into());
-    }
-    let Some(model) = missing_model_spec(&command) else {
+    let answer = error.inference_availability();
+    let Some(pull_spec) = offerable_download(interactive, format, &command, answer.as_ref()) else {
         return Err(error.into());
     };
-
-    eprintln!("{error}");
-    eprint!("\nDownload {model} now? [y/N] ");
-    // Rationale: the flush only makes the prompt appear before the read
-    // blocks. If stderr cannot be flushed the prompt is lost, not the answer —
-    // the read below still decides, and reporting the flush failure would go
-    // to the same broken stream.
-    let _ = std::io::stderr().flush();
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() || !answer.trim().eq_ignore_ascii_case("y")
-    {
+    let pull_spec = pull_spec.to_owned();
+    if !ask(&error, &pull_spec) {
         return Err(error.into());
     }
-
-    connection.execute(strata_executor::Command::InferenceModelsPull {
-        model: model.clone(),
+    connection.execute(Command::InferenceModelsPull {
+        model: pull_spec.clone(),
     })?;
-    eprintln!("pulled {model}; retrying");
+    eprintln!("pulled {pull_spec}; retrying");
     Ok(connection.execute(command)?)
 }
 
-/// Whether a failed inference command should offer to download the model (D8).
+/// What a failed command may offer to download (D8): the pull spec, or
+/// nothing.
 ///
-/// A pure decision so it has a truth table. All three conditions matter and
-/// each guards a different mistake:
+/// A pure decision so it has a truth table. Every condition guards a
+/// different mistake:
 ///
 /// - **A terminal.** An agent cannot answer a prompt; blocking one on a hidden
 ///   fetch is the failure D8 exists to prevent.
 /// - **Human output.** `--json` output is parsed. A prompt in the middle of it
 ///   corrupts the stream even when a human is watching.
-/// - **The model is merely missing.** Any other failure is not fixed by
-///   downloading, so offering would be a wrong suggestion rather than no
-///   suggestion.
+/// - **The resolver's answer is `not_downloaded`**, read from the refusal's
+///   details rather than from its code or from the command. The answer says
+///   which model, so a `vector --text` refusal — whose model came from the
+///   collection's record, not the command line — is offered too, and it says
+///   what a pull accepts, so an uncatalogued name is never offered (#3226).
+///   Any other answer is not fixed by downloading, and offering would be a
+///   wrong suggestion rather than no suggestion.
+/// - **Not a pull.** A refused pull carries the same answer, and running it
+///   again would meet the same refusal.
 #[cfg(all(feature = "native", feature = "inference"))]
-const fn should_offer_download(interactive: bool, format: options::Format, code: &str) -> bool {
-    // `const fn` cannot compare strings, so the code check is done by the
-    // caller's match below.
-    interactive && matches!(format, options::Format::Human) && is_missing_model(code)
-}
-
-/// True for the one code a download can fix.
-#[cfg(all(feature = "native", feature = "inference"))]
-const fn is_missing_model(code: &str) -> bool {
-    matches!(code.as_bytes(), b"inference.missing_model")
-}
-
-/// The model spec an inference command would load, when it has one.
-#[cfg(all(feature = "native", feature = "inference"))]
-fn missing_model_spec(command: &strata_executor::Command) -> Option<String> {
-    use strata_executor::Command;
-    match command {
-        Command::InferenceEmbed { model, .. }
-        | Command::InferenceGenerate { model, .. }
-        | Command::InferenceRank { model, .. }
-        | Command::InferenceTokenize { model, .. }
-        | Command::InferenceDetokenize { model, .. } => Some(model.clone()),
-        _ => None,
+fn offerable_download<'a>(
+    interactive: bool,
+    format: options::Format,
+    command: &Command,
+    answer: Option<&'a strata_executor::InferenceAvailabilityDetails>,
+) -> Option<&'a str> {
+    if !interactive
+        || !matches!(format, options::Format::Human)
+        || matches!(command, Command::InferenceModelsPull { .. })
+    {
+        return None;
     }
+    let answer = answer?;
+    if answer.availability != strata_executor::InferenceAvailabilityKind::NotDownloaded {
+        return None;
+    }
+    answer.pull_spec.as_deref()
 }
 
 /// Copies config-file provider keys into the environment the runtime reads,
@@ -2462,7 +2501,12 @@ fn parse_tool_choice(value: &str) -> strata_executor::InferenceToolChoice {
     }
 }
 
-#[cfg(all(test, feature = "inference"))]
+// Test gates are stacked, never `all(test, …)`: cargo-mutants recognises the
+// literal `#[cfg(test)]` and skips the module, but does not look inside
+// `all(...)`, so a combined gate has it mutate the module's helper fns as
+// product code.
+#[cfg(test)]
+#[cfg(feature = "inference")]
 mod config_key_tests {
     use super::{is_user_config_key, provider_api_key_target, redact_key};
 
@@ -2496,7 +2540,9 @@ mod config_key_tests {
     }
 }
 
-#[cfg(all(test, feature = "inference"))]
+// Stacked gate: see `config_key_tests`.
+#[cfg(test)]
+#[cfg(feature = "inference")]
 mod inference_command_tests {
     use super::{inference_command, options, parse_chat_message};
     use serde_json::json;
@@ -2875,7 +2921,9 @@ impl From<ExecutorError> for CliError {
     }
 }
 
-#[cfg(all(test, feature = "native"))]
+// Stacked gate: see `config_key_tests`.
+#[cfg(test)]
+#[cfg(feature = "native")]
 mod tests {
     use super::*;
 
@@ -3222,44 +3270,316 @@ mod tests {
         );
     }
 
-    /// D8's truth table: all three conditions guard a different mistake.
+    /// The answer at the terminal: an explicit `y` — either case, surrounding
+    /// whitespace tolerated — and nothing else. `n`, `yes`, an empty line and
+    /// a closed stdin all decline. The refusal and the question reach the
+    /// prompt stream first, and a prompt stream that cannot be written loses
+    /// the question, not the answer.
     #[cfg(all(feature = "native", feature = "inference"))]
     #[test]
-    fn the_download_offer_needs_a_terminal_human_output_and_a_missing_model() {
-        use super::should_offer_download;
+    fn only_an_explicit_yes_at_the_terminal_accepts_the_download() {
+        use super::ask_for_download;
+
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+
+        let refusal = ExecutorError::new("inference.missing_model", "miniLM is not on disk");
+        let mut prompt = Vec::new();
+        assert!(ask_for_download(
+            &refusal,
+            "miniLM",
+            &b"y\n"[..],
+            &mut prompt
+        ));
+        let prompt = String::from_utf8(prompt).expect("the prompt is text");
+        let (shown, question) = prompt
+            .split_once("\nDownload miniLM now? [y/N] ")
+            .unwrap_or_else(|| panic!("no question in {prompt:?}"));
+        assert!(shown.contains(refusal.code()), "{shown:?}");
+        assert_eq!(question, "");
+
+        for yes in ["Y\n", "  y  \n", "y"] {
+            assert!(
+                ask_for_download(&refusal, "miniLM", yes.as_bytes(), Vec::new()),
+                "{yes:?} is a yes"
+            );
+        }
+        for no in ["n\n", "N\n", "yes\n", "\n", ""] {
+            assert!(
+                !ask_for_download(&refusal, "miniLM", no.as_bytes(), Vec::new()),
+                "{no:?} is a no"
+            );
+        }
+        assert!(ask_for_download(&refusal, "miniLM", &b"y\n"[..], Broken));
+        assert!(!ask_for_download(&refusal, "miniLM", &b"n\n"[..], Broken));
+    }
+
+    /// D8's truth table: every condition guards a different mistake.
+    #[cfg(all(feature = "native", feature = "inference"))]
+    #[test]
+    fn the_download_offer_needs_a_terminal_human_output_and_a_model_to_pull() {
+        use super::offerable_download;
         use crate::options::Format;
+        use strata_executor::{Command, InferenceAvailabilityDetails, InferenceAvailabilityKind};
 
-        const MISSING: &str = "inference.missing_model";
+        let answer = |availability: InferenceAvailabilityKind,
+                      pull_spec: Option<&str>|
+         -> InferenceAvailabilityDetails {
+            serde_json::from_value(serde_json::json!({
+                "model": "miniLM",
+                "provider": "local",
+                "availability": availability,
+                "pull_spec": pull_spec,
+            }))
+            .expect("a resolver answer")
+        };
+        let not_downloaded = answer(InferenceAvailabilityKind::NotDownloaded, Some("miniLM"));
+        let tokenize = Command::InferenceTokenize {
+            model: "miniLM".to_owned(),
+            text: "hi".to_owned(),
+            add_special: false,
+        };
 
-        // The one case that offers.
-        assert!(should_offer_download(true, Format::Human, MISSING));
+        // The one case that offers, and it names what a pull accepts.
+        assert_eq!(
+            offerable_download(true, Format::Human, &tokenize, Some(&not_downloaded)),
+            Some("miniLM")
+        );
 
         // Not a terminal: an agent cannot answer, so it must get the refusal
         // (which already names the pull command) instead of a hidden fetch.
-        assert!(!should_offer_download(false, Format::Human, MISSING));
+        assert_eq!(
+            offerable_download(false, Format::Human, &tokenize, Some(&not_downloaded)),
+            None
+        );
 
         // Machine-readable output: a prompt would corrupt the stream even with
         // a human watching.
         for format in [Format::Json, Format::Pretty, Format::Raw] {
-            assert!(
-                !should_offer_download(true, format, MISSING),
+            assert_eq!(
+                offerable_download(true, format, &tokenize, Some(&not_downloaded)),
+                None,
                 "{format:?} is parsed, so it must not be interrupted"
             );
         }
 
-        // A failure a download cannot fix. Offering here would be a wrong
-        // suggestion, which is worse than none.
-        for code in [
-            "inference.unsupported_operation",
-            "inference.missing_api_key",
-            "inference.provider_auth_failed",
-            "inference.download_disabled",
+        // A refused pull carries the same answer; running it again would
+        // meet the same refusal.
+        let pull = Command::InferenceModelsPull {
+            model: "miniLM".to_owned(),
+        };
+        assert_eq!(
+            offerable_download(true, Format::Human, &pull, Some(&not_downloaded)),
+            None
+        );
+
+        // Any other answer is not fixed by downloading. Offering here would be
+        // a wrong suggestion, which is worse than none — and for a name the
+        // catalog does not know, an offer to pull it (#3226).
+        for availability in [
+            InferenceAvailabilityKind::Ready,
+            InferenceAvailabilityKind::NotInCatalog,
+            InferenceAvailabilityKind::PathMissing,
+            InferenceAvailabilityKind::TaskNotSupported,
+            InferenceAvailabilityKind::LocalExecutionNotBuilt,
+            InferenceAvailabilityKind::ProviderNotBuilt,
+            InferenceAvailabilityKind::NetworkDisabled,
+            InferenceAvailabilityKind::KeyMissing,
         ] {
-            assert!(
-                !should_offer_download(true, Format::Human, code),
-                "{code} is not fixed by downloading"
+            let other = answer(availability, Some("miniLM"));
+            assert_eq!(
+                offerable_download(true, Format::Human, &tokenize, Some(&other)),
+                None,
+                "{availability:?} is not fixed by downloading"
             );
         }
+
+        // An answer with nothing to pull, and a failure with no answer at all
+        // (a provider timeout, a branch that does not exist).
+        let unpullable = answer(InferenceAvailabilityKind::NotDownloaded, None);
+        assert_eq!(
+            offerable_download(true, Format::Human, &tokenize, Some(&unpullable)),
+            None
+        );
+        assert_eq!(
+            offerable_download(true, Format::Human, &tokenize, None),
+            None
+        );
+    }
+
+    /// A world where `miniLM` is catalogued but not on disk, for the offer
+    /// loop's call-site tests.
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
+    fn undownloaded_world() -> Connection {
+        use strata_executor::FakeInferenceService;
+
+        Connection::cache(
+            Executor::open_cache()
+                .expect("cache executor opens")
+                .with_inference_runtime(FakeInferenceService::new().with_undownloaded("miniLM")),
+        )
+    }
+
+    /// A command that loads `model` and nothing else.
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
+    fn tokenize_with(model: &str) -> strata_executor::Command {
+        strata_executor::Command::InferenceTokenize {
+            model: model.to_owned(),
+            text: "hi".to_owned(),
+            add_special: false,
+        }
+    }
+
+    /// The code of the executor refusal the offer loop handed back.
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
+    fn refusal_code(error: CliError) -> String {
+        match error {
+            CliError::Executor(error) => error.code().to_owned(),
+            other => panic!("not an executor refusal: {other:?}"),
+        }
+    }
+
+    /// The answer a test gives in place of a person at the terminal when no
+    /// question may be asked.
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
+    fn never_asked(error: &ExecutorError, _: &str) -> bool {
+        panic!("asked without a terminal: {}", error.code())
+    }
+
+    /// The offer loop end to end against the fake runtime: a person at a
+    /// terminal meets the refusal, one question, the pull and the retry; the
+    /// answer decides; no terminal meets the refusal alone.
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
+    #[test]
+    fn the_offer_pulls_the_model_the_refusal_names_and_retries() {
+        use super::execute_offering_download;
+        use crate::options::Format;
+        use strata_executor::Output;
+
+        let connection = undownloaded_world();
+        let tokenize = tokenize_with("miniLM");
+
+        // Not a terminal: the refusal, and no question.
+        let error = execute_offering_download(
+            &connection,
+            tokenize.clone(),
+            Format::Human,
+            false,
+            &mut never_asked,
+        )
+        .expect_err("not on disk");
+        assert_eq!(refusal_code(error), "inference.missing_model");
+
+        // A terminal, and the answer is no: the refusal, asked once.
+        let mut asked = Vec::new();
+        let mut decline = |error: &ExecutorError, pull_spec: &str| -> bool {
+            asked.push((error.code().to_owned(), pull_spec.to_owned()));
+            false
+        };
+        let error = execute_offering_download(
+            &connection,
+            tokenize.clone(),
+            Format::Human,
+            true,
+            &mut decline,
+        )
+        .expect_err("declined");
+        assert_eq!(refusal_code(error), "inference.missing_model");
+        assert_eq!(
+            asked,
+            [("inference.missing_model".to_owned(), "miniLM".to_owned())]
+        );
+
+        // A terminal, and the answer is yes: pulled, retried, done — and the
+        // model is present for everything after.
+        let mut asked = Vec::new();
+        let mut accept = |_: &ExecutorError, pull_spec: &str| -> bool {
+            asked.push(pull_spec.to_owned());
+            true
+        };
+        let output = execute_offering_download(
+            &connection,
+            tokenize.clone(),
+            Format::Human,
+            true,
+            &mut accept,
+        )
+        .expect("pulled and retried");
+        assert!(matches!(output, Output::InferenceTokenIds(_)), "{output:?}");
+        assert_eq!(asked, ["miniLM"]);
+        let output =
+            execute_offering_download(&connection, tokenize, Format::Human, true, &mut never_asked)
+                .expect("present now");
+        assert!(matches!(output, Output::InferenceTokenIds(_)), "{output:?}");
+    }
+
+    /// The offer keys on the resolver's answer, not the command: `vector
+    /// --text` loads the collection's recorded model and gets the same offer,
+    /// and a name the catalog does not know gets none.
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
+    #[test]
+    fn the_offer_names_the_collection_model_and_never_an_uncatalogued_one() {
+        use super::execute_offering_download;
+        use crate::options::Format;
+        use strata_executor::{Command, Output, VectorDistanceMetric};
+
+        // `vector --text`: the model comes from the collection's record, not
+        // the command line, and the offer still names it.
+        let connection = undownloaded_world();
+        connection
+            .execute(Command::VectorCreateCollection {
+                branch: None,
+                space: None,
+                collection: "docs".to_owned(),
+                dimension: 8,
+                metric: VectorDistanceMetric::Cosine,
+                embedding_model: Some("miniLM".to_owned()),
+            })
+            .expect("collection records the model");
+        let upsert = Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "docs".to_owned(),
+            key: "doc-a".to_owned(),
+            vector: Vec::new(),
+            text: Some("a document to embed".to_owned()),
+            metadata: None,
+        };
+        let mut asked = Vec::new();
+        let mut accept = |error: &ExecutorError, pull_spec: &str| -> bool {
+            asked.push((error.code().to_owned(), pull_spec.to_owned()));
+            true
+        };
+        let output =
+            execute_offering_download(&connection, upsert, Format::Human, true, &mut accept)
+                .expect("pulled and retried");
+        assert!(
+            matches!(output, Output::VectorWriteResult { .. }),
+            "{output:?}"
+        );
+        assert_eq!(
+            asked,
+            [("inference.missing_model".to_owned(), "miniLM".to_owned())]
+        );
+
+        // A name the catalog does not know is refused without a question:
+        // there is nothing a pull would accept (#3226).
+        let error = execute_offering_download(
+            &connection,
+            tokenize_with("nope"),
+            Format::Human,
+            true,
+            &mut never_asked,
+        )
+        .expect_err("unknown");
+        assert_eq!(refusal_code(error), "inference.unknown_model");
     }
 
     /// The truth table for where `inference status` says a key came from.
@@ -3338,35 +3658,5 @@ mod tests {
         let untouched = status.clone();
         name_config_key_sources(&mut status, &[], CONFIG);
         assert_eq!(status, untouched);
-    }
-
-    /// `missing_model_spec` picks the model out of the commands that load one.
-    ///
-    /// The mutation gate found this untested: returning `None`, an empty
-    /// string, or a wrong name all passed. `None` silently disables the
-    /// download offer; a wrong name would offer to download the wrong model.
-    #[cfg(all(feature = "native", feature = "inference"))]
-    #[test]
-    fn the_offer_names_the_model_the_command_was_going_to_load() {
-        use super::missing_model_spec;
-        use strata_executor::Command;
-
-        let tokenize = Command::InferenceTokenize {
-            model: "gpt2".to_owned(),
-            text: "hi".to_owned(),
-            add_special: false,
-        };
-        assert_eq!(missing_model_spec(&tokenize).as_deref(), Some("gpt2"));
-
-        let detokenize = Command::InferenceDetokenize {
-            model: "miniLM".to_owned(),
-            ids: vec![1, 2, 3],
-        };
-        assert_eq!(missing_model_spec(&detokenize).as_deref(), Some("miniLM"));
-
-        // A command that loads no model has nothing to offer, and must not
-        // invent one.
-        assert_eq!(missing_model_spec(&Command::InferenceCacheStatus {}), None);
-        assert_eq!(missing_model_spec(&Command::Ping {}), None);
     }
 }

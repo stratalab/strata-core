@@ -64,13 +64,11 @@ pub fn download_hf_file_with_size(
     }
 
     // Ensure directories exist
-    fs::create_dir_all(models_dir)
-        .map_err(|e| InferenceError::Registry(format!("Failed to create models dir: {}", e)))?;
+    fs::create_dir_all(models_dir).map_err(|e| io_failure("create models dir", models_dir, &e))?;
 
     let downloading_dir = models_dir.join(".downloading");
-    fs::create_dir_all(&downloading_dir).map_err(|e| {
-        InferenceError::Registry(format!("Failed to create .downloading dir: {}", e))
-    })?;
+    fs::create_dir_all(&downloading_dir)
+        .map_err(|e| io_failure("create download dir", &downloading_dir, &e))?;
 
     let lock_path = downloading_dir.join(format!("{}.lock", hf_file));
     let temp_path = downloading_dir.join(hf_file);
@@ -157,8 +155,8 @@ pub fn download_hf_file_with_size(
     }
 
     let mut reader = response.into_body().into_reader();
-    let mut file = fs::File::create(&temp_path)
-        .map_err(|e| InferenceError::Registry(format!("Failed to create temp file: {}", e)))?;
+    let mut file =
+        fs::File::create(&temp_path).map_err(|e| io_failure("create temp file", &temp_path, &e))?;
 
     let result = stream_to_file(&mut reader, &mut file, progress, total_bytes);
 
@@ -186,15 +184,17 @@ pub fn download_hf_file_with_size(
     }
 
     // Atomic-ish rename to final location
-    fs::rename(&temp_path, &dest).map_err(|e| {
-        InferenceError::Registry(format!(
-            "Failed to move downloaded file to {}: {}",
-            dest.display(),
-            e
-        ))
-    })?;
+    fs::rename(&temp_path, &dest).map_err(|e| io_failure("move downloaded file to", &dest, &e))?;
 
     Ok(())
+}
+
+/// A local filesystem step of the download that failed — the models
+/// directory, the temp file, the lock, the rename. Not the transfer, and not
+/// something checking the internet connection would fix, so it is `Io`
+/// rather than a download failure (#3252).
+fn io_failure(action: &str, path: &Path, e: &std::io::Error) -> InferenceError {
+    InferenceError::Io(format!("Failed to {action} {}: {e}", path.display()))
 }
 
 /// Verifies a downloaded temp file against its expected SHA-256 digest,
@@ -205,17 +205,12 @@ fn verify_sha256(
     hf_file: &str,
 ) -> Result<(), InferenceError> {
     let mut hasher = Sha256::new();
-    let mut f = fs::File::open(temp_path).map_err(|e| {
-        InferenceError::Registry(format!(
-            "Failed to open temp file for hash verification: {}",
-            e
-        ))
-    })?;
+    let mut f = fs::File::open(temp_path)
+        .map_err(|e| io_failure("open for hash verification", temp_path, &e))?;
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = std::io::Read::read(&mut f, &mut buf).map_err(|e| {
-            InferenceError::Registry(format!("Hash verification read error: {}", e))
-        })?;
+        let n = std::io::Read::read(&mut f, &mut buf)
+            .map_err(|e| io_failure("read for hash verification", temp_path, &e))?;
         if n == 0 {
             break;
         }
@@ -275,13 +270,13 @@ fn stream_to_file(
             break;
         }
         file.write_all(&buf[..n])
-            .map_err(|e| InferenceError::Registry(format!("Failed to write temp file: {}", e)))?;
+            .map_err(|e| InferenceError::Io(format!("Failed to write temp file: {e}")))?;
         downloaded += n as u64;
         progress(downloaded, total_bytes);
     }
 
     file.flush()
-        .map_err(|e| InferenceError::Registry(format!("Failed to flush temp file: {}", e)))?;
+        .map_err(|e| InferenceError::Io(format!("Failed to flush temp file: {e}")))?;
 
     Ok(downloaded)
 }
@@ -294,8 +289,7 @@ struct LockGuard {
 impl LockGuard {
     fn new(path: &Path) -> Result<Self, InferenceError> {
         let pid = std::process::id();
-        fs::write(path, format!("{}", pid))
-            .map_err(|e| InferenceError::Registry(format!("Failed to write lock file: {}", e)))?;
+        fs::write(path, format!("{pid}")).map_err(|e| io_failure("write lock file", path, &e))?;
         Ok(Self {
             path: path.to_path_buf(),
         })
@@ -344,12 +338,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_temp_file_fails_verification_typed() {
+    fn a_temp_file_that_cannot_be_opened_for_verification_is_an_io_failure() {
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("never-written.tmp");
         let error =
             verify_sha256(&path, "00", "model.gguf").expect_err("missing temp file must fail");
-        assert!(!error.code().is_empty());
+        assert_eq!(error.code(), "inference.io_failure");
     }
 
     #[test]
@@ -512,6 +506,31 @@ mod tests {
                 !dir.path().join(".downloading/model.gguf.lock").exists(),
                 "the lock is released when the download fails"
             );
+        });
+    }
+
+    /// The downloader's own filesystem work — the models directory, the
+    /// temp file, the lock, the rename — is local I/O, not the download.
+    /// Failing it as `download_failed` sent the caller to check their
+    /// internet connection for a disk they cannot write (#3252).
+    #[test]
+    fn a_models_directory_that_cannot_be_created_is_an_io_failure() {
+        without_a_reachable_hub(|| {
+            let dir = tempfile::tempdir().expect("tmp");
+            let models_dir = dir.path().join("models");
+            std::fs::write(&models_dir, b"a file where the directory goes").expect("write");
+
+            let error = download_hf_file_with_size(
+                "org/repo",
+                "model.gguf",
+                &models_dir,
+                &|_, _| {},
+                0,
+                None,
+            )
+            .expect_err("a file cannot become the models directory");
+
+            assert_eq!(error.code(), "inference.io_failure");
         });
     }
 }

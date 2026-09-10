@@ -520,16 +520,30 @@ malformed-spec error; at executor level it is `(code, class, details keys)`.
   `normalize_explicit_status` each re-read the registry); only a plant in the
   innermost layer reddens the cells, which is worth knowing before anyone
   tries to simplify that path.
-- Executor level, S2: the cells become **replay fixtures** (`fixtures.error_cases`)
-  for `inference.generate`, `inference.embed`, `inference.models.pull`,
-  `inference.capability`, `vector.upsert` and `vector.query`. For that to
-  work the testkit fake must fake *execution only*: `FakeInferenceService`
-  composes the real `resolve` over a fake catalog + tempdir + no-key source,
-  and fakes what happens after `require_ready`. Then `missing_model`,
-  `unknown_model`, `missing_api_key`, `invalid_request`,
-  `unsupported_provider`, `unsupported_operation` and `download_disabled`
-  leave `unreplayed-error-codes.yaml` (budget 114 → ~107) and the IDL's
-  existing guards reach resolution for the first time. No parallel harness.
+- Executor level, S2b (shipped): the resolution-time cells are **replay
+  fixtures** (`fixtures.error_cases`) for `inference.generate`,
+  `inference.embed`, `inference.rank`, `inference.tokenize`,
+  `inference.detokenize`, `inference.models.pull`, `inference.capability`,
+  `vector.upsert` and `vector.query`. The testkit fake fakes *execution
+  only*: `FakeInferenceService` composes the real `resolve` over the real
+  catalog (a `ModelRegistry` on a directory that does not exist), and fakes
+  what happens after `require_ready`. Its world is fixed in its own favour
+  for what the environment decides — every catalogued model present, every
+  provider built and keyed, the network on — and the override sits *after*
+  the resolver rather than in a `cfg!`, so a fixture replays the same under
+  every feature set (in a build without `local` the resolver answers
+  `LocalExecutionNotBuilt` before it looks for the file; with it,
+  `NotDownloaded`). So `unknown_model`, `invalid_request` and
+  `unsupported_operation` left `unreplayed-error-codes.yaml` (budget 115 →
+  112; `missing_model`, `missing_api_key`, `download_disabled` and
+  `unsupported_provider` are environment facts the fake world fixes, covered
+  by the matrix and the real-runtime executor tests), and the IDL's existing
+  guards reach resolution for the first time. The replay lane injects the
+  fake for every command, not only the inference family, which is what lets
+  a `vector --text` case meet the resolver. One knob shapes the world:
+  `with_undownloaded(pull_spec)` holds a catalogued variant off disk until it
+  is pulled, so a consumer's refuse → pull → retry loop (D8) runs end to end
+  in-process. No parallel harness.
 - Cloud `Ready` cells assert `capability` only; nothing in the matrix sends a
   request. The 21 cells that would (a key present, the network on) are the
   matrix's only never-run cells; they need a runtime-level provider base URL
@@ -650,7 +664,7 @@ column are **not** to be `/audit-fix`ed individually while this plan runs.
 |---|---|---|---|
 | **S0** | Matrix (inference level, all cells) + `KNOWN_RED`; executor-level wire cells (pass-through, registry row, IDL declaration); falsification by re-planting #3222 — **done** (PR #3265), §5.3 | none | — (filed #3262, #3263, #3264) |
 | **S1** | R1 `resolve` / `ResolvedModel` / `Availability` / `require_ready`; R5 one registry; R6 pull through the resolver; the free loaders and `from_registry*` deleted — **done** (PR #3269), §5.3 | declarations only: `pull` gains `unsupported_operation` (cloud spec) and `invalid_request`; `tokenize` / `detokenize` / `rank` gain `invalid_request` | #3255, #3260, #3263 |
-| **S2** | R2 `unknown_model`; R3 `AvailabilityDetails` on the wire and in `capability`; D8 reads details; testkit fake composes the real resolver; replay fixtures for resolution-time codes; #3252 decided (Q4) | **yes** — new code, new details, `capability` fields; CHANGELOG + release note | #3256, #3226, #3252, #3262, #3264 |
+| **S2** | R2 `unknown_model`; R3 `AvailabilityDetails` on the wire and in `capability`; D8 reads details; testkit fake composes the real resolver; replay fixtures for resolution-time codes; #3252 decided (Q4, wired) — **done** in two PRs: S2a (PR #3289: `unknown_model`, details on the wire) and S2b (`capability` fields, `io_failure` produced, fake composes the resolver, replay fixtures, D8 on details), §5.2 | **yes** — new code, new details, `capability` fields; release notes in both PR bodies | #3256, #3262, #3264, #3286 (S2a); #3226, #3252 (S2b) |
 | **S3** | R4 key source (executor installs env-then-config; CLI bridge deleted); R9 implicit cache for inference verbs; key dimension at executor level; docs drop `--cache` | `status` key-source field semantics (same values, produced by the runtime) | #3221, #3233 |
 | **S4** | R7 one size formatter; R8 rule 14 rewrite, clap-parse guard over docs and hints, nightly catalog check, dead-entry decision; `STRATA_LOCAL_API_KEY` removed; `strata models pull` fixed | none | #3235, #3257, #3045 |
 | **T** | Tooling lane: mutation-gate self-check (a diff that touches product code and yields zero viable mutants fails the gate); #3225 exit-3 precedence; #3227 `Result` alias; #3254 `local`-gated code in mixed files; #3258 non-`Default` enum arms; #3220 | none | #3225, #3227, #3254, #3258, #3220 |
@@ -688,20 +702,20 @@ CLI, by test (R8).
 
 ## 8. Where we stand
 
-Verified against `main` at `98f8f324`; the first three rows updated for S1.
+Verified against `main` at `98f8f324`; rows updated for S1 and S2 (S2a, S2b).
 
 | Area | State | Gap |
 |---|---|---|
 | Parser | `parse_model_spec` correct after #3259; lenient on case and whitespace | rule 14 contradicts it (#3257) |
 | Catalog / registry | sound predicates; case-insensitive lookup; one directory resolver; **S1**: one registry per runtime, `lookup` the only catalog question, loaders take a path | — |
-| Availability | **S1**: `resolve` → `ResolvedModel` / `Availability` for every verb, `require_ready` the only renderer; `capability` still exposes `can_*` only | `Availability` does not reach the wire or `capability` (R3, S2) |
-| Error codes | typed kinds exist (#3217) but 6 of 8 variants are strings, ~240 of ~250 construction sites; substring classifiers load-bearing | `missing_model` conflates two facts (#3256); `io_failure` unproducible (#3252) |
-| Wire details | schema name declared on every row | no definition, no producer — every inference error has empty `details` |
-| D8 offer | works for five `Inference*` verbs on a TTY | keyed on a code literal + command field; misses `vector --text` (#3226); offers uncatalogued names (#3256) |
+| Availability | **S1**: `resolve` → `ResolvedModel` / `Availability` for every verb, `require_ready` the only renderer; **S2**: `Availability` reaches the wire as `details` and `capability` as `availability` / `pull_spec` / `size_bytes` / `key_env_var` / `config_key` — one `AvailabilityDetails` type, both directions | — |
+| Error codes | typed kinds exist (#3217) but 6 of 8 variants are strings, ~240 of ~250 construction sites; substring classifiers load-bearing; **S2**: `unknown_model` split from `missing_model` (#3256); `io_failure` produced for a filesystem that cannot say whether a file is there (#3252, Q4) | substring classifiers (#3216 step 2, out of scope) |
+| Wire details | **S2**: `strata.error.details.inference.v1` defined by `AvailabilityDetails`, produced by every resolution refusal, flattened by the executor and read back by `ExecutorError::inference_availability`; `size_bytes` readable from its decimal string | — |
+| D8 offer | **S2b**: keyed on `details.availability == not_downloaded` and `details.pull_spec`, not on a code or a command field; covers `vector --text` (the model from the collection's record); never offers a name the catalog does not know (#3226); a refused pull is not re-offered | — |
 | Keys | `strata config set <provider>.api_key` stored 0600; env wins | reaches inference only via the CLI's `set_var` bridge (#3221) |
 | No-database use | `install-local` intercepted pre-open | every other inference verb refuses without a DB target (#3233); docs disagree with each other |
 | Sizes | one decimal formatter in inference | CLI has a second, mislabelled one (#3235) |
-| Test reach | parser pinned (`api_contract.rs`); capability honesty pinned; wire==registry pinned; **S0 matrix** (`resolution_matrix.rs`, `inference_resolution_wire.rs`) with `KNOWN_RED` as the bug inventory | zero inference codes replayed; no CI lane builds `local`, so the local-lane cells run only on a developer machine; mutation gate blind to `local` arms (#3254/#3258) and to guards that are equivalent programs in every CI lane (#3267); cloud dispatch after `require_ready` observable only with a live key (#3270) |
+| Test reach | parser pinned (`api_contract.rs`); capability honesty pinned; wire==registry pinned; **S0 matrix** (`resolution_matrix.rs`, `inference_resolution_wire.rs`) with `KNOWN_RED` as the bug inventory; **S2b**: resolution-time codes replayed from IDL error cases against the fake-composes-real-resolver world, D8's loop driven end to end against `with_undownloaded` | no CI lane builds `local`, so the local-lane cells run only on a developer machine; mutation gate blind to `local` arms (#3254/#3258) and to guards that are equivalent programs in every CI lane (#3267); cloud dispatch after `require_ready` observable only with a live key (#3270) |
 
 ---
 

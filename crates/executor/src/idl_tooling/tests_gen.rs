@@ -151,7 +151,6 @@ fn emit_command(
     divergence_used: &mut [bool],
 ) -> Result<()> {
     let fn_base = entry.id.replace(['.', '-'], "_");
-    let needs_fake = entry.family == "inference";
 
     out.push_str(&format!("\n// ---- {} ----\n", entry.id));
 
@@ -218,7 +217,7 @@ fn emit_command(
         let setups = setup_list(&case.setup);
         out.push_str(&format!(
             "\n#[test]\nfn {fn_base}_error_case_{position}_envelope_matches() {{\n    \
-             support::error_case_envelope_matches(&[{setups}], {:?}, {:?}, {needs_fake});\n}}\n",
+             support::error_case_envelope_matches(&[{setups}], {:?}, {:?});\n}}\n",
             case.request, case.expected_error
         ));
     }
@@ -235,7 +234,7 @@ fn emit_command(
             let setups = setup_list(&entry.fixtures.setup);
             out.push_str(&format!(
                 "\n#[test]\nfn {fn_base}_replay_observes_a_declared_output() {{\n    \
-                 support::replay_observes_declared(&[{setups}], {:?}, &[{tags}], {needs_fake});\n}}\n",
+                 support::replay_observes_declared(&[{setups}], {:?}, &[{tags}]);\n}}\n",
                 entry.fixtures.request
             ));
         }

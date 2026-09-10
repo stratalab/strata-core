@@ -1,0 +1,7 @@
+{
+  "type": "inference_embed",
+  "model": "anthropic:claude-3-5-haiku-latest",
+  "request": {
+    "input": "hello world"
+  }
+}
