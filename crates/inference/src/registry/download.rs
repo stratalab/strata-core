@@ -337,7 +337,6 @@ mod tests {
         let error = verify_sha256(&path, &expected, "model.gguf")
             .expect_err("mismatch must fail verification");
         assert_eq!(error.code(), "inference.download_verification_failed");
-        assert_eq!(error.class(), crate::error::InferenceErrorClass::Corruption);
         assert!(
             !path.exists(),
             "a failed verification must remove the temp file"
@@ -383,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_read_errors_are_typed_and_retryable() {
+    fn stream_read_errors_are_typed_download_failures() {
         struct FailingReader;
         impl std::io::Read for FailingReader {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
@@ -395,7 +394,6 @@ mod tests {
         let error = stream_to_file(&mut FailingReader, &mut file, &|_, _| {}, 100)
             .expect_err("read failure must propagate");
         assert_eq!(error.code(), "inference.download_failed");
-        assert!(error.retryable(), "a network read failure is retryable");
     }
 
     #[test]

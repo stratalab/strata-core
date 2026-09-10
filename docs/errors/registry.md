@@ -716,6 +716,9 @@ the public registry when adding, renaming, or removing a public error code.
 <a id="inference.registry_corrupt"></a>
 - `inference.registry_corrupt`
 
+<a id="inference.unknown_model"></a>
+- `inference.unknown_model`
+
 <a id="inference.unsupported_operation"></a>
 - `inference.unsupported_operation`
 

@@ -37,7 +37,11 @@
 # inference.provider_quota_exhausted join the inference.* debt group — both are
 # classified from a live provider's error body, which this replay lane cannot
 # produce; they wait on the same live-provider harness as their siblings.
-budget: 114
+# 114 -> 115 (S2a, #3256): inference.unknown_model joins the inference.* debt
+# group with its sibling missing_model — the replay lane's fake runtime does not
+# resolve model specs, so no fixture can raise it until the fake composes the
+# real resolver (S2b, tracker #3261), which drains the resolution-time codes.
+budget: 115
 unreplayed:
   - already_exists.engine.json_index
   - failed_precondition.engine.graph_negative_weight
@@ -67,6 +71,7 @@ unreplayed:
   - inference.provider_timeout
   - inference.provider_unavailable
   - inference.registry_corrupt
+  - inference.unknown_model
   - inference.unsupported_operation
   - inference.unsupported_parameter
   - inference.unsupported_provider

@@ -14,7 +14,9 @@
 //!   issue and pinning today's wrong answer. It is shrink-only: an entry
 //!   whose cells all pass fails this test ("fixed — delete the entry"), an
 //!   entry whose cells moved to a different wrong answer fails it, and a red
-//!   cell without an entry fails it ("file an issue"). Slices S1–S4 empty it.
+//!   cell without an entry fails it ("file an issue"). Slices S1 and S2
+//!   emptied it; every cell is green, and a regression must be pinned here
+//!   under its issue before it can merge.
 //!
 //! Hermetic by construction. The matrix runs in a child process with a
 //! scrubbed environment — no provider keys, `HOME` and `STRATA_MODELS_DIR`
@@ -68,9 +70,8 @@ fn provider_built(provider: ProviderKind) -> bool {
 
 const INVALID_REQUEST: &str = "inference.invalid_request";
 const MISSING_MODEL: &str = "inference.missing_model";
-/// R2: the split of `missing_model` into "catalogued, not downloaded" and
-/// "not a model this binary knows". Lands in S2; every cell expecting it is
-/// `KNOWN_RED` until then.
+/// R2: the split of `missing_model` ("catalogued, not downloaded") from
+/// "not a model this binary knows" (S2, #3256).
 const UNKNOWN_MODEL: &str = "inference.unknown_model";
 const UNSUPPORTED_OPERATION: &str = "inference.unsupported_operation";
 const UNSUPPORTED_PROVIDER: &str = "inference.unsupported_provider";
@@ -374,10 +375,6 @@ struct Lane {
 }
 
 impl Lane {
-    const ANY: Lane = Lane {
-        local: None,
-        download: None,
-    };
     fn applies(self) -> bool {
         self.local.is_none_or(|local| local == LOCAL_BUILT)
             && self
@@ -412,51 +409,11 @@ impl KnownRed {
     }
 }
 
-const LOAD_VERBS: &[Verb] = &[Verb::Generate, Verb::Embed, Verb::Rank, Verb::Tokenize];
-
-/// Names that resolve to nothing — an unknown model, an unknown quant of a
-/// known one, a `local:`-prefixed or multi-part name the catalog does not
-/// have, and a GGUF path with no file behind it.
-const UNKNOWN: &[&str] = &[
-    "tinyllama:q99",
-    "nope",
-    "nope:thing",
-    "local:nope",
-    "a:b:c:d",
-    "openai-compatible:ep:m",
-    "<tmp>/absent.gguf",
-];
-
-const KNOWN_RED: &[KnownRed] = &[
-    // ----- #3256: catalog-miss and not-downloaded share missing_model -----
-    //
-    // The resolver (S1) answers every one of these as `NotInCatalog` or
-    // `PathMissing` in every build and every verb; what is still missing is
-    // the code that says so. `unknown_model` lands in S2 and retires both
-    // entries together.
-    KnownRed {
-        issue: "#3256",
-        why: "an uncatalogued name or a GGUF path that does not exist is \
-              `missing_model`, indistinguishable from a model awaiting download",
-        lane: Lane::ANY,
-        verbs: LOAD_VERBS,
-        specs: UNKNOWN,
-        dirs: None,
-        nets: None,
-        today: Expect::Code(MISSING_MODEL),
-    },
-    KnownRed {
-        issue: "#3256",
-        why: "same through pull, which now resolves before it looks at the \
-              network or the download feature (#3255)",
-        lane: Lane::ANY,
-        verbs: &[Verb::Pull],
-        specs: UNKNOWN,
-        dirs: None,
-        nets: None,
-        today: Expect::Code(MISSING_MODEL),
-    },
-];
+/// Empty since S2 (#3256). An entry names the cells it covers, the issue that
+/// owns them, and today's wrong answer, e.g. `KnownRed { issue: "#NNNN", why:
+/// "…", lane: Lane { local: None, download: None }, verbs: &[Verb::Pull],
+/// specs: &["nope"], dirs: None, nets: None, today: Expect::Code(MISSING_MODEL) }`.
+const KNOWN_RED: &[KnownRed] = &[];
 
 // ---------------------------------------------------------------------------
 // Cells and their execution.

@@ -77,6 +77,7 @@ fn transport_error(provider: &str, err: ureq::Error) -> InferenceError {
     InferenceError::ProviderFailed {
         kind,
         message: format!("{provider}: {err}"),
+        details: None,
     }
 }
 
@@ -91,6 +92,7 @@ pub(crate) fn provider_error(provider: &str, status: u16, body: &str) -> Inferen
     InferenceError::ProviderFailed {
         kind,
         message: format!("{provider}: {detail} (HTTP {status})"),
+        details: None,
     }
 }
 

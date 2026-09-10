@@ -14,7 +14,7 @@
 //! They are not approval — they are the record of what ships today, so the fix
 //! that flips them is visible in a diff rather than lost in a rewrite.
 
-use strata_inference::{InferenceError, InferenceErrorClass, ProviderFailure};
+use strata_inference::{InferenceError, ProviderFailure};
 
 fn provider(message: &str) -> InferenceError {
     InferenceError::Provider(message.to_owned())
@@ -68,7 +68,6 @@ fn http_status_messages_classify_as_intended() {
 fn the_missing_key_message_classifies_as_a_missing_key() {
     let error = provider("OPENAI_API_KEY not set (required for openai:gpt-4o-mini)");
     assert_eq!(error.code(), "inference.missing_api_key");
-    assert_eq!(error.class(), InferenceErrorClass::Unavailable);
 }
 
 /// Non-key provider failures keep their meaning.
@@ -94,9 +93,9 @@ fn transport_and_response_failures_classify_as_intended() {
 /// the malformed-response branch, because `contains("missing")` is checked for
 /// corrupt responses and nothing catches it first.
 ///
-/// The class this produces is `Corruption`: a caller is told their provider
-/// returned corrupt data when in fact they never set a key. D6 fixes this by
-/// deciding the code where the failure happens.
+/// The registry classes that code as corruption: a caller is told their
+/// provider returned corrupt data when in fact they never set a key. D6 fixes
+/// this by deciding the code where the failure happens.
 #[test]
 fn misclassified_a_missing_key_reads_as_provider_corruption() {
     let error = provider("API key missing for openai");
@@ -105,7 +104,6 @@ fn misclassified_a_missing_key_reads_as_provider_corruption() {
         "inference.provider_malformed_response",
         "pinning today's wrong answer so the fix is visible"
     );
-    assert_eq!(error.class(), InferenceErrorClass::Corruption);
 }
 
 /// **Known wrong.** A rejected key — the case D6 exists for — is
@@ -115,7 +113,6 @@ fn misclassified_a_missing_key_reads_as_provider_corruption() {
 fn misclassified_a_rejected_key_reads_as_an_outage() {
     let error = provider("the configured API key was rejected");
     assert_eq!(error.code(), "inference.provider_unavailable");
-    assert_eq!(error.class(), InferenceErrorClass::Unavailable);
 }
 
 /// **Known wrong.** So does a key that was never found, when phrased without
@@ -151,6 +148,7 @@ fn failed(kind: ProviderFailure, message: &str) -> InferenceError {
     InferenceError::ProviderFailed {
         kind,
         message: message.to_owned(),
+        details: None,
     }
 }
 
@@ -174,10 +172,9 @@ fn the_code_follows_the_kind_not_the_message() {
     // Text that the legacy classifier would misread, now classified correctly:
     // "missing" no longer drags a key problem into the corruption class.
     let missing = failed(ProviderFailure::MissingApiKey, "API key missing for openai");
-    assert_eq!(missing.code(), "inference.missing_api_key");
-    assert_ne!(
-        missing.class(),
-        InferenceErrorClass::Corruption,
+    assert_eq!(
+        missing.code(),
+        "inference.missing_api_key",
         "a key problem must never read as corrupt provider data"
     );
 
@@ -290,6 +287,7 @@ fn a_not_downloaded_model_reports_missing_model_whatever_the_wording() {
         message: "Model 'tinyllama' is not downloaded. To download it: \
                   strata inference models pull tinyllama"
             .to_owned(),
+        details: None,
     };
     assert_eq!(
         worded_to_trip_the_old_classifier.code(),

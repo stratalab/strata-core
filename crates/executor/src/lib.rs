@@ -59,9 +59,10 @@ pub use strata_inference::{
 };
 #[cfg(feature = "inference")]
 pub use strata_inference::{
-    ChatMessage as InferenceChatMessage, ChatRequest as InferenceChatRequest,
-    ChatResponse as InferenceChatResponse, EmbedInput as InferenceEmbedInput,
-    EmbeddingsRequest as InferenceEmbeddingsRequest,
+    AvailabilityDetails as InferenceAvailabilityDetails,
+    AvailabilityKind as InferenceAvailabilityKind, ChatMessage as InferenceChatMessage,
+    ChatRequest as InferenceChatRequest, ChatResponse as InferenceChatResponse,
+    EmbedInput as InferenceEmbedInput, EmbeddingsRequest as InferenceEmbeddingsRequest,
     EmbeddingsResponse as InferenceEmbeddingsResponse, FunctionDef as InferenceFunctionDef,
     InferenceCapability, InferenceRuntime, InferenceRuntimeConfig, InferenceStatus,
     InputType as InferenceInputType, JsonSchemaSpec as InferenceJsonSchemaSpec,

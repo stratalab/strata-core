@@ -253,6 +253,7 @@ fn every_constructible_inference_error() -> Vec<InferenceError> {
     ];
     errors.extend(
         [
+            RegistryFailure::UnknownModel,
             RegistryFailure::MissingModel,
             RegistryFailure::DownloadDisabled,
             RegistryFailure::DownloadFailed,
@@ -263,6 +264,7 @@ fn every_constructible_inference_error() -> Vec<InferenceError> {
         .map(|kind| InferenceError::RegistryFailed {
             kind,
             message: message(),
+            details: None,
         }),
     );
     errors.extend(
@@ -281,6 +283,7 @@ fn every_constructible_inference_error() -> Vec<InferenceError> {
         .map(|kind| InferenceError::ProviderFailed {
             kind,
             message: message(),
+            details: None,
         }),
     );
     errors

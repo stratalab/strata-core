@@ -5,7 +5,7 @@
 //! answers for every spec form. This file pins that the executor — the path
 //! every product surface takes — relays that answer unchanged and dresses it
 //! from the registry row. For every spec form × registry directory × network
-//! setting × verb it asserts three relations:
+//! setting × verb it asserts four relations:
 //!
 //! 1. **Pass-through.** The executor succeeds exactly when the
 //!    [`InferenceService`] trait succeeds on an identically configured
@@ -17,6 +17,11 @@
 //! 3. **Declared.** The code is in the command's declared error set in the
 //!    generated IDL index, so an agent reading `agents commands` sees every
 //!    code the resolution surface can produce.
+//! 4. **Details pass-through.** The resolver's answer on the trait error
+//!    (`InferenceError::availability`) is the error's `details` on the wire,
+//!    one entry per field of `AvailabilityDetails` and nothing else; an
+//!    error with no answer has no details. The answer travels as data, so a
+//!    client acts on `availability` and `pull_spec`, never on the message.
 //!
 //! Nothing here restates the inference matrix's expectations: the spec list
 //! is derived from the catalog and the provider table, and the expected code
@@ -271,11 +276,85 @@ fn declared_errors() -> BTreeMap<String, BTreeSet<String>> {
 
 const CHILD_MODE: &str = "STRATA_RESOLUTION_WIRE_CHILD";
 
+/// `AvailabilityDetails` as the wire carries it: its serialized fields, each
+/// value a string. The oracle for relation 4.
+fn flattened(details: &strata_inference::AvailabilityDetails) -> BTreeMap<String, String> {
+    let serde_json::Value::Object(fields) =
+        serde_json::to_value(details).expect("details serialize")
+    else {
+        panic!("details serialize as an object")
+    };
+    fields
+        .into_iter()
+        .map(|(key, value)| match value {
+            serde_json::Value::String(text) => (key, text),
+            other => (key, other.to_string()),
+        })
+        .collect()
+}
+
 fn describe(result: &Result<(), ExecutorError>) -> String {
     match result {
         Ok(()) => "Ok".to_owned(),
         Err(error) => error.code().to_owned(),
     }
+}
+
+/// Relations 2–4 for one refusal. Returns whether the resolver answered with
+/// details, so the caller can prove relation 4 checked something.
+fn check_refusal(
+    name: &str,
+    wire: &str,
+    error: &ExecutorError,
+    via_trait: &Result<(), InferenceError>,
+    declared: &BTreeMap<String, BTreeSet<String>>,
+    failures: &mut Vec<String>,
+) -> bool {
+    let code = error.code();
+
+    // 2. Row fidelity.
+    match public_error_code_entry(code) {
+        None => failures.push(format!("{name}: {code} has no registry row")),
+        Some(entry) => {
+            if error.public_class() != entry.class || error.retry_policy() != entry.retry_policy {
+                failures.push(format!(
+                    "{name}: {code} rendered as ({:?}, {:?}), registry row says ({:?}, {:?})",
+                    error.public_class(),
+                    error.retry_policy(),
+                    entry.class,
+                    entry.retry_policy
+                ));
+            }
+        }
+    }
+
+    // 3. Declared.
+    let declared_for = declared
+        .get(wire)
+        .unwrap_or_else(|| panic!("{wire} is in the IDL index"));
+    if !declared_for.contains(code) {
+        failures.push(format!("{name}: {wire} does not declare {code} in the IDL"));
+    }
+
+    // 4. Details pass-through.
+    let answered = via_trait
+        .as_ref()
+        .err()
+        .and_then(InferenceError::availability);
+    // No resolver answer means no details at all: the wire does not pretend.
+    let expected = answered.map_or_else(BTreeMap::new, flattened);
+    let observed: BTreeMap<String, String> = error
+        .status()
+        .details()
+        .iter()
+        .map(|detail| (detail.key().to_owned(), detail.value().to_owned()))
+        .collect();
+    if observed != expected {
+        failures.push(format!(
+            "{name}: {code} carries details {observed:?}, the resolver answered {expected:?}"
+        ));
+    }
+    answered.is_some()
 }
 
 #[test]
@@ -296,6 +375,7 @@ fn wire_child() {
     let specs = specs();
     let mut failures = Vec::new();
     let mut executed = 0usize;
+    let mut with_details = 0usize;
     let mut codes_seen = BTreeSet::new();
 
     for dir in DIRS {
@@ -335,34 +415,9 @@ fn wire_child() {
                     let Err(error) = &via_executor else {
                         continue;
                     };
-                    let code = error.code();
-                    codes_seen.insert(code.to_owned());
-
-                    // 2. Row fidelity.
-                    match public_error_code_entry(code) {
-                        None => failures.push(format!("{name}: {code} has no registry row")),
-                        Some(entry) => {
-                            if error.public_class() != entry.class
-                                || error.retry_policy() != entry.retry_policy
-                            {
-                                failures.push(format!(
-                                    "{name}: {code} rendered as ({:?}, {:?}), registry row says \
-                                     ({:?}, {:?})",
-                                    error.public_class(),
-                                    error.retry_policy(),
-                                    entry.class,
-                                    entry.retry_policy
-                                ));
-                            }
-                        }
-                    }
-
-                    // 3. Declared.
-                    let declared_for = declared
-                        .get(wire)
-                        .unwrap_or_else(|| panic!("{wire} is in the IDL index"));
-                    if !declared_for.contains(code) {
-                        failures.push(format!("{name}: {wire} does not declare {code} in the IDL"));
+                    codes_seen.insert(error.code().to_owned());
+                    if check_refusal(&name, wire, error, &via_trait, &declared, &mut failures) {
+                        with_details += 1;
                     }
                 }
             }
@@ -372,7 +427,7 @@ fn wire_child() {
     // `inference-local` is the executor's only local feature; it carries
     // `download` with it.
     println!(
-        "resolution wire [local={}]: {executed} cells, codes seen: {}",
+        "resolution wire [local={}]: {executed} cells, {with_details} with details, codes seen: {}",
         cfg!(feature = "inference-local"),
         codes_seen
             .iter()
@@ -384,6 +439,10 @@ fn wire_child() {
         failures.is_empty(),
         "resolution wire:\n  {}",
         failures.join("\n  ")
+    );
+    assert!(
+        with_details > 0,
+        "no cell carried a resolver answer; relation 4 checked nothing"
     );
 }
 

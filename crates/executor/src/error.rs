@@ -441,13 +441,69 @@ fn source_chain_display(error: &dyn Error) -> Option<String> {
 }
 
 #[cfg(feature = "inference")]
-impl From<strata_inference::InferenceError> for ExecutorError {
-    fn from(value: strata_inference::InferenceError) -> Self {
+impl ExecutorError {
+    /// Converts an inference error, naming the vector collection whose
+    /// recorded model the spec came from.
+    ///
+    /// A refusal from model resolution carries the resolver's answer
+    /// ([`strata_inference::AvailabilityDetails`]); it lands on the wire as
+    /// `details`, one entry per field, so a client can act on
+    /// `availability` and `pull_spec` instead of parsing the message. The
+    /// spec of a `vector … --text` call is read from the collection, not
+    /// the command, so the refusal says which collection recorded it.
+    pub(crate) fn from_inference(
+        error: &strata_inference::InferenceError,
+        collection: Option<&str>,
+    ) -> Self {
         // The registry row is the single authority for a registered code's
         // class, retry policy, commit outcome and suggested fix; private
         // per-code tables here drifted from it (#3243). A code missing from
         // the registry renders as `internal.executor.unregistered_code`.
-        Self::new(value.code(), value.public_message())
+        let details = match error.availability() {
+            Some(availability) => {
+                let mut availability = availability.clone();
+                if let Some(collection) = collection {
+                    availability.collection = Some(collection.to_owned());
+                }
+                availability_details(&availability)
+            }
+            None => Vec::new(),
+        };
+        Self {
+            status: render_status(
+                error.code(),
+                error.public_message(),
+                None,
+                details,
+                Vec::new(),
+            ),
+        }
+    }
+}
+
+/// `strata.error.details.inference.v1`: the resolver's answer as flat
+/// details, keyed by the struct's own field names so the type is the
+/// definition and nothing here restates it.
+#[cfg(feature = "inference")]
+fn availability_details(availability: &strata_inference::AvailabilityDetails) -> Vec<ErrorDetail> {
+    let serde_json::Value::Object(fields) =
+        serde_json::to_value(availability).expect("AvailabilityDetails is plain data")
+    else {
+        unreachable!("AvailabilityDetails serializes as an object")
+    };
+    fields
+        .into_iter()
+        .map(|(key, value)| match value {
+            serde_json::Value::String(text) => ErrorDetail::new(key, text),
+            other => ErrorDetail::new(key, other.to_string()),
+        })
+        .collect()
+}
+
+#[cfg(feature = "inference")]
+impl From<strata_inference::InferenceError> for ExecutorError {
+    fn from(value: strata_inference::InferenceError) -> Self {
+        Self::from_inference(&value, None)
     }
 }
 

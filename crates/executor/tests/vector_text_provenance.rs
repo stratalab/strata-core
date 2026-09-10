@@ -15,7 +15,9 @@
 //! - a declaration is one-time: repeating it is a no-op, changing it is a
 //!   mismatch;
 //! - an embedding that fails, or a vector the collection rejects, leaves
-//!   nothing written.
+//!   nothing written;
+//! - a refusal from model resolution names the collection whose recorded
+//!   model was refused, beside the resolver's own answer (#3226).
 
 #![cfg(all(feature = "testkit", feature = "inference"))]
 // `ExecutorResult` mirrors the wire error type; the helpers below return it.
@@ -29,8 +31,8 @@ use strata_executor::{
 use strata_inference::testkit::FakeInferenceService;
 use strata_inference::{
     ChatRequest, ChatResponse, EmbeddingsRequest, EmbeddingsResponse, InferenceCapability,
-    InferenceError, InferenceService, InferenceStatus, InputType, ModelCacheStatus, ModelInfo,
-    PullModelOutput, RankRequest, RankResponse,
+    InferenceError, InferenceRuntime, InferenceRuntimeConfig, InferenceService, InferenceStatus,
+    InputType, ModelCacheStatus, ModelInfo, PullModelOutput, RankRequest, RankResponse,
 };
 
 /// The fake embeds into 8 dimensions.
@@ -568,4 +570,110 @@ fn an_embedding_the_collection_rejects_writes_nothing() {
     assert_eq!(error.code(), "invalid_argument.engine.vector_dimension");
     assert_eq!(harness.calls().len(), 1);
     assert_eq!(harness.count("narrow"), 0);
+}
+
+/// The model a `--text` call is refused for came from the collection, not
+/// the command, so the refusal says which collection recorded it — beside
+/// the resolver's answer, so a client can tell "not in the catalog" from
+/// "not downloaded" without parsing the message (#3226, #3256).
+#[test]
+fn a_resolution_refusal_names_the_collection_and_carries_the_answer() {
+    // The real runtime, so the refusal is the resolver's: a name the catalog
+    // does not know is `unknown_model` in every build, before the build's
+    // local-execution or key checks get a say. The models directory is a
+    // fresh tempdir, so nothing on this machine can make the name resolve.
+    let models = tempfile::tempdir().expect("models dir");
+    let runtime = InferenceRuntime::new(InferenceRuntimeConfig {
+        models_dir: Some(models.path().to_path_buf()),
+        network_enabled: false,
+    });
+    let mut executor = Executor::open_cache()
+        .expect("cache executor opens")
+        .with_inference_runtime(runtime);
+    executor
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: None,
+            collection: "docs".to_owned(),
+            dimension: DIMENSION,
+            metric: VectorDistanceMetric::Cosine,
+            embedding_model: Some("local:nope".to_owned()),
+        })
+        .expect("collection creates");
+
+    let error = executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "docs".to_owned(),
+            key: "k".to_owned(),
+            vector: Vec::new(),
+            text: Some("hello".to_owned()),
+            metadata: None,
+        })
+        .expect_err("the recorded model is not a model this binary knows");
+    assert_eq!(error.code(), "inference.unknown_model");
+    assert_eq!(error.public_class(), ErrorClass::NotFound);
+
+    let details: std::collections::BTreeMap<&str, &str> = error
+        .status()
+        .details()
+        .iter()
+        .map(|detail| (detail.key(), detail.value()))
+        .collect();
+    assert_eq!(
+        details,
+        [
+            ("availability", "not_in_catalog"),
+            ("collection", "docs"),
+            ("model", "nope"),
+            ("provider", "local"),
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    // The same refusal for a query, which reads the model from the same
+    // record.
+    let error = executor
+        .execute(Command::VectorQuery {
+            branch: None,
+            space: None,
+            collection: "docs".to_owned(),
+            query: Vec::new(),
+            text: Some("hello".to_owned()),
+            k: 5,
+            filter: None,
+            as_of: None,
+            as_of_time: None,
+        })
+        .expect_err("the recorded model is not a model this binary knows");
+    assert_eq!(error.code(), "inference.unknown_model");
+    assert!(
+        error
+            .status()
+            .details()
+            .iter()
+            .any(|detail| detail.key() == "collection" && detail.value() == "docs"),
+        "{:?}",
+        error.status().details()
+    );
+}
+
+/// A failure past resolution — the provider itself — has no answer to carry,
+/// and the wire does not invent one.
+#[test]
+fn a_provider_failure_carries_no_resolution_details() {
+    let mut harness = Harness::with_failing_provider();
+    harness.create("docs", DIMENSION, Some("fake-embed"));
+
+    let error = harness
+        .upsert_text("docs", "k", "hello")
+        .expect_err("the provider is down");
+    assert_eq!(error.code(), "inference.provider_unavailable");
+    assert!(
+        error.status().details().is_empty(),
+        "{:?}",
+        error.status().details()
+    );
 }

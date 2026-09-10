@@ -676,77 +676,42 @@ mod tests {
 
     #[test]
     fn scripted_failures_classify_to_the_stable_error_codes() {
-        use crate::error::InferenceErrorClass;
-        let cases: [(ScriptedFailure, &str, InferenceErrorClass, bool); 10] = [
-            (
-                ScriptedFailure::MissingModel,
-                "inference.missing_model",
-                InferenceErrorClass::NotFound,
-                false,
-            ),
-            (
-                ScriptedFailure::InvalidRequest,
-                "inference.invalid_request",
-                InferenceErrorClass::InvalidInput,
-                false,
-            ),
+        let cases: [(ScriptedFailure, &str); 10] = [
+            (ScriptedFailure::MissingModel, "inference.missing_model"),
+            (ScriptedFailure::InvalidRequest, "inference.invalid_request"),
             (
                 ScriptedFailure::UnsupportedParameter,
                 "inference.unsupported_parameter",
-                InferenceErrorClass::InvalidInput,
-                false,
             ),
             (
                 ScriptedFailure::UnsupportedOperation,
                 "inference.unsupported_operation",
-                InferenceErrorClass::Unavailable,
-                false,
             ),
-            (
-                ScriptedFailure::MissingApiKey,
-                "inference.missing_api_key",
-                InferenceErrorClass::Unavailable,
-                false,
-            ),
+            (ScriptedFailure::MissingApiKey, "inference.missing_api_key"),
             (
                 ScriptedFailure::AuthFailure,
                 "inference.provider_auth_failed",
-                InferenceErrorClass::Unavailable,
-                false,
             ),
             (
                 ScriptedFailure::RateLimit,
                 "inference.provider_rate_limited",
-                InferenceErrorClass::Retryable,
-                true,
             ),
-            (
-                ScriptedFailure::Timeout,
-                "inference.provider_timeout",
-                InferenceErrorClass::Retryable,
-                true,
-            ),
+            (ScriptedFailure::Timeout, "inference.provider_timeout"),
             (
                 ScriptedFailure::ProviderUnavailable,
                 "inference.provider_unavailable",
-                InferenceErrorClass::Unavailable,
-                true,
             ),
             (
                 ScriptedFailure::MalformedResponse,
                 "inference.provider_malformed_response",
-                InferenceErrorClass::Corruption,
-                false,
             ),
         ];
-        for (failure, code, class, retryable) in cases {
+        for (failure, code) in cases {
             let mut engine = failing(failure);
             let error = engine
                 .generate(&GenerateRequest::default())
                 .expect_err("scripted failure must fail generation");
             assert_eq!(error.code(), code, "{failure:?}: {error:?}");
-            assert_eq!(error.class(), class, "{failure:?}: {error:?}");
-            assert_eq!(error.retryable(), retryable, "{failure:?}: {error:?}");
             // The same script gates every capability, not just generation.
             failing(failure)
                 .embed("x")

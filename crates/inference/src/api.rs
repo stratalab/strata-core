@@ -11,7 +11,4 @@ pub use crate::wire::{
     EmbeddingsRequest, EmbeddingsResponse, FinishReason, InputType, Mirostat, ModelConfig, Pooling,
     RerankRequest, RerankResponse, RerankResult, ResponseFormat, Role, Usage,
 };
-pub use crate::{
-    GenerateRequest, GenerateResponse, InferenceError, InferenceErrorClass, ProviderKind,
-    StopReason,
-};
+pub use crate::{GenerateRequest, GenerateResponse, InferenceError, ProviderKind, StopReason};

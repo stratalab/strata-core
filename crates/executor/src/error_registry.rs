@@ -514,8 +514,8 @@ const INFERENCE_ERROR_CODES: &[ErrorCodeRegistryEntry] = &[
         ErrorClass::FailedPrecondition,
         RetryPolicy::AfterStateChange,
         CommitOutcomeStatus::NotApplicable,
-        "The requested model is missing.",
-        "Install, pull, or configure the requested model before retrying.",
+        "The requested model is in the catalog but is not downloaded.",
+        "Run `strata inference models pull <model>`, then retry.",
         INFERENCE_SCHEMA,
     ),
     entry(
@@ -597,6 +597,15 @@ const INFERENCE_ERROR_CODES: &[ErrorCodeRegistryEntry] = &[
         CommitOutcomeStatus::NotApplicable,
         "The local inference registry is corrupt.",
         "Repair or recreate the local model registry before retrying.",
+        INFERENCE_SCHEMA,
+    ),
+    entry(
+        "inference.unknown_model",
+        ErrorClass::NotFound,
+        RetryPolicy::Never,
+        CommitOutcomeStatus::NotApplicable,
+        "The requested model is not in the catalog.",
+        "Check the model name against `strata inference models list`, or pass the path of a GGUF file.",
         INFERENCE_SCHEMA,
     ),
     entry(
