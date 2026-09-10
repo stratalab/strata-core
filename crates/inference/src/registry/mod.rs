@@ -24,8 +24,30 @@ pub mod download;
 
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "download")]
 use crate::error::InferenceError;
+
+/// What the filesystem says about the model file at `path`: its metadata,
+/// `None` when nothing is there, or the I/O failure that kept it from
+/// answering.
+///
+/// "Not there" and "cannot tell" are different answers. Absence is a fact
+/// the caller acts on — pull the model, fix the path. A read that fails for
+/// any other reason (a loop in the path, a permission, a dead mount) is not
+/// absence, and reporting it as "not downloaded" would send the caller to
+/// download a file that may already be there (#3252). A missing parent is
+/// absence too: nothing is downloaded under a directory that does not exist,
+/// or under a path that is not a directory.
+pub(crate) fn probe_model_file(path: &Path) -> Result<Option<std::fs::Metadata>, InferenceError> {
+    use std::io::ErrorKind;
+    match path.metadata() {
+        Ok(meta) => Ok(Some(meta)),
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Ok(None),
+        Err(e) => Err(InferenceError::Io(format!(
+            "cannot read {}: {e}",
+            path.display()
+        ))),
+    }
+}
 
 /// Whether the model file at `path` is downloaded.
 ///
@@ -35,11 +57,18 @@ use crate::error::InferenceError;
 /// resolution refused a zero-length file as an interrupted download while
 /// the listing called the same file "ready" and the status counted it.
 ///
+/// A filesystem that cannot answer counts as "not downloaded" here: this is
+/// the lenient form for listings, which report over the whole catalog and
+/// have nowhere to put one file's I/O failure. Resolution asks
+/// [`probe_model_file`] directly and refuses.
+pub(crate) fn model_file_is_downloaded(path: &Path) -> bool {
+    matches!(probe_model_file(path), Ok(Some(meta)) if is_downloaded_model_file(&meta))
+}
+
 /// A regular file with at least one byte. A directory or an empty file at the
 /// path is a leftover, not a model.
-pub(crate) fn model_file_is_downloaded(path: &Path) -> bool {
-    path.metadata()
-        .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+pub(crate) fn is_downloaded_model_file(meta: &std::fs::Metadata) -> bool {
+    meta.is_file() && meta.len() > 0
 }
 
 /// What a model is designed for.
@@ -269,10 +298,13 @@ impl ModelRegistry {
     /// name. Before that resolver existed, `resolve`, `resolve_or_pull`,
     /// `info`, `pull` and `check_and_clean_corrupt` each parsed the name for
     /// themselves, and disagreed about what an unknown one meant (#3264).
-    pub(crate) fn lookup(&self, name: &str) -> CatalogLookup {
+    ///
+    /// Errs only when the models directory cannot be read
+    /// ([`probe_model_file`]); an absent file is `downloaded: false`.
+    pub(crate) fn lookup(&self, name: &str) -> Result<CatalogLookup, InferenceError> {
         let parts: Vec<&str> = name.split(':').collect();
         let Some((entry, quant)) = catalog::find_entry_by_parts(&parts) else {
-            return CatalogLookup::UnknownModel;
+            return Ok(CatalogLookup::UnknownModel);
         };
         let quant_name = quant.unwrap_or(entry.default_quant);
         match entry
@@ -282,14 +314,16 @@ impl ModelRegistry {
         {
             Some(variant) => {
                 let path = self.models_dir.join(variant.hf_file);
-                CatalogLookup::Found {
+                let downloaded =
+                    probe_model_file(&path)?.is_some_and(|meta| is_downloaded_model_file(&meta));
+                Ok(CatalogLookup::Found {
                     entry,
                     variant,
-                    downloaded: model_file_is_downloaded(&path),
+                    downloaded,
                     path,
-                }
+                })
             }
-            None => CatalogLookup::UnknownQuant { entry },
+            None => Ok(CatalogLookup::UnknownQuant { entry }),
         }
     }
 
@@ -323,14 +357,19 @@ impl ModelRegistry {
     #[cfg(all(test, feature = "local"))]
     pub(crate) fn downloaded_catalog_path(name: &str) -> Option<PathBuf> {
         match Self::new().lookup(name) {
-            CatalogLookup::Found {
+            Ok(CatalogLookup::Found {
                 path,
                 downloaded: true,
                 ..
-            } => Some(path),
-            CatalogLookup::Found { .. }
-            | CatalogLookup::UnknownModel
-            | CatalogLookup::UnknownQuant { .. } => None,
+            }) => Some(path),
+            // A models directory that cannot be read has no downloaded
+            // model to smoke-test with, same as one that is empty.
+            Ok(
+                CatalogLookup::Found { .. }
+                | CatalogLookup::UnknownModel
+                | CatalogLookup::UnknownQuant { .. },
+            )
+            | Err(_) => None,
         }
     }
 
@@ -422,7 +461,7 @@ mod tests {
     /// The variant and path `lookup` finds for `name`, with whether the file
     /// is downloaded. Panics when the name is not catalogued.
     fn found(registry: &ModelRegistry, name: &str) -> (&'static QuantVariant, PathBuf, bool) {
-        match registry.lookup(name) {
+        match registry.lookup(name).expect("a readable models directory") {
             CatalogLookup::Found {
                 variant,
                 path,
@@ -434,7 +473,7 @@ mod tests {
     }
 
     fn assert_unknown_model(registry: &ModelRegistry, name: &str) {
-        let lookup = registry.lookup(name);
+        let lookup = registry.lookup(name).expect("a readable models directory");
         assert!(
             matches!(lookup, CatalogLookup::UnknownModel),
             "{name:?}: expected UnknownModel, got {lookup:?}"
@@ -522,7 +561,10 @@ mod tests {
     fn lookup_unknown_quant_names_the_entry() {
         let (_dir, registry) = test_registry();
 
-        match registry.lookup("tinyllama:iq2_xs") {
+        match registry
+            .lookup("tinyllama:iq2_xs")
+            .expect("a readable models directory")
+        {
             CatalogLookup::UnknownQuant { entry } => assert_eq!(entry.name, "tinyllama"),
             other => panic!("expected UnknownQuant, got {other:?}"),
         }

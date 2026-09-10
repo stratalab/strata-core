@@ -5060,6 +5060,10 @@
         {
           "code": "inference.invalid_request",
           "docs": "https://stratadb.org/e/inference.invalid_request"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
         }
       ],
       "fixtures": {
@@ -5128,6 +5132,10 @@
         {
           "code": "inference.unknown_model",
           "docs": "https://stratadb.org/e/inference.unknown_model"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
         },
         {
           "code": "inference.model_load_failed",
@@ -5208,6 +5216,10 @@
         {
           "code": "inference.unknown_model",
           "docs": "https://stratadb.org/e/inference.unknown_model"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
         },
         {
           "code": "inference.model_load_failed",
@@ -5328,6 +5340,10 @@
         {
           "code": "inference.unknown_model",
           "docs": "https://stratadb.org/e/inference.unknown_model"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
         },
         {
           "code": "inference.model_load_failed",
@@ -5645,6 +5661,10 @@
           "docs": "https://stratadb.org/e/inference.unknown_model"
         },
         {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
           "code": "inference.model_load_failed",
           "docs": "https://stratadb.org/e/inference.model_load_failed"
         },
@@ -5775,6 +5795,10 @@
         {
           "code": "inference.unknown_model",
           "docs": "https://stratadb.org/e/inference.unknown_model"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
         },
         {
           "code": "inference.model_load_failed",
@@ -9644,6 +9668,10 @@
           "docs": "https://stratadb.org/e/inference.unknown_model"
         },
         {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
           "code": "inference.model_load_failed",
           "docs": "https://stratadb.org/e/inference.model_load_failed"
         },
@@ -9969,6 +9997,10 @@
         {
           "code": "inference.unknown_model",
           "docs": "https://stratadb.org/e/inference.unknown_model"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
         },
         {
           "code": "inference.model_load_failed",

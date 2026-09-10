@@ -23,14 +23,15 @@
 # `crates/executor/tests/inference_behavior.rs` keeps the sets aligned with it.
 sets:
   # What a local-model operation can raise: the model is unknown or not
-  # downloaded, cannot be loaded, fails at runtime, or the registry that names
-  # it is corrupt.
+  # downloaded, the models directory cannot be read, the model cannot be
+  # loaded, fails at runtime, or the registry that names it is corrupt.
   - id: inference.local_model
     errors:
       - inference.invalid_request
       - inference.unsupported_operation
       - inference.missing_model
       - inference.unknown_model
+      - inference.io_failure
       - inference.model_load_failed
       - inference.local_runtime_failed
       - inference.registry_corrupt

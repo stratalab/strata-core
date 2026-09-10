@@ -50,6 +50,7 @@ commands:
     prose: commands/inference.capability.md
     errors+:
       - inference.invalid_request
+      - inference.io_failure
     fixtures:
       request: requests/v1/inference/capability.json
       response: responses/v1/inference/capability.json

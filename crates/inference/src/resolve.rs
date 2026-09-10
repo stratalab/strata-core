@@ -8,7 +8,8 @@
 //! the checks in their own order, and the code a caller saw depended on which
 //! site it happened to reach first (#3255, #3260, #3262, #3263, #3264).
 //!
-//! [`resolve`] errs only for a malformed spec. Every other outcome is data —
+//! [`resolve`] errs only for a malformed spec or a filesystem that cannot
+//! say whether a file is there. Every other outcome is data —
 //! an [`Availability`] — so that `capability` can report it, an error can
 //! carry it, and [`ResolvedModel::require_ready`] can turn it into exactly
 //! one typed [`InferenceError`] by a match the compiler keeps total. No code
@@ -23,7 +24,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::registry::{format_size, CatalogEntry, CatalogLookup, ModelRegistry, QuantVariant};
+use crate::registry::{
+    format_size, probe_model_file, CatalogEntry, CatalogLookup, ModelRegistry, QuantVariant,
+};
 use crate::runtime::{InferenceRuntime, ModelAbilities, LOCAL_UNAVAILABLE_REMEDY};
 use crate::{
     api_key_env_var, generation_provider_feature_enabled, parse_model_spec, InferenceError,
@@ -429,8 +432,9 @@ impl ResolvedModel {
 /// the check before it passed, so a network-disabled runtime never touches
 /// the key at all.
 ///
-/// Errs only when the spec is malformed. Everything else is an
-/// [`Availability`].
+/// Errs when the spec is malformed (`invalid_request`) or the filesystem
+/// cannot say whether a local file is there (`io_failure`,
+/// [`probe_model_file`]). Everything else is an [`Availability`].
 pub(crate) fn resolve(
     registry: &ModelRegistry,
     network_enabled: bool,
@@ -440,7 +444,7 @@ pub(crate) fn resolve(
 ) -> Result<ResolvedModel, InferenceError> {
     let (provider, name) = parse_model_spec(spec)?;
     let (source, availability) = if provider == ProviderKind::Local {
-        resolve_local(registry, &name, use_)
+        resolve_local(registry, &name, use_)?
     } else {
         resolve_cloud(provider, network_enabled, key_present, use_)
     };
@@ -457,20 +461,21 @@ fn resolve_local(
     registry: &ModelRegistry,
     name: &str,
     use_: Option<ModelUse>,
-) -> (ModelSource, Availability) {
+) -> Result<(ModelSource, Availability), InferenceError> {
     if looks_like_path(name) {
         let path = PathBuf::from(name);
-        let availability = if !path.is_file() {
+        let is_file = probe_model_file(&path)?.is_some_and(|meta| meta.is_file());
+        let availability = if !is_file {
             Availability::PathMissing
         } else if use_.is_some() && !cfg!(feature = "local") {
             Availability::LocalExecutionNotBuilt
         } else {
             Availability::Ready
         };
-        return (ModelSource::GgufPath(path), availability);
+        return Ok((ModelSource::GgufPath(path), availability));
     }
 
-    match registry.lookup(name) {
+    Ok(match registry.lookup(name)? {
         CatalogLookup::UnknownModel => (
             ModelSource::Uncatalogued { entry: None },
             Availability::NotInCatalog,
@@ -506,7 +511,7 @@ fn resolve_local(
                 availability,
             )
         }
-    }
+    })
 }
 
 fn resolve_cloud(
@@ -631,7 +636,7 @@ mod tests {
     }
 
     fn plant_minilm(registry: &ModelRegistry) -> PathBuf {
-        let CatalogLookup::Found { path, .. } = registry.lookup("miniLM") else {
+        let CatalogLookup::Found { path, .. } = registry.lookup("miniLM").expect("readable") else {
             panic!("miniLM is catalogued")
         };
         std::fs::write(&path, b"not a real model").expect("plant");
@@ -641,7 +646,7 @@ mod tests {
     // --- identity ---------------------------------------------------------
 
     #[test]
-    fn a_malformed_spec_is_the_only_error() {
+    fn a_malformed_spec_is_an_invalid_request() {
         let (_dir, registry) = registry();
         for spec in ["", "   ", "openai:", "local:"] {
             let err = resolve(&registry, true, &|_| true, spec, None).expect_err(spec);
@@ -724,6 +729,70 @@ mod tests {
         let spec = dir.path().to_string_lossy().into_owned();
         let resolved = resolve_in(&registry, true, true, &spec, None);
         assert_eq!(resolved.availability, Availability::PathMissing);
+    }
+
+    // --- the filesystem ---------------------------------------------------
+
+    /// A directory whose entries cannot be stat'ed: a symlink to itself.
+    /// `metadata` on anything beneath it fails with ELOOP for every user,
+    /// root included, so the test does not depend on permissions.
+    #[cfg(unix)]
+    fn unreadable_dir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let looped = dir.path().join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).expect("symlink loop");
+        (dir, looped)
+    }
+
+    /// "Not there" and "cannot tell" are different answers. An absent file
+    /// is an availability the caller can act on (pull it, fix the path); a
+    /// filesystem that will not say is an I/O failure, and answering
+    /// "not downloaded" over it would send the caller to download a model
+    /// that may be sitting right there (#3252).
+    #[cfg(unix)]
+    #[test]
+    fn a_filesystem_that_cannot_answer_is_an_io_failure_not_an_availability() {
+        let (_dir, looped) = unreadable_dir();
+        let registry = ModelRegistry::with_dir(looped.clone());
+
+        // Catalog form: the variant's presence check reads under the loop.
+        let err = resolve(&registry, true, &|_| true, "miniLM", None)
+            .expect_err("the models directory cannot be read");
+        assert_eq!(err.code(), "inference.io_failure");
+
+        // Path form: the file itself sits under the loop.
+        let spec = looped.join("model.gguf").to_string_lossy().into_owned();
+        let err =
+            resolve(&registry, true, &|_| true, &spec, None).expect_err("the path cannot be read");
+        assert_eq!(err.code(), "inference.io_failure");
+    }
+
+    /// Direction control: a models directory that is a regular file, or
+    /// does not exist, answers — nothing is downloaded there. Only a read
+    /// that fails for another reason is an I/O failure.
+    #[test]
+    fn a_models_directory_that_is_not_a_directory_answers_not_downloaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("models");
+        std::fs::write(&file, b"not a directory").expect("write");
+        for models_dir in [file, dir.path().join("never-created")] {
+            let registry = ModelRegistry::with_dir(models_dir.clone());
+            let resolved = resolve_in(&registry, true, true, "miniLM", None);
+            assert!(
+                matches!(resolved.availability, Availability::NotDownloaded { .. }),
+                "{}: {:?}",
+                models_dir.display(),
+                resolved.availability
+            );
+            let spec = models_dir.join("model.gguf").to_string_lossy().into_owned();
+            let resolved = resolve_in(&registry, true, true, &spec, None);
+            assert_eq!(
+                resolved.availability,
+                Availability::PathMissing,
+                "{}",
+                models_dir.display()
+            );
+        }
     }
 
     #[test]
