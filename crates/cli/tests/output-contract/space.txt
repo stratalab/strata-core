@@ -1,0 +1,63 @@
+### space.create · edge:applied=false · human
+not_found tenant_a applied=false
+∎
+### space.create · edge:applied=false · raw
+∎
+### space.create · edge:committed_at=fixed · human
+created tenant_a applied=true
+∎
+### space.create · edge:committed_at=fixed · raw
+∎
+### space.create · responses/v1/spaces/create.json · human
+created tenant_a applied=true
+∎
+### space.create · responses/v1/spaces/create.json · raw
+∎
+### space.delete · edge:applied=false · human
+not_found tenant_a applied=false
+∎
+### space.delete · edge:applied=false · raw
+∎
+### space.delete · edge:committed_at=fixed · human
+deleted tenant_a applied=true
+∎
+### space.delete · edge:committed_at=fixed · raw
+∎
+### space.delete · responses/v1/errors/spaces/delete_default.json · human
+invalid_argument.engine.space_delete_default: command failed∎
+### space.delete · responses/v1/errors/spaces/delete_default.json · raw
+invalid_argument.engine.space_delete_default: command failed∎
+### space.delete · responses/v1/spaces/delete.json · human
+deleted tenant_a applied=true
+∎
+### space.delete · responses/v1/spaces/delete.json · raw
+∎
+### space.exists · responses/v1/spaces/exists_true.json · human
+true
+∎
+### space.exists · responses/v1/spaces/exists_true.json · raw
+true
+∎
+### space.list · edge:has_more=true · human
+default
+tenant_a
+-- more: add --cursor bmV4dA== to the same command
+∎
+### space.list · edge:has_more=true · raw
+default
+tenant_a
+∎
+### space.list · edge:items=[] · human
+(empty)
+∎
+### space.list · edge:items=[] · raw
+(empty)
+∎
+### space.list · responses/v1/spaces/list.json · human
+default
+tenant_a
+∎
+### space.list · responses/v1/spaces/list.json · raw
+default
+tenant_a
+∎

@@ -1,0 +1,26 @@
+### arrow.export · responses/v1/arrow/export_kv_csv.json · human
+{
+  "format": "csv",
+  "paths": [
+    "kv_out.csv"
+  ],
+  "primitive": "kv",
+  "row_count": 3,
+  "size_bytes": 135
+}
+∎
+### arrow.export · responses/v1/arrow/export_kv_csv.json · raw
+{"format":"csv","paths":["kv_out.csv"],"primitive":"kv","row_count":3,"size_bytes":135}
+∎
+### arrow.import · responses/v1/arrow/import_kv_csv.json · human
+{
+  "batches_processed": 1,
+  "file_path": "input.csv",
+  "rows_imported": 3,
+  "rows_skipped": 0,
+  "target": "kv"
+}
+∎
+### arrow.import · responses/v1/arrow/import_kv_csv.json · raw
+{"batches_processed":1,"file_path":"input.csv","rows_imported":3,"rows_skipped":0,"target":"kv"}
+∎

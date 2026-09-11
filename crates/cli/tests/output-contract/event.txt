@@ -1,0 +1,180 @@
+### event.append · edge:applied=false · human
+not_found applied=false
+∎
+### event.append · edge:applied=false · raw
+∎
+### event.append · edge:committed_at=fixed · human
+created applied=true
+∎
+### event.append · edge:committed_at=fixed · raw
+∎
+### event.append · responses/v1/errors/event/append_empty_type.json · human
+invalid_argument.engine.event_type: command failed∎
+### event.append · responses/v1/errors/event/append_empty_type.json · raw
+invalid_argument.engine.event_type: command failed∎
+### event.append · responses/v1/event/append_applied.json · human
+created applied=true
+∎
+### event.append · responses/v1/event/append_applied.json · raw
+∎
+### event.batch_append · edge:committed_at=fixed · human
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"event_type":"user.updated","sequence":1},"status":"ok"}
+∎
+### event.batch_append · edge:committed_at=fixed · raw
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"event_type":"user.updated","sequence":1},"status":"ok"}
+∎
+### event.batch_append · edge:items=[] · human
+(empty)
+∎
+### event.batch_append · edge:items=[] · raw
+(empty)
+∎
+### event.batch_append · responses/v1/event/batch_append_ok.json · human
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"event_type":"user.updated","sequence":1},"status":"ok"}
+∎
+### event.batch_append · responses/v1/event/batch_append_ok.json · raw
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"event_type":"user.updated","sequence":1},"status":"ok"}
+∎
+### event.count · responses/v1/event/len_two.json · human
+2
+∎
+### event.count · responses/v1/event/len_two.json · raw
+2
+∎
+### event.exists · responses/v1/status/bool_true.json · human
+true
+∎
+### event.exists · responses/v1/status/bool_true.json · raw
+true
+∎
+### event.get · edge:found=false · human
+(nil)
+∎
+### event.get · edge:found=false · raw
+∎
+### event.get · responses/v1/event/get_found.json · human
+{
+  "event": {
+    "event_type": "user.created",
+    "hash": "ef66c75b71e03746e96de6ecd282d9f60bc6047f024fd87a22bcbb9eacb2775d",
+    "payload": {
+      "name": "Ada"
+    },
+    "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sequence": 0,
+    "timestamp": 1783742390446216
+  },
+  "timestamp": 3,
+  "version": 3
+}
+∎
+### event.get · responses/v1/event/get_found.json · raw
+{"event":{"event_type":"user.created","hash":"ef66c75b71e03746e96de6ecd282d9f60bc6047f024fd87a22bcbb9eacb2775d","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390446216},"timestamp":3,"version":3}
+∎
+### event.list · edge:has_more=true · human
+{"event":{"event_type":"user.created","hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390447369},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"9f41a13d6f49bbc9b9c41dccaed0420b697dea1a971cb5f141cdf21bb47ff5fe","payload":{"name":"Ada","plan":"pro"},"previous_hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","sequence":1,"timestamp":1783742390447545},"timestamp":4,"version":4}
+-- more: add --cursor 7 to the same command
+∎
+### event.list · edge:has_more=true · raw
+{"event":{"event_type":"user.created","hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390447369},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"9f41a13d6f49bbc9b9c41dccaed0420b697dea1a971cb5f141cdf21bb47ff5fe","payload":{"name":"Ada","plan":"pro"},"previous_hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","sequence":1,"timestamp":1783742390447545},"timestamp":4,"version":4}
+∎
+### event.list · edge:items=[] · human
+(empty)
+∎
+### event.list · edge:items=[] · raw
+(empty)
+∎
+### event.list · responses/v1/event/list_page.json · human
+{"event":{"event_type":"user.created","hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390447369},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"9f41a13d6f49bbc9b9c41dccaed0420b697dea1a971cb5f141cdf21bb47ff5fe","payload":{"name":"Ada","plan":"pro"},"previous_hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","sequence":1,"timestamp":1783742390447545},"timestamp":4,"version":4}
+∎
+### event.list · responses/v1/event/list_page.json · raw
+{"event":{"event_type":"user.created","hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390447369},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"9f41a13d6f49bbc9b9c41dccaed0420b697dea1a971cb5f141cdf21bb47ff5fe","payload":{"name":"Ada","plan":"pro"},"previous_hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","sequence":1,"timestamp":1783742390447545},"timestamp":4,"version":4}
+∎
+### event.range · edge:has_more=true · human
+{"event":{"event_type":"user.created","hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448165},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"998df51fb4d93d47aa277eb9e18b9055e19bf3888d479ad471edb70d3a041fe0","payload":{"name":"Ada","plan":"pro"},"previous_hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","sequence":1,"timestamp":1783742390448342},"timestamp":4,"version":4}
+-- more: add --cursor 7 to the same command
+∎
+### event.range · edge:has_more=true · raw
+{"event":{"event_type":"user.created","hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448165},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"998df51fb4d93d47aa277eb9e18b9055e19bf3888d479ad471edb70d3a041fe0","payload":{"name":"Ada","plan":"pro"},"previous_hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","sequence":1,"timestamp":1783742390448342},"timestamp":4,"version":4}
+∎
+### event.range · edge:items=[] · human
+(empty)
+∎
+### event.range · edge:items=[] · raw
+(empty)
+∎
+### event.range · responses/v1/event/range_forward.json · human
+{"event":{"event_type":"user.created","hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448165},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"998df51fb4d93d47aa277eb9e18b9055e19bf3888d479ad471edb70d3a041fe0","payload":{"name":"Ada","plan":"pro"},"previous_hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","sequence":1,"timestamp":1783742390448342},"timestamp":4,"version":4}
+∎
+### event.range · responses/v1/event/range_forward.json · raw
+{"event":{"event_type":"user.created","hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448165},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"998df51fb4d93d47aa277eb9e18b9055e19bf3888d479ad471edb70d3a041fe0","payload":{"name":"Ada","plan":"pro"},"previous_hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","sequence":1,"timestamp":1783742390448342},"timestamp":4,"version":4}
+∎
+### event.range_time · edge:has_more=true · human
+{"event":{"event_type":"user.created","hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448970},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"0bfbda450be637166b0e9cf1acf8461b8165d61544a446201b6a9d8b0111b4da","payload":{"name":"Ada","plan":"pro"},"previous_hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","sequence":1,"timestamp":1783742390449152},"timestamp":4,"version":4}
+-- more: add --cursor 7 to the same command
+∎
+### event.range_time · edge:has_more=true · raw
+{"event":{"event_type":"user.created","hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448970},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"0bfbda450be637166b0e9cf1acf8461b8165d61544a446201b6a9d8b0111b4da","payload":{"name":"Ada","plan":"pro"},"previous_hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","sequence":1,"timestamp":1783742390449152},"timestamp":4,"version":4}
+∎
+### event.range_time · edge:items=[] · human
+(empty)
+∎
+### event.range_time · edge:items=[] · raw
+(empty)
+∎
+### event.range_time · responses/v1/event/range_time_forward.json · human
+{"event":{"event_type":"user.created","hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448970},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"0bfbda450be637166b0e9cf1acf8461b8165d61544a446201b6a9d8b0111b4da","payload":{"name":"Ada","plan":"pro"},"previous_hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","sequence":1,"timestamp":1783742390449152},"timestamp":4,"version":4}
+∎
+### event.range_time · responses/v1/event/range_time_forward.json · raw
+{"event":{"event_type":"user.created","hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448970},"timestamp":3,"version":3}
+{"event":{"event_type":"user.updated","hash":"0bfbda450be637166b0e9cf1acf8461b8165d61544a446201b6a9d8b0111b4da","payload":{"name":"Ada","plan":"pro"},"previous_hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","sequence":1,"timestamp":1783742390449152},"timestamp":4,"version":4}
+∎
+### event.types · edge:has_more=true · human
+user.created
+user.updated
+-- more: add --cursor bmV4dA== to the same command
+∎
+### event.types · edge:has_more=true · raw
+user.created
+user.updated
+∎
+### event.types · edge:items=[] · human
+(empty)
+∎
+### event.types · edge:items=[] · raw
+(empty)
+∎
+### event.types · responses/v1/event/types.json · human
+user.created
+user.updated
+∎
+### event.types · responses/v1/event/types.json · raw
+user.created
+user.updated
+∎
+### event.verify_chain · responses/v1/event/verify_chain_valid.json · human
+{
+  "error": null,
+  "first_invalid": null,
+  "length": 2,
+  "valid": true
+}
+∎
+### event.verify_chain · responses/v1/event/verify_chain_valid.json · raw
+{"error":null,"first_invalid":null,"length":2,"valid":true}
+∎
