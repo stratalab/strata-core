@@ -17,7 +17,7 @@ non_hermetic:
   - hub.list_yanked            # network + configured StrataHub
   - inference.generate         # local model or cloud key — tests/test_inference_local.py
   - inference.embed            # local model or cloud key — tests/test_inference_local.py
-  - inference.rank             # reranker model or cloud key
+  - inference.rank             # reranker GGUF path (none catalogued, #3045) or cloud key
   - inference.tokenize         # local model — tests/test_inference_local.py
   - inference.detokenize       # local model — tests/test_inference_local.py
   - inference.models.local     # machine-specific on-disk model state

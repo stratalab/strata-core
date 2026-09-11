@@ -146,7 +146,7 @@ pub fn download_hf_file_with_size(
     // Validate content-length against expected size from catalog (if both known)
     if total_bytes > 0 && expected_size > 0 {
         let ratio = total_bytes as f64 / expected_size as f64;
-        if !(0.5..=2.0).contains(&ratio) {
+        if !SIZE_TOLERANCE.contains(&ratio) {
             return Err(InferenceError::Registry(format!(
                 "Unexpected file size: server reports {} bytes, catalog expects {} bytes",
                 total_bytes, expected_size
@@ -228,6 +228,11 @@ fn verify_sha256(
     Ok(())
 }
 
+/// How far the size the hub reports may stray from the catalog's `size_bytes`
+/// (as a ratio) before a download is refused as the wrong file. The nightly
+/// catalog-reachability check holds every catalogued file to the same window.
+const SIZE_TOLERANCE: std::ops::RangeInclusive<f64> = 0.5..=2.0;
+
 /// Base endpoint for model downloads: `STRATA_HF_ENDPOINT` or the public hub.
 fn hf_endpoint() -> String {
     match std::env::var("STRATA_HF_ENDPOINT") {
@@ -304,12 +309,15 @@ impl Drop for LockGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
     use std::sync::Mutex;
 
     use super::{
-        download_hf_file_with_size, hf_download_url, model_file_is_downloaded, stream_to_file,
-        verify_sha256, LockGuard,
+        download_hf_file_with_size, hf_download_url, hf_endpoint, hf_token,
+        model_file_is_downloaded, stream_to_file, verify_sha256, LockGuard, SIZE_TOLERANCE,
     };
+    use crate::registry::catalog::CATALOG;
+    use crate::InferenceError;
     use sha2::{Digest, Sha256};
 
     #[test]
@@ -430,11 +438,9 @@ mod tests {
     /// address: the variable is process-global and tests run in parallel.
     static ENDPOINT_MUTEX: Mutex<()> = Mutex::new(());
 
-    /// Runs `body` with downloads pointed at a closed loopback port, so a
-    /// download that is attempted fails at once (connection refused) and one
-    /// that is not attempted is the only way to succeed. Restores the
+    /// Runs `body` with downloads pointed at `endpoint`. Restores the
     /// variable afterwards, panic or not.
-    fn without_a_reachable_hub<T>(body: impl FnOnce() -> T) -> T {
+    fn with_hub_at<T>(endpoint: &str, body: impl FnOnce() -> T) -> T {
         struct Restore(Option<String>);
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -448,8 +454,180 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _restore = Restore(std::env::var("STRATA_HF_ENDPOINT").ok());
-        unsafe { std::env::set_var("STRATA_HF_ENDPOINT", "http://127.0.0.1:1") };
+        unsafe { std::env::set_var("STRATA_HF_ENDPOINT", endpoint) };
         body()
+    }
+
+    /// Runs `body` with downloads pointed at a closed loopback port, so a
+    /// download that is attempted fails at once (connection refused) and one
+    /// that is not attempted is the only way to succeed.
+    fn without_a_reachable_hub<T>(body: impl FnOnce() -> T) -> T {
+        with_hub_at("http://127.0.0.1:1", body)
+    }
+
+    /// A hub on loopback that answers its one request with `200`, a
+    /// `content-length` of `advertised` (which need not be the body's
+    /// length) and `body`. Returns the endpoint to point downloads at.
+    fn a_hub_serving(advertised: usize, body: &'static [u8]) -> String {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("bound address").port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("one request");
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).expect("read the request head");
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\ncontent-length: {advertised}\r\nconnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .expect("write the response head");
+            // A client that refuses on the head hangs up before the body;
+            // that refusal is what the caller may be testing.
+            let _ = stream.write_all(body);
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// The hub's `content-length` is held to `SIZE_TOLERANCE` around the
+    /// catalog's `size_bytes` before a byte is written: a file ten times
+    /// smaller than catalogued is not the catalogued file.
+    #[test]
+    fn a_download_the_hub_sizes_far_from_the_catalog_is_refused_before_any_bytes_land() {
+        let hub = a_hub_serving(4, b"gguf");
+        with_hub_at(&hub, || {
+            let dir = tempfile::tempdir().expect("tmp");
+            let error = download_hf_file_with_size(
+                "org/repo",
+                "model.gguf",
+                dir.path(),
+                &|_, _| {},
+                40,
+                None,
+            )
+            .expect_err("4 bytes against a catalogued 40 is outside the window");
+            // The code this carries is the substring classifier's
+            // (`registry_corrupt`, #3216); the variant is the contract here.
+            assert!(matches!(error, InferenceError::Registry(_)), "{error:?}");
+            assert!(!dir.path().join("model.gguf").exists(), "nothing landed");
+            assert!(
+                !dir.path().join(".downloading").join("model.gguf").exists(),
+                "no temp file either"
+            );
+        });
+    }
+
+    /// The same window admits a plausible size, and the download then runs
+    /// to completion: the file lands at its destination with every byte.
+    #[test]
+    fn a_download_the_hub_sizes_near_the_catalog_lands_in_full() {
+        let hub = a_hub_serving(4, b"gguf");
+        with_hub_at(&hub, || {
+            let dir = tempfile::tempdir().expect("tmp");
+            download_hf_file_with_size("org/repo", "model.gguf", dir.path(), &|_, _| {}, 5, None)
+                .expect("4 bytes against a catalogued 5 is inside the window");
+            assert_eq!(
+                std::fs::read(dir.path().join("model.gguf")).expect("landed"),
+                b"gguf"
+            );
+        });
+    }
+
+    /// Every file the catalog names must be on the hub. Two entries were
+    /// catalogued against repos that were never published (#3045) and one
+    /// variant against a file its repo does not hold (#3300); each surfaced
+    /// as a `models pull` failure long after the entry landed. This is the
+    /// check that admits a catalog entry: one HEAD per catalogued file,
+    /// nothing downloaded. The hub answers a resolve URL for a published
+    /// file with a redirect to its CDN (carrying `x-linked-size`), so the
+    /// redirect is the proof and is not followed; an unpublished repo answers
+    /// 401 unauthenticated and a missing file 404. A published file whose
+    /// size lies outside `SIZE_TOLERANCE` fails too, because the download
+    /// would.
+    ///
+    /// Network: run by the nightly `catalog-reachability` job.
+    #[test]
+    #[ignore = "network: the nightly catalog-reachability lane runs it"]
+    fn every_catalogued_file_is_published_on_the_hub() {
+        let _serialized = ENDPOINT_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
+        let endpoint = hf_endpoint();
+        let token = hf_token();
+
+        let mut failures = Vec::new();
+        for entry in CATALOG {
+            for variant in entry.variants {
+                let url = hf_download_url(&endpoint, entry.hf_repo, variant.hf_file);
+                let mut request = agent.head(&url);
+                if let Some(token) = &token {
+                    request = request.header("authorization", &format!("Bearer {token}"));
+                }
+                let response = match request.call() {
+                    Ok(response) => response,
+                    Err(error) => {
+                        failures.push(format!("{}:{} {url}: {error}", entry.name, variant.name));
+                        continue;
+                    }
+                };
+                let status = response.status();
+                let header = |name: &str| {
+                    response
+                        .headers()
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned)
+                };
+                if !(status.is_success() || status.is_redirection()) {
+                    // The hub names the reason (RepoNotFound, EntryNotFound,
+                    // GatedRepo) when it has one; the status alone otherwise.
+                    let code = header("x-error-code").unwrap_or_default();
+                    failures.push(format!(
+                        "{}:{} {url}: HTTP {status} {code}",
+                        entry.name, variant.name
+                    ));
+                    continue;
+                }
+                // The redirect's own content-length is its body, not the file's.
+                let reported = header("x-linked-size")
+                    .or_else(|| {
+                        status
+                            .is_success()
+                            .then(|| header("content-length"))
+                            .flatten()
+                    })
+                    .and_then(|size| size.parse::<u64>().ok());
+                let Some(reported) = reported else {
+                    continue; // the hub did not say how big the file is
+                };
+                let ratio = reported as f64 / variant.size_bytes as f64;
+                if !SIZE_TOLERANCE.contains(&ratio) {
+                    failures.push(format!(
+                        "{}:{} {url}: the hub reports {reported} bytes, the catalog {} — \
+                         a download would be refused",
+                        entry.name, variant.name, variant.size_bytes
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "catalogued files the hub does not serve:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]

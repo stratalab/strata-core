@@ -289,16 +289,16 @@ mod tests {
     // Smoke tests (require libllama + downloaded model)
     // -----------------------------------------------------------------------
 
+    /// No catalogued model ranks (#3045), so the reranker under test is named
+    /// by path: `STRATA_SMOKE_RANK_GGUF=/path/to/reranker.gguf`.
     #[test]
     #[ignore]
-    fn smoke_rank_jina_reranker() {
-        let Some(path) =
-            crate::registry::ModelRegistry::downloaded_catalog_path("jina-reranker-v1-tiny")
-        else {
-            eprintln!("skipping smoke_rank_jina_reranker: jina-reranker-v1-tiny is not downloaded");
+    fn smoke_rank_gguf_path() {
+        let Some(path) = std::env::var_os("STRATA_SMOKE_RANK_GGUF") else {
+            eprintln!("skipping smoke_rank_gguf_path: STRATA_SMOKE_RANK_GGUF is not set");
             return;
         };
-        let engine = RankingEngine::from_gguf(path).expect("jina-reranker-v1-tiny should load");
+        let engine = RankingEngine::from_gguf(path).expect("the reranker should load");
 
         // Empty passages
         let empty = engine.rank("test", &[]).expect("empty should succeed");

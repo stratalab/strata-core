@@ -425,3 +425,22 @@ jobs:
           STRATA_VECTOR_DIFF_SEEDS: "16"
           STRATA_VECTOR_DIFF_OPS: "500"
         run: cargo test --locked -p strata-executor --test differential_vector -- --nocapture
+
+  catalog-reachability:
+    # Every file the model catalog names must be on the hub. Two catalog
+    # entries once pointed at repos that were never published (#3045) and
+    # one variant at a file its repo does not hold (#3300); each surfaced as
+    # a `models pull` failure long after the entry landed. One HEAD per
+    # catalogued file, nothing downloaded, and the catalog's `size_bytes`
+    # held to the window the downloader itself enforces. A red run here is
+    # a catalog entry to remove or correct.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authorize private git dependencies
+        run: git config --global url."https://x-access-token:${{ secrets.STRATAHUB_READ_TOKEN }}@github.com/stratalab/stratahub".insteadOf "https://github.com/stratalab/stratahub"
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Every catalogued file is published on the hub
+        run: cargo test --locked -p strata-inference --features download --lib every_catalogued_file_is_published_on_the_hub -- --ignored --nocapture

@@ -73,7 +73,7 @@ fn inference_commands_round_trip_through_json() {
             },
         },
         Command::InferenceRank {
-            model: "local:jina-reranker-v1-tiny".to_owned(),
+            model: "local:/models/reranker.gguf".to_owned(),
             request: RankRequest {
                 query: "q".to_owned(),
                 passages: vec!["p".to_owned()],

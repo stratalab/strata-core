@@ -30,12 +30,17 @@ fn capability_never_claims_more_than_the_build_can_do() {
     // One model per task, so every `can_*` has a case where the model itself
     // supports the operation — otherwise the feature check is the only thing
     // making the flag false and the rest of the expression is unobservable.
+    // No catalogued model ranks (#3045); a present GGUF path claims every
+    // local ability including rank, so it is the rank case.
+    let dir = tempfile::tempdir().unwrap();
+    let reranker = dir.path().join("reranker.gguf");
+    std::fs::write(&reranker, b"gguf").unwrap();
     for spec in [
-        "miniLM",                // embed
-        "gpt2",                  // generate
-        "tinyllama",             // generate
-        "nomic-embed",           // embed
-        "jina-reranker-v1-tiny", // rank
+        "miniLM",                   // embed
+        "gpt2",                     // generate
+        "tinyllama",                // generate
+        "nomic-embed",              // embed
+        reranker.to_str().unwrap(), // rank (a path claims every local ability)
     ] {
         let Ok(capability) = runtime.capability(spec) else {
             continue; // not in this build's catalog; nothing claimed, nothing to check
@@ -434,27 +439,6 @@ fn a_reported_key_source_is_a_variable_name() {
             );
         }
     }
-}
-
-/// A rank model is the case that distinguishes `can_rank`'s feature check from
-/// the model's own ability: every other catalogued model has `rank: false`
-/// anyway, so only this one can show the flag following the build.
-#[test]
-fn a_rank_model_claims_ranking_only_when_the_build_can_rank() {
-    let capability = runtime()
-        .capability("jina-reranker-v1-tiny")
-        .expect("the reranker is catalogued");
-
-    assert_eq!(capability.can_rank, LOCAL_BUILT_IN);
-    assert_eq!(capability.can_tokenize, LOCAL_BUILT_IN);
-    assert!(
-        !capability.can_embed,
-        "a reranker is not an embedding model, whatever the build"
-    );
-    assert!(
-        !capability.can_generate,
-        "a reranker is not a generation model either, whatever the build"
-    );
 }
 
 /// The spec forms the registry loads — an alias, a quant suffix, a different

@@ -133,7 +133,7 @@ fn diagnostics_dtos_round_trip_without_provider_payloads() {
     let cache_status = ModelCacheStatus {
         generation_models: vec!["local:qwen3:1.7b:q8_0".to_owned()],
         embedding_models: vec!["openai:text-embedding-3-small".to_owned()],
-        ranking_models: vec!["local:jina-reranker-v1-tiny".to_owned()],
+        ranking_models: vec!["local:/models/reranker.gguf".to_owned()],
     };
     assert_eq!(round_trip(&cache_status), cache_status);
 }
