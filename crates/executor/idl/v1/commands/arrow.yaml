@@ -28,6 +28,8 @@ commands:
       - not_found.engine.vector_collection
       - unavailable.executor.arrow_io
       - internal.executor.arrow
+    display:
+      receipt: "imported {/data/rows_imported|plural:row} into {/data/target} from {/data/file_path} ({/data/rows_skipped} skipped)"
     fixtures:
       request: requests/v1/arrow/import.json
       response: responses/v1/arrow/import_kv_csv.json
@@ -51,6 +53,8 @@ commands:
       - invalid_argument.executor.arrow_collection
       - unavailable.executor.arrow_io
       - internal.executor.arrow
+    display:
+      receipt: "exported {/data/row_count|plural:row} of {/data/primitive} to {/data/paths/0} ({/data/size_bytes|size})"
     fixtures:
       request: requests/v1/arrow/export.json
       response: responses/v1/arrow/export_kv_csv.json

@@ -6,6 +6,7 @@ commands:
     output: Output::InferenceModels
     result: ModelInfo
     prose: commands/inference.models.list.md
+    display: bespoke
     fixtures:
       request: requests/v1/inference/models_list.json
       response: responses/v1/inference/models_list.json
@@ -16,6 +17,7 @@ commands:
     output: Output::InferenceModels
     result: ModelInfo
     prose: commands/inference.models.local.md
+    display: bespoke
     fixtures:
       request: requests/v1/inference/models_local.json
       response: responses/v1/inference/models_local.json
@@ -37,6 +39,7 @@ commands:
       - inference.download_verification_failed
       - inference.io_failure
       - inference.registry_corrupt
+    display: bespoke
     fixtures:
       request: requests/v1/inference/models_pull.json
       response: responses/v1/inference/models_pull.json
@@ -56,6 +59,24 @@ commands:
     errors+:
       - inference.invalid_request
       - inference.io_failure
+    display:
+      fields:
+        - field: /data/provider
+        - field: /data/model
+        - field: /data/availability
+        - field: /data/can_generate
+        - field: /data/can_embed
+        - field: /data/can_rank
+        - field: /data/can_tokenize
+        - field: /data/embedding_dim
+        - field: /data/requires_api_key
+        - field: /data/requires_network
+        - field: /data/network_enabled
+        - field: /data/provider_feature_enabled
+        - field: /data/supports_tools
+        - field: /data/supports_json_object
+        - field: /data/supports_json_schema
+        - field: /data/supports_logprobs
     fixtures:
       request: requests/v1/inference/capability.json
       response: responses/v1/inference/capability.json
@@ -72,6 +93,7 @@ commands:
     prose: commands/inference.generate.md
     errors+:
       - set:inference.model_runtime
+    display: bespoke
     fixtures:
       request: requests/v1/inference/generate.json
       response: responses/v1/inference/generate.json
@@ -90,6 +112,7 @@ commands:
     prose: commands/inference.tokenize.md
     errors+:
       - set:inference.local_model
+    display: bespoke
     fixtures:
       request: requests/v1/inference/tokenize.json
       response: responses/v1/inference/tokenize.json
@@ -106,6 +129,7 @@ commands:
     prose: commands/inference.detokenize.md
     errors+:
       - set:inference.local_model
+    display: bespoke
     fixtures:
       request: requests/v1/inference/detokenize.json
       response: responses/v1/inference/text.json
@@ -119,6 +143,7 @@ commands:
     prose: commands/inference.embed.md
     errors+:
       - set:inference.model_runtime
+    display: bespoke
     fixtures:
       request: requests/v1/inference/embed.json
       response: responses/v1/inference/embed.json
@@ -139,6 +164,7 @@ commands:
     prose: commands/inference.rank.md
     errors+:
       - set:inference.local_model
+    display: bespoke
     fixtures:
       request: requests/v1/inference/rank.json
       response: responses/v1/inference/rank.json
@@ -153,6 +179,7 @@ commands:
     result: UnloadResult
     response_model: UnloadResult
     prose: commands/inference.unload.md
+    display: bespoke
     fixtures:
       request: requests/v1/inference/unload.json
       response: responses/v1/inference/unload.json
@@ -164,6 +191,7 @@ commands:
     result: InferenceStatus
     response_model: InferenceStatus
     prose: commands/inference.status.md
+    display: bespoke
     fixtures:
       request: requests/v1/inference/status.json
       response: responses/v1/inference/status.json
@@ -175,6 +203,14 @@ commands:
     result: ModelCacheStatus
     response_model: ModelCacheStatus
     prose: commands/inference.cache_status.md
+    display:
+      fields:
+        - field: /data/generation_models
+          as: list
+        - field: /data/embedding_models
+          as: list
+        - field: /data/ranking_models
+          as: list
     fixtures:
       request: requests/v1/inference/cache_status.json
       response: responses/v1/inference/cache_status.json

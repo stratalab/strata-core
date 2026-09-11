@@ -1,7 +1,7 @@
 {
   "generated": true,
   "schema_version": "strata.cli.v1",
-  "generator_version": "strata-executor-cli-idl.1",
+  "generator_version": "strata-executor-cli-idl.2",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
     "checksum_sha256": "f4e0a2d49eb7f9ca84827e255c65d7522983cdbd2bbe8a9d9fc1ce2b60fa6f29",
@@ -292,7 +292,11 @@
         "response": "responses/v1/arrow/export_kv_csv.json",
         "replay_skip": "arrow export writes real files to a filesystem path outside the scratch cache executor"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "receipt": "exported {/data/row_count|plural:row} of {/data/primitive} to {/data/paths/0} ({/data/size_bytes|size})"
+      }
     },
     {
       "id": "arrow.import",
@@ -407,7 +411,11 @@
         "response": "responses/v1/arrow/import_kv_csv.json",
         "replay_skip": "arrow import reads a real file from the filesystem; the source file does not exist on the scratch cache executor"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "receipt": "imported {/data/rows_imported|plural:row} into {/data/target} from {/data/file_path} ({/data/rows_skipped} skipped)"
+      }
     },
     {
       "id": "branch.create",
@@ -466,7 +474,14 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "created branch {/data/name}",
+        "identity": [
+          "/data/name"
+        ]
+      }
     },
     {
       "id": "branch.delete",
@@ -523,7 +538,15 @@
           "requests/v1/branches/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} branch {/data/branch/name}",
+        "noun": "branch",
+        "identity": [
+          "/data/branch/name"
+        ]
+      }
     },
     {
       "id": "branch.diff",
@@ -577,7 +600,9 @@
           "requests/v1/branches/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": "bespoke"
     },
     {
       "id": "branch.fork",
@@ -634,7 +659,14 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "forked {/data/name} from {/data/parent/name}",
+        "identity": [
+          "/data/name"
+        ]
+      }
     },
     {
       "id": "branch.fork_at_timestamp",
@@ -695,7 +727,14 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "forked {/data/name} from {/data/parent/name} at timestamp {/data/parent/fork_timestamp}",
+        "identity": [
+          "/data/name"
+        ]
+      }
     },
     {
       "id": "branch.fork_at_version",
@@ -756,7 +795,14 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "forked {/data/name} from {/data/parent/name} at version {/data/parent/fork_version}",
+        "identity": [
+          "/data/name"
+        ]
+      }
     },
     {
       "id": "branch.get",
@@ -809,7 +855,31 @@
           "requests/v1/branches/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/name"
+          },
+          {
+            "field": "/data/parent/name",
+            "header": "parent"
+          },
+          {
+            "field": "/data/status"
+          },
+          {
+            "field": "/data/generation"
+          },
+          {
+            "field": "/data/created_at"
+          },
+          {
+            "field": "/data/deleted_at"
+          }
+        ]
+      }
     },
     {
       "id": "branch.list",
@@ -850,7 +920,25 @@
           "requests/v1/branches/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/name"
+          },
+          {
+            "field": "/data/items/*/parent/name",
+            "header": "PARENT"
+          },
+          {
+            "field": "/data/items/*/status"
+          },
+          {
+            "field": "/data/items/*/generation"
+          }
+        ]
+      }
     },
     {
       "id": "branch.merge",
@@ -932,7 +1020,14 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "merged {/data/source} into {/data/target}: {/data/applied|len} applied, {/data/deleted|len} deleted, {/data/conflicts|len} conflicts (version {/data/target_version})",
+        "identity": [
+          "/data/target_version"
+        ]
+      }
     },
     {
       "id": "branch.preview",
@@ -1001,7 +1096,44 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/source"
+          },
+          {
+            "field": "/data/target"
+          },
+          {
+            "field": "/data/strategy"
+          },
+          {
+            "field": "/data/branch_point"
+          },
+          {
+            "field": "/data/spaces_covered",
+            "as": "list"
+          },
+          {
+            "field": "/data/capabilities_covered",
+            "as": "list"
+          },
+          {
+            "field": "/data/capabilities_unsupported",
+            "as": "list"
+          },
+          {
+            "field": "/data/conflicts",
+            "as": "table"
+          },
+          {
+            "field": "/data/derived_state",
+            "as": "table"
+          }
+        ]
+      }
     },
     {
       "id": "admin.hub_clone",
@@ -1067,7 +1199,11 @@
         ],
         "replay_skip": "hub clone resolves and downloads a dataset over the network into a new database directory; it never runs against the scratch cache executor"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "receipt": "cloned {/data/dataset}@{/data/branch} into {/data/dest} ({/data/object_count|plural:object}, {/data/total_bytes|size})"
+      }
     },
     {
       "id": "admin.config",
@@ -1105,7 +1241,24 @@
         "request": "requests/v1/admin/config_get.json",
         "response": "responses/v1/admin/config.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/target"
+          },
+          {
+            "field": "/data/durable"
+          },
+          {
+            "field": "/data/default_branch"
+          },
+          {
+            "field": "/data/created"
+          }
+        ]
+      }
     },
     {
       "id": "admin.config_key",
@@ -1147,7 +1300,11 @@
         "request": "requests/v1/admin/config_key.json",
         "response": "responses/v1/admin/config_value_default_branch.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "admin.describe",
@@ -1192,7 +1349,9 @@
         "request": "requests/v1/admin/describe.json",
         "response": "responses/v1/admin/describe.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "event.append",
@@ -1256,7 +1415,14 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "appended {/data/event_type} #{/data/sequence}",
+        "identity": [
+          "/data/sequence"
+        ]
+      }
     },
     {
       "id": "event.batch_append",
@@ -1318,7 +1484,18 @@
         "request": "requests/v1/event/batch_append.json",
         "response": "responses/v1/event/batch_append_ok.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/event_type"
+          },
+          {
+            "field": "/data/items/*/result/sequence"
+          }
+        ]
+      }
     },
     {
       "id": "event.count",
@@ -1368,7 +1545,11 @@
           "requests/v1/setup/event_append_updated.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data/count"
+      }
     },
     {
       "id": "event.exists",
@@ -1417,7 +1598,11 @@
           "requests/v1/event/append.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "event.get",
@@ -1467,7 +1652,35 @@
         ],
         "replay_skip": "wall-clock event timestamps are hashed into event content; outputs never reproduce (see engine next_event_timestamp)"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/value/event/sequence"
+          },
+          {
+            "field": "/data/value/event/event_type"
+          },
+          {
+            "field": "/data/value/event/timestamp",
+            "as": "date"
+          },
+          {
+            "field": "/data/value/event/payload",
+            "as": "json"
+          },
+          {
+            "field": "/data/value/event/hash"
+          },
+          {
+            "field": "/data/value/event/previous_hash"
+          },
+          {
+            "field": "/data/value/version"
+          }
+        ]
+      }
     },
     {
       "id": "event.list",
@@ -1526,7 +1739,26 @@
         ],
         "replay_skip": "wall-clock event timestamps are hashed into event content; outputs never reproduce (see engine next_event_timestamp)"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/event/sequence"
+          },
+          {
+            "field": "/data/items/*/event/event_type"
+          },
+          {
+            "field": "/data/items/*/event/timestamp",
+            "as": "date"
+          },
+          {
+            "field": "/data/items/*/event/payload",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "event.range",
@@ -1585,7 +1817,26 @@
         ],
         "replay_skip": "wall-clock event timestamps are hashed into event content; outputs never reproduce (see engine next_event_timestamp)"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/event/sequence"
+          },
+          {
+            "field": "/data/items/*/event/event_type"
+          },
+          {
+            "field": "/data/items/*/event/timestamp",
+            "as": "date"
+          },
+          {
+            "field": "/data/items/*/event/payload",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "event.range_time",
@@ -1644,7 +1895,26 @@
         ],
         "replay_skip": "wall-clock event timestamps are hashed into event content; outputs never reproduce (see engine next_event_timestamp)"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/event/sequence"
+          },
+          {
+            "field": "/data/items/*/event/event_type"
+          },
+          {
+            "field": "/data/items/*/event/timestamp",
+            "as": "date"
+          },
+          {
+            "field": "/data/items/*/event/payload",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "event.types",
@@ -1694,7 +1964,15 @@
           "requests/v1/setup/event_append_updated.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*"
+          }
+        ]
+      }
     },
     {
       "id": "event.verify_chain",
@@ -1744,7 +2022,24 @@
           "requests/v1/setup/event_append_updated.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/valid"
+          },
+          {
+            "field": "/data/length"
+          },
+          {
+            "field": "/data/first_invalid"
+          },
+          {
+            "field": "/data/error"
+          }
+        ]
+      }
     },
     {
       "id": "graph.edge.add",
@@ -1843,7 +2138,17 @@
           "requests/v1/setup/graph_add_bob.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} edge {/data/src} -[{/data/edge_type}]-> {/data/dst} in {/data/graph}",
+        "noun": "edge",
+        "identity": [
+          "/data/src",
+          "/data/edge_type",
+          "/data/dst"
+        ]
+      }
     },
     {
       "id": "graph.node.add",
@@ -1932,7 +2237,15 @@
           "requests/v1/graph/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} node {/data/node_id} in {/data/graph}",
+        "noun": "node",
+        "identity": [
+          "/data/node_id"
+        ]
+      }
     },
     {
       "id": "graph.apply_delete_policy",
@@ -1986,7 +2299,14 @@
           "requests/v1/setup/graph_add_bound_node.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "applied delete policy {/data/policy} ({/data/effect/affected_count} affected)",
+        "identity": [
+          "/data/effect/affected_count"
+        ]
+      }
     },
     {
       "id": "graph.batch_write",
@@ -2067,7 +2387,18 @@
           "requests/v1/graph/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/operation"
+          },
+          {
+            "field": "/data/items/*/result/created"
+          }
+        ]
+      }
     },
     {
       "id": "graph.analytics.bfs",
@@ -2149,7 +2480,13 @@
           "requests/v1/setup/graph_edge_alice_carol.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "analytics",
+      "display": {
+        "map": "/data/depths",
+        "header": "DEPTH",
+        "sort": "asc"
+      }
     },
     {
       "id": "graph.bindings",
@@ -2203,7 +2540,30 @@
           "requests/v1/setup/graph_add_bound_node.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/graph"
+          },
+          {
+            "field": "/data/items/*/node_id"
+          },
+          {
+            "field": "/data/items/*/binding/target/primitive"
+          },
+          {
+            "field": "/data/items/*/binding/target/space"
+          },
+          {
+            "field": "/data/items/*/binding/target/key"
+          },
+          {
+            "field": "/data/items/*/version"
+          }
+        ]
+      }
     },
     {
       "id": "graph.bulk_insert",
@@ -2296,7 +2656,14 @@
           "requests/v1/graph/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "inserted {/data/nodes_inserted|plural:node}, {/data/edges_inserted|plural:edge} into {/data/graph}",
+        "identity": [
+          "/data/graph"
+        ]
+      }
     },
     {
       "id": "graph.analytics.cdlp",
@@ -2368,7 +2735,13 @@
           "requests/v1/setup/graph_edge_carol_alice.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "analytics",
+      "display": {
+        "map": "/data/labels",
+        "header": "LABEL",
+        "sort": "key"
+      }
     },
     {
       "id": "graph.create",
@@ -2439,7 +2812,14 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} graph {/data/info/graph}",
+        "identity": [
+          "/data/info/graph"
+        ]
+      }
     },
     {
       "id": "graph.delete",
@@ -2496,7 +2876,15 @@
           "requests/v1/graph/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} graph {/data/graph}",
+        "noun": "graph",
+        "identity": [
+          "/data/graph"
+        ]
+      }
     },
     {
       "id": "graph.edge.get",
@@ -2564,7 +2952,31 @@
           "requests/v1/graph/edge_add.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/value/src"
+          },
+          {
+            "field": "/data/value/edge_type"
+          },
+          {
+            "field": "/data/value/dst"
+          },
+          {
+            "field": "/data/value/graph"
+          },
+          {
+            "field": "/data/value/weight",
+            "as": "float"
+          },
+          {
+            "field": "/data/value/version"
+          }
+        ]
+      }
     },
     {
       "id": "graph.node.get",
@@ -2626,7 +3038,28 @@
           "requests/v1/graph/node_add.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/value/node_id"
+          },
+          {
+            "field": "/data/value/graph"
+          },
+          {
+            "field": "/data/value/object_type"
+          },
+          {
+            "field": "/data/value/properties",
+            "as": "json"
+          },
+          {
+            "field": "/data/value/version"
+          }
+        ]
+      }
     },
     {
       "id": "graph.analytics.lcc",
@@ -2697,7 +3130,13 @@
           "requests/v1/setup/graph_edge_alice_carol.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "analytics",
+      "display": {
+        "map": "/data/coefficients",
+        "header": "COEFFICIENT",
+        "sort": "key"
+      }
     },
     {
       "id": "graph.list",
@@ -2750,7 +3189,15 @@
           "requests/v1/graph/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*"
+          }
+        ]
+      }
     },
     {
       "id": "graph.node.list",
@@ -2814,7 +3261,21 @@
           "requests/v1/setup/graph_add_carol.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/node_id"
+          },
+          {
+            "field": "/data/items/*/object_type"
+          },
+          {
+            "field": "/data/items/*/version"
+          }
+        ]
+      }
     },
     {
       "id": "graph.meta",
@@ -2874,7 +3335,27 @@
           "requests/v1/graph/edge_add.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/graph"
+          },
+          {
+            "field": "/data/node_count"
+          },
+          {
+            "field": "/data/edge_count"
+          },
+          {
+            "field": "/data/created_version"
+          },
+          {
+            "field": "/data/updated_version"
+          }
+        ]
+      }
     },
     {
       "id": "graph.neighbors",
@@ -2944,7 +3425,31 @@
           "requests/v1/setup/graph_edge_alice_carol.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/node_id"
+          },
+          {
+            "field": "/data/items/*/direction"
+          },
+          {
+            "field": "/data/items/*/edge_type"
+          },
+          {
+            "field": "/data/items/*/src"
+          },
+          {
+            "field": "/data/items/*/dst"
+          },
+          {
+            "field": "/data/items/*/edge/weight",
+            "as": "float"
+          }
+        ]
+      }
     },
     {
       "id": "graph.nodes_by_type",
@@ -3012,7 +3517,21 @@
           "requests/v1/setup/graph_add_carol.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/node_id"
+          },
+          {
+            "field": "/data/items/*/object_type"
+          },
+          {
+            "field": "/data/items/*/version"
+          }
+        ]
+      }
     },
     {
       "id": "graph.ontology.define_link_type",
@@ -3087,7 +3606,15 @@
           "requests/v1/graph/ontology_define_object_type.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} link type {/data/type_name} in {/data/graph}",
+        "noun": "link type",
+        "identity": [
+          "/data/type_name"
+        ]
+      }
     },
     {
       "id": "graph.ontology.define_object_type",
@@ -3161,7 +3688,15 @@
           "requests/v1/graph/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} object type {/data/type_name} in {/data/graph}",
+        "noun": "object type",
+        "identity": [
+          "/data/type_name"
+        ]
+      }
     },
     {
       "id": "graph.ontology.delete_link_type",
@@ -3229,7 +3764,15 @@
           "requests/v1/setup/graph_define_link_type_knows.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} link type {/data/type_name} in {/data/graph}",
+        "noun": "link type",
+        "identity": [
+          "/data/type_name"
+        ]
+      }
     },
     {
       "id": "graph.ontology.delete_object_type",
@@ -3296,7 +3839,15 @@
           "requests/v1/setup/graph_define_object_type_robot.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} object type {/data/type_name} in {/data/graph}",
+        "noun": "object type",
+        "identity": [
+          "/data/type_name"
+        ]
+      }
     },
     {
       "id": "graph.ontology.freeze",
@@ -3364,7 +3915,14 @@
           "requests/v1/graph/ontology_define_link_type.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "froze ontology of {/data/graph} ({/data/object_types|plural:object type}, {/data/link_types|plural:link type})",
+        "identity": [
+          "/data/graph"
+        ]
+      }
     },
     {
       "id": "graph.ontology.get",
@@ -3425,7 +3983,29 @@
           "requests/v1/graph/ontology_freeze.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/graph"
+          },
+          {
+            "field": "/data/status"
+          },
+          {
+            "field": "/data/version"
+          },
+          {
+            "field": "/data/object_types",
+            "as": "table"
+          },
+          {
+            "field": "/data/link_types",
+            "as": "table"
+          }
+        ]
+      }
     },
     {
       "id": "graph.ontology.summary",
@@ -3487,7 +4067,29 @@
           "requests/v1/setup/graph_add_bob.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/graph"
+          },
+          {
+            "field": "/data/status"
+          },
+          {
+            "field": "/data/version"
+          },
+          {
+            "field": "/data/object_types",
+            "as": "table"
+          },
+          {
+            "field": "/data/link_types",
+            "as": "table"
+          }
+        ]
+      }
     },
     {
       "id": "graph.analytics.pagerank",
@@ -3567,7 +4169,13 @@
           "requests/v1/setup/graph_edge_carol_alice.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "analytics",
+      "display": {
+        "map": "/data/ranks",
+        "header": "RANK",
+        "sort": "desc"
+      }
     },
     {
       "id": "graph.edge.remove",
@@ -3635,7 +4243,17 @@
           "requests/v1/graph/edge_add.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} edge {/data/src} -[{/data/edge_type}]-> {/data/dst} in {/data/graph}",
+        "noun": "edge",
+        "identity": [
+          "/data/src",
+          "/data/edge_type",
+          "/data/dst"
+        ]
+      }
     },
     {
       "id": "graph.node.remove",
@@ -3697,7 +4315,15 @@
           "requests/v1/graph/node_add.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} node {/data/node_id} in {/data/graph}",
+        "noun": "node",
+        "identity": [
+          "/data/node_id"
+        ]
+      }
     },
     {
       "id": "graph.sample",
@@ -3757,7 +4383,21 @@
           "requests/v1/setup/graph_add_carol.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/node_id"
+          },
+          {
+            "field": "/data/items/*/object_type"
+          },
+          {
+            "field": "/data/items/*/version"
+          }
+        ]
+      }
     },
     {
       "id": "graph.analytics.sssp",
@@ -3835,7 +4475,13 @@
           "requests/v1/setup/graph_edge_bob_carol.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "analytics",
+      "display": {
+        "map": "/data/distances",
+        "header": "DISTANCE",
+        "sort": "asc"
+      }
     },
     {
       "id": "graph.analytics.wcc",
@@ -3907,7 +4553,13 @@
           "requests/v1/setup/graph_edge_carol_alice.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "analytics",
+      "display": {
+        "map": "/data/components",
+        "header": "COMPONENT",
+        "sort": "key"
+      }
     },
     {
       "id": "admin.health",
@@ -3952,7 +4604,33 @@
         "request": "requests/v1/admin/health.json",
         "response": "responses/v1/admin/health.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/status"
+          },
+          {
+            "field": "/data/identity"
+          },
+          {
+            "field": "/data/registry"
+          },
+          {
+            "field": "/data/branch_catalog"
+          },
+          {
+            "field": "/data/space_catalog"
+          },
+          {
+            "field": "/data/default_branch"
+          },
+          {
+            "field": "/data/branch_count"
+          }
+        ]
+      }
     },
     {
       "id": "hub.get_dataset",
@@ -4015,7 +4693,62 @@
         "response": "responses/v1/hub/dataset.json",
         "replay_skip": "hub browse reads a configured StrataHub over the network; it never runs against the scratch cache executor"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/name"
+          },
+          {
+            "field": "/data/owner"
+          },
+          {
+            "field": "/data/badge"
+          },
+          {
+            "field": "/data/description"
+          },
+          {
+            "field": "/data/license"
+          },
+          {
+            "field": "/data/primitives",
+            "as": "list"
+          },
+          {
+            "field": "/data/tags",
+            "as": "list"
+          },
+          {
+            "field": "/data/tasks",
+            "as": "list"
+          },
+          {
+            "field": "/data/size_bytes",
+            "header": "size",
+            "as": "size"
+          },
+          {
+            "field": "/data/downloads"
+          },
+          {
+            "field": "/data/default_branch"
+          },
+          {
+            "field": "/data/created"
+          },
+          {
+            "field": "/data/last_updated"
+          },
+          {
+            "field": "/data/engine_version_required"
+          },
+          {
+            "field": "/data/clone_command"
+          }
+        ]
+      }
     },
     {
       "id": "hub.info",
@@ -4070,7 +4803,46 @@
         "response": "responses/v1/hub/info.json",
         "replay_skip": "hub browse reads a configured StrataHub over the network; it never runs against the scratch cache executor"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/server_implementation"
+          },
+          {
+            "field": "/data/server_version"
+          },
+          {
+            "field": "/data/protocol_version"
+          },
+          {
+            "field": "/data/hash_algorithm"
+          },
+          {
+            "field": "/data/max_dataset_size_bytes",
+            "header": "max_dataset_size",
+            "as": "size"
+          },
+          {
+            "field": "/data/max_object_size_bytes",
+            "header": "max_object_size",
+            "as": "size"
+          },
+          {
+            "field": "/data/max_manifest_size_bytes",
+            "header": "max_manifest_size",
+            "as": "size"
+          },
+          {
+            "field": "/data/supported_object_content_types",
+            "as": "list"
+          },
+          {
+            "field": "/data/telemetry_endpoint_enabled"
+          }
+        ]
+      }
     },
     {
       "id": "hub.list_datasets",
@@ -4135,7 +4907,36 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/name"
+          },
+          {
+            "field": "/data/items/*/badge"
+          },
+          {
+            "field": "/data/items/*/license"
+          },
+          {
+            "field": "/data/items/*/primitives",
+            "as": "list"
+          },
+          {
+            "field": "/data/items/*/size_bytes",
+            "header": "SIZE",
+            "as": "size"
+          },
+          {
+            "field": "/data/items/*/downloads"
+          },
+          {
+            "field": "/data/items/*/last_updated"
+          }
+        ]
+      }
     },
     {
       "id": "hub.list_refs",
@@ -4198,7 +4999,22 @@
         "response": "responses/v1/hub/refs.json",
         "replay_skip": "hub browse reads a configured StrataHub over the network; it never runs against the scratch cache executor"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/dataset"
+          },
+          {
+            "field": "/data/default_branch"
+          },
+          {
+            "field": "/data/refs",
+            "as": "table"
+          }
+        ]
+      }
     },
     {
       "id": "hub.list_yanked",
@@ -4267,7 +5083,27 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/dataset"
+          },
+          {
+            "field": "/data/items/*/branch"
+          },
+          {
+            "field": "/data/items/*/reason"
+          },
+          {
+            "field": "/data/items/*/yanked_at"
+          },
+          {
+            "field": "/data/items/*/manifest_hash"
+          }
+        ]
+      }
     },
     {
       "id": "inference.cache_status",
@@ -4309,7 +5145,24 @@
         "request": "requests/v1/inference/cache_status.json",
         "response": "responses/v1/inference/cache_status.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/generation_models",
+            "as": "list"
+          },
+          {
+            "field": "/data/embedding_models",
+            "as": "list"
+          },
+          {
+            "field": "/data/ranking_models",
+            "as": "list"
+          }
+        ]
+      }
     },
     {
       "id": "inference.capability",
@@ -4365,7 +5218,60 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/provider"
+          },
+          {
+            "field": "/data/model"
+          },
+          {
+            "field": "/data/availability"
+          },
+          {
+            "field": "/data/can_generate"
+          },
+          {
+            "field": "/data/can_embed"
+          },
+          {
+            "field": "/data/can_rank"
+          },
+          {
+            "field": "/data/can_tokenize"
+          },
+          {
+            "field": "/data/embedding_dim"
+          },
+          {
+            "field": "/data/requires_api_key"
+          },
+          {
+            "field": "/data/requires_network"
+          },
+          {
+            "field": "/data/network_enabled"
+          },
+          {
+            "field": "/data/provider_feature_enabled"
+          },
+          {
+            "field": "/data/supports_tools"
+          },
+          {
+            "field": "/data/supports_json_object"
+          },
+          {
+            "field": "/data/supports_json_schema"
+          },
+          {
+            "field": "/data/supports_logprobs"
+          }
+        ]
+      }
     },
     {
       "id": "inference.detokenize",
@@ -4439,7 +5345,9 @@
         "request": "requests/v1/inference/detokenize.json",
         "response": "responses/v1/inference/text.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "inference.embed",
@@ -4567,7 +5475,9 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "inference.generate",
@@ -4691,7 +5601,9 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "inference.models.list",
@@ -4734,7 +5646,9 @@
         "request": "requests/v1/inference/models_list.json",
         "response": "responses/v1/inference/models_list.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": "bespoke"
     },
     {
       "id": "inference.models.local",
@@ -4777,7 +5691,9 @@
         "request": "requests/v1/inference/models_local.json",
         "response": "responses/v1/inference/models_local.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": "bespoke"
     },
     {
       "id": "inference.models.pull",
@@ -4866,7 +5782,9 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "inference.rank",
@@ -4946,7 +5864,9 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "inference.status",
@@ -4988,7 +5908,9 @@
         "request": "requests/v1/inference/status.json",
         "response": "responses/v1/inference/status.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "inference.tokenize",
@@ -5068,7 +5990,9 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "inference.unload",
@@ -5110,7 +6034,9 @@
         "request": "requests/v1/inference/unload.json",
         "response": "responses/v1/inference/unload.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "admin.info",
@@ -5155,7 +6081,48 @@
         "request": "requests/v1/admin/info.json",
         "response": "responses/v1/admin/info.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/target"
+          },
+          {
+            "field": "/data/version"
+          },
+          {
+            "field": "/data/durable"
+          },
+          {
+            "field": "/data/default_branch"
+          },
+          {
+            "field": "/data/branch_count"
+          },
+          {
+            "field": "/data/space_count"
+          },
+          {
+            "field": "/data/memory_budget",
+            "fields": [
+              {
+                "field": "/data/memory_budget/source"
+              },
+              {
+                "field": "/data/memory_budget/total_bytes",
+                "header": "total",
+                "as": "size"
+              },
+              {
+                "field": "/data/memory_budget/usable_host_bytes",
+                "header": "usable_host",
+                "as": "size"
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "admin.ipc_status",
@@ -5193,7 +6160,21 @@
         "request": "requests/v1/admin/ipc_status.json",
         "response": "responses/v1/admin/ipc_status.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/hosting"
+          },
+          {
+            "field": "/data/is_owner"
+          },
+          {
+            "field": "/data/client_count"
+          }
+        ]
+      }
     },
     {
       "id": "admin.ipc_stop",
@@ -5231,7 +6212,9 @@
         "request": "requests/v1/admin/ipc_stop.json",
         "response": "responses/v1/admin/ipc_stop.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "json.batch_delete",
@@ -5300,7 +6283,15 @@
           "requests/v1/json/set.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/document_version"
+          }
+        ]
+      }
     },
     {
       "id": "json.batch_exists",
@@ -5353,7 +6344,15 @@
           "requests/v1/json/set.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/exists"
+          }
+        ]
+      }
     },
     {
       "id": "json.batch_get",
@@ -5414,7 +6413,22 @@
           "requests/v1/json/set.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/document_version"
+          },
+          {
+            "field": "/data/items/*/result/version"
+          },
+          {
+            "field": "/data/items/*/result/value",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "json.batch_set",
@@ -5500,7 +6514,15 @@
         "request": "requests/v1/json/batch_set.json",
         "response": "responses/v1/json/batch_set_ok.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/document_version"
+          }
+        ]
+      }
     },
     {
       "id": "json.count",
@@ -5553,7 +6575,11 @@
           "requests/v1/json/batch_set.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "json.delete",
@@ -5615,7 +6641,15 @@
         "request": "requests/v1/json/delete.json",
         "response": "responses/v1/json/delete_missing.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} {/data/key}",
+        "noun": "key",
+        "identity": [
+          "/data/key"
+        ]
+      }
     },
     {
       "id": "json.exists",
@@ -5668,7 +6702,11 @@
           "requests/v1/json/set.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "json.get",
@@ -5742,7 +6780,12 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "value": "/data/value/value",
+        "as": "json"
+      }
     },
     {
       "id": "json.history",
@@ -5796,7 +6839,26 @@
           "requests/v1/setup/json_set_user_age.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "history",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/*/version"
+          },
+          {
+            "field": "/data/*/document_version"
+          },
+          {
+            "field": "/data/*/committed_at",
+            "as": "date"
+          },
+          {
+            "field": "/data/*/value",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "json.index.create",
@@ -5863,7 +6925,14 @@
         "request": "requests/v1/json/index_create.json",
         "response": "responses/v1/json/index_definition.json"
       },
-      "wire_status": "transitional"
+      "wire_status": "transitional",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "created index {/data/name} on {/data/field_path} ({/data/index_type})",
+        "identity": [
+          "/data/name"
+        ]
+      }
     },
     {
       "id": "json.index.drop",
@@ -5921,7 +6990,15 @@
           "requests/v1/json/index_create.json"
         ]
       },
-      "wire_status": "transitional"
+      "wire_status": "transitional",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "dropped index {/request/name}",
+        "noun": "index",
+        "identity": [
+          "/request/name"
+        ]
+      }
     },
     {
       "id": "json.index.list",
@@ -5971,7 +7048,27 @@
           "requests/v1/json/index_create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/name"
+          },
+          {
+            "field": "/data/items/*/field_path"
+          },
+          {
+            "field": "/data/items/*/index_type"
+          },
+          {
+            "field": "/data/items/*/space"
+          },
+          {
+            "field": "/data/items/*/created_version"
+          }
+        ]
+      }
     },
     {
       "id": "json.list",
@@ -6024,7 +7121,15 @@
           "requests/v1/json/batch_set.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*"
+          }
+        ]
+      }
     },
     {
       "id": "json.sample",
@@ -6077,7 +7182,22 @@
           "requests/v1/json/batch_set.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/key"
+          },
+          {
+            "field": "/data/items/*/version"
+          },
+          {
+            "field": "/data/items/*/value",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "json.scan",
@@ -6130,7 +7250,22 @@
           "requests/v1/json/batch_set.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/key"
+          },
+          {
+            "field": "/data/items/*/version"
+          },
+          {
+            "field": "/data/items/*/value",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "json.set",
@@ -6218,7 +7353,15 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} {/data/key}",
+        "noun": "key",
+        "identity": [
+          "/data/key"
+        ]
+      }
     },
     {
       "id": "kv.batch_delete",
@@ -6283,7 +7426,16 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/key",
+            "as": "bytes"
+          }
+        ]
+      }
     },
     {
       "id": "kv.batch_exists",
@@ -6340,7 +7492,19 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/key",
+            "as": "bytes"
+          },
+          {
+            "field": "/data/items/*/result/exists"
+          }
+        ]
+      }
     },
     {
       "id": "kv.batch_get",
@@ -6397,7 +7561,23 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/key",
+            "as": "bytes"
+          },
+          {
+            "field": "/data/items/*/result/version"
+          },
+          {
+            "field": "/data/items/*/result/value",
+            "as": "bytes"
+          }
+        ]
+      }
     },
     {
       "id": "kv.batch_put",
@@ -6465,7 +7645,16 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/key",
+            "as": "bytes"
+          }
+        ]
+      }
     },
     {
       "id": "kv.count",
@@ -6518,7 +7707,11 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "kv.delete",
@@ -6568,7 +7761,15 @@
         "request": "requests/v1/kv/delete.json",
         "response": "responses/v1/kv/delete_missing.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} {/data/key|bytes}",
+        "noun": "key",
+        "identity": [
+          "/data/key|bytes"
+        ]
+      }
     },
     {
       "id": "kv.exists",
@@ -6621,7 +7822,11 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "kv.get",
@@ -6685,7 +7890,12 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "value": "/data/value/value",
+        "as": "bytes"
+      }
     },
     {
       "id": "kv.history",
@@ -6739,7 +7949,23 @@
           "requests/v1/setup/kv_put_a_two.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "history",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/version"
+          },
+          {
+            "field": "/data/items/*/committed_at",
+            "as": "date"
+          },
+          {
+            "field": "/data/items/*/value",
+            "as": "bytes"
+          }
+        ]
+      }
     },
     {
       "id": "kv.list",
@@ -6794,7 +8020,16 @@
           "requests/v1/setup/kv_put_a3.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*",
+            "as": "bytes"
+          }
+        ]
+      }
     },
     {
       "id": "kv.put",
@@ -6850,7 +8085,15 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} {/data/key|bytes}",
+        "noun": "key",
+        "identity": [
+          "/data/key|bytes"
+        ]
+      }
     },
     {
       "id": "kv.sample",
@@ -6903,7 +8146,23 @@
           "requests/v1/kv/put.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/key",
+            "as": "bytes"
+          },
+          {
+            "field": "/data/items/*/version"
+          },
+          {
+            "field": "/data/items/*/value",
+            "as": "bytes"
+          }
+        ]
+      }
     },
     {
       "id": "kv.scan",
@@ -6958,7 +8217,23 @@
           "requests/v1/setup/kv_put_a3.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/key",
+            "as": "bytes"
+          },
+          {
+            "field": "/data/items/*/version"
+          },
+          {
+            "field": "/data/items/*/value",
+            "as": "bytes"
+          }
+        ]
+      }
     },
     {
       "id": "admin.metrics",
@@ -7003,7 +8278,27 @@
         "request": "requests/v1/admin/metrics.json",
         "response": "responses/v1/admin/metrics.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/control_status"
+          },
+          {
+            "field": "/data/target"
+          },
+          {
+            "field": "/data/durable"
+          },
+          {
+            "field": "/data/branch_count"
+          },
+          {
+            "field": "/data/space_count"
+          }
+        ]
+      }
     },
     {
       "id": "admin.ping",
@@ -7040,7 +8335,9 @@
         "request": "requests/v1/admin/ping.json",
         "response": "responses/v1/admin/ping.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_sections",
+      "display": "bespoke"
     },
     {
       "id": "admin.remote",
@@ -7077,7 +8374,32 @@
         "request": "requests/v1/admin/remote_get.json",
         "response": "responses/v1/admin/remote_null.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/origin/dataset"
+          },
+          {
+            "field": "/data/origin/branch"
+          },
+          {
+            "field": "/data/origin/remote_url"
+          },
+          {
+            "field": "/data/origin/manifest_hash"
+          },
+          {
+            "field": "/data/origin/fetched_at_micros",
+            "as": "date"
+          },
+          {
+            "field": "/data/origin/base_frontier",
+            "as": "table"
+          }
+        ]
+      }
     },
     {
       "id": "space.create",
@@ -7127,7 +8449,14 @@
         "request": "requests/v1/spaces/create.json",
         "response": "responses/v1/spaces/create.json"
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} space {/data/space}",
+        "identity": [
+          "/data/space"
+        ]
+      }
     },
     {
       "id": "space.delete",
@@ -7198,7 +8527,15 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} space {/data/space} ({/data/deleted_rows|plural:row})",
+        "noun": "space",
+        "identity": [
+          "/data/space"
+        ]
+      }
     },
     {
       "id": "space.exists",
@@ -7251,7 +8588,11 @@
           "requests/v1/spaces/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "space.list",
@@ -7296,7 +8637,15 @@
           "requests/v1/spaces/create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*"
+          }
+        ]
+      }
     },
     {
       "id": "vector.batch_delete",
@@ -7367,7 +8716,15 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/vector_revision"
+          }
+        ]
+      }
     },
     {
       "id": "vector.batch_exists",
@@ -7430,7 +8787,15 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/exists"
+          }
+        ]
+      }
     },
     {
       "id": "vector.batch_get",
@@ -7497,7 +8862,29 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/value/key"
+          },
+          {
+            "field": "/data/items/*/result/value/version"
+          },
+          {
+            "field": "/data/items/*/result/value/vector_revision"
+          },
+          {
+            "field": "/data/items/*/result/value/data/embedding",
+            "as": "json"
+          },
+          {
+            "field": "/data/items/*/result/value/data/metadata",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "vector.batch_upsert",
@@ -7578,7 +8965,15 @@
           "requests/v1/vector/collection_create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "batch",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/result/vector_revision"
+          }
+        ]
+      }
     },
     {
       "id": "vector.collection.create",
@@ -7659,7 +9054,14 @@
           }
         ]
       },
-      "wire_status": "transitional"
+      "wire_status": "transitional",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "created collection {/data/items/0/name} ({/data/items/0/dimension} dimensions, {/data/items/0/metric})",
+        "identity": [
+          "/data/items/0/name"
+        ]
+      }
     },
     {
       "id": "vector.collection.delete",
@@ -7721,7 +9123,15 @@
           "requests/v1/vector/collection_create.json"
         ]
       },
-      "wire_status": "transitional"
+      "wire_status": "transitional",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "deleted collection {/request/collection}",
+        "noun": "collection",
+        "identity": [
+          "/request/collection"
+        ]
+      }
     },
     {
       "id": "vector.collection.list",
@@ -7783,7 +9193,27 @@
           "requests/v1/vector/collection_create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/name"
+          },
+          {
+            "field": "/data/items/*/dimension"
+          },
+          {
+            "field": "/data/items/*/metric"
+          },
+          {
+            "field": "/data/items/*/count"
+          },
+          {
+            "field": "/data/items/*/embedding_model"
+          }
+        ]
+      }
     },
     {
       "id": "vector.collection.set_embedding_model",
@@ -7873,7 +9303,14 @@
           }
         ]
       },
-      "wire_status": "transitional"
+      "wire_status": "transitional",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "updated collection {/data/items/0/name}: embedding model {/data/items/0/embedding_model}",
+        "identity": [
+          "/data/items/0/name"
+        ]
+      }
     },
     {
       "id": "vector.collection.stats",
@@ -7935,7 +9372,27 @@
           "requests/v1/vector/collection_create.json"
         ]
       },
-      "wire_status": "transitional"
+      "wire_status": "transitional",
+      "render": "status_value",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/name"
+          },
+          {
+            "field": "/data/items/*/dimension"
+          },
+          {
+            "field": "/data/items/*/metric"
+          },
+          {
+            "field": "/data/items/*/count"
+          },
+          {
+            "field": "/data/items/*/embedding_model"
+          }
+        ]
+      }
     },
     {
       "id": "vector.count",
@@ -7996,7 +9453,11 @@
           "requests/v1/vector/collection_create.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "vector.delete",
@@ -8059,7 +9520,15 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} {/data/key} in {/data/collection}",
+        "noun": "vector",
+        "identity": [
+          "/data/key"
+        ]
+      }
     },
     {
       "id": "vector.delete_all",
@@ -8122,7 +9591,14 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "deleted {/data/effect/affected_count|plural:vector} from {/data/collection}",
+        "identity": [
+          "/data/effect/affected_count"
+        ]
+      }
     },
     {
       "id": "vector.delete_by_filter",
@@ -8189,7 +9665,14 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "deleted {/data/effect/affected_count|plural:vector} from {/data/collection}",
+        "identity": [
+          "/data/effect/affected_count"
+        ]
+      }
     },
     {
       "id": "vector.exists",
@@ -8252,7 +9735,11 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "status_value",
+      "display": {
+        "value": "/data"
+      }
     },
     {
       "id": "vector.get",
@@ -8321,7 +9808,29 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "optional",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/value/key"
+          },
+          {
+            "field": "/data/value/vector_revision"
+          },
+          {
+            "field": "/data/value/version"
+          },
+          {
+            "field": "/data/value/data/embedding",
+            "as": "json"
+          },
+          {
+            "field": "/data/value/data/metadata",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "vector.history",
@@ -8384,7 +9893,30 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "history",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/version"
+          },
+          {
+            "field": "/data/items/*/vector_revision"
+          },
+          {
+            "field": "/data/items/*/committed_at",
+            "as": "date"
+          },
+          {
+            "field": "/data/items/*/data/embedding",
+            "as": "json"
+          },
+          {
+            "field": "/data/items/*/data/metadata",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "vector.index.query",
@@ -8456,7 +9988,122 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "search",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/matches/*/key"
+          },
+          {
+            "field": "/data/matches/*/score",
+            "as": "float"
+          },
+          {
+            "field": "/data/matches/*/metadata",
+            "as": "json"
+          }
+        ],
+        "fields": [
+          {
+            "field": "/data/diagnostics",
+            "fields": [
+              {
+                "field": "/data/diagnostics/active_delta_count"
+              },
+              {
+                "field": "/data/diagnostics/active_delta_seal_threshold"
+              },
+              {
+                "field": "/data/diagnostics/active_delta_source_count"
+              },
+              {
+                "field": "/data/diagnostics/artifact_sources",
+                "as": "table"
+              },
+              {
+                "field": "/data/diagnostics/collection"
+              },
+              {
+                "field": "/data/diagnostics/collection_exact_threshold"
+              },
+              {
+                "field": "/data/diagnostics/derived_bytes",
+                "header": "derived",
+                "as": "size"
+              },
+              {
+                "field": "/data/diagnostics/exact_fallback_count"
+              },
+              {
+                "field": "/data/diagnostics/exact_source_count"
+              },
+              {
+                "field": "/data/diagnostics/filtered_underfill_fallback"
+              },
+              {
+                "field": "/data/diagnostics/flat_source_count"
+              },
+              {
+                "field": "/data/diagnostics/hnsw_graph_builds"
+              },
+              {
+                "field": "/data/diagnostics/hnsw_memory_budget_bytes",
+                "header": "hnsw_memory_budget",
+                "as": "size"
+              },
+              {
+                "field": "/data/diagnostics/hnsw_source_count"
+              },
+              {
+                "field": "/data/diagnostics/indexed_source_count"
+              },
+              {
+                "field": "/data/diagnostics/indexed_vector_count"
+              },
+              {
+                "field": "/data/diagnostics/last_query_fallback_reason"
+              },
+              {
+                "field": "/data/diagnostics/last_query_used_index"
+              },
+              {
+                "field": "/data/diagnostics/manifest_generation"
+              },
+              {
+                "field": "/data/diagnostics/manifest_inherited_ref_count"
+              },
+              {
+                "field": "/data/diagnostics/manifest_owned_ref_count"
+              },
+              {
+                "field": "/data/diagnostics/manifest_ref_count"
+              },
+              {
+                "field": "/data/diagnostics/manifest_status"
+              },
+              {
+                "field": "/data/diagnostics/overfetch_factor"
+              },
+              {
+                "field": "/data/diagnostics/policy_mode"
+              },
+              {
+                "field": "/data/diagnostics/resolved_index_kind_summary"
+              },
+              {
+                "field": "/data/diagnostics/source_candidate_limit"
+              },
+              {
+                "field": "/data/diagnostics/source_flat_threshold"
+              },
+              {
+                "field": "/data/diagnostics/source_hnsw_threshold"
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "vector.keys",
@@ -8519,7 +10166,15 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*"
+          }
+        ]
+      }
     },
     {
       "id": "vector.query",
@@ -8693,7 +10348,23 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "search",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/*/key"
+          },
+          {
+            "field": "/data/*/score",
+            "as": "float"
+          },
+          {
+            "field": "/data/*/metadata",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "vector.sample",
@@ -8756,7 +10427,29 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/key"
+          },
+          {
+            "field": "/data/items/*/version"
+          },
+          {
+            "field": "/data/items/*/vector_revision"
+          },
+          {
+            "field": "/data/items/*/data/embedding",
+            "as": "json"
+          },
+          {
+            "field": "/data/items/*/data/metadata",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "vector.scan",
@@ -8819,7 +10512,29 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "page",
+      "display": {
+        "columns": [
+          {
+            "field": "/data/items/*/key"
+          },
+          {
+            "field": "/data/items/*/version"
+          },
+          {
+            "field": "/data/items/*/vector_revision"
+          },
+          {
+            "field": "/data/items/*/data/embedding",
+            "as": "json"
+          },
+          {
+            "field": "/data/items/*/data/metadata",
+            "as": "json"
+          }
+        ]
+      }
     },
     {
       "id": "vector.metadata.update",
@@ -8886,7 +10601,15 @@
           "requests/v1/setup/vector_upsert_doc_b.json"
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} {/data/key} in {/data/collection}",
+        "noun": "vector",
+        "identity": [
+          "/data/key"
+        ]
+      }
     },
     {
       "id": "vector.upsert",
@@ -9073,7 +10796,15 @@
           }
         ]
       },
-      "wire_status": "stable"
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} {/data/key} in {/data/collection}",
+        "noun": "vector",
+        "identity": [
+          "/data/key"
+        ]
+      }
     }
   ],
   "lookup": {

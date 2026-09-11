@@ -8,6 +8,24 @@ commands:
     response_model: StatusResponse<HubInfo>
     cli_path: ["hub", "info"]
     prose: commands/hub.info.md
+    display:
+      fields:
+        - field: /data/server_implementation
+        - field: /data/server_version
+        - field: /data/protocol_version
+        - field: /data/hash_algorithm
+        - field: /data/max_dataset_size_bytes
+          header: max_dataset_size
+          as: size
+        - field: /data/max_object_size_bytes
+          header: max_object_size
+          as: size
+        - field: /data/max_manifest_size_bytes
+          header: max_manifest_size
+          as: size
+        - field: /data/supported_object_content_types
+          as: list
+        - field: /data/telemetry_endpoint_enabled
     fixtures:
       request: requests/v1/hub/info.json
       response: responses/v1/hub/info.json
@@ -23,6 +41,18 @@ commands:
     prose: commands/hub.list_datasets.md
     errors+:
       - invalid_argument.executor.hub_filter
+    display:
+      columns:
+        - field: /data/items/*/name
+        - field: /data/items/*/badge
+        - field: /data/items/*/license
+        - field: /data/items/*/primitives
+          as: list
+        - field: /data/items/*/size_bytes
+          header: SIZE
+          as: size
+        - field: /data/items/*/downloads
+        - field: /data/items/*/last_updated
     fixtures:
       request: requests/v1/hub/list_datasets.json
       response: responses/v1/hub/datasets.json
@@ -42,6 +72,28 @@ commands:
     errors+:
       - invalid_argument.executor.hub_dataset
       - not_found.executor.hub_dataset
+    display:
+      fields:
+        - field: /data/name
+        - field: /data/owner
+        - field: /data/badge
+        - field: /data/description
+        - field: /data/license
+        - field: /data/primitives
+          as: list
+        - field: /data/tags
+          as: list
+        - field: /data/tasks
+          as: list
+        - field: /data/size_bytes
+          header: size
+          as: size
+        - field: /data/downloads
+        - field: /data/default_branch
+        - field: /data/created
+        - field: /data/last_updated
+        - field: /data/engine_version_required
+        - field: /data/clone_command
     fixtures:
       request: requests/v1/hub/get_dataset.json
       response: responses/v1/hub/dataset.json
@@ -58,6 +110,12 @@ commands:
     errors+:
       - invalid_argument.executor.hub_dataset
       - not_found.executor.hub_dataset
+    display:
+      fields:
+        - field: /data/dataset
+        - field: /data/default_branch
+        - field: /data/refs
+          as: table
     fixtures:
       request: requests/v1/hub/list_refs.json
       response: responses/v1/hub/refs.json
@@ -74,6 +132,13 @@ commands:
     errors+:
       - invalid_argument.executor.hub_since
       - not_found.executor.hub_resource
+    display:
+      columns:
+        - field: /data/items/*/dataset
+        - field: /data/items/*/branch
+        - field: /data/items/*/reason
+        - field: /data/items/*/yanked_at
+        - field: /data/items/*/manifest_hash
     fixtures:
       request: requests/v1/hub/list_yanked.json
       response: responses/v1/hub/yanked.json

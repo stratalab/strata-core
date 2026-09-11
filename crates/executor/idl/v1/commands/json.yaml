@@ -15,6 +15,11 @@ commands:
       - invalid_argument.engine.json_document_too_large
       - invalid_argument.engine.json_document_too_deep
       - invalid_argument.engine.json_array_too_large
+    display:
+      receipt: "{verb} {/data/key}"
+      noun: key
+      identity:
+        - /data/key
     fixtures:
       request: requests/v1/json/set.json
       response: responses/v1/json/set_applied.json
@@ -34,6 +39,9 @@ commands:
     errors+:
       - invalid_argument.engine.json_path
       - invalid_argument.engine.json_path_too_long
+    display:
+      value: /data/value/value
+      as: json
     fixtures:
       request: requests/v1/json/get.json
       response: responses/v1/json/get_versioned_found.json
@@ -57,6 +65,11 @@ commands:
       - invalid_argument.engine.json_path
       - invalid_argument.engine.json_path_too_long
       - invalid_argument.engine.json_path_type
+    display:
+      receipt: "{verb} {/data/key}"
+      noun: key
+      identity:
+        - /data/key
     fixtures:
       request: requests/v1/json/delete.json
       response: responses/v1/json/delete_missing.json
@@ -67,6 +80,14 @@ commands:
     output: Output::JsonVersionHistory
     result: JsonHistoryItem
     prose: commands/json.history.md
+    display:
+      columns:
+        - field: /data/*/version
+        - field: /data/*/document_version
+        - field: /data/*/committed_at
+          as: date
+        - field: /data/*/value
+          as: json
     fixtures:
       setup:
         - requests/v1/json/set.json
@@ -80,6 +101,8 @@ commands:
     output: Output::Bool
     result: bool
     prose: commands/json.exists.md
+    display:
+      value: /data
     fixtures:
       setup:
         - requests/v1/json/set.json
@@ -92,6 +115,9 @@ commands:
     output: Output::JsonBatchExistsResults
     result: BatchExistsPresence
     prose: commands/json.batch_exists.md
+    display:
+      columns:
+        - field: /data/items/*/result/exists
     fixtures:
       setup:
         - requests/v1/json/set.json
@@ -114,6 +140,9 @@ commands:
       - invalid_argument.engine.json_document_too_deep
       - invalid_argument.engine.json_array_too_large
       - invalid_argument.executor.json_batch_duplicate_key
+    display:
+      columns:
+        - field: /data/items/*/result/document_version
     fixtures:
       request: requests/v1/json/batch_set.json
       response: responses/v1/json/batch_set_ok.json
@@ -127,6 +156,12 @@ commands:
     errors+:
       - invalid_argument.engine.json_path
       - invalid_argument.engine.json_path_too_long
+    display:
+      columns:
+        - field: /data/items/*/result/document_version
+        - field: /data/items/*/result/version
+        - field: /data/items/*/result/value
+          as: json
     fixtures:
       setup:
         - requests/v1/json/set.json
@@ -144,6 +179,9 @@ commands:
       - invalid_argument.engine.json_path_too_long
       - invalid_argument.engine.json_path_type
       - invalid_argument.executor.json_batch_duplicate_key
+    display:
+      columns:
+        - field: /data/items/*/result/document_version
     fixtures:
       setup:
         - requests/v1/json/set.json
@@ -157,6 +195,9 @@ commands:
     result: String
     response_model: Page<String, String>
     prose: commands/json.list.md
+    display:
+      columns:
+        - field: /data/items/*
     fixtures:
       setup:
         - requests/v1/json/batch_set.json
@@ -170,6 +211,12 @@ commands:
     result: JsonSampleItem
     response_model: Page<JsonSampleItem, String>
     prose: commands/json.scan.md
+    display:
+      columns:
+        - field: /data/items/*/key
+        - field: /data/items/*/version
+        - field: /data/items/*/value
+          as: json
     fixtures:
       setup:
         - requests/v1/json/batch_set.json
@@ -182,6 +229,8 @@ commands:
     output: Output::Uint
     result: u64
     prose: commands/json.count.md
+    display:
+      value: /data
     fixtures:
       setup:
         - requests/v1/json/batch_set.json
@@ -194,6 +243,12 @@ commands:
     output: Output::JsonSampleResult
     result: JsonSampleItem
     prose: commands/json.sample.md
+    display:
+      columns:
+        - field: /data/items/*/key
+        - field: /data/items/*/version
+        - field: /data/items/*/value
+          as: json
     fixtures:
       setup:
         - requests/v1/json/batch_set.json
@@ -215,6 +270,10 @@ commands:
       - already_exists.engine.json_index
     errors-:
       - invalid_argument.engine.json_document_id
+    display:
+      receipt: "created index {/data/name} on {/data/field_path} ({/data/index_type})"
+      identity:
+        - /data/name
     fixtures:
       request: requests/v1/json/index_create.json
       response: responses/v1/json/index_definition.json
@@ -231,6 +290,11 @@ commands:
       - invalid_argument.engine.json_index_name_reserved
     errors-:
       - invalid_argument.engine.json_document_id
+    display:
+      receipt: "dropped index {/request/name}"
+      noun: index
+      identity:
+        - /request/name
     fixtures:
       setup:
         - requests/v1/json/index_create.json
@@ -246,6 +310,13 @@ commands:
     prose: commands/json.index.list.md
     errors-:
       - invalid_argument.engine.json_document_id
+    display:
+      columns:
+        - field: /data/items/*/name
+        - field: /data/items/*/field_path
+        - field: /data/items/*/index_type
+        - field: /data/items/*/space
+        - field: /data/items/*/created_version
     fixtures:
       setup:
         - requests/v1/json/index_create.json

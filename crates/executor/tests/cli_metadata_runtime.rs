@@ -44,7 +44,7 @@ fn embedded_cli_metadata_loads_without_generator_feature() {
     assert_eq!(catalog.index().schema_version, "strata.cli.v1");
     assert_eq!(
         catalog.index().generator_version,
-        "strata-executor-cli-idl.1"
+        "strata-executor-cli-idl.2"
     );
 
     // Every command the IDL declares, and only those, in the embedded index
@@ -326,7 +326,15 @@ fn runtime_validation_rejects_bad_family_group_membership() {
 #[test]
 fn runtime_metadata_source_does_not_use_authoring_inputs() {
     let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source = fs::read_to_string(crate_root.join("src/cli_metadata.rs")).expect("source reads");
+    // The runtime module and its display submodule together; the display
+    // vocabulary is authored in YAML but the runtime only ever sees the
+    // resolved JSON index.
+    let mut source =
+        fs::read_to_string(crate_root.join("src/cli_metadata.rs")).expect("source reads");
+    source.push_str(
+        &fs::read_to_string(crate_root.join("src/cli_metadata/display.rs"))
+            .expect("display source reads"),
+    );
     for forbidden in [
         "serde_yaml",
         "frontmatter",

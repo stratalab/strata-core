@@ -10,6 +10,9 @@ commands:
     errors-:
       - invalid_argument.engine.product_space
       - invalid_argument.engine.product_space_reserved
+    display:
+      columns:
+        - field: /data/items/*
     fixtures:
       setup:
         - requests/v1/spaces/create.json
@@ -22,6 +25,10 @@ commands:
     output: Output::SpaceCreateResult
     result: SpaceCreate
     prose: commands/space.create.md
+    display:
+      receipt: "{verb} space {/data/space}"
+      identity:
+        - /data/space
     fixtures:
       request: requests/v1/spaces/create.json
       response: responses/v1/spaces/create.json
@@ -32,6 +39,8 @@ commands:
     output: Output::Bool
     result: bool
     prose: commands/space.exists.md
+    display:
+      value: /data
     fixtures:
       setup:
         - requests/v1/spaces/create.json
@@ -48,6 +57,11 @@ commands:
       - invalid_argument.engine.space_delete_default
       - failed_precondition.engine.space_not_empty
       - invalid_argument.engine.space_delete_too_large
+    display:
+      receipt: "{verb} space {/data/space} ({/data/deleted_rows|plural:row})"
+      noun: space
+      identity:
+        - /data/space
     fixtures:
       setup:
         - requests/v1/spaces/create.json

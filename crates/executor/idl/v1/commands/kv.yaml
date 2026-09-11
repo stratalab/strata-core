@@ -6,6 +6,11 @@ commands:
     output: Output::WriteResult
     result: KvWrite
     prose: commands/kv.put.md
+    display:
+      receipt: "{verb} {/data/key|bytes}"
+      noun: key
+      identity:
+        - /data/key|bytes
     fixtures:
       request: requests/v1/kv/put.json
       response: responses/v1/kv/write_applied.json
@@ -21,6 +26,9 @@ commands:
     prose: commands/kv.get.md
     errors+:
       - history_unavailable.engine.persistence_history
+    display:
+      value: /data/value/value
+      as: bytes
     fixtures:
       request: requests/v1/kv/get.json
       response: responses/v1/kv/get_found.json
@@ -37,6 +45,11 @@ commands:
     output: Output::DeleteResult
     result: KvDelete
     prose: commands/kv.delete.md
+    display:
+      receipt: "{verb} {/data/key|bytes}"
+      noun: key
+      identity:
+        - /data/key|bytes
     fixtures:
       request: requests/v1/kv/delete.json
       response: responses/v1/kv/delete_missing.json
@@ -48,6 +61,10 @@ commands:
     result: Bytes
     response_model: Page<Bytes, Bytes>
     prose: commands/kv.list.md
+    display:
+      columns:
+        - field: /data/items/*
+          as: bytes
     fixtures:
       request: requests/v1/kv/list.json
       response: responses/v1/kv/list_page.json
@@ -63,6 +80,13 @@ commands:
     result: ScanItem
     response_model: Page<ScanItem, Bytes>
     prose: commands/kv.scan.md
+    display:
+      columns:
+        - field: /data/items/*/key
+          as: bytes
+        - field: /data/items/*/version
+        - field: /data/items/*/value
+          as: bytes
     fixtures:
       request: requests/v1/kv/scan.json
       response: responses/v1/kv/scan_page.json
@@ -81,6 +105,10 @@ commands:
       - invalid_argument.engine.kv_batch
       - invalid_argument.engine.kv_batch_duplicate_key
       - invalid_argument.executor.kv_batch_duplicate_key
+    display:
+      columns:
+        - field: /data/items/*/result/key
+          as: bytes
     fixtures:
       request: requests/v1/kv/batch_put.json
       response: responses/v1/kv/batch_mutation_ok.json
@@ -96,6 +124,13 @@ commands:
     prose: commands/kv.batch_get.md
     errors+:
       - invalid_argument.engine.kv_batch
+    display:
+      columns:
+        - field: /data/items/*/result/key
+          as: bytes
+        - field: /data/items/*/result/version
+        - field: /data/items/*/result/value
+          as: bytes
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -112,6 +147,10 @@ commands:
       - invalid_argument.engine.kv_batch
       - invalid_argument.engine.kv_batch_duplicate_key
       - invalid_argument.executor.kv_batch_duplicate_key
+    display:
+      columns:
+        - field: /data/items/*/result/key
+          as: bytes
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -126,6 +165,11 @@ commands:
     prose: commands/kv.batch_exists.md
     errors+:
       - invalid_argument.engine.kv_batch
+    display:
+      columns:
+        - field: /data/items/*/result/key
+          as: bytes
+        - field: /data/items/*/result/exists
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -138,6 +182,8 @@ commands:
     output: Output::Bool
     result: bool
     prose: commands/kv.exists.md
+    display:
+      value: /data
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -150,6 +196,13 @@ commands:
     output: Output::VersionHistory
     result: HistoryItem
     prose: commands/kv.history.md
+    display:
+      columns:
+        - field: /data/items/*/version
+        - field: /data/items/*/committed_at
+          as: date
+        - field: /data/items/*/value
+          as: bytes
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -163,6 +216,8 @@ commands:
     output: Output::Uint
     result: u64
     prose: commands/kv.count.md
+    display:
+      value: /data
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -175,6 +230,13 @@ commands:
     output: Output::SampleResult
     result: SampleItem
     prose: commands/kv.sample.md
+    display:
+      columns:
+        - field: /data/items/*/key
+          as: bytes
+        - field: /data/items/*/version
+        - field: /data/items/*/value
+          as: bytes
     fixtures:
       setup:
         - requests/v1/kv/put.json
