@@ -3866,6 +3866,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "regex",
  "rustyline",
  "serde",
  "serde_json",

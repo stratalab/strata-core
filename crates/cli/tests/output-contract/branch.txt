@@ -1,0 +1,244 @@
+### branch.create · responses/v1/branches/create.json · human
+{
+  "branch_id": "dc42122c-83b7-5436-89bc-9ffa4299697c",
+  "created_at": 3,
+  "deleted_at": null,
+  "generation": 1,
+  "name": "feature",
+  "parent": null,
+  "state_revision": 0,
+  "status": "active"
+}
+∎
+### branch.create · responses/v1/branches/create.json · raw
+{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+∎
+### branch.create · responses/v1/errors/branches/create_duplicate.json · human
+already_exists.engine.branch: command failed∎
+### branch.create · responses/v1/errors/branches/create_duplicate.json · raw
+already_exists.engine.branch: command failed∎
+### branch.delete · edge:applied=false · human
+not_found applied=false
+∎
+### branch.delete · edge:applied=false · raw
+∎
+### branch.delete · responses/v1/branches/delete.json · human
+deleted applied=true
+∎
+### branch.delete · responses/v1/branches/delete.json · raw
+∎
+### branch.diff · responses/v1/branches/diff.json · human
+{
+  "branch_a": "default",
+  "branch_b": "feature",
+  "spaces": [
+    {
+      "added": [],
+      "capability": "kv",
+      "modified": [],
+      "removed": [
+        {
+          "identity": "a",
+          "version": 3
+        }
+      ],
+      "space": "default"
+    }
+  ]
+}
+∎
+### branch.diff · responses/v1/branches/diff.json · raw
+{"branch_a":"default","branch_b":"feature","spaces":[{"added":[],"capability":"kv","modified":[],"removed":[{"identity":"a","version":3}],"space":"default"}]}
+∎
+### branch.fork · responses/v1/branches/fork.json · human
+{
+  "branch_id": "338a0c4e-73b4-5f8d-82bd-5f2846698908",
+  "created_at": 4,
+  "deleted_at": null,
+  "generation": 1,
+  "name": "feature-fork",
+  "parent": {
+    "branch_id": "00000000-0000-0000-0000-000000000000",
+    "fork_timestamp": null,
+    "fork_version": 3,
+    "generation": 1,
+    "name": "default"
+  },
+  "state_revision": 0,
+  "status": "active"
+}
+∎
+### branch.fork · responses/v1/branches/fork.json · raw
+{"branch_id":"338a0c4e-73b4-5f8d-82bd-5f2846698908","created_at":4,"deleted_at":null,"generation":1,"name":"feature-fork","parent":{"branch_id":"00000000-0000-0000-0000-000000000000","fork_timestamp":null,"fork_version":3,"generation":1,"name":"default"},"state_revision":0,"status":"active"}
+∎
+### branch.fork_at_timestamp · responses/v1/branches/fork_at_timestamp.json · human
+{
+  "branch_id": "338a0c4e-73b4-5f8d-82bd-5f2846698908",
+  "created_at": 4,
+  "deleted_at": null,
+  "generation": 1,
+  "name": "feature-fork",
+  "parent": {
+    "branch_id": "00000000-0000-0000-0000-000000000000",
+    "fork_timestamp": 3,
+    "fork_version": 3,
+    "generation": 1,
+    "name": "default"
+  },
+  "state_revision": 0,
+  "status": "active"
+}
+∎
+### branch.fork_at_timestamp · responses/v1/branches/fork_at_timestamp.json · raw
+{"branch_id":"338a0c4e-73b4-5f8d-82bd-5f2846698908","created_at":4,"deleted_at":null,"generation":1,"name":"feature-fork","parent":{"branch_id":"00000000-0000-0000-0000-000000000000","fork_timestamp":3,"fork_version":3,"generation":1,"name":"default"},"state_revision":0,"status":"active"}
+∎
+### branch.fork_at_version · responses/v1/branches/fork_at_version.json · human
+{
+  "branch_id": "338a0c4e-73b4-5f8d-82bd-5f2846698908",
+  "created_at": 4,
+  "deleted_at": null,
+  "generation": 1,
+  "name": "feature-fork",
+  "parent": {
+    "branch_id": "00000000-0000-0000-0000-000000000000",
+    "fork_timestamp": null,
+    "fork_version": 3,
+    "generation": 1,
+    "name": "default"
+  },
+  "state_revision": 0,
+  "status": "active"
+}
+∎
+### branch.fork_at_version · responses/v1/branches/fork_at_version.json · raw
+{"branch_id":"338a0c4e-73b4-5f8d-82bd-5f2846698908","created_at":4,"deleted_at":null,"generation":1,"name":"feature-fork","parent":{"branch_id":"00000000-0000-0000-0000-000000000000","fork_timestamp":null,"fork_version":3,"generation":1,"name":"default"},"state_revision":0,"status":"active"}
+∎
+### branch.get · responses/v1/branches/get.json · human
+{
+  "branch_id": "dc42122c-83b7-5436-89bc-9ffa4299697c",
+  "created_at": 3,
+  "deleted_at": null,
+  "generation": 1,
+  "name": "feature",
+  "parent": null,
+  "state_revision": 0,
+  "status": "active"
+}
+∎
+### branch.get · responses/v1/branches/get.json · raw
+{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+∎
+### branch.list · edge:has_more=true · human
+{"branch_id":"00000000-0000-0000-0000-000000000000","created_at":null,"deleted_at":null,"generation":1,"name":"default","parent":null,"state_revision":0,"status":"active"}
+{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### branch.list · edge:has_more=true · raw
+{"branch_id":"00000000-0000-0000-0000-000000000000","created_at":null,"deleted_at":null,"generation":1,"name":"default","parent":null,"state_revision":0,"status":"active"}
+{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+∎
+### branch.list · edge:items=[] · human
+(empty)
+∎
+### branch.list · edge:items=[] · raw
+(empty)
+∎
+### branch.list · responses/v1/branches/list.json · human
+{"branch_id":"00000000-0000-0000-0000-000000000000","created_at":null,"deleted_at":null,"generation":1,"name":"default","parent":null,"state_revision":0,"status":"active"}
+{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+∎
+### branch.list · responses/v1/branches/list.json · raw
+{"branch_id":"00000000-0000-0000-0000-000000000000","created_at":null,"deleted_at":null,"generation":1,"name":"default","parent":null,"state_revision":0,"status":"active"}
+{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+∎
+### branch.merge · responses/v1/branches/merge.json · human
+{
+  "applied": [
+    {
+      "capability": "kv",
+      "identity": "a",
+      "space": "default",
+      "value": "two"
+    }
+  ],
+  "branch_point": 3,
+  "capabilities_covered": [
+    "kv",
+    "json",
+    "vector"
+  ],
+  "capabilities_unsupported": [
+    "vector_collection",
+    "event",
+    "graph_metadata",
+    "graph_node",
+    "graph_edge",
+    "graph_ontology"
+  ],
+  "conflicts": [],
+  "deleted": [],
+  "derived_state": [],
+  "source": "feature-fork",
+  "spaces_covered": [
+    "default"
+  ],
+  "strategy": "strict",
+  "target": "default",
+  "target_timestamp": 9,
+  "target_version": 9
+}
+∎
+### branch.merge · responses/v1/branches/merge.json · raw
+{"applied":[{"capability":"kv","identity":"a","space":"default","value":"two"}],"branch_point":3,"capabilities_covered":["kv","json","vector"],"capabilities_unsupported":["vector_collection","event","graph_metadata","graph_node","graph_edge","graph_ontology"],"conflicts":[],"deleted":[],"derived_state":[],"source":"feature-fork","spaces_covered":["default"],"strategy":"strict","target":"default","target_timestamp":9,"target_version":9}
+∎
+### branch.merge · responses/v1/errors/branches/merge_conflict.json · human
+conflict.engine.promotion: command failed∎
+### branch.merge · responses/v1/errors/branches/merge_conflict.json · raw
+conflict.engine.promotion: command failed∎
+### branch.merge · responses/v1/errors/branches/merge_unrelated.json · human
+invalid_argument.engine.branch_point: command failed∎
+### branch.merge · responses/v1/errors/branches/merge_unrelated.json · raw
+invalid_argument.engine.branch_point: command failed∎
+### branch.preview · responses/v1/branches/preview.json · human
+{
+  "branch_point": 3,
+  "capabilities_covered": [
+    "kv",
+    "json",
+    "vector"
+  ],
+  "capabilities_unsupported": [
+    "vector_collection",
+    "event",
+    "graph_metadata",
+    "graph_node",
+    "graph_edge",
+    "graph_ontology"
+  ],
+  "conflicts": [
+    {
+      "capability": "kv",
+      "identity": "a",
+      "kind": "value_divergence",
+      "source_value": "two",
+      "space": "default",
+      "strategy_result": "refused",
+      "target_value": "three"
+    }
+  ],
+  "derived_state": [],
+  "source": "feature-fork",
+  "spaces_covered": [
+    "default"
+  ],
+  "strategy": "strict",
+  "target": "default"
+}
+∎
+### branch.preview · responses/v1/branches/preview.json · raw
+{"branch_point":3,"capabilities_covered":["kv","json","vector"],"capabilities_unsupported":["vector_collection","event","graph_metadata","graph_node","graph_edge","graph_ontology"],"conflicts":[{"capability":"kv","identity":"a","kind":"value_divergence","source_value":"two","space":"default","strategy_result":"refused","target_value":"three"}],"derived_state":[],"source":"feature-fork","spaces_covered":["default"],"strategy":"strict","target":"default"}
+∎
+### branch.preview · responses/v1/errors/branches/merge_unrelated.json · human
+invalid_argument.engine.branch_point: command failed∎
+### branch.preview · responses/v1/errors/branches/merge_unrelated.json · raw
+invalid_argument.engine.branch_point: command failed∎

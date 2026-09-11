@@ -1,0 +1,323 @@
+### 00 strata kv put greeting hello · exit
+0
+∎
+### 00 strata kv put greeting hello · stderr
+∎
+### 00 strata kv put greeting hello · stdout
+created greeting applied=true
+∎
+### 01 strata --raw kv put greeting hello2 · exit
+0
+∎
+### 01 strata --raw kv put greeting hello2 · stderr
+∎
+### 01 strata --raw kv put greeting hello2 · stdout
+∎
+### 02 strata --json kv put greeting hello3 · exit
+0
+∎
+### 02 strata --json kv put greeting hello3 · stderr
+∎
+### 02 strata --json kv put greeting hello3 · stdout
+{"data":{"commit":{"committed_at":<micros>,"delete_count":0,"durability":"standard","put_count":1,"timestamp":5,"version":5},"effect":{"affected_count":1,"applied":true,"kind":"updated","matched":true},"key":"Z3JlZXRpbmc="},"type":"write_result"}
+∎
+### 03 strata kv get greeting · exit
+0
+∎
+### 03 strata kv get greeting · stderr
+∎
+### 03 strata kv get greeting · stdout
+hello3
+∎
+### 04 strata --raw kv get greeting · exit
+0
+∎
+### 04 strata --raw kv get greeting · stderr
+∎
+### 04 strata --raw kv get greeting · stdout
+hello3
+∎
+### 05 strata --json kv get greeting · exit
+0
+∎
+### 05 strata --json kv get greeting · stderr
+∎
+### 05 strata --json kv get greeting · stdout
+{"data":{"found":true,"value":{"timestamp":5,"value":"aGVsbG8z","version":5}},"type":"kv_versioned_value"}
+∎
+### 06 strata kv get missing · exit
+0
+∎
+### 06 strata kv get missing · stderr
+∎
+### 06 strata kv get missing · stdout
+(nil)
+∎
+### 07 strata --raw kv get missing · exit
+0
+∎
+### 07 strata --raw kv get missing · stderr
+∎
+### 07 strata --raw kv get missing · stdout
+∎
+### 08 strata --json kv get missing · exit
+0
+∎
+### 08 strata --json kv get missing · stderr
+∎
+### 08 strata --json kv get missing · stdout
+{"data":{"found":false,"value":null},"type":"kv_versioned_value"}
+∎
+### 09 strata kv delete missing · exit
+0
+∎
+### 09 strata kv delete missing · stderr
+∎
+### 09 strata kv delete missing · stdout
+not_found missing applied=false
+∎
+### 10 strata --raw kv delete missing · exit
+0
+∎
+### 10 strata --raw kv delete missing · stderr
+∎
+### 10 strata --raw kv delete missing · stdout
+∎
+### 11 strata --json kv delete missing · exit
+0
+∎
+### 11 strata --json kv delete missing · stderr
+∎
+### 11 strata --json kv delete missing · stdout
+{"data":{"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"key":"bWlzc2luZw=="},"type":"delete_result"}
+∎
+### 12 strata kv delete greeting · exit
+0
+∎
+### 12 strata kv delete greeting · stderr
+∎
+### 12 strata kv delete greeting · stdout
+deleted greeting applied=true
+∎
+### 13 strata kv history greeting · exit
+0
+∎
+### 13 strata kv history greeting · stderr
+∎
+### 13 strata kv history greeting · stdout
+{"committed_at":"<instant>","timestamp":6,"tombstone":true,"value":null,"version":6}
+{"committed_at":"<instant>","timestamp":5,"tombstone":false,"value":"hello3","version":5}
+{"committed_at":"<instant>","timestamp":4,"tombstone":false,"value":"hello2","version":4}
+{"committed_at":"<instant>","timestamp":3,"tombstone":false,"value":"hello","version":3}
+∎
+### 14 strata --raw kv history greeting · exit
+0
+∎
+### 14 strata --raw kv history greeting · stderr
+∎
+### 14 strata --raw kv history greeting · stdout
+{"committed_at":"<instant>","timestamp":6,"tombstone":true,"value":null,"version":6}
+{"committed_at":"<instant>","timestamp":5,"tombstone":false,"value":"hello3","version":5}
+{"committed_at":"<instant>","timestamp":4,"tombstone":false,"value":"hello2","version":4}
+{"committed_at":"<instant>","timestamp":3,"tombstone":false,"value":"hello","version":3}
+∎
+### 15 strata --json kv history greeting · exit
+0
+∎
+### 15 strata --json kv history greeting · stderr
+∎
+### 15 strata --json kv history greeting · stdout
+{"data":{"items":[{"committed_at":<micros>,"timestamp":6,"tombstone":true,"value":null,"version":6},{"committed_at":<micros>,"timestamp":5,"tombstone":false,"value":"aGVsbG8z","version":5},{"committed_at":<micros>,"timestamp":4,"tombstone":false,"value":"aGVsbG8y","version":4},{"committed_at":<micros>,"timestamp":3,"tombstone":false,"value":"aGVsbG8=","version":3}]},"type":"version_history"}
+∎
+### 16 strata kv list · exit
+0
+∎
+### 16 strata kv list · stderr
+∎
+### 16 strata kv list · stdout
+(empty)
+∎
+### 17 strata --raw kv list · exit
+0
+∎
+### 17 strata --raw kv list · stderr
+∎
+### 17 strata --raw kv list · stdout
+(empty)
+∎
+### 18 strata --json kv list · exit
+0
+∎
+### 18 strata --json kv list · stderr
+∎
+### 18 strata --json kv list · stdout
+{"data":{"cursor":null,"has_more":false,"items":[]},"type":"keys_page"}
+∎
+### 19 strata kv put b 2 · exit
+0
+∎
+### 19 strata kv put b 2 · stderr
+∎
+### 19 strata kv put b 2 · stdout
+created b applied=true
+∎
+### 20 strata kv put c 3 · exit
+0
+∎
+### 20 strata kv put c 3 · stderr
+∎
+### 20 strata kv put c 3 · stdout
+created c applied=true
+∎
+### 21 strata kv list --limit 1 · exit
+0
+∎
+### 21 strata kv list --limit 1 · stderr
+∎
+### 21 strata kv list --limit 1 · stdout
+b
+-- more: add --cursor Yg== to the same command
+∎
+### 22 strata --raw kv list --limit 1 · exit
+0
+∎
+### 22 strata --raw kv list --limit 1 · stderr
+∎
+### 22 strata --raw kv list --limit 1 · stdout
+b
+∎
+### 23 strata --json kv list --limit 1 · exit
+0
+∎
+### 23 strata --json kv list --limit 1 · stderr
+∎
+### 23 strata --json kv list --limit 1 · stdout
+{"data":{"cursor":"Yg==","has_more":true,"items":["Yg=="]},"type":"keys_page"}
+∎
+### 24 strata branch get nope · exit
+1
+∎
+### 24 strata branch get nope · stderr
+not_found.engine.branch: branch `nope` does not exist (<reference_id>)
+  hint: List branches or use the default branch, then retry with an existing branch name.
+  ref: https://stratadb.org/e/not_found.engine.branch
+∎
+### 24 strata branch get nope · stdout
+∎
+### 25 strata --raw branch get nope · exit
+1
+∎
+### 25 strata --raw branch get nope · stderr
+not_found.engine.branch: branch `nope` does not exist (<reference_id>)
+  hint: List branches or use the default branch, then retry with an existing branch name.
+  ref: https://stratadb.org/e/not_found.engine.branch
+∎
+### 25 strata --raw branch get nope · stdout
+∎
+### 26 strata --json branch get nope · exit
+1
+∎
+### 26 strata --json branch get nope · stderr
+{"error":{"class":"not_found","code":"not_found.engine.branch","retry_policy":"never","retryable":false,"commit_outcome":"not_applicable","message":"branch `nope` does not exist","suggested_fix":"List branches or use the default branch, then retry with an existing branch name.","docs_url":"https://stratadb.org/e/not_found.engine.branch","reference_id":"<reference_id>"}}
+∎
+### 26 strata --json branch get nope · stdout
+∎
+### 27 strata kv put · exit
+2
+∎
+### 27 strata kv put · stderr
+error: the following required arguments were not provided:
+  <KEY>
+
+Usage: strata kv put <KEY> [VALUE]
+
+For more information, try '--help'.
+∎
+### 27 strata kv put · stdout
+∎
+### 28 strata --json kv put · exit
+2
+∎
+### 28 strata --json kv put · stderr
+error: the following required arguments were not provided:
+  <KEY>
+
+Usage: strata kv put <KEY> [VALUE]
+
+For more information, try '--help'.
+∎
+### 28 strata --json kv put · stdout
+∎
+### 29 strata branch create exp · exit
+0
+∎
+### 29 strata branch create exp · stderr
+∎
+### 29 strata branch create exp · stdout
+{
+  "branch_id": "<uuid>",
+  "created_at": 9,
+  "deleted_at": null,
+  "generation": 1,
+  "name": "exp",
+  "parent": null,
+  "state_revision": 0,
+  "status": "active"
+}
+∎
+### 30 strata --raw branch create exp2 · exit
+0
+∎
+### 30 strata --raw branch create exp2 · stderr
+∎
+### 30 strata --raw branch create exp2 · stdout
+{"branch_id":"<uuid>","created_at":12,"deleted_at":null,"generation":1,"name":"exp2","parent":null,"state_revision":0,"status":"active"}
+∎
+### 31 strata --json branch create exp3 · exit
+0
+∎
+### 31 strata --json branch create exp3 · stderr
+∎
+### 31 strata --json branch create exp3 · stdout
+{"data":{"branch_id":"<uuid>","created_at":15,"deleted_at":null,"generation":1,"name":"exp3","parent":null,"state_revision":0,"status":"active"},"type":"branch"}
+∎
+### 32 strata branch create exp · exit
+1
+∎
+### 32 strata branch create exp · stderr
+already_exists.engine.branch: branch `exp` already exists (<reference_id>)
+  hint: Choose a different branch name or delete the existing branch first.
+  ref: https://stratadb.org/e/already_exists.engine.branch
+∎
+### 32 strata branch create exp · stdout
+∎
+### 33 strata info · exit
+0
+∎
+### 33 strata info · stderr
+∎
+### 33 strata info · stdout
+{
+  "branch_count": 4,
+  "created": false,
+  "default_branch": "default",
+  "durable": true,
+  "memory_budget": {
+    "source": "derived_from_host",
+    "total_bytes": <bytes>,
+    "usable_host_bytes": <bytes>
+  },
+  "open": true,
+  "space_count": 1,
+  "target": "durable_local",
+  "version": "<semver>"
+}
+∎
+### 34 strata --raw info · exit
+0
+∎
+### 34 strata --raw info · stderr
+∎
+### 34 strata --raw info · stdout
+{"branch_count":4,"created":false,"default_branch":"default","durable":true,"memory_budget":{"source":"derived_from_host","total_bytes":<bytes>,"usable_host_bytes":<bytes>},"open":true,"space_count":1,"target":"durable_local","version":"<semver>"}
+∎

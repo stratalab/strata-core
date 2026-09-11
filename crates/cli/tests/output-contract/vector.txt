@@ -1,0 +1,409 @@
+### vector.batch_delete · edge:committed_at=fixed · human
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":1,"durability":"not_durable","put_count":0,"timestamp":6,"version":6},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"vector_revision":null},"status":"ok"}
+{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"vector_revision":null},"status":"ok"}
+∎
+### vector.batch_delete · edge:committed_at=fixed · raw
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":1,"durability":"not_durable","put_count":0,"timestamp":6,"version":6},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"vector_revision":null},"status":"ok"}
+{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"vector_revision":null},"status":"ok"}
+∎
+### vector.batch_delete · edge:items=[] · human
+(empty)
+∎
+### vector.batch_delete · edge:items=[] · raw
+(empty)
+∎
+### vector.batch_delete · responses/v1/vector/batch_delete_ok.json · human
+{"applied":true,"commit":{"committed_at":null,"delete_count":1,"durability":"not_durable","put_count":0,"timestamp":6,"version":6},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"vector_revision":null},"status":"ok"}
+{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"vector_revision":null},"status":"ok"}
+∎
+### vector.batch_delete · responses/v1/vector/batch_delete_ok.json · raw
+{"applied":true,"commit":{"committed_at":null,"delete_count":1,"durability":"not_durable","put_count":0,"timestamp":6,"version":6},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"vector_revision":null},"status":"ok"}
+{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"vector_revision":null},"status":"ok"}
+∎
+### vector.batch_exists · edge:items=[] · human
+(empty)
+∎
+### vector.batch_exists · edge:items=[] · raw
+(empty)
+∎
+### vector.batch_exists · responses/v1/vector/batch_exists.json · human
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"exists":true},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"exists":false},"status":"ok"}
+∎
+### vector.batch_exists · responses/v1/vector/batch_exists.json · raw
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"exists":true},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"exists":false},"status":"ok"}
+∎
+### vector.batch_get · edge:items=[] · human
+(empty)
+∎
+### vector.batch_get · edge:items=[] · raw
+(empty)
+∎
+### vector.batch_get · responses/v1/vector/batch_get_ok.json · human
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"found":true,"value":{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"found":false,"value":null},"status":"miss"}
+∎
+### vector.batch_get · responses/v1/vector/batch_get_ok.json · raw
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"found":true,"value":{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"found":false,"value":null},"status":"miss"}
+∎
+### vector.batch_upsert · edge:committed_at=fixed · human
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":1,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"vector_revision":1},"status":"ok"}
+∎
+### vector.batch_upsert · edge:committed_at=fixed · raw
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":1,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"vector_revision":1},"status":"ok"}
+∎
+### vector.batch_upsert · edge:items=[] · human
+(empty)
+∎
+### vector.batch_upsert · edge:items=[] · raw
+(empty)
+∎
+### vector.batch_upsert · responses/v1/vector/batch_upsert_ok.json · human
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":1,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"vector_revision":1},"status":"ok"}
+∎
+### vector.batch_upsert · responses/v1/vector/batch_upsert_ok.json · raw
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":1,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"vector_revision":1},"status":"ok"}
+∎
+### vector.collection.create · edge:has_more=true · human
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### vector.collection.create · edge:has_more=true · raw
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.collection.create · edge:items=[] · human
+(empty)
+∎
+### vector.collection.create · edge:items=[] · raw
+(empty)
+∎
+### vector.collection.create · responses/v1/errors/vector/collection_create_zero_dim.json · human
+invalid_argument.engine.vector_dimension: command failed∎
+### vector.collection.create · responses/v1/errors/vector/collection_create_zero_dim.json · raw
+invalid_argument.engine.vector_dimension: command failed∎
+### vector.collection.create · responses/v1/errors/vector/embedding_model_empty.json · human
+invalid_argument.engine.embedding_model: command failed∎
+### vector.collection.create · responses/v1/errors/vector/embedding_model_empty.json · raw
+invalid_argument.engine.embedding_model: command failed∎
+### vector.collection.create · responses/v1/vector/collection_list.json · human
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.collection.create · responses/v1/vector/collection_list.json · raw
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.collection.delete · responses/v1/vector/collection_delete_true.json · human
+true
+∎
+### vector.collection.delete · responses/v1/vector/collection_delete_true.json · raw
+true
+∎
+### vector.collection.list · edge:has_more=true · human
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### vector.collection.list · edge:has_more=true · raw
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.collection.list · edge:items=[] · human
+(empty)
+∎
+### vector.collection.list · edge:items=[] · raw
+(empty)
+∎
+### vector.collection.list · responses/v1/vector/collection_list.json · human
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.collection.list · responses/v1/vector/collection_list.json · raw
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.collection.set_embedding_model · edge:has_more=true · human
+{"count":0,"dimension":2,"embedding_model":"miniLM","metric":"cosine","name":"docs"}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### vector.collection.set_embedding_model · edge:has_more=true · raw
+{"count":0,"dimension":2,"embedding_model":"miniLM","metric":"cosine","name":"docs"}
+∎
+### vector.collection.set_embedding_model · edge:items=[] · human
+(empty)
+∎
+### vector.collection.set_embedding_model · edge:items=[] · raw
+(empty)
+∎
+### vector.collection.set_embedding_model · responses/v1/errors/vector/collection_missing.json · human
+not_found.engine.vector_collection: command failed∎
+### vector.collection.set_embedding_model · responses/v1/errors/vector/collection_missing.json · raw
+not_found.engine.vector_collection: command failed∎
+### vector.collection.set_embedding_model · responses/v1/errors/vector/embedding_model_empty.json · human
+invalid_argument.engine.embedding_model: command failed∎
+### vector.collection.set_embedding_model · responses/v1/errors/vector/embedding_model_empty.json · raw
+invalid_argument.engine.embedding_model: command failed∎
+### vector.collection.set_embedding_model · responses/v1/errors/vector/embedding_model_mismatch.json · human
+failed_precondition.engine.embedding_model_mismatch: command failed∎
+### vector.collection.set_embedding_model · responses/v1/errors/vector/embedding_model_mismatch.json · raw
+failed_precondition.engine.embedding_model_mismatch: command failed∎
+### vector.collection.set_embedding_model · responses/v1/vector/collection_set_embedding_model.json · human
+{"count":0,"dimension":2,"embedding_model":"miniLM","metric":"cosine","name":"docs"}
+∎
+### vector.collection.set_embedding_model · responses/v1/vector/collection_set_embedding_model.json · raw
+{"count":0,"dimension":2,"embedding_model":"miniLM","metric":"cosine","name":"docs"}
+∎
+### vector.collection.stats · edge:has_more=true · human
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### vector.collection.stats · edge:has_more=true · raw
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.collection.stats · edge:items=[] · human
+(empty)
+∎
+### vector.collection.stats · edge:items=[] · raw
+(empty)
+∎
+### vector.collection.stats · responses/v1/vector/collection_list.json · human
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.collection.stats · responses/v1/vector/collection_list.json · raw
+{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+∎
+### vector.count · responses/v1/vector/count.json · human
+0
+∎
+### vector.count · responses/v1/vector/count.json · raw
+0
+∎
+### vector.delete · edge:applied=false · human
+not_found doc-a applied=false
+∎
+### vector.delete · edge:applied=false · raw
+∎
+### vector.delete · edge:committed_at=fixed · human
+deleted doc-a applied=true
+∎
+### vector.delete · edge:committed_at=fixed · raw
+∎
+### vector.delete · responses/v1/vector/delete_applied.json · human
+deleted doc-a applied=true
+∎
+### vector.delete · responses/v1/vector/delete_applied.json · raw
+∎
+### vector.delete_all · edge:applied=false · human
+not_found docs applied=false
+∎
+### vector.delete_all · edge:applied=false · raw
+∎
+### vector.delete_all · edge:committed_at=fixed · human
+deleted docs applied=true
+∎
+### vector.delete_all · edge:committed_at=fixed · raw
+∎
+### vector.delete_all · responses/v1/vector/delete_all_applied.json · human
+deleted docs applied=true
+∎
+### vector.delete_all · responses/v1/vector/delete_all_applied.json · raw
+∎
+### vector.delete_by_filter · edge:applied=false · human
+not_found docs applied=false
+∎
+### vector.delete_by_filter · edge:applied=false · raw
+∎
+### vector.delete_by_filter · edge:committed_at=fixed · human
+deleted docs applied=true
+∎
+### vector.delete_by_filter · edge:committed_at=fixed · raw
+∎
+### vector.delete_by_filter · responses/v1/vector/delete_by_filter_applied.json · human
+deleted docs applied=true
+∎
+### vector.delete_by_filter · responses/v1/vector/delete_by_filter_applied.json · raw
+∎
+### vector.exists · responses/v1/vector/exists_true.json · human
+true
+∎
+### vector.exists · responses/v1/vector/exists_true.json · raw
+true
+∎
+### vector.get · edge:found=false · human
+(nil)
+∎
+### vector.get · edge:found=false · raw
+∎
+### vector.get · responses/v1/errors/vector/get_missing_collection.json · human
+not_found.engine.vector_collection: command failed∎
+### vector.get · responses/v1/errors/vector/get_missing_collection.json · raw
+not_found.engine.vector_collection: command failed∎
+### vector.get · responses/v1/vector/get_found.json · human
+{
+  "data": {
+    "embedding": [
+      1.0,
+      0.0
+    ],
+    "metadata": {
+      "kind": "doc"
+    }
+  },
+  "key": "doc-a",
+  "timestamp": 4,
+  "vector_revision": 1,
+  "version": 4
+}
+∎
+### vector.get · responses/v1/vector/get_found.json · raw
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+∎
+### vector.history · edge:committed_at=fixed · human
+{"committed_at":"2026-09-10 20:19:44.000000 +00:00","data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"tombstone":false,"vector_revision":1,"version":4}
+∎
+### vector.history · edge:committed_at=fixed · raw
+{"committed_at":"2026-09-10 20:19:44.000000 +00:00","data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"tombstone":false,"vector_revision":1,"version":4}
+∎
+### vector.history · edge:items=[] · human
+(empty)
+∎
+### vector.history · edge:items=[] · raw
+(empty)
+∎
+### vector.history · responses/v1/vector/history_found.json · human
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"tombstone":false,"vector_revision":1,"version":4}
+∎
+### vector.history · responses/v1/vector/history_found.json · raw
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"tombstone":false,"vector_revision":1,"version":4}
+∎
+### vector.index.query · responses/v1/vector/index_query_exact.json · human
+doc-a	1.0
+∎
+### vector.index.query · responses/v1/vector/index_query_exact.json · raw
+doc-a	1.0
+∎
+### vector.keys · edge:has_more=true · human
+doc-a
+doc-b
+-- more: add --cursor bmV4dA== to the same command
+∎
+### vector.keys · edge:has_more=true · raw
+doc-a
+doc-b
+∎
+### vector.keys · edge:items=[] · human
+(empty)
+∎
+### vector.keys · edge:items=[] · raw
+(empty)
+∎
+### vector.keys · responses/v1/vector/key_page.json · human
+doc-a
+doc-b
+∎
+### vector.keys · responses/v1/vector/key_page.json · raw
+doc-a
+doc-b
+∎
+### vector.metadata.update · edge:applied=false · human
+not_found doc-a applied=false
+∎
+### vector.metadata.update · edge:applied=false · raw
+∎
+### vector.metadata.update · edge:committed_at=fixed · human
+updated doc-a applied=true
+∎
+### vector.metadata.update · edge:committed_at=fixed · raw
+∎
+### vector.metadata.update · responses/v1/vector/metadata_update_applied.json · human
+updated doc-a applied=true
+∎
+### vector.metadata.update · responses/v1/vector/metadata_update_applied.json · raw
+∎
+### vector.query · responses/v1/errors/inference/unknown_model.json · human
+inference.unknown_model: command failed∎
+### vector.query · responses/v1/errors/inference/unknown_model.json · raw
+inference.unknown_model: command failed∎
+### vector.query · responses/v1/errors/vector/embedding_model_missing.json · human
+failed_precondition.engine.embedding_model_missing: command failed∎
+### vector.query · responses/v1/errors/vector/embedding_model_missing.json · raw
+failed_precondition.engine.embedding_model_missing: command failed∎
+### vector.query · responses/v1/errors/vector/vector_input.json · human
+invalid_argument.executor.vector_input: command failed∎
+### vector.query · responses/v1/errors/vector/vector_input.json · raw
+invalid_argument.executor.vector_input: command failed∎
+### vector.query · responses/v1/vector/search.json · human
+doc-a	1.0
+∎
+### vector.query · responses/v1/vector/search.json · raw
+doc-a	1.0
+∎
+### vector.sample · edge:has_more=true · human
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### vector.sample · edge:has_more=true · raw
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+∎
+### vector.sample · edge:items=[] · human
+(empty)
+∎
+### vector.sample · edge:items=[] · raw
+(empty)
+∎
+### vector.sample · responses/v1/vector/sample_page.json · human
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+∎
+### vector.sample · responses/v1/vector/sample_page.json · raw
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+∎
+### vector.scan · edge:has_more=true · human
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### vector.scan · edge:has_more=true · raw
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+∎
+### vector.scan · edge:items=[] · human
+(empty)
+∎
+### vector.scan · edge:items=[] · raw
+(empty)
+∎
+### vector.scan · responses/v1/vector/scan_page.json · human
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+∎
+### vector.scan · responses/v1/vector/scan_page.json · raw
+{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+∎
+### vector.upsert · edge:applied=false · human
+not_found doc-a applied=false
+∎
+### vector.upsert · edge:applied=false · raw
+∎
+### vector.upsert · edge:committed_at=fixed · human
+created doc-a applied=true
+∎
+### vector.upsert · edge:committed_at=fixed · raw
+∎
+### vector.upsert · responses/v1/errors/inference/unknown_model.json · human
+inference.unknown_model: command failed∎
+### vector.upsert · responses/v1/errors/inference/unknown_model.json · raw
+inference.unknown_model: command failed∎
+### vector.upsert · responses/v1/errors/vector/embedding_model_missing.json · human
+failed_precondition.engine.embedding_model_missing: command failed∎
+### vector.upsert · responses/v1/errors/vector/embedding_model_missing.json · raw
+failed_precondition.engine.embedding_model_missing: command failed∎
+### vector.upsert · responses/v1/errors/vector/vector_input.json · human
+invalid_argument.executor.vector_input: command failed∎
+### vector.upsert · responses/v1/errors/vector/vector_input.json · raw
+invalid_argument.executor.vector_input: command failed∎
+### vector.upsert · responses/v1/vector/upsert_applied.json · human
+created doc-a applied=true
+∎
+### vector.upsert · responses/v1/vector/upsert_applied.json · raw
+∎

@@ -1,0 +1,244 @@
+### kv.batch_delete · edge:committed_at=fixed · human
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":1,"durability":"not_durable","put_count":0,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"key":"YQ=="},"status":"ok"}
+{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"key":"bWlzc2luZw=="},"status":"ok"}
+∎
+### kv.batch_delete · edge:committed_at=fixed · raw
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":1,"durability":"not_durable","put_count":0,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"key":"YQ=="},"status":"ok"}
+{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"key":"bWlzc2luZw=="},"status":"ok"}
+∎
+### kv.batch_delete · edge:items=[] · human
+(empty)
+∎
+### kv.batch_delete · edge:items=[] · raw
+(empty)
+∎
+### kv.batch_delete · responses/v1/kv/batch_mutation_partial.json · human
+{"applied":true,"commit":{"committed_at":null,"delete_count":1,"durability":"not_durable","put_count":0,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"key":"YQ=="},"status":"ok"}
+{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"key":"bWlzc2luZw=="},"status":"ok"}
+∎
+### kv.batch_delete · responses/v1/kv/batch_mutation_partial.json · raw
+{"applied":true,"commit":{"committed_at":null,"delete_count":1,"durability":"not_durable","put_count":0,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"key":"YQ=="},"status":"ok"}
+{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"key":"bWlzc2luZw=="},"status":"ok"}
+∎
+### kv.batch_exists · edge:items=[] · human
+(empty)
+∎
+### kv.batch_exists · edge:items=[] · raw
+(empty)
+∎
+### kv.batch_exists · responses/v1/kv/batch_exists.json · human
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"exists":true,"key":"YQ=="},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"exists":false,"key":"bWlzc2luZw=="},"status":"ok"}
+∎
+### kv.batch_exists · responses/v1/kv/batch_exists.json · raw
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"exists":true,"key":"YQ=="},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"exists":false,"key":"bWlzc2luZw=="},"status":"ok"}
+∎
+### kv.batch_get · edge:items=[] · human
+(empty)
+∎
+### kv.batch_get · edge:items=[] · raw
+(empty)
+∎
+### kv.batch_get · edge:value=non-utf8 · human
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"found":true,"key":"YQ==","timestamp":3,"value":"/w==","version":3},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"found":false,"key":"bWlzc2luZw==","timestamp":null,"value":null,"version":null},"status":"miss"}
+∎
+### kv.batch_get · edge:value=non-utf8 · raw
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"found":true,"key":"YQ==","timestamp":3,"value":"/w==","version":3},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"found":false,"key":"bWlzc2luZw==","timestamp":null,"value":null,"version":null},"status":"miss"}
+∎
+### kv.batch_get · responses/v1/kv/batch_get_ok.json · human
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"found":true,"key":"YQ==","timestamp":3,"value":"b25l","version":3},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"found":false,"key":"bWlzc2luZw==","timestamp":null,"value":null,"version":null},"status":"miss"}
+∎
+### kv.batch_get · responses/v1/kv/batch_get_ok.json · raw
+{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"found":true,"key":"YQ==","timestamp":3,"value":"b25l","version":3},"status":"ok"}
+{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"found":false,"key":"bWlzc2luZw==","timestamp":null,"value":null,"version":null},"status":"miss"}
+∎
+### kv.batch_put · edge:committed_at=fixed · human
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":1,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"key":"YQ=="},"status":"ok"}
+∎
+### kv.batch_put · edge:committed_at=fixed · raw
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":1,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"key":"YQ=="},"status":"ok"}
+∎
+### kv.batch_put · edge:items=[] · human
+(empty)
+∎
+### kv.batch_put · edge:items=[] · raw
+(empty)
+∎
+### kv.batch_put · responses/v1/errors/kv/batch_put_duplicate_key.json · human
+invalid_argument.executor.kv_batch_duplicate_key: command failed∎
+### kv.batch_put · responses/v1/errors/kv/batch_put_duplicate_key.json · raw
+invalid_argument.executor.kv_batch_duplicate_key: command failed∎
+### kv.batch_put · responses/v1/kv/batch_mutation_ok.json · human
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":1,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"key":"YQ=="},"status":"ok"}
+∎
+### kv.batch_put · responses/v1/kv/batch_mutation_ok.json · raw
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":1,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"key":"YQ=="},"status":"ok"}
+∎
+### kv.count · responses/v1/kv/count.json · human
+1
+∎
+### kv.count · responses/v1/kv/count.json · raw
+1
+∎
+### kv.delete · responses/v1/kv/delete_missing.json · human
+not_found a applied=false
+∎
+### kv.delete · responses/v1/kv/delete_missing.json · raw
+∎
+### kv.exists · responses/v1/kv/exists_true.json · human
+true
+∎
+### kv.exists · responses/v1/kv/exists_true.json · raw
+true
+∎
+### kv.get · edge:found=false · human
+(nil)
+∎
+### kv.get · edge:found=false · raw
+∎
+### kv.get · edge:value=non-utf8 · human
+/w==
+∎
+### kv.get · edge:value=non-utf8 · raw
+/w==
+∎
+### kv.get · responses/v1/errors/kv/get_unretained_version.json · human
+history_unavailable.engine.persistence_history: command failed∎
+### kv.get · responses/v1/errors/kv/get_unretained_version.json · raw
+history_unavailable.engine.persistence_history: command failed∎
+### kv.get · responses/v1/kv/get_found.json · human
+one
+∎
+### kv.get · responses/v1/kv/get_found.json · raw
+one
+∎
+### kv.history · edge:committed_at=fixed · human
+{"committed_at":"2026-09-10 20:19:44.000000 +00:00","timestamp":4,"tombstone":false,"value":"two","version":4}
+{"committed_at":"2026-09-10 20:19:44.000000 +00:00","timestamp":3,"tombstone":false,"value":"one","version":3}
+∎
+### kv.history · edge:committed_at=fixed · raw
+{"committed_at":"2026-09-10 20:19:44.000000 +00:00","timestamp":4,"tombstone":false,"value":"two","version":4}
+{"committed_at":"2026-09-10 20:19:44.000000 +00:00","timestamp":3,"tombstone":false,"value":"one","version":3}
+∎
+### kv.history · edge:items=[] · human
+(empty)
+∎
+### kv.history · edge:items=[] · raw
+(empty)
+∎
+### kv.history · edge:value=non-utf8 · human
+{"timestamp":4,"tombstone":false,"value":"/w==","version":4}
+{"timestamp":3,"tombstone":false,"value":"/w==","version":3}
+∎
+### kv.history · edge:value=non-utf8 · raw
+{"timestamp":4,"tombstone":false,"value":"/w==","version":4}
+{"timestamp":3,"tombstone":false,"value":"/w==","version":3}
+∎
+### kv.history · responses/v1/kv/history_found.json · human
+{"timestamp":4,"tombstone":false,"value":"two","version":4}
+{"timestamp":3,"tombstone":false,"value":"one","version":3}
+∎
+### kv.history · responses/v1/kv/history_found.json · raw
+{"timestamp":4,"tombstone":false,"value":"two","version":4}
+{"timestamp":3,"tombstone":false,"value":"one","version":3}
+∎
+### kv.list · edge:items=[] · human
+(empty)
+∎
+### kv.list · edge:items=[] · raw
+(empty)
+∎
+### kv.list · responses/v1/kv/list_page.json · human
+a1
+a2
+-- more: add --cursor YTI= to the same command
+∎
+### kv.list · responses/v1/kv/list_page.json · raw
+a1
+a2
+∎
+### kv.put · edge:applied=false · human
+not_found a applied=false
+∎
+### kv.put · edge:applied=false · raw
+∎
+### kv.put · edge:committed_at=fixed · human
+created a applied=true
+∎
+### kv.put · edge:committed_at=fixed · raw
+∎
+### kv.put · responses/v1/errors/kv/put_empty_key.json · human
+invalid_argument.engine.kv_key: command failed∎
+### kv.put · responses/v1/errors/kv/put_empty_key.json · raw
+invalid_argument.engine.kv_key: command failed∎
+### kv.put · responses/v1/kv/write_applied.json · human
+created a applied=true
+∎
+### kv.put · responses/v1/kv/write_applied.json · raw
+∎
+### kv.sample · edge:has_more=true · human
+{"key":"a","timestamp":3,"value":"one","version":3}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### kv.sample · edge:has_more=true · raw
+{"key":"a","timestamp":3,"value":"one","version":3}
+∎
+### kv.sample · edge:items=[] · human
+(empty)
+∎
+### kv.sample · edge:items=[] · raw
+(empty)
+∎
+### kv.sample · edge:value=non-utf8 · human
+{"key":"a","timestamp":3,"value":"/w==","version":3}
+∎
+### kv.sample · edge:value=non-utf8 · raw
+{"key":"a","timestamp":3,"value":"/w==","version":3}
+∎
+### kv.sample · responses/v1/kv/sample_page.json · human
+{"key":"a","timestamp":3,"value":"one","version":3}
+∎
+### kv.sample · responses/v1/kv/sample_page.json · raw
+{"key":"a","timestamp":3,"value":"one","version":3}
+∎
+### kv.scan · edge:has_more=true · human
+{"key":"a1","timestamp":3,"value":"1","version":3}
+{"key":"a2","timestamp":4,"value":"2","version":4}
+{"key":"a3","timestamp":5,"value":"3","version":5}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### kv.scan · edge:has_more=true · raw
+{"key":"a1","timestamp":3,"value":"1","version":3}
+{"key":"a2","timestamp":4,"value":"2","version":4}
+{"key":"a3","timestamp":5,"value":"3","version":5}
+∎
+### kv.scan · edge:items=[] · human
+(empty)
+∎
+### kv.scan · edge:items=[] · raw
+(empty)
+∎
+### kv.scan · edge:value=non-utf8 · human
+{"key":"a1","timestamp":3,"value":"/w==","version":3}
+{"key":"a2","timestamp":4,"value":"/w==","version":4}
+{"key":"a3","timestamp":5,"value":"/w==","version":5}
+∎
+### kv.scan · edge:value=non-utf8 · raw
+{"key":"a1","timestamp":3,"value":"/w==","version":3}
+{"key":"a2","timestamp":4,"value":"/w==","version":4}
+{"key":"a3","timestamp":5,"value":"/w==","version":5}
+∎
+### kv.scan · responses/v1/kv/scan_page.json · human
+{"key":"a1","timestamp":3,"value":"1","version":3}
+{"key":"a2","timestamp":4,"value":"2","version":4}
+{"key":"a3","timestamp":5,"value":"3","version":5}
+∎
+### kv.scan · responses/v1/kv/scan_page.json · raw
+{"key":"a1","timestamp":3,"value":"1","version":3}
+{"key":"a2","timestamp":4,"value":"2","version":4}
+{"key":"a3","timestamp":5,"value":"3","version":5}
+∎

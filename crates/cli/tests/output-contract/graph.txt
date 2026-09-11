@@ -1,0 +1,625 @@
+### graph.analytics.bfs · responses/v1/graph/bfs_traversal.json · human
+{
+  "depths": {
+    "alice": 0,
+    "bob": 1,
+    "carol": 1
+  },
+  "edges": [
+    {
+      "dst": "bob",
+      "edge_type": "follows",
+      "src": "alice",
+      "weight": 1.0
+    },
+    {
+      "dst": "carol",
+      "edge_type": "knows",
+      "src": "alice",
+      "weight": 1.0
+    }
+  ],
+  "graph": "social",
+  "start": "alice",
+  "truncated": false,
+  "visited": [
+    "alice",
+    "bob",
+    "carol"
+  ]
+}
+∎
+### graph.analytics.bfs · responses/v1/graph/bfs_traversal.json · raw
+{"depths":{"alice":0,"bob":1,"carol":1},"edges":[{"dst":"bob","edge_type":"follows","src":"alice","weight":1.0},{"dst":"carol","edge_type":"knows","src":"alice","weight":1.0}],"graph":"social","start":"alice","truncated":false,"visited":["alice","bob","carol"]}
+∎
+### graph.analytics.cdlp · responses/v1/graph/cdlp_labels.json · human
+{
+  "graph": "social",
+  "labels": {
+    "alice": "alice",
+    "bob": "alice",
+    "carol": "alice",
+    "dave": "dave"
+  }
+}
+∎
+### graph.analytics.cdlp · responses/v1/graph/cdlp_labels.json · raw
+{"graph":"social","labels":{"alice":"alice","bob":"alice","carol":"alice","dave":"dave"}}
+∎
+### graph.analytics.lcc · responses/v1/graph/lcc_coefficients.json · human
+{
+  "coefficients": {
+    "alice": 1.0,
+    "bob": 1.0,
+    "carol": 1.0
+  },
+  "graph": "social"
+}
+∎
+### graph.analytics.lcc · responses/v1/graph/lcc_coefficients.json · raw
+{"coefficients":{"alice":1.0,"bob":1.0,"carol":1.0},"graph":"social"}
+∎
+### graph.analytics.pagerank · responses/v1/graph/pagerank_ranks.json · human
+{
+  "graph": "social",
+  "iterations": 10,
+  "personalized": false,
+  "ranks": {
+    "alice": 0.3174603047943687,
+    "bob": 0.3174603047943687,
+    "carol": 0.3174603047943687,
+    "dave": 0.04761908561689371
+  }
+}
+∎
+### graph.analytics.pagerank · responses/v1/graph/pagerank_ranks.json · raw
+{"graph":"social","iterations":10,"personalized":false,"ranks":{"alice":0.3174603047943687,"bob":0.3174603047943687,"carol":0.3174603047943687,"dave":0.04761908561689371}}
+∎
+### graph.analytics.sssp · responses/v1/graph/sssp_distances.json · human
+{
+  "direction": "outgoing",
+  "distances": {
+    "alice": 0.0,
+    "bob": 1.0,
+    "carol": 3.0
+  },
+  "graph": "social",
+  "source": "alice"
+}
+∎
+### graph.analytics.sssp · responses/v1/graph/sssp_distances.json · raw
+{"direction":"outgoing","distances":{"alice":0.0,"bob":1.0,"carol":3.0},"graph":"social","source":"alice"}
+∎
+### graph.analytics.wcc · responses/v1/graph/wcc_components.json · human
+{
+  "component_count": 2,
+  "components": {
+    "alice": "alice",
+    "bob": "alice",
+    "carol": "alice",
+    "dave": "dave"
+  },
+  "graph": "social"
+}
+∎
+### graph.analytics.wcc · responses/v1/graph/wcc_components.json · raw
+{"component_count":2,"components":{"alice":"alice","bob":"alice","carol":"alice","dave":"dave"},"graph":"social"}
+∎
+### graph.apply_delete_policy · edge:applied=false · human
+not_found applied=false
+∎
+### graph.apply_delete_policy · edge:applied=false · raw
+∎
+### graph.apply_delete_policy · edge:committed_at=fixed · human
+updated applied=true
+∎
+### graph.apply_delete_policy · edge:committed_at=fixed · raw
+∎
+### graph.apply_delete_policy · responses/v1/graph/apply_delete_policy_applied.json · human
+updated applied=true
+∎
+### graph.apply_delete_policy · responses/v1/graph/apply_delete_policy_applied.json · raw
+∎
+### graph.batch_write · edge:committed_at=fixed · human
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"created":true,"operation":"upsert_node","operation_index":0},"status":"ok"}
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"created":true,"operation":"upsert_node","operation_index":1},"status":"ok"}
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":2,"result":{"created":true,"operation":"upsert_edge","operation_index":2},"status":"ok"}
+∎
+### graph.batch_write · edge:committed_at=fixed · raw
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"created":true,"operation":"upsert_node","operation_index":0},"status":"ok"}
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"created":true,"operation":"upsert_node","operation_index":1},"status":"ok"}
+{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":2,"result":{"created":true,"operation":"upsert_edge","operation_index":2},"status":"ok"}
+∎
+### graph.batch_write · edge:items=[] · human
+(empty)
+∎
+### graph.batch_write · edge:items=[] · raw
+(empty)
+∎
+### graph.batch_write · responses/v1/graph/batch_write_ok.json · human
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"created":true,"operation":"upsert_node","operation_index":0},"status":"ok"}
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"created":true,"operation":"upsert_node","operation_index":1},"status":"ok"}
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":2,"result":{"created":true,"operation":"upsert_edge","operation_index":2},"status":"ok"}
+∎
+### graph.batch_write · responses/v1/graph/batch_write_ok.json · raw
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"created":true,"operation":"upsert_node","operation_index":0},"status":"ok"}
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"created":true,"operation":"upsert_node","operation_index":1},"status":"ok"}
+{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":2,"result":{"created":true,"operation":"upsert_edge","operation_index":2},"status":"ok"}
+∎
+### graph.bindings · edge:has_more=true · human
+{"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### graph.bindings · edge:has_more=true · raw
+{"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
+∎
+### graph.bindings · edge:items=[] · human
+(empty)
+∎
+### graph.bindings · edge:items=[] · raw
+(empty)
+∎
+### graph.bindings · responses/v1/graph/bindings_page.json · human
+{"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
+∎
+### graph.bindings · responses/v1/graph/bindings_page.json · raw
+{"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
+∎
+### graph.bulk_insert · edge:committed_at=fixed · human
+{
+  "commit": {
+    "committed_at": "2026-09-10 20:19:44.000000 +00:00",
+    "delete_count": 0,
+    "durability": "not_durable",
+    "put_count": 2,
+    "timestamp": 5,
+    "version": 5
+  },
+  "commits": 2,
+  "edges_inserted": 2,
+  "graph": "social",
+  "nodes_inserted": 3
+}
+∎
+### graph.bulk_insert · edge:committed_at=fixed · raw
+{"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":2,"timestamp":5,"version":5},"commits":2,"edges_inserted":2,"graph":"social","nodes_inserted":3}
+∎
+### graph.bulk_insert · responses/v1/graph/bulk_insert_applied.json · human
+{
+  "commit": {
+    "committed_at": null,
+    "delete_count": 0,
+    "durability": "not_durable",
+    "put_count": 2,
+    "timestamp": 5,
+    "version": 5
+  },
+  "commits": 2,
+  "edges_inserted": 2,
+  "graph": "social",
+  "nodes_inserted": 3
+}
+∎
+### graph.bulk_insert · responses/v1/graph/bulk_insert_applied.json · raw
+{"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":2,"timestamp":5,"version":5},"commits":2,"edges_inserted":2,"graph":"social","nodes_inserted":3}
+∎
+### graph.create · edge:applied=false · human
+not_found applied=false
+∎
+### graph.create · edge:applied=false · raw
+∎
+### graph.create · edge:committed_at=fixed · human
+created applied=true
+∎
+### graph.create · edge:committed_at=fixed · raw
+∎
+### graph.create · responses/v1/errors/graph/create_duplicate.json · human
+already_exists.engine.graph: command failed∎
+### graph.create · responses/v1/errors/graph/create_duplicate.json · raw
+already_exists.engine.graph: command failed∎
+### graph.create · responses/v1/errors/graph/create_empty_name.json · human
+invalid_argument.engine.graph_name: command failed∎
+### graph.create · responses/v1/errors/graph/create_empty_name.json · raw
+invalid_argument.engine.graph_name: command failed∎
+### graph.create · responses/v1/graph/create_applied.json · human
+created applied=true
+∎
+### graph.create · responses/v1/graph/create_applied.json · raw
+∎
+### graph.delete · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.delete · edge:applied=false · raw
+∎
+### graph.delete · edge:committed_at=fixed · human
+deleted social applied=true
+∎
+### graph.delete · edge:committed_at=fixed · raw
+∎
+### graph.delete · responses/v1/graph/delete_applied.json · human
+deleted social applied=true
+∎
+### graph.delete · responses/v1/graph/delete_applied.json · raw
+∎
+### graph.edge.add · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.edge.add · edge:applied=false · raw
+∎
+### graph.edge.add · edge:committed_at=fixed · human
+created social applied=true
+∎
+### graph.edge.add · edge:committed_at=fixed · raw
+∎
+### graph.edge.add · responses/v1/graph/edge_add_applied.json · human
+created social applied=true
+∎
+### graph.edge.add · responses/v1/graph/edge_add_applied.json · raw
+∎
+### graph.edge.get · edge:found=false · human
+(nil)
+∎
+### graph.edge.get · edge:found=false · raw
+∎
+### graph.edge.get · responses/v1/graph/edge_get_found.json · human
+{
+  "dst": "bob",
+  "edge_type": "follows",
+  "graph": "social",
+  "properties": {
+    "since": 2021
+  },
+  "src": "alice",
+  "timestamp": 6,
+  "version": 6,
+  "weight": 1.0
+}
+∎
+### graph.edge.get · responses/v1/graph/edge_get_found.json · raw
+{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":6,"version":6,"weight":1.0}
+∎
+### graph.edge.remove · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.edge.remove · edge:applied=false · raw
+∎
+### graph.edge.remove · edge:committed_at=fixed · human
+deleted social applied=true
+∎
+### graph.edge.remove · edge:committed_at=fixed · raw
+∎
+### graph.edge.remove · responses/v1/graph/edge_remove_applied.json · human
+deleted social applied=true
+∎
+### graph.edge.remove · responses/v1/graph/edge_remove_applied.json · raw
+∎
+### graph.list · edge:has_more=true · human
+social
+-- more: add --cursor bmV4dA== to the same command
+∎
+### graph.list · edge:has_more=true · raw
+social
+∎
+### graph.list · edge:items=[] · human
+(empty)
+∎
+### graph.list · edge:items=[] · raw
+(empty)
+∎
+### graph.list · responses/v1/graph/list_page.json · human
+social
+∎
+### graph.list · responses/v1/graph/list_page.json · raw
+social
+∎
+### graph.meta · responses/v1/graph/meta_found.json · human
+{
+  "created_timestamp": 3,
+  "created_version": 3,
+  "edge_count": 1,
+  "graph": "social",
+  "node_count": 2,
+  "updated_timestamp": 6,
+  "updated_version": 6
+}
+∎
+### graph.meta · responses/v1/graph/meta_found.json · raw
+{"created_timestamp":3,"created_version":3,"edge_count":1,"graph":"social","node_count":2,"updated_timestamp":6,"updated_version":6}
+∎
+### graph.neighbors · edge:has_more=true · human
+{"direction":"outgoing","dst":"bob","edge":{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":7,"version":7,"weight":1.0},"edge_type":"follows","graph":"social","node":{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5},"node_id":"bob","src":"alice"}
+{"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### graph.neighbors · edge:has_more=true · raw
+{"direction":"outgoing","dst":"bob","edge":{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":7,"version":7,"weight":1.0},"edge_type":"follows","graph":"social","node":{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5},"node_id":"bob","src":"alice"}
+{"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
+∎
+### graph.neighbors · edge:items=[] · human
+(empty)
+∎
+### graph.neighbors · edge:items=[] · raw
+(empty)
+∎
+### graph.neighbors · responses/v1/graph/neighbors_page.json · human
+{"direction":"outgoing","dst":"bob","edge":{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":7,"version":7,"weight":1.0},"edge_type":"follows","graph":"social","node":{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5},"node_id":"bob","src":"alice"}
+{"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
+∎
+### graph.neighbors · responses/v1/graph/neighbors_page.json · raw
+{"direction":"outgoing","dst":"bob","edge":{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":7,"version":7,"weight":1.0},"edge_type":"follows","graph":"social","node":{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5},"node_id":"bob","src":"alice"}
+{"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
+∎
+### graph.node.add · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.node.add · edge:applied=false · raw
+∎
+### graph.node.add · edge:committed_at=fixed · human
+created social applied=true
+∎
+### graph.node.add · edge:committed_at=fixed · raw
+∎
+### graph.node.add · responses/v1/graph/node_add_applied.json · human
+created social applied=true
+∎
+### graph.node.add · responses/v1/graph/node_add_applied.json · raw
+∎
+### graph.node.get · edge:found=false · human
+(nil)
+∎
+### graph.node.get · edge:found=false · raw
+∎
+### graph.node.get · responses/v1/graph/node_get_found.json · human
+{
+  "graph": "social",
+  "node_id": "alice",
+  "object_type": "Person",
+  "properties": {
+    "name": "Alice",
+    "role": "eng"
+  },
+  "timestamp": 4,
+  "version": 4
+}
+∎
+### graph.node.get · responses/v1/graph/node_get_found.json · raw
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+∎
+### graph.node.list · edge:items=[] · human
+(empty)
+∎
+### graph.node.list · edge:items=[] · raw
+(empty)
+∎
+### graph.node.list · responses/v1/graph/node_list_page.json · human
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+-- more: add --cursor bob to the same command
+∎
+### graph.node.list · responses/v1/graph/node_list_page.json · raw
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+∎
+### graph.node.remove · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.node.remove · edge:applied=false · raw
+∎
+### graph.node.remove · edge:committed_at=fixed · human
+deleted social applied=true
+∎
+### graph.node.remove · edge:committed_at=fixed · raw
+∎
+### graph.node.remove · responses/v1/graph/node_remove_applied.json · human
+deleted social applied=true
+∎
+### graph.node.remove · responses/v1/graph/node_remove_applied.json · raw
+∎
+### graph.nodes_by_type · edge:items=[] · human
+(empty)
+∎
+### graph.nodes_by_type · edge:items=[] · raw
+(empty)
+∎
+### graph.nodes_by_type · responses/v1/graph/nodes_by_type_page.json · human
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+-- more: add --cursor bob to the same command
+∎
+### graph.nodes_by_type · responses/v1/graph/nodes_by_type_page.json · raw
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+∎
+### graph.ontology.define_link_type · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.ontology.define_link_type · edge:applied=false · raw
+∎
+### graph.ontology.define_link_type · edge:committed_at=fixed · human
+created social applied=true
+∎
+### graph.ontology.define_link_type · edge:committed_at=fixed · raw
+∎
+### graph.ontology.define_link_type · responses/v1/graph/ontology_define_link_type_applied.json · human
+created social applied=true
+∎
+### graph.ontology.define_link_type · responses/v1/graph/ontology_define_link_type_applied.json · raw
+∎
+### graph.ontology.define_object_type · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.ontology.define_object_type · edge:applied=false · raw
+∎
+### graph.ontology.define_object_type · edge:committed_at=fixed · human
+created social applied=true
+∎
+### graph.ontology.define_object_type · edge:committed_at=fixed · raw
+∎
+### graph.ontology.define_object_type · responses/v1/graph/ontology_define_object_type_applied.json · human
+created social applied=true
+∎
+### graph.ontology.define_object_type · responses/v1/graph/ontology_define_object_type_applied.json · raw
+∎
+### graph.ontology.delete_link_type · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.ontology.delete_link_type · edge:applied=false · raw
+∎
+### graph.ontology.delete_link_type · edge:committed_at=fixed · human
+deleted social applied=true
+∎
+### graph.ontology.delete_link_type · edge:committed_at=fixed · raw
+∎
+### graph.ontology.delete_link_type · responses/v1/graph/ontology_delete_link_type_applied.json · human
+deleted social applied=true
+∎
+### graph.ontology.delete_link_type · responses/v1/graph/ontology_delete_link_type_applied.json · raw
+∎
+### graph.ontology.delete_object_type · edge:applied=false · human
+not_found social applied=false
+∎
+### graph.ontology.delete_object_type · edge:applied=false · raw
+∎
+### graph.ontology.delete_object_type · edge:committed_at=fixed · human
+deleted social applied=true
+∎
+### graph.ontology.delete_object_type · edge:committed_at=fixed · raw
+∎
+### graph.ontology.delete_object_type · responses/v1/graph/ontology_delete_object_type_applied.json · human
+deleted social applied=true
+∎
+### graph.ontology.delete_object_type · responses/v1/graph/ontology_delete_object_type_applied.json · raw
+∎
+### graph.ontology.freeze · edge:committed_at=fixed · human
+{
+  "commit": {
+    "committed_at": "2026-09-10 20:19:44.000000 +00:00",
+    "delete_count": 0,
+    "durability": "not_durable",
+    "put_count": 1,
+    "timestamp": 6,
+    "version": 6
+  },
+  "graph": "social",
+  "link_types": 1,
+  "object_types": 1
+}
+∎
+### graph.ontology.freeze · edge:committed_at=fixed · raw
+{"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":1,"timestamp":6,"version":6},"graph":"social","link_types":1,"object_types":1}
+∎
+### graph.ontology.freeze · responses/v1/graph/ontology_freeze_applied.json · human
+{
+  "commit": {
+    "committed_at": null,
+    "delete_count": 0,
+    "durability": "not_durable",
+    "put_count": 1,
+    "timestamp": 6,
+    "version": 6
+  },
+  "graph": "social",
+  "link_types": 1,
+  "object_types": 1
+}
+∎
+### graph.ontology.freeze · responses/v1/graph/ontology_freeze_applied.json · raw
+{"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":1,"timestamp":6,"version":6},"graph":"social","link_types":1,"object_types":1}
+∎
+### graph.ontology.get · responses/v1/graph/ontology_get_frozen.json · human
+{
+  "graph": "social",
+  "link_types": [
+    {
+      "cardinality": "many-to-many",
+      "name": "follows",
+      "source": "Person",
+      "target": "Person"
+    }
+  ],
+  "object_types": [
+    {
+      "name": "Person",
+      "properties": {
+        "level": {
+          "required": false,
+          "value_type": "integer"
+        },
+        "name": {
+          "required": true,
+          "value_type": "string"
+        }
+      }
+    }
+  ],
+  "status": "frozen",
+  "timestamp": 6,
+  "version": 6
+}
+∎
+### graph.ontology.get · responses/v1/graph/ontology_get_frozen.json · raw
+{"graph":"social","link_types":[{"cardinality":"many-to-many","name":"follows","source":"Person","target":"Person"}],"object_types":[{"name":"Person","properties":{"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}}],"status":"frozen","timestamp":6,"version":6}
+∎
+### graph.ontology.summary · responses/v1/graph/ontology_summary_found.json · human
+{
+  "graph": "social",
+  "link_types": [
+    {
+      "cardinality": "many-to-many",
+      "edge_count": 0,
+      "name": "follows",
+      "source": "Person",
+      "target": "Person"
+    }
+  ],
+  "object_types": [
+    {
+      "name": "Person",
+      "node_count": 2,
+      "properties": {
+        "level": {
+          "required": false,
+          "value_type": "integer"
+        },
+        "name": {
+          "required": true,
+          "value_type": "string"
+        }
+      }
+    }
+  ],
+  "status": "draft",
+  "timestamp": 5,
+  "version": 5
+}
+∎
+### graph.ontology.summary · responses/v1/graph/ontology_summary_found.json · raw
+{"graph":"social","link_types":[{"cardinality":"many-to-many","edge_count":0,"name":"follows","source":"Person","target":"Person"}],"object_types":[{"name":"Person","node_count":2,"properties":{"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}}],"status":"draft","timestamp":5,"version":5}
+∎
+### graph.sample · edge:has_more=true · human
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6}
+-- more: add --cursor bmV4dA== to the same command
+∎
+### graph.sample · edge:has_more=true · raw
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6}
+∎
+### graph.sample · edge:items=[] · human
+(empty)
+∎
+### graph.sample · edge:items=[] · raw
+(empty)
+∎
+### graph.sample · responses/v1/graph/sample_page.json · human
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6}
+∎
+### graph.sample · responses/v1/graph/sample_page.json · raw
+{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6}
+∎

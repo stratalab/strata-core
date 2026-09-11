@@ -1,0 +1,169 @@
+### inference.cache_status · responses/v1/inference/cache_status.json · human
+{
+  "embedding_models": [],
+  "generation_models": [],
+  "ranking_models": []
+}
+∎
+### inference.cache_status · responses/v1/inference/cache_status.json · raw
+{"embedding_models":[],"generation_models":[],"ranking_models":[]}
+∎
+### inference.capability · responses/v1/errors/inference/invalid_request.json · human
+inference.invalid_request: command failed∎
+### inference.capability · responses/v1/errors/inference/invalid_request.json · raw
+inference.invalid_request: command failed∎
+### inference.capability · responses/v1/inference/capability.json · human
+{
+  "availability": "ready",
+  "can_embed": false,
+  "can_generate": true,
+  "can_rank": false,
+  "can_tokenize": false,
+  "embedding_dim": 0,
+  "model": "claude-3-5-haiku-latest",
+  "network_enabled": true,
+  "provider": "anthropic",
+  "provider_feature_enabled": true,
+  "requires_api_key": true,
+  "requires_network": true,
+  "supports_json_object": true,
+  "supports_json_schema": false,
+  "supports_logprobs": false,
+  "supports_tools": false
+}
+∎
+### inference.capability · responses/v1/inference/capability.json · raw
+{"availability":"ready","can_embed":false,"can_generate":true,"can_rank":false,"can_tokenize":false,"embedding_dim":0,"model":"claude-3-5-haiku-latest","network_enabled":true,"provider":"anthropic","provider_feature_enabled":true,"requires_api_key":true,"requires_network":true,"supports_json_object":true,"supports_json_schema":false,"supports_logprobs":false,"supports_tools":false}
+∎
+### inference.detokenize · responses/v1/inference/text.json · human
+hello
+∎
+### inference.detokenize · responses/v1/inference/text.json · raw
+hello
+∎
+### inference.embed · responses/v1/errors/inference/invalid_request.json · human
+inference.invalid_request: command failed∎
+### inference.embed · responses/v1/errors/inference/invalid_request.json · raw
+inference.invalid_request: command failed∎
+### inference.embed · responses/v1/errors/inference/unknown_model.json · human
+inference.unknown_model: command failed∎
+### inference.embed · responses/v1/errors/inference/unknown_model.json · raw
+inference.unknown_model: command failed∎
+### inference.embed · responses/v1/errors/inference/unsupported_operation.json · human
+inference.unsupported_operation: command failed∎
+### inference.embed · responses/v1/errors/inference/unsupported_operation.json · raw
+inference.unsupported_operation: command failed∎
+### inference.embed · responses/v1/inference/embed.json · human
+1 embeddings · dim 8
+  [0] [0.0681, 0.3584, -0.2061, -0.7119, -0.1242, -0.5920, …]
+∎
+### inference.embed · responses/v1/inference/embed.json · raw
+0.06806039810180664 0.3584129810333252 -0.20612019300460815 -0.71190345287323 -0.12423133850097656 -0.5919586420059204 -0.23881715536117554 0.2620750665664673
+∎
+### inference.generate · responses/v1/errors/inference/unknown_model.json · human
+inference.unknown_model: command failed∎
+### inference.generate · responses/v1/errors/inference/unknown_model.json · raw
+inference.unknown_model: command failed∎
+### inference.generate · responses/v1/errors/inference/unsupported_operation.json · human
+inference.unsupported_operation: command failed∎
+### inference.generate · responses/v1/errors/inference/unsupported_operation.json · raw
+inference.unsupported_operation: command failed∎
+### inference.generate · responses/v1/inference/generate.json · human
+fake:Write a haiku about databases.
+-- stop: stop · prompt 5 tok · completion 5 tok
+∎
+### inference.generate · responses/v1/inference/generate.json · raw
+fake:Write a haiku about databases.
+∎
+### inference.models.list · edge:has_more=true · human
+fake-embed	embed	fake	q8_0	not downloaded	0 bytes
+fake-generate	generate	fake	q8_0	not downloaded	0 bytes
+fake-rank	rank	fake	q8_0	not downloaded	0 bytes
+∎
+### inference.models.list · edge:has_more=true · raw
+{"architecture":"fake","default_quant":"q8_0","embedding_dim":8,"hf_repo":"fake/fake","is_local":false,"local_path":null,"name":"fake-embed","runnable":true,"size_bytes":0,"task":"embed"}
+{"architecture":"fake","default_quant":"q8_0","embedding_dim":0,"hf_repo":"fake/fake","is_local":false,"local_path":null,"name":"fake-generate","runnable":true,"size_bytes":0,"task":"generate"}
+{"architecture":"fake","default_quant":"q8_0","embedding_dim":0,"hf_repo":"fake/fake","is_local":false,"local_path":null,"name":"fake-rank","runnable":true,"size_bytes":0,"task":"rank"}
+∎
+### inference.models.list · edge:items=[] · human
+(none)
+∎
+### inference.models.list · edge:items=[] · raw
+(empty)
+∎
+### inference.models.list · responses/v1/inference/models_list.json · human
+fake-embed	embed	fake	q8_0	not downloaded	0 bytes
+fake-generate	generate	fake	q8_0	not downloaded	0 bytes
+fake-rank	rank	fake	q8_0	not downloaded	0 bytes
+∎
+### inference.models.list · responses/v1/inference/models_list.json · raw
+{"architecture":"fake","default_quant":"q8_0","embedding_dim":8,"hf_repo":"fake/fake","is_local":false,"local_path":null,"name":"fake-embed","runnable":true,"size_bytes":0,"task":"embed"}
+{"architecture":"fake","default_quant":"q8_0","embedding_dim":0,"hf_repo":"fake/fake","is_local":false,"local_path":null,"name":"fake-generate","runnable":true,"size_bytes":0,"task":"generate"}
+{"architecture":"fake","default_quant":"q8_0","embedding_dim":0,"hf_repo":"fake/fake","is_local":false,"local_path":null,"name":"fake-rank","runnable":true,"size_bytes":0,"task":"rank"}
+∎
+### inference.models.local · responses/v1/inference/models_local.json · human
+(none)
+∎
+### inference.models.local · responses/v1/inference/models_local.json · raw
+(empty)
+∎
+### inference.models.pull · responses/v1/errors/inference/unknown_model.json · human
+inference.unknown_model: command failed∎
+### inference.models.pull · responses/v1/errors/inference/unknown_model.json · raw
+inference.unknown_model: command failed∎
+### inference.models.pull · responses/v1/errors/inference/unsupported_operation.json · human
+inference.unsupported_operation: command failed∎
+### inference.models.pull · responses/v1/errors/inference/unsupported_operation.json · raw
+inference.unsupported_operation: command failed∎
+### inference.models.pull · responses/v1/inference/models_pull.json · human
+pulled miniLM -> /fake/models/all-MiniLM-L6-v2.F16.gguf
+∎
+### inference.models.pull · responses/v1/inference/models_pull.json · raw
+{"model":"miniLM","path":"/fake/models/all-MiniLM-L6-v2.F16.gguf"}
+∎
+### inference.rank · edge:items=[] · human
+∎
+### inference.rank · edge:items=[] · raw
+(empty)
+∎
+### inference.rank · responses/v1/errors/inference/unsupported_operation.json · human
+inference.unsupported_operation: command failed∎
+### inference.rank · responses/v1/errors/inference/unsupported_operation.json · raw
+inference.unsupported_operation: command failed∎
+### inference.rank · responses/v1/inference/rank.json · human
+0	0.000000
+1	0.000000
+∎
+### inference.rank · responses/v1/inference/rank.json · raw
+{"index":0,"score":0.0,"status":"ok"}
+{"index":1,"score":0.0,"status":"ok"}
+∎
+### inference.status · responses/v1/inference/status.json · human
+build	local + cloud
+
+providers
+  local	ready -- use local:<model>
+
+models	/fake/models (shared by every database)
+  downloaded	0 of 3 catalogued
+	this build cannot download models -- `strata inference install-local` adds downloading along with local execution
+∎
+### inference.status · responses/v1/inference/status.json · raw
+{"local_execution":true,"local_remedy":null,"model_download":false,"models_catalogued":3,"models_dir":"/fake/models","models_downloaded":0,"providers":[{"base_url":null,"base_url_env_var":null,"base_url_source":null,"feature_enabled":true,"key_env_var":null,"key_present":false,"key_source":null,"model_prefix":"local:","provider":"local","ready":true,"requires_api_key":false}]}
+∎
+### inference.tokenize · responses/v1/errors/inference/unknown_model.json · human
+inference.unknown_model: command failed∎
+### inference.tokenize · responses/v1/errors/inference/unknown_model.json · raw
+inference.unknown_model: command failed∎
+### inference.tokenize · responses/v1/inference/tokenize.json · human
+104 101 108 108 111 32 119 111 114 108 100
+∎
+### inference.tokenize · responses/v1/inference/tokenize.json · raw
+104 101 108 108 111 32 119 111 114 108 100
+∎
+### inference.unload · responses/v1/inference/unload.json · human
+no cached entry
+∎
+### inference.unload · responses/v1/inference/unload.json · raw
+{"unloaded":false}
+∎
