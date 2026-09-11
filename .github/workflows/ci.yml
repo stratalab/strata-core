@@ -205,6 +205,18 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: check
     runs-on: ubuntu-latest
+    # Eight shards (#3314): a lane-B (executor) mutant costs ~140s here —
+    # baseline build plus one test run each — so a ~200-mutant IDL-tooling
+    # diff needs ~7 hours serially, past the 6-hour job cap, never mind the
+    # 90 minutes below. Each shard judges every eighth mutant of every lane
+    # (round-robin, so a heavy file is spread rather than landing on one
+    # shard); a lane with no mutants in a shard exits before its baseline
+    # build, so small diffs still pay for roughly one build. Add shards
+    # before raising the timeout: a shard's clock is the gate's latency.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     # 90 minutes (#2770): sized for product diffs. The DST harness modules
     # are mutation-excluded at saturation (see .cargo/mutants.toml) — their
     # full-file mutant set outgrew any per-PR budget and their strength
@@ -234,14 +246,17 @@ jobs:
         # else; `.cargo/mutants.toml` is lane A's file, not a shared one.
         #
         # A lane whose slice of the diff has no mutants exits immediately, so
-        # single-crate PRs pay for one lane.
+        # single-crate PRs pay for one lane. Sharding applies per invocation,
+        # to that lane's own filtered list, so every lane is spread across
+        # the eight shards independently.
         #
         # Exit 3 (timeout-only, no missed mutants) passes: a mutant whose test
         # run never completes was killed by hang — the behavior change was
         # detected, just not by an assertion. Exit 2 (missed) still fails.
         run: |
           git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
-          common=(--in-diff pr.diff --timeout-multiplier 2.5 --minimum-test-timeout 60)
+          common=(--in-diff pr.diff --timeout-multiplier 2.5 --minimum-test-timeout 60
+                  --shard ${{ matrix.shard }}/8 --sharding round-robin)
           cargo mutants "${common[@]}" || [ $? -eq 3 ]
           cargo mutants "${common[@]}" \
             --config .cargo/mutants-executor.toml \
@@ -255,7 +270,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: mutants-report-${{ github.run_id }}
+          name: mutants-report-${{ github.run_id }}-shard-${{ matrix.shard }}
           path: mutants.out
           retention-days: 30
 
