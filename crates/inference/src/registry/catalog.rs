@@ -66,36 +66,10 @@ pub static CATALOG: &[CatalogEntry] = &[
         embedding_dim: 768,
     },
     // ===== Ranking Models =====
-    CatalogEntry {
-        name: "jina-reranker-v1-tiny",
-        aliases: &["jina-reranker-tiny", "jina-reranker"],
-        task: ModelTask::Rank,
-        hf_repo: "stratalab-org/jina-reranker-v1-tiny-en-GGUF",
-        default_quant: "f16",
-        variants: &[QuantVariant {
-            name: "f16",
-            hf_file: "jina-reranker-v1-tiny-en.F16.gguf",
-            size_bytes: 66_000_000,
-            sha256: None,
-        }],
-        architecture: "jina-bert-v2",
-        embedding_dim: 0,
-    },
-    CatalogEntry {
-        name: "bge-reranker-v2-m3",
-        aliases: &["bge-reranker"],
-        task: ModelTask::Rank,
-        hf_repo: "stratalab-org/bge-reranker-v2-m3-GGUF",
-        default_quant: "q8_0",
-        variants: &[QuantVariant {
-            name: "q8_0",
-            hf_file: "bge-reranker-v2-m3-Q8_0.gguf",
-            size_bytes: 580_000_000,
-            sha256: None,
-        }],
-        architecture: "xlm-roberta",
-        embedding_dim: 0,
-    },
+    // None catalogued: the two reranker repos this list once named were never
+    // published (#3045). A reranker is used by GGUF path until one is; the
+    // nightly reachability check (`every_catalogued_file_is_published_on_the_hub`)
+    // is what admits a new entry.
     // ===== Generation Models =====
     CatalogEntry {
         name: "gpt2",
@@ -149,20 +123,13 @@ pub static CATALOG: &[CatalogEntry] = &[
         task: ModelTask::Generate,
         hf_repo: "stratalab-org/Qwen3-1.7B-GGUF",
         default_quant: "q8_0",
-        variants: &[
-            QuantVariant {
-                name: "q4_k_m",
-                hf_file: "Qwen3-1.7B-Q4_K_M.gguf",
-                size_bytes: 1_100_000_000,
-                sha256: None,
-            },
-            QuantVariant {
-                name: "q8_0",
-                hf_file: "Qwen3-1.7B-Q8_0.gguf",
-                size_bytes: 2_000_000_000,
-                sha256: None,
-            },
-        ],
+        // Only q8_0 is published in the repo (#3300).
+        variants: &[QuantVariant {
+            name: "q8_0",
+            hf_file: "Qwen3-1.7B-Q8_0.gguf",
+            size_bytes: 2_000_000_000,
+            sha256: None,
+        }],
         architecture: "qwen3",
         embedding_dim: 0,
     },
@@ -444,41 +411,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn ranking_models_exist_in_catalog() {
-        let rank_count = CATALOG.iter().filter(|e| e.task == ModelTask::Rank).count();
-        assert!(
-            rank_count >= 1,
-            "catalog should have at least one ranking model"
-        );
-    }
-
-    #[test]
-    fn find_entry_jina_reranker() {
-        let entry = find_entry("jina-reranker-v1-tiny").unwrap();
-        assert_eq!(entry.task, ModelTask::Rank);
-    }
-
-    #[test]
-    fn find_entry_jina_reranker_alias() {
-        let entry = find_entry("jina-reranker").unwrap();
-        assert_eq!(entry.name, "jina-reranker-v1-tiny");
-        assert_eq!(entry.task, ModelTask::Rank);
-    }
-
-    #[test]
-    fn find_entry_bge_reranker() {
-        let entry = find_entry("bge-reranker-v2-m3").unwrap();
-        assert_eq!(entry.task, ModelTask::Rank);
-    }
-
-    #[test]
-    fn find_entry_bge_reranker_alias() {
-        let entry = find_entry("bge-reranker").unwrap();
-        assert_eq!(entry.name, "bge-reranker-v2-m3");
-        assert_eq!(entry.task, ModelTask::Rank);
     }
 
     #[test]

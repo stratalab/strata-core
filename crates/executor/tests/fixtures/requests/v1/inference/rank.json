@@ -1,6 +1,6 @@
 {
   "type": "inference_rank",
-  "model": "jina-reranker-v1-tiny",
+  "model": "fake-rank",
   "request": {
     "query": "vector database",
     "passages": [

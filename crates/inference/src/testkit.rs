@@ -1165,8 +1165,10 @@ mod tests {
         service
             .chat("tinyllama", &chat("hi"))
             .expect("local generation is built");
+        // No catalogued model ranks (#3045); the fake's own rank model stands
+        // in for the reranker a user would name by GGUF path.
         service
-            .rank("jina-reranker-v1-tiny", &rank("q"))
+            .rank("fake-rank", &rank("q"))
             .expect("local ranking is built");
         service
             .tokenize("tinyllama", "hi", true)
