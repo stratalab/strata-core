@@ -26,6 +26,12 @@ jobs:
     # compiles; nightly budget covers core fully plus the storage
     # format layer (the pure decoders where UB would be durable-format
     # corruption).
+    #
+    # Miri cannot call foreign functions: a format test that reaches the
+    # zstd C decoder aborts the whole test process, and every test after
+    # it goes unverified. Gate such tests (or their zstd cells) under
+    # `cfg(miri)` as `format::table::golden_tests` does — the ASAN lane
+    # covers the compression paths (#3307).
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
