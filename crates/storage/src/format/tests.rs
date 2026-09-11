@@ -1368,6 +1368,19 @@ fn rle(verdicts: &[bool]) -> String {
     out
 }
 
+/// Goldens whose unmutated bytes are handed to the zstd C decoder. Miri
+/// cannot call foreign functions and aborts the whole test process on the
+/// first attempt (every later test in the lane goes unverified), so under
+/// Miri these stems are left to the ASAN lane — as `table::golden_tests`
+/// leaves its zstd vector — and every other cell keeps its Miri coverage.
+/// Only a frame that *declares* zstd reaches the FFI: the block CRC runs
+/// before decompression, so no mutation of an uncompressed golden gets
+/// there, and the immutable-table goldens hold uncompressed blocks behind
+/// a table-level CRC.
+fn skipped_under_miri(stem: &str) -> bool {
+    cfg!(miri) && stem == "table-data-block-zstd-frame"
+}
+
 #[test]
 fn adversarial_matrix_matches_the_pinned_contract() {
     let goldens_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1404,6 +1417,9 @@ fn adversarial_matrix_matches_the_pinned_contract() {
             lines.push(format!("{stem}\tunmapped"));
             continue;
         };
+        if skipped_under_miri(stem) {
+            continue;
+        }
         let text = fs::read_to_string(goldens_dir.join(file)).expect("golden");
         let bytes = parse_hex(&text);
         // Historical must-reject fixtures pin that a retired encoding STAYS
@@ -1442,13 +1458,31 @@ fn adversarial_matrix_matches_the_pinned_contract() {
     }
     let rendered = lines.join("\n") + "\n";
 
-    if std::env::var("STRATA_ADVERSARIAL_BLESS").is_ok() {
+    let bless = std::env::var("STRATA_ADVERSARIAL_BLESS").is_ok();
+    assert!(
+        !bless || !cfg!(miri),
+        "bless natively: under Miri the zstd cells are skipped"
+    );
+    if bless {
         fs::write(&manifest_path, &rendered).expect("bless adversarial contract");
         eprintln!("blessed {} adversarial contract lines", lines.len());
         return;
     }
-    let committed = fs::read_to_string(&manifest_path)
+    let mut committed = fs::read_to_string(&manifest_path)
         .expect("committed adversarial contract (bless once with STRATA_ADVERSARIAL_BLESS=1)");
+    if cfg!(miri) {
+        // The skipped stems' lines leave the committed side too; natively
+        // nothing is skipped and the comparison stays byte-for-byte.
+        let mut kept = String::new();
+        for line in committed.lines() {
+            let stem = line.split_once('\t').map_or(line, |(stem, _)| stem);
+            if !skipped_under_miri(stem) {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+        }
+        committed = kept;
+    }
     assert_eq!(
         rendered, committed,
         "the adversarial decode contract drifted — a decoder's rejection \
