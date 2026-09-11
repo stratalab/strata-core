@@ -148,13 +148,14 @@ under this plan.
 
 ### 2.4 The playground
 
-`crates/wasm/src/lib.rs:91-107` `execute_cli` parses the line with the real
-clap grammar via `command_from_line` (`lib.rs:2829`), which returns only the
-executor `Command` — `cli.json`, `cli.raw` and `cli.format` are dropped —
-and renders every result with `Format::Human` (#3312). Errors come back as
-the human error line *in the same string* as output; there is no stderr and
-no exit code in the browser. Whatever the human contract says about channels
-must also read correctly when both channels are one stream.
+`crates/wasm/src/lib.rs` `execute_cli` is `strata_cli::run_line`: it parses
+the line with the real clap grammar via `command_from_line`, which returns
+the executor `Command` *and* the `Format` the line's flags chose, executes,
+and renders in that format — the binary's stdout then its stderr, as one
+string. (Before #3312 the format was dropped and every result rendered
+human.) There is no stderr and no exit code in the browser, so whatever the
+human contract says about channels must also read correctly when both
+channels are one stream.
 
 ### 2.5 What the tests reach
 
@@ -601,10 +602,10 @@ outlives them.
   an empty list, a history, `info`, a usage error, an executor error — each
   in `human`, `raw` and `json`, capturing stdout, stderr and the exit code
   separately. This is the only place the R5 contract is observable.
-- Playground cell: for every human in-process cell, `execute_cli`'s string
-  equals stdout ⧺ stderr of the binary cell (wasm target compiled natively
-  through `strata_cli::command_from_line` + `output_to_string`, as the crate
-  already tests families).
+- Playground cell: for every exchange of the binary script, `execute_cli`'s
+  string equals stdout ⧺ stderr of the binary cell (the wasm crate's path is
+  `strata_cli::run_line`, compiled natively and run against a cache executor;
+  `info` is skipped because it reports the target itself).
 - `command-examples.json` cross-check: every reproducible example line's
   `out` equals the matrix's human render of the same replayed step (the two
   artifacts must not drift from each other; the guard fails if they do). The

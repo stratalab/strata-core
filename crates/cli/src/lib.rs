@@ -8,7 +8,7 @@
 #![cfg_attr(not(feature = "native"), allow(dead_code))]
 
 use clap::Parser;
-use strata_executor::{Command, ExecutorError, GraphPropertyDef};
+use strata_executor::{Command, Executor, ExecutorError, GraphPropertyDef};
 
 #[cfg(feature = "native")]
 use serde_json::Value;
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 #[cfg(feature = "native")]
 use strata_executor::ipc::{Connection, SessionAccess};
 #[cfg(feature = "native")]
-use strata_executor::{Executor, IpcMode};
+use strata_executor::IpcMode;
 
 #[cfg(feature = "native")]
 mod agents;
@@ -72,7 +72,9 @@ use render::{render_error, render_output, render_value};
 
 // The wasm-safe CLI surface, re-exported for embedded consumers (the browser
 // playground): render an Output or error to the CLI's own display string with
-// no host I/O. `command_from_line` (below) turns a CLI line into a Command.
+// no host I/O. `command_from_line` (below) turns a CLI line into a Command
+// plus the output format its flags chose; `run_line` runs one against an
+// embedded executor and returns what the binary would have printed.
 pub use options::Format;
 pub use render::{error_to_string, output_to_string, value_to_string};
 
@@ -2816,11 +2818,23 @@ fn bytes(value: String) -> strata_executor::Bytes {
     strata_executor::Bytes::new(value.into_bytes())
 }
 
-/// Parses a single CLI line (e.g. `kv put greeting hello`) into an executor
-/// [`Command`], reusing the exact clap grammar and argument handling the
-/// `strata` binary uses. Wasm-safe and host-free: it opens no database and
-/// performs no I/O. `branch`/`space` supply the session scope for commands that
-/// omit their own `--branch`/`--space`.
+/// A CLI line parsed for an embedded session: the executor command it names
+/// and the output format its flags selected (`--json`, `--raw`, or the human
+/// default), so the caller renders the result the way the binary would.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ParsedLine {
+    /// The command to execute.
+    pub command: Command,
+    /// The output format the line's flags chose.
+    pub format: Format,
+}
+
+/// Parses a single CLI line (e.g. `--json kv get greeting`) into an executor
+/// [`Command`] and its output [`Format`], reusing the exact clap grammar and
+/// argument handling the `strata` binary uses. Wasm-safe and host-free: it
+/// opens no database and performs no I/O. `branch`/`space` supply the session
+/// scope for commands that omit their own `--branch`/`--space`.
 ///
 /// The `Err` string is human-readable text to display in place of running a
 /// command: a clap parse error, `--help`/`--version` output, or a note that the
@@ -2830,7 +2844,7 @@ pub fn command_from_line(
     line: &str,
     branch: Option<String>,
     space: Option<String>,
-) -> Result<Command, String> {
+) -> Result<ParsedLine, String> {
     let tokens = shlex::split(line)
         .ok_or_else(|| "could not parse the line (unbalanced quotes?)".to_owned())?;
     if tokens.is_empty() {
@@ -2838,6 +2852,7 @@ pub fn command_from_line(
     }
     let argv = std::iter::once("strata".to_owned()).chain(tokens);
     let cli = Cli::try_parse_from(argv).map_err(|error| error.render().to_string())?;
+    let format = cli.output_format();
     let Some(command) = cli.command else {
         return Err("type a command, e.g. `kv put greeting hello`".to_owned());
     };
@@ -2847,7 +2862,36 @@ pub fn command_from_line(
         branch: cli.branch.or(branch),
         space: cli.space.or(space),
     };
-    command_to_executor(command, &scope).map_err(|error| error.to_string())
+    let command = command_to_executor(command, &scope).map_err(|error| error.to_string())?;
+    Ok(ParsedLine { command, format })
+}
+
+/// Runs one CLI line against an embedded `executor` and returns what the
+/// `strata` binary would have written for it — stdout, then stderr, as one
+/// string, in the format the line's flags chose. The executor's default
+/// branch and space are the session scope. Wasm-safe: this is the browser
+/// playground's whole path, and the output-contract matrix pins it equal to
+/// the binary's channels (`crates/cli/tests/output_contract.rs`).
+///
+/// Parse errors, `--help`, and host-only refusals are returned as the text to
+/// display (see [`command_from_line`]); command failures come back as the
+/// CLI's error line. The only `Err` is a rendering failure.
+///
+/// # Errors
+///
+/// Returns the renderer's error when the executor's output cannot be
+/// serialized for display.
+pub fn run_line(executor: &mut Executor, line: &str) -> Result<String, CliError> {
+    let branch = Some(executor.default_branch().to_owned());
+    let space = Some(executor.default_space().to_owned());
+    let ParsedLine { command, format } = match command_from_line(line, branch, space) {
+        Ok(parsed) => parsed,
+        Err(message) => return Ok(message),
+    };
+    match executor.execute(command) {
+        Ok(output) => render::output_line(&output, format),
+        Err(error) => Ok(render::error_line(error.status(), format)),
+    }
 }
 
 /// Maps a parsed top-level command to an executor [`Command`] for the embedded
@@ -3203,7 +3247,7 @@ mod tests {
 
     #[test]
     fn command_from_line_maps_each_supported_family() {
-        let cmd = |line: &str| command_from_line(line, None, None).expect(line);
+        let cmd = |line: &str| command_from_line(line, None, None).expect(line).command;
         assert!(matches!(cmd("ping"), Command::Ping {}));
         assert!(matches!(cmd("remote"), Command::RemoteGet {}));
         assert!(matches!(cmd("info"), Command::Info { .. }));
@@ -3254,7 +3298,9 @@ mod tests {
     fn command_from_line_applies_session_scope_and_per_command_override() {
         // The session scope fills in when the command omits --branch.
         let Command::KvGet { branch, .. } =
-            command_from_line("kv get k", Some("feature".to_owned()), None).expect("kv get")
+            command_from_line("kv get k", Some("feature".to_owned()), None)
+                .expect("kv get")
+                .command
         else {
             panic!("expected kv get");
         };
@@ -3264,10 +3310,56 @@ mod tests {
         let Command::KvGet { branch, .. } =
             command_from_line("kv get k --branch other", Some("feature".to_owned()), None)
                 .expect("kv get override")
+                .command
         else {
             panic!("expected kv get");
         };
         assert_eq!(branch.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn command_from_line_carries_the_output_format_its_flags_chose() {
+        // #3312: the format is part of the parse, so an embedded session
+        // renders `--json`/`--raw` the way the binary does instead of
+        // dropping the flag on the floor.
+        let format = |line: &str| command_from_line(line, None, None).expect(line).format;
+        assert_eq!(format("kv get k"), Format::Human);
+        assert_eq!(format("--json kv get k"), Format::Json);
+        assert_eq!(format("kv get k --json"), Format::Json);
+        assert_eq!(format("--raw kv get k"), Format::Raw);
+        assert_eq!(format("--output-format pretty kv get k"), Format::Pretty);
+        // Conflicting flags are a parse error, as on the command line.
+        assert!(command_from_line("--json --raw kv get k", None, None).is_err());
+    }
+
+    #[test]
+    fn run_line_renders_in_the_format_the_line_chose() {
+        // The playground's path: each format's channel text, as the binary
+        // would print it (stdout ⧺ stderr; JSON envelopes newline-terminated).
+        let mut executor = Executor::open_cache().expect("cache executor opens");
+        let run = |executor: &mut Executor, line: &str| run_line(executor, line).expect(line);
+        assert_eq!(
+            run(&mut executor, "kv put greeting hello"),
+            "created greeting applied=true\n"
+        );
+        assert_eq!(run(&mut executor, "--raw kv get greeting"), "hello\n");
+        let json = run(&mut executor, "--json kv get greeting");
+        assert!(json.ends_with('\n'), "JSON is newline-terminated: {json:?}");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("compact JSON");
+        assert_eq!(envelope["type"], "kv_versioned_value");
+        assert_eq!(envelope["data"]["value"]["value"], "aGVsbG8=");
+        // A command failure is the error line in the chosen format, not an Err.
+        let missing = run(&mut executor, "--json branch get nope");
+        let envelope: serde_json::Value = serde_json::from_str(&missing).expect("error envelope");
+        assert_eq!(envelope["error"]["code"], "not_found.engine.branch");
+        let missing = run(&mut executor, "branch get nope");
+        assert!(
+            missing.starts_with("not_found.engine.branch:") && missing.ends_with('\n'),
+            "human error line: {missing:?}"
+        );
+        // Parse errors and host-only refusals are the text to display.
+        assert!(run(&mut executor, "kv put").contains("Usage: strata kv put"));
+        assert!(run(&mut executor, "hub info").contains("needs a host environment"));
     }
 
     #[test]

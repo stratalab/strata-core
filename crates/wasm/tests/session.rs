@@ -169,6 +169,62 @@ fn a_closed_session_reports_the_close_and_then_refuses_work() {
     );
 }
 
+fn execute_cli(session: &mut StrataSession, line: &str) -> String {
+    session
+        .execute_cli(line)
+        .expect("a CLI line renders without throwing")
+}
+
+#[wasm_bindgen_test]
+fn execute_cli_renders_the_human_default() {
+    let mut session = StrataSession::new().expect("session opens");
+    assert_eq!(
+        execute_cli(&mut session, "kv put greeting hello"),
+        "created greeting applied=true\n"
+    );
+    assert_eq!(execute_cli(&mut session, "kv get greeting"), "hello\n");
+}
+
+#[wasm_bindgen_test]
+fn execute_cli_honours_json() {
+    // #3312: `--json` used to be accepted and ignored, so the playground
+    // rendered the human line where the binary prints the wire envelope.
+    let mut session = StrataSession::new().expect("session opens");
+    execute_cli(&mut session, "kv put greeting hello");
+    let line = execute_cli(&mut session, "--json kv get greeting");
+    assert!(
+        line.ends_with('\n'),
+        "newline-terminated like stdout: {line:?}"
+    );
+    let envelope: serde_json::Value = serde_json::from_str(&line).expect("compact JSON");
+    assert_eq!(envelope["type"], "kv_versioned_value");
+    assert_eq!(envelope["data"]["value"]["value"], VALUE_HELLO);
+}
+
+#[wasm_bindgen_test]
+fn execute_cli_honours_raw() {
+    let mut session = StrataSession::new().expect("session opens");
+    execute_cli(&mut session, "kv put greeting hello");
+    assert_eq!(
+        execute_cli(&mut session, "--raw kv get greeting"),
+        "hello\n"
+    );
+    assert_eq!(execute_cli(&mut session, "--raw kv get missing"), "");
+}
+
+#[wasm_bindgen_test]
+fn execute_cli_renders_failures_in_the_chosen_format() {
+    let mut session = StrataSession::new().expect("session opens");
+    let human = execute_cli(&mut session, "branch get nope");
+    assert!(
+        human.starts_with("not_found.engine.branch:") && human.ends_with('\n'),
+        "human error line: {human:?}"
+    );
+    let json = execute_cli(&mut session, "--json branch get nope");
+    let envelope: serde_json::Value = serde_json::from_str(&json).expect("error envelope");
+    assert_eq!(envelope["error"]["code"], "not_found.engine.branch");
+}
+
 #[wasm_bindgen_test]
 fn engine_version_reports_a_non_empty_semver() {
     let version = engine_version();
