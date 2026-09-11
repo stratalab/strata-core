@@ -74,14 +74,16 @@ impl StrataSession {
             .map_err(|error| JsError::new(&format!("envelope serialization failed: {error}")))
     }
 
-    /// Runs one `strata` CLI line and returns the CLI's own display output.
+    /// Runs one `strata` CLI line and returns what the installed binary would
+    /// have printed for it — stdout, then stderr, as one string.
     ///
     /// The input is a command line exactly as typed at the `strata` prompt —
-    /// `kv put greeting hello`, `branch merge tuning default`, … — parsed by the
+    /// `kv put greeting hello`, `--json kv get greeting`, … — parsed by the
     /// same clap grammar the installed binary uses, run against this session's
-    /// in-memory database, and rendered to the CLI's human output. A parse
-    /// error, `--help`, or a host-only command (`mcp`, `init`, `clone`, …)
-    /// returns its message as the string to display.
+    /// in-memory database, and rendered in the format the line's flags chose
+    /// (`--json`, `--raw`, or the human default). A parse error, `--help`, or
+    /// a host-only command (`mcp`, `init`, `clone`, …) returns its message as
+    /// the string to display.
     ///
     /// # Errors
     ///
@@ -89,21 +91,8 @@ impl StrataSession {
     /// errors come back as the returned display string, not as thrown errors.
     #[wasm_bindgen(js_name = executeCli)]
     pub fn execute_cli(&mut self, line: &str) -> Result<String, JsError> {
-        let branch = Some(self.executor.default_branch().to_owned());
-        let space = Some(self.executor.default_space().to_owned());
-        let command = match strata_cli::command_from_line(line, branch, space) {
-            Ok(command) => command,
-            // Parse errors, --help, and usage refusals are shown, not thrown.
-            Err(message) => return Ok(message),
-        };
-        match self.executor.execute(command) {
-            Ok(output) => strata_cli::output_to_string(&output, strata_cli::Format::Human)
-                .map_err(|error| JsError::new(&format!("render failed: {error}"))),
-            Err(error) => Ok(strata_cli::error_to_string(
-                error.status(),
-                strata_cli::Format::Human,
-            )),
-        }
+        strata_cli::run_line(&mut self.executor, line)
+            .map_err(|error| JsError::new(&format!("render failed: {error}")))
     }
 
     /// Returns the session's default branch (used when commands omit theirs).

@@ -31,8 +31,9 @@
 //! `crates/inference/tests/resolution_matrix.rs`). The `command-examples.json`
 //! cross-check closes the loop with the docs bundle: every reproducible
 //! example line's `out` must equal this matrix's human render of the same
-//! wire, so the two artifacts cannot drift apart. Playground cells arrive
-//! with #3312, which makes `execute_cli` honour the format.
+//! wire, so the two artifacts cannot drift apart. The playground cells run
+//! the binary's script through `strata_cli::run_line` — the browser's whole
+//! path — and hold it equal to the binary's stdout ⧺ stderr (#3312).
 
 #![deny(unsafe_code)]
 
@@ -43,7 +44,7 @@ use std::process::Command;
 
 use serde_json::Value;
 use strata_cli::{error_to_string, output_to_string, Format};
-use strata_executor::Output;
+use strata_executor::{Executor, Output};
 
 const CHILD_MODE: &str = "STRATA_OUTPUT_CONTRACT_CHILD";
 const BLESS: &str = "STRATA_OUTPUT_BLESS";
@@ -586,12 +587,13 @@ const SCRIPT: &[&[&str]] = &[
 /// Replaces the values that vary run to run or machine to machine with
 /// placeholders, so the pinned text is the shape of the channel, not the
 /// instant it was captured.
-fn scrub(text: &str, db: &str) -> String {
-    let mut out = text.replace(db, "<db>");
+fn scrub(text: &str) -> String {
+    let mut out = text.to_owned();
     for (pattern, placeholder) in [
-        // A rendered local date-time (under TZ=UTC) and a raw epoch-micros.
+        // A rendered local date-time (the binary runs under TZ=UTC; the
+        // playground cell renders in the host's zone) and a raw epoch-micros.
         (
-            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \+00:00",
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ [+-]\d{2}:\d{2}",
             "<instant>",
         ),
         (r#"("committed_at":\s*)\d+"#, "${1}<micros>"),
@@ -614,12 +616,18 @@ fn scrub(text: &str, db: &str) -> String {
     out
 }
 
-#[test]
-fn binary_cells_hold() {
-    let dir = tempfile::tempdir().expect("tmp");
-    let home = dir.path().join("home");
+/// The cell key of one exchange's channel: `NN strata <args> · <channel>`.
+fn exchange_key(position: usize, args: &[&str], channel: &str) -> String {
+    format!("{position:02} strata {} · {channel}", args.join(" "))
+}
+
+/// Runs the script through the real binary against a fresh durable database
+/// under `dir`, one process per exchange, and returns every channel scrubbed.
+fn binary_cells(dir: &Path) -> Cells {
+    let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("home");
-    let db = dir.path().join("db").to_string_lossy().into_owned();
+    let db = dir.join("db").to_string_lossy().into_owned();
+    let channel = |bytes: &[u8]| scrub(&String::from_utf8_lossy(bytes).replace(&db, "<db>"));
     let mut cells = Cells::new();
     for (position, args) in SCRIPT.iter().enumerate() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_strata"));
@@ -634,21 +642,80 @@ fn binary_cells_hold() {
             command.env("PATH", path);
         }
         let output = command.output().expect("run strata binary");
-        let key = |channel: &str| format!("{position:02} strata {} · {channel}", args.join(" "));
         cells.insert(
-            key("stdout"),
-            scrub(&String::from_utf8_lossy(&output.stdout), &db),
+            exchange_key(position, args, "stdout"),
+            channel(&output.stdout),
         );
         cells.insert(
-            key("stderr"),
-            scrub(&String::from_utf8_lossy(&output.stderr), &db),
+            exchange_key(position, args, "stderr"),
+            channel(&output.stderr),
         );
         cells.insert(
-            key("exit"),
+            exchange_key(position, args, "exit"),
             format!("{}\n", output.status.code().expect("exit code")),
         );
     }
-    report("binary cells", &compare("binary", &cells));
+    cells
+}
+
+#[test]
+fn binary_cells_hold() {
+    let dir = tempfile::tempdir().expect("tmp");
+    report(
+        "binary cells",
+        &compare("binary", &binary_cells(dir.path())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Playground cells: the browser's one stream equals the binary's two.
+// ---------------------------------------------------------------------------
+
+/// The two surfaces run on different targets — the binary on a durable file,
+/// the playground on a cache session — and a target may say so: `info`
+/// describes it outright (that exchange is skipped), and a commit ack names
+/// its durability (`standard` on the file, `not_durable` in cache; mapped
+/// here). Nothing else legitimately differs between the two.
+fn describes_the_target(args: &[&str]) -> bool {
+    args.contains(&"info")
+}
+
+fn on_the_cache_target(binary_text: &str) -> String {
+    binary_text.replace(
+        r#""durability":"standard""#,
+        r#""durability":"not_durable""#,
+    )
+}
+
+/// §5.2 playground cell (#3312): for every exchange of the script, `run_line`
+/// — the playground's whole path, parse through render — returns stdout ⧺
+/// stderr of the binary's exchange, in the format the line chose. The two
+/// surfaces run the same script against their own database, so the state each
+/// exchange sees is the same on both sides.
+#[test]
+fn playground_cells_match_the_binary() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let binary = binary_cells(dir.path());
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let mut red = Vec::new();
+    for (position, args) in SCRIPT.iter().enumerate() {
+        let line = args.join(" ");
+        let got = scrub(&strata_cli::run_line(&mut executor, &line).expect("run_line renders"));
+        if describes_the_target(args) {
+            continue;
+        }
+        let want = on_the_cache_target(&format!(
+            "{}{}",
+            binary[&exchange_key(position, args, "stdout")],
+            binary[&exchange_key(position, args, "stderr")]
+        ));
+        if got != want {
+            red.push(format!(
+                "playground: {position:02} strata {line}\n--- binary stdout ⧺ stderr\n{want}--- playground\n{got}"
+            ));
+        }
+    }
+    report("playground cells", &red);
 }
 
 #[test]

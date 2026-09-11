@@ -75,31 +75,43 @@ pub fn error_to_string(status: &impl Serialize, format: Format) -> String {
     }
 }
 
+/// The stdout text of an `Output` exactly as the binary writes it: JSON/pretty
+/// envelopes end with a newline; human/raw strings already carry their own
+/// line breaks. The binary prints this; the playground returns it (`run_line`).
+pub(crate) fn output_line(output: &Output, format: Format) -> Result<String, CliError> {
+    Ok(terminated(output_to_string(output, format)?, format))
+}
+
+/// The stderr text of an executor error exactly as the binary writes it: the
+/// error line, newline-terminated in every format.
+pub(crate) fn error_line(status: &impl Serialize, format: Format) -> String {
+    let mut line = error_to_string(status, format);
+    line.push('\n');
+    line
+}
+
+fn terminated(mut rendered: String, format: Format) -> String {
+    if matches!(format, Format::Json | Format::Pretty) {
+        rendered.push('\n');
+    }
+    rendered
+}
+
 #[cfg(feature = "native")]
 pub(crate) fn render_output(output: &Output, format: Format) -> Result<(), CliError> {
-    print_rendered(&output_to_string(output, format)?, format);
+    print!("{}", output_line(output, format)?);
     Ok(())
 }
 
 #[cfg(feature = "native")]
 pub(crate) fn render_value(value: &Value, format: Format) -> Result<(), CliError> {
-    print_rendered(&value_to_string(value, format)?, format);
+    print!("{}", terminated(value_to_string(value, format)?, format));
     Ok(())
-}
-
-/// JSON/pretty envelopes get a trailing newline; human/raw strings already
-/// carry their own line breaks and print verbatim.
-#[cfg(feature = "native")]
-fn print_rendered(rendered: &str, format: Format) {
-    match format {
-        Format::Json | Format::Pretty => println!("{rendered}"),
-        Format::Human | Format::Raw => print!("{rendered}"),
-    }
 }
 
 #[cfg(feature = "native")]
 pub(crate) fn render_error(status: &impl Serialize, format: Format) {
-    eprintln!("{}", error_to_string(status, format));
+    eprint!("{}", error_line(status, format));
 }
 
 fn render_human(value: &Value, out: &mut String) -> Result<(), CliError> {
