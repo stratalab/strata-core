@@ -66,6 +66,7 @@ commands:
     input: Command::BranchMerge
     output: Output::BranchMerge
     result: PromotionOutcomeItem
+    response_model: StatusResponse<PromotionOutcomeItem>
     errors+:
       - conflict.engine.promotion
       - invalid_argument.engine.branch_point
@@ -138,6 +139,7 @@ commands:
     input: Command::BranchCreate
     output: Output::Branch
     result: BranchItem
+    response_model: StatusResponse<BranchItem>
     prose: commands/branch.create.md
     errors+:
       - already_exists.engine.branch
@@ -161,6 +163,7 @@ commands:
     input: Command::BranchForkCurrent
     output: Output::Branch
     result: BranchItem
+    response_model: StatusResponse<BranchItem>
     prose: commands/branch.fork.md
     errors+:
       - already_exists.engine.branch
@@ -179,6 +182,7 @@ commands:
     input: Command::BranchForkAtVersion
     output: Output::Branch
     result: BranchItem
+    response_model: StatusResponse<BranchItem>
     cli_surface: wire
     prose: commands/branch.fork_at_version.md
     errors+:
@@ -199,6 +203,7 @@ commands:
     input: Command::BranchForkAtTimestamp
     output: Output::Branch
     result: BranchItem
+    response_model: StatusResponse<BranchItem>
     cli_surface: wire
     prose: commands/branch.fork_at_timestamp.md
     errors+:

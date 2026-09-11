@@ -29,6 +29,7 @@ allowlist may *only shrink*. If you skip a step, a guard tells you which one.
 | `manifest.yaml` | Schema + generator version stamps. |
 | `*uncovered*.yaml`, `missing-examples.yaml` | Shrink-only coverage allowlists. |
 | `unknown-key-divergences.yaml` | Shrink-only ledger of schema-closed sites the deserializer wrongly accepts (each entry cites its issue; re-verified every generation). |
+| `response-model-divergences.yaml` | Shrink-only ledger of commands whose generated schema does not carry the shape their `response_model` family declares (each row cites its issue; every listed command is `wire_status: transitional`). |
 | `generated/` | **Generated — never hand-edit.** Index, schemas, docs, `llms.txt`. |
 
 A command's final facts are resolved by layering **defaults → family → kind →
@@ -77,6 +78,17 @@ Notes:
   command (see `kv.list` → `Page<Bytes, Bytes>`).
 - The **resolved `response_model` must be listed in `dto-inventory.yaml`**, or
   resolution fails.
+- The **family must match the generated schema**: `generate`/`check` classify
+  what `response.data` actually carries and compare it with the declaration
+  (`MutationAck<_>` ⇔ an object with `effect`, `Page<_>` ⇔ `{items, has_more,
+  cursor?}`, `StatusValue<_>` ⇔ a bare scalar, `Maybe<_>` ⇔ `{found, value}` or
+  a nullable `data`, and so on). A `Maybe`/`Maybe<Vec<_>>` spelling is an
+  accepted *encoding*, resolved into `cli-command-index.json` as `encoding`
+  (`found_value` / `nullable` / `items` / `array`), never a divergence. When the
+  declaration is what is wrong, correct it; when the wire is what is wrong,
+  list the command in `response-model-divergences.yaml` with its issue and mark
+  it `wire_status: transitional` — the reference page then says which shape the
+  wire carries today.
 - **Errors**: family-wide codes go in `families.yaml`; command-specific ones via
   `errors+: [<code>]` (and `errors-:` to drop an inherited one). Every code must
   be registered in `errors.yaml`. A group of codes that recurs across commands,
@@ -223,6 +235,8 @@ Data-plane commands flow into the SDK automatically once the IDL is vendored;
 | `check` / `check-cli` / `check-docs` / `check-tests` | `generated/` and the generated conformance suite are fresh (regenerate + diff). |
 | `check-cli` (display layer) | every kind has a `render:`, every command a `display:`; each declaration's shape fits its kind's rule and every pointer/placeholder/filter/`as:` resolves against the generated schema (`idl_display` test target drives each rule). |
 | `check` (SDK boundary) | `command-index.json` carries no `display`/`render` key — the CLI layer never reaches the SDKs. |
+| `check` (response models) | every command's `response_model` family matches the shape its generated schema carries, or the command has a row in `response-model-divergences.yaml` and is `wire_status: transitional`; a row whose command now conforms, or whose `declared`/`wire` no longer match the facts, fails (`idl_response_model` test target). |
+| `response-model-divergences.yaml` | shrink-only: `budget` equals the row count; rows leave when the wire is normalised or the declaration corrected. |
 | `generated_conformance` test target | per-command wire round-trip idempotence, nested unknown-key rejection at schema-closed sites, error-envelope replay, observed-⊆-declared output tags. |
 | `unknown-key-divergences.yaml` | every entry must still be a live schema/deserializer divergence (fixed ⇒ delete the entry). |
 | `verify-fixtures` | fixtures validate against the schema and replay to their response. |

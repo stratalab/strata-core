@@ -84,6 +84,7 @@ commands:
     output: Output::EventCount
     result: u64
     prose: commands/event.count.md
+    wire_status: transitional
     display:
       value: /data/count
     fixtures:
@@ -193,6 +194,7 @@ commands:
     input: Command::EventVerifyChain
     output: Output::EventChainVerification
     result: EventChainVerification
+    response_model: StatusResponse<EventChainVerification>
     prose: commands/event.verify_chain.md
     display:
       fields:

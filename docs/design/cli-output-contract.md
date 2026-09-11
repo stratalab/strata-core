@@ -438,8 +438,13 @@ declares, it does not resolve encodings:
 
 - *Encoding* — whether a `Maybe` is `{found, value}` or a nullable `data`,
   whether a history is `{items}` or a bare array — is read from the schema
-  at generation time and resolved into the index as `optional.encoding` /
-  `history.encoding`. The renderer never sniffs it.
+  at generation time and resolved into the index as a flat `encoding`
+  (`found_value` / `nullable` for `optional`, `items` / `array` for
+  `history`, `null` under every other rule; amended from
+  `optional.encoding` / `history.encoding` in S0c, where the field landed
+  beside `render` rather than nested under it). An encoding is an accepted
+  spelling of the declared family, never a divergence, so it earns no row in
+  the ledger below and no `transitional` mark. The renderer never sniffs it.
 - *Verb* — `mutation_ack` reads `effect.kind` through `{verb}` when the
   schema has an `effect`; when it does not, the receipt spells the verb
   (`created branch {/data/name}`), which the guard enforces by refusing
@@ -449,7 +454,10 @@ declares, it does not resolve encodings:
 The rows where declaration and schema disagree live in a shrink-only
 `response-model-divergences.yaml` beside `cross-surface-divergences.yaml`
 (#3313's ask); `check` fails if a row leaves the wire unchanged but the
-allowlist grows. S0 lands the declarations and the allowlist as the
+allowlist grows. Every ledgered command carries `wire_status: transitional`
+and its reference page says which shape the wire carries today; a
+`transitional` command that conforms gets the generic "not yet frozen"
+sentence instead. S0 lands the declarations and the allowlist as the
 executable form of the inventory; nothing renders differently until S1.
 
 The generator resolves the declaration into `cli-command-index.json` per

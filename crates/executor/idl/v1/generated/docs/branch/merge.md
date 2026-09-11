@@ -60,7 +60,7 @@ $ strata branch merge experiment default --strategy strict  # applies the fork's
 
 ## Returns
 
-`MutationAck<PromotionOutcomeItem>`.
+`StatusResponse<PromotionOutcomeItem>`.
 
 ## Errors
 

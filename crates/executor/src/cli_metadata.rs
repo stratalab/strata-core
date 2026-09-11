@@ -9,8 +9,8 @@ use thiserror::Error;
 
 mod display;
 pub use display::{
-    validate_display_shape, CliDisplay, CliDisplayAs, CliDisplayDecl, CliDisplayField,
-    CliDisplayShape, CliDisplaySort, CliRenderRule,
+    validate_display_shape, validate_encoding_shape, CliDisplay, CliDisplayAs, CliDisplayDecl,
+    CliDisplayField, CliDisplayShape, CliDisplaySort, CliRenderRule, CliWireEncoding,
 };
 
 /// Embedded generated CLI command metadata JSON.
@@ -18,7 +18,7 @@ pub const EMBEDDED_CLI_COMMAND_INDEX_JSON: &str =
     include_str!("../idl/v1/generated/cli-command-index.json");
 
 const SUPPORTED_SCHEMA_VERSION: &str = "strata.cli.v1";
-const SUPPORTED_GENERATOR_VERSION: &str = "strata-executor-cli-idl.2";
+const SUPPORTED_GENERATOR_VERSION: &str = "strata-executor-cli-idl.3";
 // Crate-visible: the IPC hello echoes these same stamps (protocol.rs), so the
 // hello and the embedded command index cannot disagree about the source IDL.
 pub(crate) const SUPPORTED_SOURCE_SCHEMA_VERSION: &str = "strata.idl.v1";
@@ -282,6 +282,9 @@ pub struct CliCommandEntry {
     /// The command's display declaration (`display:`), validated against
     /// `render` and, at authoring time, against the generated schema.
     pub display: CliDisplayDecl,
+    /// How an `optional`/`history` value is spelled on the wire, resolved from
+    /// the generated schema; `null` under every other rule.
+    pub encoding: Option<CliWireEncoding>,
 }
 
 /// Registered public error reference for CLI metadata.
@@ -480,7 +483,14 @@ fn validate_command(command: &CliCommandEntry) -> CliMetadataResult<()> {
             )))
         }
     }
-    validate_display_shape(&command.id, command.render, &command.display).map_err(invalid)
+    validate_display_shape(&command.id, command.render, &command.display).map_err(invalid)?;
+    validate_encoding_shape(
+        &command.id,
+        command.render,
+        command.encoding,
+        &command.wire_status,
+    )
+    .map_err(invalid)
 }
 
 fn validate_families(index: &CliCommandIndex) -> CliMetadataResult<()> {

@@ -39,6 +39,8 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 
 `StatusResponse<VectorCollectionInfo>`.
 
+**Transitional wire:** the response currently carries a page rather than a bare record; the declaration is the target shape and the wire is scheduled to be normalised.
+
 ## Errors
 
 - [`failed_precondition.engine.runtime_closed`](https://stratadb.org/e/failed_precondition.engine.runtime_closed)

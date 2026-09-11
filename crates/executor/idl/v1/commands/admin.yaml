@@ -166,6 +166,7 @@ commands:
     result: RemoteOriginInfo
     cli_path: ["remote"]
     prose: commands/admin.remote.md
+    wire_status: transitional
     errors-:
       - not_found.engine.branch
     display:

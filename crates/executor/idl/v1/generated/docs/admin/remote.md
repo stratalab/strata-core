@@ -33,6 +33,8 @@ _No parameters._
 
 `Maybe<RemoteOriginInfo>` — a miss returns nothing rather than raising.
 
+**Transitional wire:** the response currently carries a bare record rather than an optional value; the declaration is the target shape and the wire is scheduled to be normalised.
+
 ## Errors
 
 - [`failed_precondition.engine.runtime_closed`](https://stratadb.org/e/failed_precondition.engine.runtime_closed)
