@@ -14,7 +14,7 @@
 //! the claims become true and the assertions follow — so the same file guards
 //! the source build and the released one.
 
-use strata_inference::{Availability, InferenceRuntime, InferenceRuntimeConfig};
+use strata_inference::{Availability, AvailabilityKind, InferenceRuntime, InferenceRuntimeConfig};
 
 const LOCAL_BUILT_IN: bool = cfg!(feature = "local");
 
@@ -505,4 +505,52 @@ fn an_uncatalogued_local_spec_claims_nothing() {
         "an unknown local model must not claim abilities: {capability:?}"
     );
     assert_eq!(capability.embedding_dim, 0);
+}
+
+/// A caller-supplied GGUF file is loaded for whichever task is asked of it —
+/// the resolver returns it ready for every use, and the load decides — so
+/// `capability` claims for it every local ability this build has (#3303).
+/// Before, a present path claimed nothing, like a name the catalog does not
+/// know, while `generate`, `embed`, `rank` and `tokenize` all ran it.
+#[test]
+fn a_present_gguf_path_claims_every_local_ability_the_build_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("model.gguf");
+    std::fs::write(&path, b"gguf").unwrap();
+
+    let capability = runtime()
+        .capability(path.to_str().unwrap())
+        .expect("capability is metadata-only and does not read the file");
+
+    assert_eq!(capability.availability, AvailabilityKind::Ready);
+    assert_eq!(capability.can_generate, LOCAL_BUILT_IN, "{capability:?}");
+    assert_eq!(capability.can_tokenize, LOCAL_BUILT_IN, "{capability:?}");
+    assert_eq!(capability.can_embed, LOCAL_BUILT_IN, "{capability:?}");
+    assert_eq!(capability.can_rank, LOCAL_BUILT_IN, "{capability:?}");
+    assert_eq!(capability.provider_feature_enabled, LOCAL_BUILT_IN);
+    assert_eq!(
+        capability.embedding_dim, 0,
+        "nothing is known about the file's shape until it is loaded"
+    );
+}
+
+/// The same path with no file behind it names nothing (Q5): nothing is
+/// claimed for it, in any build, exactly as for an uncatalogued name.
+#[test]
+fn an_absent_gguf_path_claims_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("absent.gguf");
+
+    let capability = runtime()
+        .capability(path.to_str().unwrap())
+        .expect("capability answers for a missing file");
+
+    assert_eq!(capability.availability, AvailabilityKind::PathMissing);
+    assert!(
+        !capability.can_generate
+            && !capability.can_tokenize
+            && !capability.can_embed
+            && !capability.can_rank,
+        "a path with no file behind it must not claim abilities: {capability:?}"
+    );
 }

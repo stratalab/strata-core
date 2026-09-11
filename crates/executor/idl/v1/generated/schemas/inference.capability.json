@@ -62,7 +62,7 @@
           "type": "boolean"
         },
         "can_generate": {
-          "description": "Whether **this binary** can generate with this model right now.\n\nFalse when the provider's feature is compiled out, even for a model\nthat inherently generates — see `provider_feature_enabled` for why. The\nmodel's own task is in the catalog (`inference models list`).",
+          "description": "Whether **this binary** can generate with this model right now.\n\nFalse when the provider's feature is compiled out, even for a model\nthat inherently generates — see `provider_feature_enabled` for why. The\nmodel's own task is in the catalog (`inference models list`); a GGUF\nfile named by path has no catalogued task and claims every local\nability this binary has — the load decides what the file can do.",
           "type": "boolean"
         },
         "can_rank": {

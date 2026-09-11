@@ -45,9 +45,9 @@ use std::process::Command;
 
 use strata_inference::registry::catalog::CATALOG;
 use strata_inference::{
-    ChatRequest, EmbedInput, EmbeddingsRequest, InferenceError, InferenceRuntime,
-    InferenceRuntimeConfig, InferenceService, ModelTask, ProviderKind, RankRequest,
-    CLOUD_PROVIDER_KEYS,
+    ChatRequest, EmbedInput, EmbeddingsRequest, InferenceCapability, InferenceError,
+    InferenceRuntime, InferenceRuntimeConfig, InferenceService, ModelTask, ProviderKind,
+    RankRequest, CLOUD_PROVIDER_KEYS,
 };
 
 // ---------------------------------------------------------------------------
@@ -560,6 +560,16 @@ fn run(cell: &Cell) -> Observed {
                     cell.name()
                 );
             }
+            if let (
+                Ok(capability),
+                Identity::Catalog { .. }
+                | Identity::NotInCatalog
+                | Identity::PathPresent
+                | Identity::PathAbsent,
+            ) = (&result, cell.row.identity)
+            {
+                assert_claims_match_the_verbs(cell, capability);
+            }
             Observed::of(result)
         }
         Verb::Generate => Observed::of(runtime.chat(
@@ -589,6 +599,47 @@ fn run(cell: &Cell) -> Observed {
         )),
         Verb::Tokenize => Observed::of(runtime.tokenize(&spec, "hi", true)),
         Verb::Pull => Observed::of(runtime.pull_model(&spec)),
+    }
+}
+
+/// One truth table answers for `capability` and for every verb (#3303): a
+/// local spec's `can_<task>` is true exactly when the verb would go on to
+/// load the model — refused by neither the identity check nor the task
+/// check nor the build check. `expected` already pins what each verb does,
+/// so the flags are derived from it rather than pinned a second time.
+///
+/// A present GGUF path is the cell that made this a law: every verb loads
+/// it (`model_load_failed` on junk, in a build with `local`) while
+/// `capability` claimed nothing for it, as if it were a name the catalog
+/// does not know.
+///
+/// Cloud cells are exempt: a cloud flag is about the provider feature, and
+/// the network and the key are reported beside it (`network_enabled`,
+/// `requires_api_key`), not folded into it.
+fn assert_claims_match_the_verbs(cell: &Cell, capability: &InferenceCapability) {
+    for verb in [Verb::Generate, Verb::Embed, Verb::Rank, Verb::Tokenize] {
+        let would_load = !matches!(
+            expected(cell.row.identity, cell.dir, cell.net, verb),
+            Expect::Code(UNSUPPORTED_OPERATION | UNKNOWN_MODEL)
+        );
+        let claimed = match verb {
+            Verb::Generate => capability.can_generate,
+            Verb::Embed => capability.can_embed,
+            Verb::Rank => capability.can_rank,
+            Verb::Tokenize => capability.can_tokenize,
+            Verb::Capability | Verb::Pull => unreachable!("not a load verb"),
+        };
+        assert_eq!(
+            claimed,
+            would_load,
+            "{}: capability claims {claimed} for {verb:?}, which {}",
+            cell.name(),
+            if would_load {
+                "would load the model"
+            } else {
+                "is refused before any load"
+            }
+        );
     }
 }
 
