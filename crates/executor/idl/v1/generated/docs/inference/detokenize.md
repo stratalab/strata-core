@@ -16,7 +16,7 @@ Decodes an ordered list of token ids back into text using a local model's vocabu
 
 ## Returns
 
-`DetokenizedText`.
+`string`.
 
 ## Errors
 

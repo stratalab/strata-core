@@ -57,7 +57,6 @@ const COMMAND_SOURCE_FIELDS: &[&str] = &[
     "input",
     "output",
     "outputs",
-    "result",
     "prose",
     "wire_status",
     "docs",
@@ -562,12 +561,6 @@ struct ErrorSetSource {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DtoInventorySource {
-    response_models: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CommandsFileSource {
     commands: Vec<CommandSource>,
 }
@@ -631,7 +624,6 @@ struct CommandSource {
     output: String,
     #[serde(default)]
     outputs: Vec<String>,
-    result: String,
     prose: String,
     #[serde(default)]
     wire_status: Option<String>,
@@ -799,19 +791,27 @@ pub fn resolve_default_index() -> Result<CommandIndex> {
 /// keyed by command ID. This is the artifact MCP tool schemas, SDK stubs,
 /// and generic command-runner validation consume.
 pub fn resolve_default_schemas() -> Result<BTreeMap<String, serde_json::Value>> {
-    let index = resolve_index(&default_repo_root())?;
-    schemas::schema_documents(&index)
+    resolve_index_with_schemas(&default_repo_root()).map(|(_, documents)| documents)
 }
 
 /// Resolves the IDL source tree under `repo_root`.
 pub fn resolve_index(repo_root: &Path) -> Result<CommandIndex> {
+    resolve_index_with_schemas(repo_root).map(|(index, _)| index)
+}
+
+/// Resolves the IDL source tree under `repo_root` together with the
+/// per-command schema documents the resolution needed: a command's published
+/// `response_model` is derived from its schema, so the two are produced as
+/// one artifact.
+pub fn resolve_index_with_schemas(
+    repo_root: &Path,
+) -> Result<(CommandIndex, BTreeMap<String, serde_json::Value>)> {
     let idl_root = repo_root.join(IDL_DIR);
     let manifest: ManifestSource = read_yaml(&idl_root.join("manifest.yaml"))?;
     let mut defaults: DefaultsSource = read_yaml(&idl_root.join("defaults.yaml"))?;
     let families: FamiliesSource = read_yaml(&idl_root.join("families.yaml"))?;
     let kinds: KindsSource = read_yaml(&idl_root.join("kinds.yaml"))?;
     let overlay_errors: ErrorsSource = read_yaml(&idl_root.join("errors.yaml"))?;
-    let dto_inventory: DtoInventorySource = read_yaml(&idl_root.join("dto-inventory.yaml"))?;
 
     let mut family_layers = named_layers(families.families, "family")?;
     let mut kind_layers = named_layers(
@@ -840,7 +840,6 @@ pub fn resolve_index(repo_root: &Path) -> Result<CommandIndex> {
 
     let command_refs = enum_variants(&repo_root.join("crates/executor/src/command.rs"))?;
     let output_refs = enum_variants(&repo_root.join("crates/executor/src/output.rs"))?;
-    let response_models: BTreeSet<String> = dto_inventory.response_models.into_iter().collect();
 
     let mut command_entries = Vec::new();
     for file_name in COMMAND_FILES {
@@ -876,7 +875,6 @@ pub fn resolve_index(repo_root: &Path) -> Result<CommandIndex> {
             &registered_errors,
             &command_refs,
             &output_refs,
-            &response_models,
             &command_path,
             &command,
         )?;
@@ -900,12 +898,15 @@ pub fn resolve_index(repo_root: &Path) -> Result<CommandIndex> {
     resolved.sort_by(|left, right| left.id.cmp(&right.id));
     enforce_command_exhaustiveness(&idl_root, &command_refs, &resolved)?;
     enforce_replay_skip_ratchet(&idl_root, &resolved)?;
-    Ok(CommandIndex {
+    let mut index = CommandIndex {
         generated: true,
         schema_version: manifest.schema_version,
         generator_version: manifest.generator_version,
         commands: resolved,
-    })
+    };
+    let documents = schemas::schema_documents(&index)?;
+    response_model::derive_response_models(&idl_root, &mut index, &documents)?;
+    Ok((index, documents))
 }
 
 /// Serializes a resolved index with stable formatting.
@@ -921,10 +922,8 @@ pub fn to_generated_json(index: &CommandIndex) -> Result<String> {
 /// Generates `crates/executor/idl/v1/generated/command-index.json` and the
 /// per-command schema documents under `generated/schemas/`.
 pub fn generate(repo_root: &Path) -> Result<()> {
-    let index = resolve_index(repo_root)?;
-    let documents = schemas::schema_documents(&index)?;
+    let (index, documents) = resolve_index_with_schemas(repo_root)?;
     schemas::validate_fixtures(repo_root, &index, &documents)?;
-    response_model::enforce_response_models(&repo_root.join(IDL_DIR), &index, &documents)?;
 
     let json = to_generated_json(&index)?;
     let path = command_index_path(repo_root);
@@ -967,7 +966,7 @@ pub fn generate(repo_root: &Path) -> Result<()> {
 
 /// Checks whether the generated command index and schema documents are fresh.
 pub fn check(repo_root: &Path) -> Result<()> {
-    let index = resolve_index(repo_root)?;
+    let (index, documents) = resolve_index_with_schemas(repo_root)?;
     let expected = to_generated_json(&index)?;
     let path = command_index_path(repo_root);
     display::assert_no_display_keys(&expected, &path)?;
@@ -979,9 +978,7 @@ pub fn check(repo_root: &Path) -> Result<()> {
         return Err(IdlError::Stale { path });
     }
 
-    let documents = schemas::schema_documents(&index)?;
     schemas::validate_fixtures(repo_root, &index, &documents)?;
-    response_model::enforce_response_models(&repo_root.join(IDL_DIR), &index, &documents)?;
     let schemas_dir = schemas_dir_path(repo_root);
     let mut expected_files = BTreeSet::new();
     for (id, document) in &documents {
@@ -1068,8 +1065,7 @@ pub fn verify_fixtures(repo_root: &Path, update: bool) -> Result<Vec<PathBuf>> {
 /// plus the wire output it produced, so a consumer (strata-cli) can render the
 /// output and ship `command-examples.json` in the docs bundle (#3059).
 pub fn capture_examples(repo_root: &Path) -> Result<Vec<examples::CapturedExample>> {
-    let index = resolve_index(repo_root)?;
-    let documents = schemas::schema_documents(&index)?;
+    let (index, documents) = resolve_index_with_schemas(repo_root)?;
     let arg_spec = examples::load_arg_spec(repo_root)?;
     examples::capture_example_runs(repo_root, &index, &documents, &arg_spec)
 }
@@ -1086,8 +1082,7 @@ pub fn check_docs(repo_root: &Path) -> Result<()> {
 /// Validates and replays every canonical example (`idl/v1/examples/`) against
 /// a scratch cache executor, enforcing the example-coverage allowlist.
 pub fn verify_examples(repo_root: &Path) -> Result<()> {
-    let index = resolve_index(repo_root)?;
-    let schemas = schemas::schema_documents(&index)?;
+    let (index, schemas) = resolve_index_with_schemas(repo_root)?;
     examples::verify_examples(repo_root, &index, &schemas)
 }
 
@@ -1408,7 +1403,6 @@ fn resolve_command(
     registered_errors: &BTreeMap<String, String>,
     command_refs: &BTreeSet<String>,
     output_refs: &BTreeSet<String>,
-    response_models: &BTreeSet<String>,
     command_path: &Path,
     command: &CommandSource,
 ) -> Result<ResolvedCommand> {
@@ -1443,7 +1437,7 @@ fn resolve_command(
     layer.apply(kind_layer);
     layer.apply_command(command);
 
-    let context = PlaceholderContext::new(family, op, &command.result);
+    let context = PlaceholderContext::new(family, op);
     let docs = expand_required(
         "docs",
         &required(layer.docs, "docs", &command.id)?,
@@ -1471,17 +1465,10 @@ fn resolve_command(
     let mcp_name = expand_required("mcp_name", &mcp_name_template, &context)?;
     validate_mcp_name(&mcp_name, &command.id)?;
 
-    let response_model = expand_required(
-        "response_model",
-        &required(layer.response_model, "response_model", &command.id)?,
-        &context,
-    )?;
-    if !response_models.contains(&response_model) {
-        return Err(invalid(format!(
-            "command `{}` references unknown response model `{response_model}`",
-            command.id
-        )));
-    }
+    // The authored value is a family template; the payload is derived from
+    // the command's schema once the index is built (`derive_response_models`).
+    let response_model = required(layer.response_model, "response_model", &command.id)?;
+    response_model::ResponseFamily::from_template(&command.id, &response_model)?;
 
     let prose = load_prose(idl_root, &command.prose, &layer.snippets)?;
     let errors = resolve_errors(
@@ -2454,17 +2441,15 @@ struct PlaceholderContext<'a> {
     op: &'a str,
     op_path: String,
     op_slug: String,
-    result: &'a str,
 }
 
 impl<'a> PlaceholderContext<'a> {
-    fn new(family: &'a str, op: &'a str, result: &'a str) -> Self {
+    fn new(family: &'a str, op: &'a str) -> Self {
         Self {
             family,
             op,
             op_path: op.replace('.', "/"),
             op_slug: op.replace('.', "_"),
-            result,
         }
     }
 
@@ -2474,7 +2459,6 @@ impl<'a> PlaceholderContext<'a> {
             "op" => Some(self.op),
             "op_path" => Some(&self.op_path),
             "op_slug" => Some(&self.op_slug),
-            "result" => Some(self.result),
             _ => None,
         }
     }
@@ -2985,7 +2969,7 @@ mod tests {
 
     #[test]
     fn placeholder_expansion_rejects_unknown_placeholders() {
-        let context = PlaceholderContext::new("kv", "put", "KvWrite");
+        let context = PlaceholderContext::new("kv", "put");
         let error = expand_required("docs", "/docs/{unknown}", &context)
             .expect_err("unknown placeholder should fail");
         assert!(error.to_string().contains("unknown placeholder"));

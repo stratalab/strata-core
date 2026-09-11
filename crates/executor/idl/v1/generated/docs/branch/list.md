@@ -33,7 +33,7 @@ _No parameters._
 
 ## Returns
 
-`Page<BranchItem, String>`.
+`Page<BranchItem>`.
 
 ## Errors
 

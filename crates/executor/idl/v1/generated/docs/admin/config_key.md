@@ -33,7 +33,7 @@ $ strata config get-key missing
 
 ## Returns
 
-`Maybe<String>` — a miss returns nothing rather than raising.
+`Maybe<string>` — a miss returns nothing rather than raising.
 
 ## Errors
 

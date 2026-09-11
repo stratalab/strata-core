@@ -3,56 +3,56 @@ kinds:
     access: write
     commit: commits_on_success
     render: mutation_ack
-    response_model: MutationAck<{result}>
+    response_model: MutationAck
     snippets:
       - mutation-ack.md
   - id: mutation.put
     access: write
     commit: commits_on_success
     render: mutation_ack
-    response_model: MutationAck<{result}>
+    response_model: MutationAck
     snippets:
       - mutation-ack.md
   - id: mutation.delete
     access: write
     commit: commits_on_success
     render: mutation_ack
-    response_model: MutationAck<{result}>
+    response_model: MutationAck
     snippets:
       - mutation-ack.md
   - id: mutation.bulk_delete
     access: write
     commit: commits_on_success
     render: mutation_ack
-    response_model: MutationAck<{result}>
+    response_model: MutationAck
     snippets:
       - mutation-ack.md
   - id: mutation.metadata_update
     access: write
     commit: commits_on_success
     render: mutation_ack
-    response_model: MutationAck<{result}>
+    response_model: MutationAck
     snippets:
       - mutation-ack.md
   - id: mutation.merge
     access: write
     commit: commits_on_success
     render: mutation_ack
-    response_model: MutationAck<{result}>
+    response_model: MutationAck
     snippets:
       - mutation-ack.md
   - id: read.get
     access: read
     commit: none
     render: optional
-    response_model: Maybe<{result}>
+    response_model: Maybe<{payload}>
     snippets:
       - optional-read.md
   - id: read.history
     access: read
     commit: none
     render: history
-    response_model: Maybe<Vec<{result}>>
+    response_model: Maybe<Vec<{payload}>>
     snippets:
       - optional-read.md
   - id: read.page
@@ -60,7 +60,7 @@ kinds:
     commit: none
     render: page
     pagination: cursor
-    response_model: Page<{result}>
+    response_model: Page<{payload}>
     snippets:
       - cursor-page.md
   - id: read.search
@@ -68,7 +68,7 @@ kinds:
     commit: none
     render: search
     pagination: bounded
-    response_model: SearchResult<{result}>
+    response_model: SearchResult<{payload}>
     snippets:
       - search-result.md
   - id: read.diagnostics
@@ -76,7 +76,7 @@ kinds:
     commit: none
     render: search
     pagination: bounded
-    response_model: SearchResult<{result}> + IndexDiagnostics
+    response_model: SearchResult<{payload}> + IndexDiagnostics
     snippets:
       - search-result.md
       - diagnostics.md
@@ -84,7 +84,7 @@ kinds:
     access: read
     commit: none
     render: status_value
-    response_model: StatusValue<{result}>
+    response_model: StatusValue<{payload}>
     snippets:
       - status-value.md
   - id: read.sample
@@ -92,7 +92,7 @@ kinds:
     commit: none
     render: page
     pagination: sample
-    response_model: SamplePage<{result}>
+    response_model: SamplePage<{payload}>
     snippets:
       - cursor-page.md
   - id: batch.itemwise_mutation
@@ -101,7 +101,7 @@ kinds:
     commit: itemwise_shared_commit
     render: batch
     batch: itemwise
-    response_model: BatchResult<{result}>
+    response_model: BatchResult<{payload}>
     snippets:
       - itemwise-batch.md
   - id: batch.itemwise_read
@@ -110,7 +110,7 @@ kinds:
     commit: none
     render: batch
     batch: itemwise
-    response_model: BatchResult<{result}>
+    response_model: BatchResult<{payload}>
     snippets:
       - itemwise-batch.md
   - id: batch.itemwise_status
@@ -119,14 +119,14 @@ kinds:
     commit: none
     render: batch
     batch: itemwise
-    response_model: BatchResult<{result}>
+    response_model: BatchResult<{payload}>
     snippets:
       - itemwise-batch.md
   - id: read.analytics
     access: read
     commit: none
     render: analytics
-    response_model: AnalyticsResult<{result}>
+    response_model: AnalyticsResult<{payload}>
     snippets:
       - analytics-result.md
   - id: batch.atomic_mutation
@@ -135,21 +135,21 @@ kinds:
     commit: commits_on_success
     render: batch
     batch: atomic
-    response_model: BatchResult<{result}>
+    response_model: BatchResult<{payload}>
     snippets:
       - atomic-batch.md
   - id: read.summary
     access: read
     commit: none
     render: status_sections
-    response_model: StatusResponse<{result}>
+    response_model: StatusResponse<{payload}>
     snippets:
       - status-value.md
   - id: action.status
     access: write
     commit: none
     render: status_sections
-    response_model: StatusResponse<{result}>
+    response_model: StatusResponse<{payload}>
     snippets:
       - status-value.md
   - id: inference.models_page
@@ -157,8 +157,9 @@ kinds:
     commit: none
     render: page
     pagination: cursor
-    response_model: Page<ModelInfo, String>
+    response_model: Page<{payload}>
   - id: inference.runtime_op
     access: read
     commit: none
     render: status_sections
+    response_model: "{payload}"

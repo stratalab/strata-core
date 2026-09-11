@@ -1,10 +1,16 @@
-//! The response-model guard (#3313, S0c of the CLI output contract #3314).
+//! The response-model derivation (#3313/#3322, S0c of the CLI output
+//! contract #3314).
 //!
-//! Every command declares a `response_model` family and every family implies
-//! a wire shape. `generate` and `check` classify what the generated schema
-//! actually carries under `response.data` and compare it with the
-//! declaration; the commands where the two disagree live in the shrink-only
-//! `response-model-divergences.yaml`, each marked `wire_status: transitional`.
+//! Every command declares a `response_model` family *template*
+//! (`Maybe<{payload}>`, `MutationAck`, ...) and every family implies a wire
+//! shape. `generate` and `check` classify what the generated schema actually
+//! carries under `response.data`, compare it with the template's family, and
+//! fill `{payload}` from the schema: the `$def` at the family's payload slot,
+//! or the wire-spelled primitive. Nothing authors the payload. The commands
+//! where wire and family disagree live in the shrink-only
+//! `response-model-divergences.yaml`, each marked `wire_status: transitional`,
+//! and their row states the complete target model. Every model the surface
+//! resolves to is listed in `dto-inventory.yaml`, and only those.
 //! An accepted spelling of a family (`{found, value}` or a nullable `data`
 //! for `Maybe<T>`, `{items}` or a bare array for `Maybe<Vec<T>>`) is an
 //! *encoding*, resolved into `cli-command-index.json`, never a divergence.
@@ -25,17 +31,24 @@ use std::path::{Path, PathBuf};
 
 use strata_executor::cli_metadata::{CliRenderRule, CliWireEncoding};
 use strata_executor::idl_tooling::{
-    check, check_cli, generate, generate_docs, resolve_default_cli_index, IdlError,
+    check, check_cli, generate, generate_docs, resolve_default_cli_index, resolve_default_index,
+    IdlError,
 };
 
 const LEDGER: &str = "response-model-divergences.yaml";
+const INVENTORY: &str = "dto-inventory.yaml";
 
 /// The ledger row for `json.index.drop` exactly as authored, the anchor for
 /// the row-shaped edits below.
 const JSON_INDEX_DROP_ROW: &str = "  - command: json.index.drop
-    declared: MutationAck<JsonIndexDrop>
+    declared: MutationAck
     wire: scalar:boolean
     issue: 3313
+";
+
+/// The authored `kv.get` lines the command-shaped edits below anchor on.
+const KV_GET_HEAD: &str = "    input: Command::KvGet
+    output: Output::KvVersionedValue
 ";
 
 struct Scratch {
@@ -155,14 +168,14 @@ fn a_conforming_command_declaring_the_wrong_family_is_rejected() {
     let scratch = Scratch::new();
     scratch.replace_in(
         "commands/kv.yaml",
-        "    result: VersionedValue\n    prose: commands/kv.get.md\n",
-        "    result: VersionedValue\n    response_model: StatusValue<bool>\n    prose: commands/kv.get.md\n",
+        KV_GET_HEAD,
+        &format!("{KV_GET_HEAD}    response_model: StatusValue<{{payload}}>\n"),
     );
     assert_rejects(
         scratch.generate(),
         "kv.get",
         &[
-            "declares `StatusValue<bool>` (a bare scalar) but its schema carries a `{found, value}` record",
+            "declares `StatusValue<{payload}>` (a bare scalar) but its schema carries a `{found, value}` record",
             "correct the declaration",
             "list the command in response-model-divergences.yaml",
         ],
@@ -177,7 +190,7 @@ fn a_divergent_command_needs_a_row() {
     assert_rejects(
         scratch.check(),
         "json.index.drop",
-        &["declares `MutationAck<JsonIndexDrop>` (a mutation acknowledgement) but its schema carries a bare `boolean`"],
+        &["declares `MutationAck` (a mutation acknowledgement) but its schema carries a bare `boolean`"],
     );
 }
 
@@ -203,20 +216,25 @@ fn a_row_for_a_conforming_command_is_stale() {
 }
 
 #[test]
-fn correcting_a_declaration_retires_its_row() {
-    // `vector.collection.stats` declares `StatusResponse<VectorCollectionInfo>`
-    // but ships a page. Declaring the page makes the command conform and its
-    // row stale; removing the row (and lowering the budget) is the drain.
+fn correcting_a_declaration_retires_its_row_and_its_inventory_entry() {
+    // `vector.collection.stats` declares `StatusResponse<{payload}>` but ships
+    // a page. Declaring the page makes the command conform and its row stale;
+    // removing the row (and lowering the budget) is the drain, after which
+    // the model the row published is in use by nothing and leaves the
+    // inventory too.
     let scratch = Scratch::new();
     scratch.replace_in(
         "commands/vector.yaml",
-        "    response_model: StatusResponse<VectorCollectionInfo>\n",
-        "    response_model: Page<VectorCollectionInfo, String>\n",
+        "    response_model: StatusResponse<{payload}>\n",
+        "    response_model: Page<{payload}>\n",
     );
     assert_rejects(
         scratch.generate(),
         "vector.collection.stats",
-        &["now carries a page", "remove its row (#3313)"],
+        &[
+            "now carries a page as its `Page<{payload}>` declares",
+            "remove its row (#3313)",
+        ],
     );
 
     scratch.replace_in(
@@ -225,36 +243,257 @@ fn correcting_a_declaration_retires_its_row() {
         "",
     );
     scratch.set_budget(10, 9);
+    let message = rejection(scratch.generate());
+    assert!(
+        message.contains(
+            "dto-inventory.yaml lists `StatusResponse<VectorCollectionInfo>` which no command resolves to; remove it"
+        ),
+        "got: {message}"
+    );
+
+    scratch.replace_in(INVENTORY, "  - StatusResponse<VectorCollectionInfo>\n", "");
     scratch
         .generate()
-        .expect("a corrected declaration with its row drained passes");
+        .expect("a corrected declaration with its row and inventory entry drained passes");
 }
 
 #[test]
-fn a_row_must_record_the_declaration_and_wire_it_ledgers() {
+fn a_row_states_the_target_within_the_declared_family() {
     let scratch = Scratch::new();
     scratch.replace_in(
         LEDGER,
-        "    declared: MutationAck<JsonIndexDrop>\n",
-        "    declared: MutationAck<Other>\n",
+        "  - command: json.index.drop\n    declared: MutationAck\n",
+        "  - command: json.index.drop\n    declared: StatusValue<boolean>\n",
     );
     assert_rejects(
         scratch.check(),
         "json.index.drop",
-        &["records declared `MutationAck<Other>` but the command declares `MutationAck<JsonIndexDrop>`"],
+        &[
+            "declares `StatusValue<boolean>` (a bare scalar) but the command declares `MutationAck` (a mutation acknowledgement)",
+            "a row states the target within the declared family",
+        ],
     );
 
+    // The acknowledgement family carries no payload, so a row cannot give it one.
     let scratch = Scratch::new();
     scratch.replace_in(
         LEDGER,
-        "    declared: MutationAck<JsonIndexDrop>\n    wire: scalar:boolean\n",
-        "    declared: MutationAck<JsonIndexDrop>\n    wire: record\n",
+        "  - command: json.index.drop\n    declared: MutationAck\n",
+        "  - command: json.index.drop\n    declared: MutationAck<JsonIndexDrop>\n",
+    );
+    assert_rejects(
+        scratch.check(),
+        "json.index.drop",
+        &["`MutationAck<JsonIndexDrop>` of an unknown family"],
+    );
+}
+
+#[test]
+fn a_row_payload_must_name_a_def_of_the_schema_or_a_primitive() {
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        LEDGER,
+        "    declared: Maybe<RemoteOriginInfo>\n",
+        "    declared: Maybe<RemoteOriginInfoo>\n",
+    );
+    assert_rejects(
+        scratch.check(),
+        "admin.remote",
+        &["declares `Maybe<RemoteOriginInfoo>` but `RemoteOriginInfoo` is neither a `$def` of the command's schema nor a wire primitive"],
+    );
+
+    // A primitive passes the name check; what then fails is the inventory,
+    // which no longer sees `Maybe<RemoteOriginInfo>` in use.
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        LEDGER,
+        "    declared: Maybe<RemoteOriginInfo>\n",
+        "    declared: Maybe<string>\n",
+    );
+    let message = rejection(scratch.check());
+    assert!(
+        message.contains("lists `Maybe<RemoteOriginInfo>` which no command resolves to"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_row_must_record_the_wire_it_ledgers() {
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        LEDGER,
+        JSON_INDEX_DROP_ROW,
+        &JSON_INDEX_DROP_ROW.replace("wire: scalar:boolean", "wire: record"),
     );
     assert_rejects(
         scratch.check(),
         "json.index.drop",
         &["records wire `record` but the schema carries `scalar:boolean`"],
     );
+}
+
+#[test]
+fn a_complete_model_is_rejected_where_a_template_belongs() {
+    // At the command layer.
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        "commands/kv.yaml",
+        KV_GET_HEAD,
+        &format!("{KV_GET_HEAD}    response_model: Maybe<VersionedValue>\n"),
+    );
+    assert_rejects(
+        scratch.generate(),
+        "kv.get",
+        &[
+            "declares response_model `Maybe<VersionedValue>`",
+            "the payload is derived from the schema, so declare the family template `Maybe<{payload}>`",
+        ],
+    );
+
+    // At the kind layer, where every `read.get` command inherits it.
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        "kinds.yaml",
+        "    response_model: Maybe<{payload}>\n",
+        "    response_model: Maybe<VersionedValue>\n",
+    );
+    let message = rejection(scratch.generate());
+    assert!(
+        message.contains("declare the family template `Maybe<{payload}>`"),
+        "got: {message}"
+    );
+
+    // The acknowledgement family has no slot to fill.
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        "commands/kv.yaml",
+        "    input: Command::KvPut\n    output: Output::WriteResult\n",
+        "    input: Command::KvPut\n    output: Output::WriteResult\n    response_model: MutationAck<KvWrite>\n",
+    );
+    assert_rejects(
+        scratch.generate(),
+        "kv.put",
+        &["`MutationAck<KvWrite>` of an unknown family"],
+    );
+}
+
+#[test]
+fn an_authored_result_name_is_rejected() {
+    // `result:` used to name the payload by hand; the field is gone and the
+    // command-source field list refuses it, so a stale command file cannot
+    // reintroduce a second spelling of the payload beside the derived one.
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        "commands/kv.yaml",
+        KV_GET_HEAD,
+        &format!("{KV_GET_HEAD}    result: VersionedValue\n"),
+    );
+    let message = rejection(scratch.generate());
+    assert!(
+        message.contains("commands/kv.yaml") && message.contains("unknown command field `result`"),
+        "expected the source field list to reject `result:`, got: {message}"
+    );
+}
+
+#[test]
+fn the_inventory_lists_exactly_the_models_in_use() {
+    // A derived model the inventory lacks: the review-once gate.
+    let scratch = Scratch::new();
+    scratch.replace_in(INVENTORY, "  - Maybe<VersionedValue>\n", "");
+    assert_rejects(
+        scratch.generate(),
+        "kv.get",
+        &[
+            "resolves to response model `Maybe<VersionedValue>` which dto-inventory.yaml does not list",
+            "add it (every published model is reviewed once)",
+        ],
+    );
+
+    // A listed model nothing resolves to: the shrink gate.
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        INVENTORY,
+        "  - Maybe<VersionedValue>\n",
+        "  - Maybe<VersionedValue>\n  - Maybe<Ghost>\n",
+    );
+    let message = rejection(scratch.check());
+    assert!(
+        message.contains(
+            "dto-inventory.yaml lists `Maybe<Ghost>` which no command resolves to; remove it (the inventory carries only the models in use)"
+        ),
+        "got: {message}"
+    );
+
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        INVENTORY,
+        "  - Maybe<VersionedValue>\n",
+        "  - Maybe<VersionedValue>\n  - Maybe<VersionedValue>\n",
+    );
+    let message = rejection(scratch.check());
+    assert!(
+        message.contains("duplicate `Maybe<VersionedValue>` in dto-inventory.yaml"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn resolved_models_are_spelled_by_the_schema() {
+    // One command per family and per payload kind, observed through the
+    // resolver the generators and the CLI index consume.
+    let index = resolve_default_index().expect("index resolves");
+    let expected: BTreeMap<&str, &str> = BTreeMap::from([
+        ("kv.put", "MutationAck"),
+        ("kv.get", "Maybe<VersionedValue>"),
+        ("admin.config_key", "Maybe<string>"),
+        ("kv.history", "Maybe<Vec<HistoryItem>>"),
+        ("json.history", "Maybe<Vec<JsonHistoryItem>>"),
+        ("kv.list", "Page<Bytes>"),
+        ("branch.list", "Page<BranchItem>"),
+        ("vector.keys", "Page<string>"),
+        ("json.sample", "SamplePage<JsonSampleItem>"),
+        ("vector.query", "SearchResult<VectorMatch>"),
+        (
+            "vector.index.query",
+            "SearchResult<VectorMatch> + IndexDiagnostics",
+        ),
+        ("kv.exists", "StatusValue<boolean>"),
+        ("branch.get", "StatusResponse<BranchItem>"),
+        (
+            "graph.analytics.pagerank",
+            "AnalyticsResult<GraphPagerankData>",
+        ),
+        ("kv.batch_get", "BatchResult<BatchGetItemResult>"),
+        ("inference.tokenize", "integer[]"),
+        ("inference.detokenize", "string"),
+        ("inference.generate", "ChatResponse"),
+        // Ledgered: the row's target, not the wire.
+        ("event.count", "StatusValue<integer>"),
+        ("admin.remote", "Maybe<RemoteOriginInfo>"),
+        (
+            "vector.collection.stats",
+            "StatusResponse<VectorCollectionInfo>",
+        ),
+    ]);
+    let resolved: BTreeMap<&str, &str> = index
+        .commands
+        .iter()
+        .filter(|command| expected.contains_key(command.id.as_str()))
+        .map(|command| (command.id.as_str(), command.response_model.as_str()))
+        .collect();
+    assert_eq!(resolved, expected);
+
+    // No command publishes a template, a cursor type, or a Rust spelling.
+    for command in &index.commands {
+        let model = &command.response_model;
+        for stray in ["{payload}", ", ", "u64", "bool>", "String>", "Vec<Maybe"] {
+            assert!(
+                !model.contains(stray),
+                "`{}` resolved `{model}`",
+                command.id
+            );
+        }
+    }
 }
 
 #[test]
@@ -412,7 +651,7 @@ fn docs_say_which_shape_a_transitional_wire_carries() {
 
     // A ledgered divergence names the shape the wire carries today.
     let divergent = scratch.docs_page("event/count.md");
-    assert!(divergent.contains("`StatusValue<u64>`."), "{divergent}");
+    assert!(divergent.contains("`StatusValue<integer>`."), "{divergent}");
     assert!(
         divergent.contains(
             "**Transitional wire:** the response currently carries a bare record rather than a bare scalar; the declaration is the target shape and the wire is scheduled to be normalised."

@@ -1,112 +1,104 @@
+# DTO inventory (#3322; S0c of the CLI output contract).
+#
+# The complete set of response models the command surface publishes. Nothing
+# authors these names: `strata-idl generate` derives each command's
+# `response_model` from its family template (`kinds.yaml`, or the command's
+# own `response_model:` override) and the `$def` its generated schema carries
+# at the family's payload slot, then checks the result against this list in
+# BOTH directions -- a derived model this list lacks fails `generate`/`check`
+# (every published model is reviewed once, when it is added here), and a
+# listed model no command derives fails too (the list carries only the models
+# in use, so a rename or a retired command cannot leave a ghost entry).
+#
+# Spelling is the schema's: the payload is the `$defs` key the schema
+# references (`Maybe<VersionedValue>`) or, for a primitive payload, the JSON
+# Schema type (`StatusValue<integer>`, `Page<string>`, `integer[]`).
+# `MutationAck` carries no payload. The ledgered commands
+# (`response-model-divergences.yaml`) contribute their `declared` target.
+#
+# Sorted; keep it that way.
 response_models:
-  - MutationAck<KvWrite>
-  - Maybe<VersionedValue>
-  - MutationAck<KvDelete>
-  - Page<Bytes, Bytes>
-  - Page<ScanItem, Bytes>
-  - BatchResult<KvMutationItem>
-  - BatchResult<Maybe<Bytes>>
+  - AnalyticsResult<GraphBfsData>
+  - AnalyticsResult<GraphCdlpData>
+  - AnalyticsResult<GraphLccData>
+  - AnalyticsResult<GraphPagerankData>
+  - AnalyticsResult<GraphSsspData>
+  - AnalyticsResult<GraphWccData>
   - BatchResult<BatchExistsItemResult>
   - BatchResult<BatchExistsPresence>
-  - BatchResult<StatusValue<bool>>
-  - StatusValue<bool>
-  - Maybe<Vec<HistoryItem>>
-  - StatusValue<u64>
-  - SamplePage<SampleItem>
-  - MutationAck<VectorCollectionCreate>
-  - MutationAck<VectorCollectionDelete>
-  - Page<VectorCollectionInfo, String>
-  - StatusResponse<VectorCollectionInfo>
-  - MutationAck<VectorCollectionInfo>
-  - MutationAck<VectorWrite>
-  - Maybe<VectorVersionedData>
-  - Maybe<Vec<VectorHistoryItem>>
-  - Page<String, String>
-  - Page<VectorVersionedData, String>
-  - MutationAck<VectorMetadataUpdate>
-  - MutationAck<VectorDelete>
-  - MutationAck<VectorBulkDelete>
-  - SearchResult<VectorMatch>
-  - SearchResult<VectorMatch> + IndexDiagnostics
-  - BatchResult<VectorMutationItem>
-  - BatchResult<Maybe<VectorVersionedData>>
-  - MutationAck<JsonWrite>
-  - Maybe<JsonVersionedValue>
-  - MutationAck<JsonDelete>
-  - Maybe<Vec<JsonHistoryItem>>
-  - BatchResult<JsonMutationItem>
-  - BatchResult<Maybe<JsonValue>>
-  - SamplePage<JsonSampleItem>
-  - SamplePage<VectorVersionedData>
-  - SamplePage<GraphNodeDataOutput>
-  - Page<JsonSampleItem, String>
-  - MutationAck<JsonIndexCreate>
-  - MutationAck<JsonIndexDrop>
-  - Page<JsonIndexDefinition, String>
-  - MutationAck<EventAppend>
-  - BatchResult<EventBatchAppendItem>
-  - Maybe<EventVersionedData>
-  - Page<EventVersionedData, u64>
-  - StatusResponse<EventChainVerification>
-  - Page<BranchItem, String>
-  - StatusResponse<BranchItem>
-  - StatusResponse<BranchComparisonItem>
-  - StatusResponse<BranchPreviewItem>
-  - MutationAck<BranchDelete>
-  - StatusResponse<PromotionOutcomeItem>
-  - MutationAck<SpaceCreate>
-  - MutationAck<SpaceDelete>
-  - MutationAck<GraphInfoData>
-  - MutationAck<GraphDelete>
-  - Maybe<GraphInfoData>
-  - MutationAck<GraphNodeWrite>
-  - Maybe<GraphNodeDataOutput>
-  - Page<GraphNodeDataOutput, String>
-  - MutationAck<GraphEdgeWrite>
-  - Maybe<GraphEdgeDataOutput>
-  - Page<GraphNeighborHit, String>
-  - Page<GraphBindingHit, String>
+  - BatchResult<BatchGetItemResult>
+  - BatchResult<BatchItemResult>
+  - BatchResult<EventBatchAppendItemResult>
   - BatchResult<GraphBatchItemResult>
-  - MutationAck<GraphOntologyWrite>
-  - MutationAck<GraphOntologyDelete>
-  - MutationAck<GraphOntologyFreeze>
+  - BatchResult<JsonBatchGetItemResult>
+  - BatchResult<JsonBatchItemResult>
+  - BatchResult<VectorBatchGetItemResult>
+  - BatchResult<VectorBatchItemResult>
+  - ChatResponse
+  - EmbeddingsResponse
+  - InferenceCapability
+  - InferenceStatus
+  - InferenceUnloadResult
+  - Maybe<EventVersionedData>
+  - Maybe<GraphEdgeDataOutput>
+  - Maybe<GraphInfoData>
+  - Maybe<GraphNodeDataOutput>
   - Maybe<GraphOntologyData>
   - Maybe<GraphOntologySummaryData>
-  - AnalyticsResult<GraphWccData>
-  - AnalyticsResult<GraphLccData>
-  - AnalyticsResult<GraphSsspData>
-  - AnalyticsResult<GraphPagerankData>
-  - AnalyticsResult<GraphCdlpData>
-  - AnalyticsResult<GraphBfsData>
-  - MutationAck<GraphBulkInsert>
-  - MutationAck<GraphDeletePolicyApply>
-  - StatusResponse<AdminPing>
+  - Maybe<JsonVersionedValue>
+  - Maybe<RemoteOriginInfo>
+  - Maybe<Vec<HistoryItem>>
+  - Maybe<Vec<JsonHistoryItem>>
+  - Maybe<Vec<VectorHistoryItem>>
+  - Maybe<VectorVersionedData>
+  - Maybe<VersionedValue>
+  - Maybe<string>
+  - ModelCacheStatus
+  - MutationAck
+  - Page<BranchItem>
+  - Page<Bytes>
+  - Page<EventVersionedData>
+  - Page<GraphBindingHit>
+  - Page<GraphNeighborHit>
+  - Page<GraphNodeDataOutput>
+  - Page<JsonIndexDefinition>
+  - Page<JsonSampleItem>
+  - Page<ModelInfo>
+  - Page<ScanItem>
+  - Page<VectorCollectionInfo>
+  - Page<VectorVersionedData>
+  - Page<string>
+  - PullModelOutput
+  - RankResponse
+  - SamplePage<GraphNodeDataOutput>
+  - SamplePage<JsonSampleItem>
+  - SamplePage<SampleItem>
+  - SamplePage<VectorVersionedData>
+  - SearchResult<VectorMatch>
+  - SearchResult<VectorMatch> + IndexDiagnostics
+  - StatusResponse<AdminConfig>
   - StatusResponse<AdminDatabaseInfo>
+  - StatusResponse<AdminDescribe>
+  - StatusResponse<AdminHealth>
   - StatusResponse<AdminIpcStatus>
   - StatusResponse<AdminIpcStop>
-  - StatusResponse<AdminHealth>
   - StatusResponse<AdminMetrics>
-  - StatusResponse<AdminDescribe>
-  - StatusResponse<AdminConfig>
-  - Maybe<RemoteOriginInfo>
-  - Maybe<String>
+  - StatusResponse<AdminPing>
+  - StatusResponse<ArrowExportResult>
+  - StatusResponse<ArrowImportResult>
+  - StatusResponse<BranchComparisonItem>
+  - StatusResponse<BranchItem>
+  - StatusResponse<BranchPreviewItem>
+  - StatusResponse<EventChainVerification>
   - StatusResponse<HubCloneResult>
-  - StatusResponse<HubCloneProgress>
-  - StatusResponse<HubInfo>
-  - StatusResponse<HubDatasetPage>
   - StatusResponse<HubDatasetCard>
+  - StatusResponse<HubDatasetPage>
+  - StatusResponse<HubInfo>
   - StatusResponse<HubRefList>
   - StatusResponse<HubYankedList>
-  - StatusResponse<ArrowImport>
-  - StatusResponse<ArrowExport>
-  - Page<ModelInfo, String>
-  - PullModelOutput
-  - InferenceCapability
-  - ChatResponse
-  - TokenIds
-  - DetokenizedText
-  - EmbeddingsResponse
-  - RankResponse
-  - InferenceUnloadResult
-  - InferenceStatus
-  - ModelCacheStatus
+  - StatusResponse<PromotionOutcomeItem>
+  - StatusResponse<VectorCollectionInfo>
+  - StatusValue<boolean>
+  - StatusValue<integer>
+  - integer[]
+  - string

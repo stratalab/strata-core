@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 
 use super::examples::{self, Example};
 use super::response_model::{self, ResponseFamily};
-use super::{invalid, relative_to, resolve_index, schemas, IdlError, ResolvedCommand, Result};
+use super::{invalid, relative_to, resolve_index_with_schemas, IdlError, ResolvedCommand, Result};
 
 /// Canonical site origin for absolute links in the machine layer, matching the
 /// schema `$id` base and the `/e/<code>` error routes.
@@ -113,8 +113,7 @@ pub(super) fn check_docs(repo_root: &Path) -> Result<()> {
 
 /// Renders every output file, keyed by absolute path (deterministic order).
 fn render_all(repo_root: &Path) -> Result<BTreeMap<PathBuf, String>> {
-    let index = resolve_index(repo_root)?;
-    let documents = schemas::schema_documents(&index)?;
+    let (index, documents) = resolve_index_with_schemas(repo_root)?;
     let example_specs = examples::load_examples(repo_root)?;
     examples::validate_examples(repo_root, &index, &documents, &example_specs)?;
     let arg_spec = examples::load_arg_spec(repo_root)?;
@@ -331,11 +330,14 @@ fn render_returns(entry: &ResolvedCommand, schema: &Value) -> Result<String> {
     let family = ResponseFamily::from_declaration(&entry.id, &entry.response_model)?;
     let mut out = String::from("## Returns\n\n");
     write!(out, "`{}`", entry.response_model).expect(INFALLIBLE);
-    // `Maybe<T>` models a miss as absence, never an error — call it out.
-    if matches!(family, ResponseFamily::Maybe | ResponseFamily::MaybeVec) {
-        out.push_str(" — a miss returns nothing rather than raising.");
-    } else {
-        out.push('.');
+    // `Maybe<T>` models a miss as absence, never an error — call it out; a
+    // `MutationAck` is the one model that names no payload.
+    match family {
+        ResponseFamily::Maybe | ResponseFamily::MaybeVec => {
+            out.push_str(" — a miss returns nothing rather than raising.");
+        }
+        ResponseFamily::MutationAck => out.push_str(" — an acknowledgement with no payload."),
+        _ => out.push('.'),
     }
     out.push_str("\n\n");
     if entry.wire_status == "transitional" {

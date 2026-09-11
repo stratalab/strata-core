@@ -1,18 +1,29 @@
-//! Response-model guard (#3313; S0c of the CLI output contract, #3314).
+//! Response-model derivation and guard (#3313, #3322; S0c of the CLI output
+//! contract, #3314).
 //!
-//! A command's `response_model` names a *family* (`MutationAck<T>`,
-//! `Maybe<T>`, `Page<T>`, …) and every family implies a wire shape. Until now
-//! nothing checked that the shape the generated schema actually describes is
-//! the one the declaration promises, so a `MutationAck<…>` could ship a bare
-//! `boolean` and the docs, SDKs and renderer would all believe the declaration.
+//! A command's `response_model` names a *family* (`MutationAck`, `Maybe<T>`,
+//! `Page<T>`, …) and every family implies a wire shape. Authored IDL declares
+//! only the family, as a template with a `{payload}` slot
+//! (`Maybe<{payload}>`); the payload is *derived* from the generated schema —
+//! the `$def` (or wire-spelled primitive) at the slot the family's shape
+//! reserves for it — so the published name can never disagree with the wire
+//! the schema describes. `MutationAck` carries no payload: an acknowledgement
+//! is the same record for every mutation.
 //!
 //! This module classifies the schema's `response.data` into a [`WireShape`],
-//! accepts it against the declared [`ResponseFamily`], and requires every
-//! disagreement to be listed in the shrink-only
+//! accepts it against the declared [`ResponseFamily`], fills the template, and
+//! requires every disagreement to be listed in the shrink-only
 //! `response-model-divergences.yaml` ledger with `wire_status: transitional`.
-//! The declaration is the target; the ledger names the wire that has not yet
+//! A ledgered command's published `response_model` is the row's `declared`
+//! target — spelled within the declared family and naming a `$def` of the
+//! command's own schema — while the ledger names the wire that has not yet
 //! caught up. Normalising a listed wire is a separate, tracked change — this
 //! guard only stops the set from growing silently.
+//!
+//! `dto-inventory.yaml` is the reviewed set of published response models: a
+//! derived name that is not listed fails `generate`, and so does a listed
+//! name no command resolves to, so the inventory can only ever carry the
+//! models in use.
 //!
 //! *Encoding* is not divergence. Whether a `Maybe<T>` is `{found, value}` or a
 //! nullable `data`, and whether a history is `{items}` or a bare array, are
@@ -34,6 +45,15 @@ use crate::cli_metadata::CliWireEncoding;
 /// response model.
 pub(super) const RESPONSE_MODEL_DIVERGENCES_FILE: &str = "response-model-divergences.yaml";
 
+/// The reviewed set of published response models.
+pub(super) const DTO_INVENTORY_FILE: &str = "dto-inventory.yaml";
+
+/// The slot a family template leaves for the schema-derived payload name.
+const PAYLOAD_SLOT: &str = "{payload}";
+
+/// JSON Schema type names a payload may be spelled as when it is not a `$def`.
+const PRIMITIVES: [&str; 4] = ["boolean", "integer", "number", "string"];
+
 /// `response-model-divergences.yaml`: one row per command whose generated
 /// schema does not carry the shape its `response_model` family implies.
 #[derive(Debug, Deserialize)]
@@ -50,7 +70,9 @@ struct DivergencesSource {
 #[serde(deny_unknown_fields)]
 struct DivergenceRow {
     command: String,
-    /// The resolved `response_model` the command declares (the target shape).
+    /// The complete `response_model` the command publishes until its wire is
+    /// normalised: the target, spelled within the family the command's
+    /// template declares.
     declared: String,
     /// The [`WireShape::name`] the schema carries today.
     wire: String,
@@ -58,11 +80,17 @@ struct DivergenceRow {
     issue: NonZeroU64,
 }
 
+/// `dto-inventory.yaml`: every response model a command may resolve to.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DtoInventorySource {
+    response_models: Vec<String>,
+}
+
 /// Family prefixes, longest first: `Maybe<Vec<` shadows `Maybe<`.
-const FAMILY_PREFIXES: [(&str, ResponseFamily); 10] = [
+const FAMILY_PREFIXES: [(&str, ResponseFamily); 9] = [
     ("Maybe<Vec<", ResponseFamily::MaybeVec),
     ("Maybe<", ResponseFamily::Maybe),
-    ("MutationAck<", ResponseFamily::MutationAck),
     ("SamplePage<", ResponseFamily::SamplePage),
     ("Page<", ResponseFamily::Page),
     ("SearchResult<", ResponseFamily::SearchResult),
@@ -86,13 +114,18 @@ pub(super) enum ResponseFamily {
     StatusResponse,
     AnalyticsResult,
     BatchResult,
-    /// A bare DTO name: the command promises a specific record, not a family.
+    /// The payload alone: the command promises a specific record, not a family.
     Bare,
 }
 
 impl ResponseFamily {
-    /// Parses the family prefix of a resolved `response_model`.
+    /// Parses the family of a `response_model`, template or complete: the
+    /// kind layer declares `Maybe<{payload}>`, the resolved index and the
+    /// ledger's `declared` column carry `Maybe<VersionedValue>`.
     pub(super) fn from_declaration(command_id: &str, declared: &str) -> Result<Self> {
+        if declared == Self::MutationAck.template() {
+            return Ok(Self::MutationAck);
+        }
         if declared.starts_with("SearchResult<") && declared.ends_with(" + IndexDiagnostics") {
             return Ok(Self::SearchResultDiagnostics);
         }
@@ -108,6 +141,59 @@ impl ResponseFamily {
             )));
         }
         Ok(Self::Bare)
+    }
+
+    /// Parses an authored `response_model` and requires it to be exactly the
+    /// family's template: the payload is derived, never declared.
+    pub(super) fn from_template(command_id: &str, template: &str) -> Result<Self> {
+        let family = Self::from_declaration(command_id, template)?;
+        if template != family.template() {
+            return Err(invalid(format!(
+                "command `{command_id}` declares response_model `{template}`; the payload is \
+                 derived from the schema, so declare the family template `{}`",
+                family.template()
+            )));
+        }
+        Ok(family)
+    }
+
+    /// The authored spelling of the family: the family around a `{payload}`
+    /// slot, or `MutationAck` alone.
+    pub(super) const fn template(self) -> &'static str {
+        match self {
+            Self::MutationAck => "MutationAck",
+            Self::Maybe => "Maybe<{payload}>",
+            Self::MaybeVec => "Maybe<Vec<{payload}>>",
+            Self::Page => "Page<{payload}>",
+            Self::SamplePage => "SamplePage<{payload}>",
+            Self::SearchResult => "SearchResult<{payload}>",
+            Self::SearchResultDiagnostics => "SearchResult<{payload}> + IndexDiagnostics",
+            Self::StatusValue => "StatusValue<{payload}>",
+            Self::StatusResponse => "StatusResponse<{payload}>",
+            Self::AnalyticsResult => "AnalyticsResult<{payload}>",
+            Self::BatchResult => "BatchResult<{payload}>",
+            Self::Bare => "{payload}",
+        }
+    }
+
+    /// The payload a complete declaration of this family carries, or `None`
+    /// for a family without a slot; a declaration that does not fit the
+    /// template is rejected.
+    fn payload_of(self, command_id: &str, declared: &str) -> Result<Option<String>> {
+        let template = self.template();
+        let Some((prefix, suffix)) = template.split_once(PAYLOAD_SLOT) else {
+            return Ok(None);
+        };
+        declared
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .filter(|payload| !payload.is_empty())
+            .map(|payload| Some(payload.to_owned()))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "command `{command_id}` declaration `{declared}` does not fit `{template}`"
+                ))
+            })
     }
 
     /// Prose for the shape the family promises (docs `Returns:` section).
@@ -191,15 +277,25 @@ impl WireShape {
 
 /// Classifies the `response.data` of one generated schema document.
 pub(super) fn classify(command_id: &str, document: &Value) -> Result<WireShape> {
-    let defs = document.get("$defs").and_then(Value::as_object);
-    let data = document
+    classify_node(
+        command_id,
+        defs_of(document),
+        response_data(command_id, document)?,
+    )
+}
+
+fn defs_of(document: &Value) -> Option<&Map<String, Value>> {
+    document.get("$defs").and_then(Value::as_object)
+}
+
+fn response_data<'a>(command_id: &str, document: &'a Value) -> Result<&'a Value> {
+    document
         .pointer("/response/properties/data")
         .ok_or_else(|| {
             invalid(format!(
                 "command `{command_id}` schema has no response data"
             ))
-        })?;
-    classify_node(command_id, defs, data)
+        })
 }
 
 fn classify_node(
@@ -328,11 +424,7 @@ fn deref<'a>(
     mut node: &'a Value,
 ) -> Result<&'a Value> {
     while let Some(reference) = node.get("$ref").and_then(Value::as_str) {
-        let name = reference.strip_prefix("#/$defs/").ok_or_else(|| {
-            invalid(format!(
-                "command `{command_id}` schema references `{reference}` outside `$defs`"
-            ))
-        })?;
+        let name = def_name(command_id, reference)?;
         node = defs.and_then(|defs| defs.get(name)).ok_or_else(|| {
             invalid(format!(
                 "command `{command_id}` schema references undefined `{name}`"
@@ -340,6 +432,15 @@ fn deref<'a>(
         })?;
     }
     Ok(node)
+}
+
+/// The `$defs` entry a `$ref` names.
+fn def_name<'a>(command_id: &str, reference: &'a str) -> Result<&'a str> {
+    reference.strip_prefix("#/$defs/").ok_or_else(|| {
+        invalid(format!(
+            "command `{command_id}` schema references `{reference}` outside `$defs`"
+        ))
+    })
 }
 
 fn unclassifiable(command_id: &str, what: &str) -> super::IdlError {
@@ -372,6 +473,142 @@ pub(super) fn accepts(family: ResponseFamily, shape: &WireShape) -> bool {
     }
 }
 
+/// The schema node at the slot an accepted `shape` of `family` reserves for
+/// the payload; `None` for a family that carries none.
+///
+/// Every slot is read through `$ref`s except the payload itself, whose `$ref`
+/// is the name being derived.
+fn payload_slot<'a>(
+    command_id: &str,
+    family: ResponseFamily,
+    shape: &WireShape,
+    document: &'a Value,
+) -> Result<Option<&'a Value>> {
+    use ResponseFamily as F;
+    let defs = defs_of(document);
+    let data = response_data(command_id, document)?;
+    let property = |node: &'a Value, key: &str| -> Result<&'a Value> {
+        deref(command_id, defs, node)?
+            .pointer(&format!("/properties/{key}"))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "command `{command_id}` response data carries no `{key}` property"
+                ))
+            })
+    };
+    let element = |node: &'a Value| -> Result<&'a Value> {
+        deref(command_id, defs, node)?.get("items").ok_or_else(|| {
+            invalid(format!(
+                "command `{command_id}` response data carries an array without `items`"
+            ))
+        })
+    };
+    let no_slot = || {
+        invalid(format!(
+            "command `{command_id}` response data carries {} which has no payload slot for {}",
+            shape.describe(),
+            family.describe()
+        ))
+    };
+    let slot = match (family, shape) {
+        (F::MutationAck, _) => return Ok(None),
+        (F::Maybe, WireShape::FoundValue) => property(non_null(data), "value")?,
+        (F::Maybe, WireShape::Nullable(_))
+        | (F::StatusValue | F::StatusResponse | F::AnalyticsResult | F::Bare, _) => data,
+        (F::MaybeVec, WireShape::Nullable(inner)) => {
+            let list = non_null(data);
+            match inner.as_ref() {
+                WireShape::Items => element(property(list, "items")?)?,
+                WireShape::Array => element(list)?,
+                _ => return Err(no_slot()),
+            }
+        }
+        (F::Page | F::SamplePage, _) => element(property(data, "items")?)?,
+        (F::SearchResult, _) => element(data)?,
+        (F::SearchResultDiagnostics, _) => element(property(data, "matches")?)?,
+        (F::BatchResult, _) => property(element(property(data, "items")?)?, "result")?,
+        (F::Maybe | F::MaybeVec, _) => return Err(no_slot()),
+    };
+    Ok(Some(slot))
+}
+
+/// The non-null half of `anyOf: [T, {type: null}]`; any other node as is. A
+/// `type: [T, "null"]` node keeps its own `properties`/`items`, so it needs
+/// no unwrapping.
+fn non_null(node: &Value) -> &Value {
+    node.get("anyOf")
+        .and_then(Value::as_array)
+        .and_then(|variants| {
+            variants
+                .iter()
+                .find(|variant| variant.get("type") != Some(&Value::from("null")))
+        })
+        .unwrap_or(node)
+}
+
+/// The published name of a payload node: its `$def`, a wire primitive, or a
+/// `[]`-suffixed element name for an array of either.
+fn payload_name(
+    command_id: &str,
+    defs: Option<&Map<String, Value>>,
+    node: &Value,
+) -> Result<String> {
+    let node = non_null(node);
+    if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
+        let name = def_name(command_id, reference)?;
+        // Resolving proves the `$def` exists; the name itself is the payload.
+        deref(command_id, defs, node)?;
+        return Ok(name.to_owned());
+    }
+    let map = node
+        .as_object()
+        .ok_or_else(|| unnameable(command_id, "a non-object schema node"))?;
+    match single_type(map) {
+        Some(ty) if PRIMITIVES.contains(&ty) => Ok(ty.to_owned()),
+        Some("array") => {
+            let items = map
+                .get("items")
+                .ok_or_else(|| unnameable(command_id, "an array without `items`"))?;
+            Ok(format!("{}[]", payload_name(command_id, defs, items)?))
+        }
+        Some("object") => Err(unnameable(
+            command_id,
+            "an anonymous record; give the DTO a name so the schema can `$ref` it",
+        )),
+        Some(other) => Err(unnameable(command_id, &format!("type `{other}`"))),
+        None => Err(unnameable(command_id, "a node with no single type")),
+    }
+}
+
+/// The one non-null JSON type a node names, if it names exactly one.
+fn single_type(map: &Map<String, Value>) -> Option<&str> {
+    match map.get("type") {
+        Some(Value::String(ty)) => Some(ty),
+        Some(Value::Array(types)) => {
+            let mut others = types
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|ty| *ty != "null");
+            let first = others.next()?;
+            others.next().is_none().then_some(first)
+        }
+        _ => None,
+    }
+}
+
+fn unnameable(command_id: &str, what: &str) -> super::IdlError {
+    invalid(format!(
+        "command `{command_id}` response payload has no name: {what}"
+    ))
+}
+
+/// Whether a ledgered declaration's payload names a `$def` of the command's
+/// schema or a wire primitive, either possibly `[]`-suffixed.
+fn names_a_def(payload: &str, defs: Option<&Map<String, Value>>) -> bool {
+    let base = payload.trim_end_matches("[]");
+    PRIMITIVES.contains(&base) || defs.is_some_and(|defs| defs.contains_key(base))
+}
+
 /// The spelling the CLI renderer needs for an optional or history value;
 /// `None` for every other shape.
 pub(super) fn encoding(shape: &WireShape) -> Option<CliWireEncoding> {
@@ -391,14 +628,19 @@ pub(super) fn encoding_for(command_id: &str, document: &Value) -> Result<Option<
     Ok(encoding(&classify(command_id, document)?))
 }
 
-/// The guard `generate` and `check` run: every command's wire either matches
-/// its declared family or is a ledgered, transitional divergence — and the
-/// ledger names nothing else.
-pub(super) fn enforce_response_models(
+/// Resolves every command's published `response_model` from its family
+/// template and generated schema — the guard `generate` and `check` run.
+///
+/// A command whose wire matches its declared family publishes the filled
+/// template; a ledgered, transitional divergence publishes its row's target;
+/// anything else fails. The ledger names nothing else, and the inventory
+/// lists exactly the models the commands resolve to.
+pub(super) fn derive_response_models(
     idl_root: &Path,
-    index: &CommandIndex,
+    index: &mut CommandIndex,
     documents: &BTreeMap<String, Value>,
 ) -> Result<()> {
+    let inventory = read_inventory(idl_root)?;
     let ledger: DivergencesSource = read_yaml(&idl_root.join(RESPONSE_MODEL_DIVERGENCES_FILE))?;
     enforce_debt_budget(
         RESPONSE_MODEL_DIVERGENCES_FILE,
@@ -414,57 +656,106 @@ pub(super) fn enforce_response_models(
             )));
         }
     }
-    for command in &index.commands {
+    let mut referenced = BTreeSet::new();
+    for command in &mut index.commands {
         let document = documents
             .get(&command.id)
             .ok_or_else(|| invalid(format!("no schema document for `{}`", command.id)))?;
-        let family = ResponseFamily::from_declaration(&command.id, &command.response_model)?;
+        let family = ResponseFamily::from_template(&command.id, &command.response_model)?;
         let shape = classify(&command.id, document)?;
         let row = rows.remove(command.id.as_str());
-        check_command(command, family, &shape, row)?;
+        let resolved = resolve_declaration(command, family, &shape, row, document)?;
+        if !inventory.contains(&resolved) {
+            return Err(invalid(format!(
+                "command `{}` resolves to response model `{resolved}` which {DTO_INVENTORY_FILE} \
+                 does not list; add it (every published model is reviewed once)",
+                command.id
+            )));
+        }
+        referenced.insert(resolved.clone());
+        command.response_model = resolved;
     }
     if let Some(unknown) = rows.into_keys().next() {
         return Err(invalid(format!(
             "{RESPONSE_MODEL_DIVERGENCES_FILE} lists `{unknown}` which is not a command id; remove it"
         )));
     }
+    if let Some(unreferenced) = inventory.difference(&referenced).next() {
+        return Err(invalid(format!(
+            "{DTO_INVENTORY_FILE} lists `{unreferenced}` which no command resolves to; remove it \
+             (the inventory carries only the models in use)"
+        )));
+    }
     Ok(())
 }
 
-fn check_command(
+fn read_inventory(idl_root: &Path) -> Result<BTreeSet<String>> {
+    let source: DtoInventorySource = read_yaml(&idl_root.join(DTO_INVENTORY_FILE))?;
+    let mut inventory = BTreeSet::new();
+    for model in source.response_models {
+        if !inventory.insert(model.clone()) {
+            return Err(invalid(format!(
+                "duplicate `{model}` in {DTO_INVENTORY_FILE}"
+            )));
+        }
+    }
+    Ok(inventory)
+}
+
+/// The complete `response_model` one command publishes.
+fn resolve_declaration(
     command: &super::ResolvedCommand,
     family: ResponseFamily,
     shape: &WireShape,
     row: Option<&DivergenceRow>,
-) -> Result<()> {
+    document: &Value,
+) -> Result<String> {
     let id = &command.id;
-    let declared = &command.response_model;
+    let template = &command.response_model;
     if accepts(family, shape) {
-        return match row {
-            None => Ok(()),
-            Some(row) => Err(invalid(format!(
-                "`{id}` now carries {} as its `{declared}` declares; remove its row (#{}) from \
+        if let Some(row) = row {
+            return Err(invalid(format!(
+                "`{id}` now carries {} as its `{template}` declares; remove its row (#{}) from \
                  {RESPONSE_MODEL_DIVERGENCES_FILE} (the ledger may only shrink)",
                 shape.describe(),
                 row.issue
-            ))),
-        };
+            )));
+        }
+        return Ok(match payload_slot(id, family, shape, document)? {
+            None => template.clone(),
+            Some(slot) => {
+                template.replace(PAYLOAD_SLOT, &payload_name(id, defs_of(document), slot)?)
+            }
+        });
     }
     let Some(row) = row else {
         return Err(invalid(format!(
-            "command `{id}` declares `{declared}` ({}) but its schema carries {}; correct the \
+            "command `{id}` declares `{template}` ({}) but its schema carries {}; correct the \
              declaration, or if the wire is what is wrong, list the command in \
-             {RESPONSE_MODEL_DIVERGENCES_FILE} and mark it `wire_status: transitional`",
+             {RESPONSE_MODEL_DIVERGENCES_FILE} with its target declaration and mark it \
+             `wire_status: transitional`",
             family.describe(),
             shape.describe()
         )));
     };
-    if row.declared != *declared {
+    let declared_family = ResponseFamily::from_declaration(id, &row.declared)?;
+    if declared_family != family {
         return Err(invalid(format!(
-            "{RESPONSE_MODEL_DIVERGENCES_FILE} row for `{id}` records declared `{}` but the \
-             command declares `{declared}`",
-            row.declared
+            "{RESPONSE_MODEL_DIVERGENCES_FILE} row for `{id}` declares `{}` ({}) but the command \
+             declares `{template}` ({}); a row states the target within the declared family",
+            row.declared,
+            declared_family.describe(),
+            family.describe()
         )));
+    }
+    if let Some(payload) = family.payload_of(id, &row.declared)? {
+        if !names_a_def(&payload, defs_of(document)) {
+            return Err(invalid(format!(
+                "{RESPONSE_MODEL_DIVERGENCES_FILE} row for `{id}` declares `{}` but `{payload}` is \
+                 neither a `$def` of the command's schema nor a wire primitive",
+                row.declared
+            )));
+        }
     }
     let wire = shape.name();
     if row.wire != wire {
@@ -481,12 +772,15 @@ fn check_command(
             command.wire_status
         )));
     }
-    Ok(())
+    Ok(row.declared.clone())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{accepts, classify, encoding, ResponseFamily, WireShape};
+    use super::{
+        accepts, classify, defs_of, encoding, names_a_def, payload_name, payload_slot,
+        ResponseFamily, WireShape,
+    };
     use crate::cli_metadata::CliWireEncoding;
     use serde_json::{json, Value};
 
@@ -501,32 +795,109 @@ mod tests {
     #[test]
     fn families_parse_by_prefix_longest_first() {
         let cases = [
-            ("MutationAck<BranchItem>", ResponseFamily::MutationAck),
+            ("MutationAck", ResponseFamily::MutationAck),
             ("Maybe<VersionedValue>", ResponseFamily::Maybe),
             ("Maybe<Vec<VersionedValue>>", ResponseFamily::MaybeVec),
-            ("Page<BranchItem, String>", ResponseFamily::Page),
+            ("Page<BranchItem>", ResponseFamily::Page),
             ("SamplePage<KvItem>", ResponseFamily::SamplePage),
             ("SearchResult<VectorMatch>", ResponseFamily::SearchResult),
             (
                 "SearchResult<VectorMatch> + IndexDiagnostics",
                 ResponseFamily::SearchResultDiagnostics,
             ),
-            ("StatusValue<bool>", ResponseFamily::StatusValue),
+            ("StatusValue<boolean>", ResponseFamily::StatusValue),
             ("StatusResponse<HealthInfo>", ResponseFamily::StatusResponse),
-            ("AnalyticsResult<f64>", ResponseFamily::AnalyticsResult),
+            ("AnalyticsResult<number>", ResponseFamily::AnalyticsResult),
             ("BatchResult<KvItem>", ResponseFamily::BatchResult),
             ("EmbedResponse", ResponseFamily::Bare),
+            ("{payload}", ResponseFamily::Bare),
         ];
         for (declared, expected) in cases {
             let family = ResponseFamily::from_declaration("t.c", declared).expect("known family");
             assert_eq!(family, expected, "{declared}");
         }
-        let rejected = ResponseFamily::from_declaration("t.c", "Option<KvItem>")
-            .expect_err("an unknown generic family is rejected");
-        assert!(
-            rejected.to_string().contains("unknown family"),
-            "{rejected}"
+        for declared in ["Option<KvItem>", "MutationAck<BranchItem>"] {
+            let rejected = ResponseFamily::from_declaration("t.c", declared)
+                .expect_err("an unknown generic family is rejected");
+            assert!(
+                rejected.to_string().contains("unknown family"),
+                "{declared}: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn templates_round_trip_and_complete_declarations_are_not_templates() {
+        use ResponseFamily as F;
+        let families = [
+            F::MutationAck,
+            F::Maybe,
+            F::MaybeVec,
+            F::Page,
+            F::SamplePage,
+            F::SearchResult,
+            F::SearchResultDiagnostics,
+            F::StatusValue,
+            F::StatusResponse,
+            F::AnalyticsResult,
+            F::BatchResult,
+            F::Bare,
+        ];
+        for family in families {
+            let parsed = ResponseFamily::from_template("t.c", family.template()).expect("template");
+            assert_eq!(parsed, family, "{}", family.template());
+        }
+        for declared in [
+            "Maybe<VersionedValue>",
+            "EmbedResponse",
+            "Page<{payload}, String>",
+        ] {
+            let rejected = ResponseFamily::from_template("t.c", declared)
+                .expect_err("a complete declaration is not a template");
+            assert!(
+                rejected.to_string().contains("declare the family template"),
+                "{declared}: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn payloads_are_read_back_out_of_complete_declarations() {
+        use ResponseFamily as F;
+        let payload = |family: F, declared: &str| family.payload_of("t.c", declared);
+        assert_eq!(payload(F::MutationAck, "MutationAck").expect("fits"), None);
+        assert_eq!(
+            payload(F::Maybe, "Maybe<VersionedValue>").expect("fits"),
+            Some("VersionedValue".to_owned())
         );
+        assert_eq!(
+            payload(F::MaybeVec, "Maybe<Vec<HistoryItem>>").expect("fits"),
+            Some("HistoryItem".to_owned())
+        );
+        assert_eq!(
+            payload(
+                F::SearchResultDiagnostics,
+                "SearchResult<VectorMatch> + IndexDiagnostics"
+            )
+            .expect("fits"),
+            Some("VectorMatch".to_owned())
+        );
+        assert_eq!(
+            payload(F::Bare, "integer[]").expect("fits"),
+            Some("integer[]".to_owned())
+        );
+        for (family, declared) in [
+            (F::Maybe, "Page<VersionedValue>"),
+            (F::Maybe, "Maybe<>"),
+            (F::Maybe, "Maybe<VersionedValue"),
+            (F::StatusValue, "StatusResponse<Info>"),
+        ] {
+            let rejected = payload(family, declared).expect_err("does not fit");
+            assert!(
+                rejected.to_string().contains("does not fit"),
+                "{declared}: {rejected}"
+            );
+        }
     }
 
     #[test]
@@ -711,6 +1082,172 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The name derived for `data` under `family`, through the real
+    /// classify → slot → name chain.
+    fn derive(family: ResponseFamily, data: &Value, defs: &Value) -> super::Result<Option<String>> {
+        let document = document(data, defs);
+        let shape = classify("t.c", &document)?;
+        assert!(
+            accepts(family, &shape),
+            "{family:?} accepts {}",
+            shape.name()
+        );
+        payload_slot("t.c", family, &shape, &document)?
+            .map(|slot| payload_name("t.c", defs_of(&document), slot))
+            .transpose()
+    }
+
+    #[test]
+    fn payload_slots_follow_the_family_shape() {
+        use ResponseFamily as F;
+        let item = json!({"$ref": "#/$defs/Item"});
+        let defs = json!({
+            "Item": {"type": "object", "properties": {"id": {"type": "string"}}},
+            "Found": {"type": "object", "properties": {"found": {"type": "boolean"}, "value": item}, "required": ["found"]},
+            "History": {"type": "object", "properties": {"items": {"type": "array", "items": item}}, "required": ["items"]},
+            "Page": {"type": "object", "properties": {"items": {"type": "array", "items": item}, "has_more": {"type": "boolean"}}, "required": ["items", "has_more"]},
+            "Sample": {"type": "object", "properties": {"items": {"type": "array", "items": item}, "has_more": {"type": "boolean"}, "total_count": {"type": "integer"}}, "required": ["items", "has_more", "total_count"]},
+            "Outcome": {"type": "object", "properties": {"result": item}},
+            "Batch": {"type": "object", "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/Outcome"}}, "mode": {}, "status": {}, "applied": {}}, "required": ["items", "mode", "status", "applied"]},
+            "Ack": {"type": "object", "properties": {"effect": {"type": "string"}}, "required": ["effect"]},
+        });
+        let cases: [(F, Value, Option<&str>); 13] = [
+            (F::MutationAck, json!({"$ref": "#/$defs/Ack"}), None),
+            (F::Maybe, json!({"$ref": "#/$defs/Found"}), Some("Item")),
+            (
+                F::Maybe,
+                json!({"anyOf": [item, {"type": "null"}]}),
+                Some("Item"),
+            ),
+            (
+                F::Maybe,
+                json!({"type": ["string", "null"]}),
+                Some("string"),
+            ),
+            (
+                F::MaybeVec,
+                json!({"anyOf": [{"$ref": "#/$defs/History"}, {"type": "null"}]}),
+                Some("Item"),
+            ),
+            (
+                F::MaybeVec,
+                json!({"type": ["array", "null"], "items": item}),
+                Some("Item"),
+            ),
+            (F::Page, json!({"$ref": "#/$defs/Page"}), Some("Item")),
+            (
+                F::SamplePage,
+                json!({"$ref": "#/$defs/Sample"}),
+                Some("Item"),
+            ),
+            (
+                F::SearchResult,
+                json!({"type": "array", "items": item}),
+                Some("Item"),
+            ),
+            (
+                F::SearchResultDiagnostics,
+                json!({"type": "object", "properties": {"matches": {"type": "array", "items": item}, "diagnostics": {}}}),
+                Some("Item"),
+            ),
+            (
+                F::BatchResult,
+                json!({"$ref": "#/$defs/Batch"}),
+                Some("Item"),
+            ),
+            (
+                F::StatusValue,
+                json!({"type": "integer", "format": "uint64"}),
+                Some("integer"),
+            ),
+            (
+                F::Bare,
+                json!({"type": "array", "items": {"type": "integer"}}),
+                Some("integer[]"),
+            ),
+        ];
+        for (family, data, expected) in cases {
+            let name = derive(family, &data, &defs).expect("derives");
+            assert_eq!(name.as_deref(), expected, "{family:?} over {data}");
+        }
+        assert_eq!(
+            derive(F::StatusResponse, &json!({"$ref": "#/$defs/Item"}), &defs).expect("derives"),
+            Some("Item".to_owned())
+        );
+        assert_eq!(
+            derive(F::AnalyticsResult, &json!({"$ref": "#/$defs/Item"}), &defs).expect("derives"),
+            Some("Item".to_owned())
+        );
+    }
+
+    #[test]
+    fn payloads_without_a_name_are_rejected() {
+        use ResponseFamily as F;
+        let anonymous = json!({"type": "object", "properties": {"id": {"type": "string"}}});
+        let cases: [(F, Value, &str); 7] = [
+            (F::StatusResponse, anonymous.clone(), "anonymous record"),
+            (
+                F::Page,
+                json!({"type": "object", "properties": {"items": {"type": "array", "items": anonymous}, "has_more": {}}, "required": ["items", "has_more"]}),
+                "anonymous record",
+            ),
+            (
+                F::Bare,
+                json!({"type": "array", "items": {"$ref": "#/$defs/Missing"}}),
+                "undefined `Missing`",
+            ),
+            (F::Bare, json!({"type": "array"}), "without `items`"),
+            (
+                F::Page,
+                json!({"type": "object", "properties": {"items": {"type": "array"}, "has_more": {}}, "required": ["items", "has_more"]}),
+                "without `items`",
+            ),
+            (
+                F::Maybe,
+                json!({"type": "object", "properties": {"found": {}, "value": {"type": "date"}}}),
+                "type `date`",
+            ),
+            (
+                F::Bare,
+                json!({"type": "array", "items": {"description": "untyped"}}),
+                "no single type",
+            ),
+        ];
+        for (family, data, reason) in cases {
+            let rejected = derive(family, &data, &json!({})).expect_err("rejected");
+            assert!(
+                rejected.to_string().contains(reason),
+                "{family:?} over {data}: {rejected}"
+            );
+        }
+        // A shape the family accepts but that carries no payload slot.
+        let rejected = payload_slot(
+            "t.c",
+            F::Maybe,
+            &WireShape::Scalar("boolean".into()),
+            &document(&json!({"type": "boolean"}), &json!({})),
+        )
+        .expect_err("no slot");
+        assert!(
+            rejected.to_string().contains("no payload slot"),
+            "{rejected}"
+        );
+    }
+
+    #[test]
+    fn ledgered_payloads_must_name_a_def_or_a_primitive() {
+        let document = json!({"$defs": {"Info": {"type": "object"}}});
+        let defs = defs_of(&document);
+        for payload in ["Info", "Info[]", "integer", "string[]"] {
+            assert!(names_a_def(payload, defs), "{payload}");
+        }
+        for payload in ["Infoo", "Vec<Info>", "{payload}", "u64", ""] {
+            assert!(!names_a_def(payload, defs), "{payload}");
+        }
+        assert!(!names_a_def("Info", None));
+        assert!(names_a_def("boolean", None));
     }
 
     #[test]

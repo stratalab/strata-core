@@ -80,7 +80,7 @@
         "Output::ConfigValue"
       ],
       "wire_status": "stable",
-      "response_model": "Maybe<String>",
+      "response_model": "Maybe<string>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -618,7 +618,7 @@
         "Output::ArrowExportResult"
       ],
       "wire_status": "stable",
-      "response_model": "StatusResponse<ArrowExport>",
+      "response_model": "StatusResponse<ArrowExportResult>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -707,7 +707,7 @@
         "Output::ArrowImportResult"
       ],
       "wire_status": "stable",
-      "response_model": "StatusResponse<ArrowImport>",
+      "response_model": "StatusResponse<ArrowImportResult>",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -901,7 +901,7 @@
         "Output::BranchDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<BranchDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -1296,7 +1296,7 @@
         "Output::Branches"
       ],
       "wire_status": "stable",
-      "response_model": "Page<BranchItem, String>",
+      "response_model": "Page<BranchItem>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -1518,7 +1518,7 @@
         "Output::EventAppendResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<EventAppend>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -1588,7 +1588,7 @@
         "Output::EventBatchAppendResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<EventBatchAppendItem>",
+      "response_model": "BatchResult<EventBatchAppendItemResult>",
       "commit": "itemwise_shared_commit",
       "pagination": "none",
       "batch": "itemwise",
@@ -1660,7 +1660,7 @@
         "Output::EventCount"
       ],
       "wire_status": "transitional",
-      "response_model": "StatusValue<u64>",
+      "response_model": "StatusValue<integer>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -1720,7 +1720,7 @@
         "Output::Bool"
       ],
       "wire_status": "stable",
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -1839,7 +1839,7 @@
         "Output::EventRecords"
       ],
       "wire_status": "stable",
-      "response_model": "Page<EventVersionedData, u64>",
+      "response_model": "Page<EventVersionedData>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -1908,7 +1908,7 @@
         "Output::EventRangeResult"
       ],
       "wire_status": "stable",
-      "response_model": "Page<EventVersionedData, u64>",
+      "response_model": "Page<EventVersionedData>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -1977,7 +1977,7 @@
         "Output::EventRangeResult"
       ],
       "wire_status": "stable",
-      "response_model": "Page<EventVersionedData, u64>",
+      "response_model": "Page<EventVersionedData>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -2046,7 +2046,7 @@
         "Output::EventTypeList"
       ],
       "wire_status": "stable",
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -2677,7 +2677,7 @@
         "Output::GraphDeletePolicyResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphDeletePolicyApply>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -2824,7 +2824,7 @@
         "Output::GraphBindingPage"
       ],
       "wire_status": "stable",
-      "response_model": "Page<GraphBindingHit, String>",
+      "response_model": "Page<GraphBindingHit>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -2888,7 +2888,7 @@
         "Output::GraphBulkInsertResult"
       ],
       "wire_status": "transitional",
-      "response_model": "MutationAck<GraphBulkInsert>",
+      "response_model": "MutationAck",
       "commit": "chunked_commits",
       "pagination": "none",
       "batch": "none",
@@ -2991,7 +2991,7 @@
         "Output::GraphCreateResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphInfoData>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -3072,7 +3072,7 @@
         "Output::GraphDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -3139,7 +3139,7 @@
         "Output::GraphEdgeWriteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphEdgeWrite>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -3326,7 +3326,7 @@
         "Output::GraphDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -3404,7 +3404,7 @@
         "Output::GraphNamePage"
       ],
       "wire_status": "stable",
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -3537,7 +3537,7 @@
         "Output::GraphNeighborPage"
       ],
       "wire_status": "stable",
-      "response_model": "Page<GraphNeighborHit, String>",
+      "response_model": "Page<GraphNeighborHit>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -3617,7 +3617,7 @@
         "Output::GraphNodeWriteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphNodeWrite>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -3788,7 +3788,7 @@
         "Output::GraphNodePage"
       ],
       "wire_status": "stable",
-      "response_model": "Page<GraphNodeDataOutput, String>",
+      "response_model": "Page<GraphNodeDataOutput>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -3862,7 +3862,7 @@
         "Output::GraphDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -3934,7 +3934,7 @@
         "Output::GraphNodePage"
       ],
       "wire_status": "stable",
-      "response_model": "Page<GraphNodeDataOutput, String>",
+      "response_model": "Page<GraphNodeDataOutput>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -4013,7 +4013,7 @@
         "Output::GraphOntologyWriteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphOntologyWrite>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -4098,7 +4098,7 @@
         "Output::GraphOntologyWriteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphOntologyWrite>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -4182,7 +4182,7 @@
         "Output::GraphOntologyDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphOntologyDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -4260,7 +4260,7 @@
         "Output::GraphOntologyDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<GraphOntologyDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -4337,7 +4337,7 @@
         "Output::GraphOntologyFreezeResult"
       ],
       "wire_status": "transitional",
-      "response_model": "MutationAck<GraphOntologyFreeze>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -5110,7 +5110,7 @@
         "Output::InferenceText"
       ],
       "wire_status": "stable",
-      "response_model": "DetokenizedText",
+      "response_model": "string",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -5467,7 +5467,7 @@
         "Output::InferenceModels"
       ],
       "wire_status": "stable",
-      "response_model": "Page<ModelInfo, String>",
+      "response_model": "Page<ModelInfo>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -5520,7 +5520,7 @@
         "Output::InferenceModels"
       ],
       "wire_status": "stable",
-      "response_model": "Page<ModelInfo, String>",
+      "response_model": "Page<ModelInfo>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -5813,7 +5813,7 @@
         "Output::InferenceTokenIds"
       ],
       "wire_status": "stable",
-      "response_model": "TokenIds",
+      "response_model": "integer[]",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -5951,7 +5951,7 @@
         "Output::JsonBatchResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<JsonMutationItem>",
+      "response_model": "BatchResult<JsonBatchItemResult>",
       "commit": "itemwise_shared_commit",
       "pagination": "none",
       "batch": "itemwise",
@@ -6085,7 +6085,7 @@
         "Output::JsonBatchGetResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<Maybe<JsonValue>>",
+      "response_model": "BatchResult<JsonBatchGetItemResult>",
       "commit": "none",
       "pagination": "none",
       "batch": "itemwise",
@@ -6152,7 +6152,7 @@
         "Output::JsonBatchResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<JsonMutationItem>",
+      "response_model": "BatchResult<JsonBatchItemResult>",
       "commit": "itemwise_shared_commit",
       "pagination": "none",
       "batch": "itemwise",
@@ -6248,7 +6248,7 @@
         "Output::Uint"
       ],
       "wire_status": "stable",
-      "response_model": "StatusValue<u64>",
+      "response_model": "StatusValue<integer>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -6311,7 +6311,7 @@
         "Output::JsonDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<JsonDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -6383,7 +6383,7 @@
         "Output::Bool"
       ],
       "wire_status": "stable",
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -6595,7 +6595,7 @@
         "Output::JsonIndexDefinition"
       ],
       "wire_status": "transitional",
-      "response_model": "MutationAck<JsonIndexCreate>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -6672,7 +6672,7 @@
         "Output::Bool"
       ],
       "wire_status": "transitional",
-      "response_model": "MutationAck<JsonIndexDrop>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -6740,7 +6740,7 @@
         "Output::JsonIndexList"
       ],
       "wire_status": "stable",
-      "response_model": "Page<JsonIndexDefinition, String>",
+      "response_model": "Page<JsonIndexDefinition>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -6799,7 +6799,7 @@
         "Output::JsonListResult"
       ],
       "wire_status": "stable",
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -6925,7 +6925,7 @@
         "Output::JsonScanResult"
       ],
       "wire_status": "stable",
-      "response_model": "Page<JsonSampleItem, String>",
+      "response_model": "Page<JsonSampleItem>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -6988,7 +6988,7 @@
         "Output::JsonWriteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<JsonWrite>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -7082,7 +7082,7 @@
         "Output::BatchResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<KvMutationItem>",
+      "response_model": "BatchResult<BatchItemResult>",
       "commit": "itemwise_shared_commit",
       "pagination": "none",
       "batch": "itemwise",
@@ -7216,7 +7216,7 @@
         "Output::BatchGetResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<Maybe<Bytes>>",
+      "response_model": "BatchResult<BatchGetItemResult>",
       "commit": "none",
       "pagination": "none",
       "batch": "itemwise",
@@ -7279,7 +7279,7 @@
         "Output::BatchResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<KvMutationItem>",
+      "response_model": "BatchResult<BatchItemResult>",
       "commit": "itemwise_shared_commit",
       "pagination": "none",
       "batch": "itemwise",
@@ -7357,7 +7357,7 @@
         "Output::Uint"
       ],
       "wire_status": "stable",
-      "response_model": "StatusValue<u64>",
+      "response_model": "StatusValue<integer>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -7420,7 +7420,7 @@
         "Output::DeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<KvDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -7480,7 +7480,7 @@
         "Output::Bool"
       ],
       "wire_status": "stable",
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -7681,7 +7681,7 @@
         "Output::KeysPage"
       ],
       "wire_status": "stable",
-      "response_model": "Page<Bytes, Bytes>",
+      "response_model": "Page<Bytes>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -7746,7 +7746,7 @@
         "Output::WriteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<KvWrite>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -7875,7 +7875,7 @@
         "Output::KvScanResult"
       ],
       "wire_status": "stable",
-      "response_model": "Page<ScanItem, Bytes>",
+      "response_model": "Page<ScanItem>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -7940,7 +7940,7 @@
         "Output::SpaceCreateResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<SpaceCreate>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -8000,7 +8000,7 @@
         "Output::SpaceDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<SpaceDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -8081,7 +8081,7 @@
         "Output::Bool"
       ],
       "wire_status": "stable",
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -8144,7 +8144,7 @@
         "Output::SpaceList"
       ],
       "wire_status": "stable",
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -8195,7 +8195,7 @@
         "Output::VectorBatchDeleteResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<VectorMutationItem>",
+      "response_model": "BatchResult<VectorBatchItemResult>",
       "commit": "itemwise_shared_commit",
       "pagination": "none",
       "batch": "itemwise",
@@ -8341,7 +8341,7 @@
         "Output::VectorBatchGetResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<Maybe<VectorVersionedData>>",
+      "response_model": "BatchResult<VectorBatchGetItemResult>",
       "commit": "none",
       "pagination": "none",
       "batch": "itemwise",
@@ -8414,7 +8414,7 @@
         "Output::VectorBatchUpsertResults"
       ],
       "wire_status": "stable",
-      "response_model": "BatchResult<VectorMutationItem>",
+      "response_model": "BatchResult<VectorBatchItemResult>",
       "commit": "itemwise_shared_commit",
       "pagination": "none",
       "batch": "itemwise",
@@ -8506,7 +8506,7 @@
         "Output::VectorCollectionList"
       ],
       "wire_status": "transitional",
-      "response_model": "MutationAck<VectorCollectionCreate>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -8597,7 +8597,7 @@
         "Output::Bool"
       ],
       "wire_status": "transitional",
-      "response_model": "MutationAck<VectorCollectionDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -8669,7 +8669,7 @@
         "Output::VectorCollectionList"
       ],
       "wire_status": "stable",
-      "response_model": "Page<VectorCollectionInfo, String>",
+      "response_model": "Page<VectorCollectionInfo>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -8741,7 +8741,7 @@
         "Output::VectorCollectionList"
       ],
       "wire_status": "transitional",
-      "response_model": "MutationAck<VectorCollectionInfo>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -8912,7 +8912,7 @@
         "Output::Uint"
       ],
       "wire_status": "stable",
-      "response_model": "StatusValue<u64>",
+      "response_model": "StatusValue<integer>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -8983,7 +8983,7 @@
         "Output::VectorDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<VectorDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -9056,7 +9056,7 @@
         "Output::VectorBulkDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<VectorBulkDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -9129,7 +9129,7 @@
         "Output::VectorBulkDeleteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<VectorBulkDelete>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -9206,7 +9206,7 @@
         "Output::Bool"
       ],
       "wire_status": "stable",
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -9508,7 +9508,7 @@
         "Output::VectorKeyPage"
       ],
       "wire_status": "stable",
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -9581,7 +9581,7 @@
         "Output::VectorMetadataUpdateResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<VectorMetadataUpdate>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",
@@ -9915,7 +9915,7 @@
         "Output::VectorScanResult"
       ],
       "wire_status": "stable",
-      "response_model": "Page<VectorVersionedData, String>",
+      "response_model": "Page<VectorVersionedData>",
       "commit": "none",
       "pagination": "cursor",
       "batch": "none",
@@ -9988,7 +9988,7 @@
         "Output::VectorWriteResult"
       ],
       "wire_status": "stable",
-      "response_model": "MutationAck<VectorWrite>",
+      "response_model": "MutationAck",
       "commit": "commits_on_success",
       "pagination": "none",
       "batch": "none",

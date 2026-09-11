@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "13d64abfae91a0d0840aec189003a5bd34f40805001602eec2fb144a034648e9",
+    "checksum_sha256": "8fa30ad3358dc1747651c5820c34609c8b8307c82bd7dd942ddd019f5d1395d3",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -240,7 +240,7 @@
       "outputs": [
         "Output::ArrowExportResult"
       ],
-      "response_model": "StatusResponse<ArrowExport>",
+      "response_model": "StatusResponse<ArrowExportResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -324,7 +324,7 @@
       "outputs": [
         "Output::ArrowImportResult"
       ],
-      "response_model": "StatusResponse<ArrowImport>",
+      "response_model": "StatusResponse<ArrowImportResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -511,7 +511,7 @@
       "outputs": [
         "Output::BranchDeleteResult"
       ],
-      "response_model": "MutationAck<BranchDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -915,7 +915,7 @@
       "outputs": [
         "Output::Branches"
       ],
-      "response_model": "Page<BranchItem, String>",
+      "response_model": "Page<BranchItem>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1299,7 +1299,7 @@
       "outputs": [
         "Output::ConfigValue"
       ],
-      "response_model": "Maybe<String>",
+      "response_model": "Maybe<string>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1394,7 +1394,7 @@
       "outputs": [
         "Output::EventAppendResult"
       ],
-      "response_model": "MutationAck<EventAppend>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1466,7 +1466,7 @@
       "outputs": [
         "Output::EventBatchAppendResults"
       ],
-      "response_model": "BatchResult<EventBatchAppendItem>",
+      "response_model": "BatchResult<EventBatchAppendItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1540,7 +1540,7 @@
       "outputs": [
         "Output::EventCount"
       ],
-      "response_model": "StatusValue<u64>",
+      "response_model": "StatusValue<integer>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1595,7 +1595,7 @@
       "outputs": [
         "Output::Bool"
       ],
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1728,7 +1728,7 @@
       "outputs": [
         "Output::EventRecords"
       ],
-      "response_model": "Page<EventVersionedData, u64>",
+      "response_model": "Page<EventVersionedData>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1807,7 +1807,7 @@
       "outputs": [
         "Output::EventRangeResult"
       ],
-      "response_model": "Page<EventVersionedData, u64>",
+      "response_model": "Page<EventVersionedData>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1886,7 +1886,7 @@
       "outputs": [
         "Output::EventRangeResult"
       ],
-      "response_model": "Page<EventVersionedData, u64>",
+      "response_model": "Page<EventVersionedData>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -1965,7 +1965,7 @@
       "outputs": [
         "Output::EventTypeList"
       ],
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -2092,7 +2092,7 @@
       "outputs": [
         "Output::GraphEdgeWriteResult"
       ],
-      "response_model": "MutationAck<GraphEdgeWrite>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -2202,7 +2202,7 @@
       "outputs": [
         "Output::GraphNodeWriteResult"
       ],
-      "response_model": "MutationAck<GraphNodeWrite>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -2300,7 +2300,7 @@
       "outputs": [
         "Output::GraphDeletePolicyResult"
       ],
-      "response_model": "MutationAck<GraphDeletePolicyApply>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -2544,7 +2544,7 @@
       "outputs": [
         "Output::GraphBindingPage"
       ],
-      "response_model": "Page<GraphBindingHit, String>",
+      "response_model": "Page<GraphBindingHit>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -2622,7 +2622,7 @@
       "outputs": [
         "Output::GraphBulkInsertResult"
       ],
-      "response_model": "MutationAck<GraphBulkInsert>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -2802,7 +2802,7 @@
       "outputs": [
         "Output::GraphCreateResult"
       ],
-      "response_model": "MutationAck<GraphInfoData>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -2881,7 +2881,7 @@
       "outputs": [
         "Output::GraphDeleteResult"
       ],
-      "response_model": "MutationAck<GraphDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3202,7 +3202,7 @@
       "outputs": [
         "Output::GraphNamePage"
       ],
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3264,7 +3264,7 @@
       "outputs": [
         "Output::GraphNodePage"
       ],
-      "response_model": "Page<GraphNodeDataOutput, String>",
+      "response_model": "Page<GraphNodeDataOutput>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3424,7 +3424,7 @@
       "outputs": [
         "Output::GraphNeighborPage"
       ],
-      "response_model": "Page<GraphNeighborHit, String>",
+      "response_model": "Page<GraphNeighborHit>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3519,7 +3519,7 @@
       "outputs": [
         "Output::GraphNodePage"
       ],
-      "response_model": "Page<GraphNodeDataOutput, String>",
+      "response_model": "Page<GraphNodeDataOutput>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3603,7 +3603,7 @@
       "outputs": [
         "Output::GraphOntologyWriteResult"
       ],
-      "response_model": "MutationAck<GraphOntologyWrite>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3687,7 +3687,7 @@
       "outputs": [
         "Output::GraphOntologyWriteResult"
       ],
-      "response_model": "MutationAck<GraphOntologyWrite>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3770,7 +3770,7 @@
       "outputs": [
         "Output::GraphOntologyDeleteResult"
       ],
-      "response_model": "MutationAck<GraphOntologyDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3847,7 +3847,7 @@
       "outputs": [
         "Output::GraphOntologyDeleteResult"
       ],
-      "response_model": "MutationAck<GraphOntologyDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -3923,7 +3923,7 @@
       "outputs": [
         "Output::GraphOntologyFreezeResult"
       ],
-      "response_model": "MutationAck<GraphOntologyFreeze>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -4254,7 +4254,7 @@
       "outputs": [
         "Output::GraphDeleteResult"
       ],
-      "response_model": "MutationAck<GraphDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -4333,7 +4333,7 @@
       "outputs": [
         "Output::GraphDeleteResult"
       ],
-      "response_model": "MutationAck<GraphDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -5363,7 +5363,7 @@
       "outputs": [
         "Output::InferenceText"
       ],
-      "response_model": "DetokenizedText",
+      "response_model": "string",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -5699,7 +5699,7 @@
       "outputs": [
         "Output::InferenceModels"
       ],
-      "response_model": "Page<ModelInfo, String>",
+      "response_model": "Page<ModelInfo>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -5745,7 +5745,7 @@
       "outputs": [
         "Output::InferenceModels"
       ],
-      "response_model": "Page<ModelInfo, String>",
+      "response_model": "Page<ModelInfo>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6010,7 +6010,7 @@
       "outputs": [
         "Output::InferenceTokenIds"
       ],
-      "response_model": "TokenIds",
+      "response_model": "integer[]",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6319,7 +6319,7 @@
       "outputs": [
         "Output::JsonBatchResults"
       ],
-      "response_model": "BatchResult<JsonMutationItem>",
+      "response_model": "BatchResult<JsonBatchItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6459,7 +6459,7 @@
       "outputs": [
         "Output::JsonBatchGetResults"
       ],
-      "response_model": "BatchResult<Maybe<JsonValue>>",
+      "response_model": "BatchResult<JsonBatchGetItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6536,7 +6536,7 @@
       "outputs": [
         "Output::JsonBatchResults"
       ],
-      "response_model": "BatchResult<JsonMutationItem>",
+      "response_model": "BatchResult<JsonBatchItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6631,7 +6631,7 @@
       "outputs": [
         "Output::Uint"
       ],
-      "response_model": "StatusValue<u64>",
+      "response_model": "StatusValue<integer>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6689,7 +6689,7 @@
       "outputs": [
         "Output::JsonDeleteResult"
       ],
-      "response_model": "MutationAck<JsonDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6760,7 +6760,7 @@
       "outputs": [
         "Output::Bool"
       ],
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6973,7 +6973,7 @@
       "outputs": [
         "Output::JsonIndexDefinition"
       ],
-      "response_model": "MutationAck<JsonIndexCreate>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7048,7 +7048,7 @@
       "outputs": [
         "Output::Bool"
       ],
-      "response_model": "MutationAck<JsonIndexDrop>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7115,7 +7115,7 @@
       "outputs": [
         "Output::JsonIndexList"
       ],
-      "response_model": "Page<JsonIndexDefinition, String>",
+      "response_model": "Page<JsonIndexDefinition>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7185,7 +7185,7 @@
       "outputs": [
         "Output::JsonListResult"
       ],
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7316,7 +7316,7 @@
       "outputs": [
         "Output::JsonScanResult"
       ],
-      "response_model": "Page<JsonSampleItem, String>",
+      "response_model": "Page<JsonSampleItem>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7385,7 +7385,7 @@
       "outputs": [
         "Output::JsonWriteResult"
       ],
-      "response_model": "MutationAck<JsonWrite>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7482,7 +7482,7 @@
       "outputs": [
         "Output::BatchResults"
       ],
-      "response_model": "BatchResult<KvMutationItem>",
+      "response_model": "BatchResult<BatchItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7627,7 +7627,7 @@
       "outputs": [
         "Output::BatchGetResults"
       ],
-      "response_model": "BatchResult<Maybe<Bytes>>",
+      "response_model": "BatchResult<BatchGetItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7701,7 +7701,7 @@
       "outputs": [
         "Output::BatchResults"
       ],
-      "response_model": "BatchResult<KvMutationItem>",
+      "response_model": "BatchResult<BatchItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7779,7 +7779,7 @@
       "outputs": [
         "Output::Uint"
       ],
-      "response_model": "StatusValue<u64>",
+      "response_model": "StatusValue<integer>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7837,7 +7837,7 @@
       "outputs": [
         "Output::DeleteResult"
       ],
-      "response_model": "MutationAck<KvDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -7896,7 +7896,7 @@
       "outputs": [
         "Output::Bool"
       ],
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8095,7 +8095,7 @@
       "outputs": [
         "Output::KeysPage"
       ],
-      "response_model": "Page<Bytes, Bytes>",
+      "response_model": "Page<Bytes>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8160,7 +8160,7 @@
       "outputs": [
         "Output::WriteResult"
       ],
-      "response_model": "MutationAck<KvWrite>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8295,7 +8295,7 @@
       "outputs": [
         "Output::KvScanResult"
       ],
-      "response_model": "Page<ScanItem, Bytes>",
+      "response_model": "Page<ScanItem>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8536,7 +8536,7 @@
       "outputs": [
         "Output::SpaceCreateResult"
       ],
-      "response_model": "MutationAck<SpaceCreate>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8594,7 +8594,7 @@
       "outputs": [
         "Output::SpaceDeleteResult"
       ],
-      "response_model": "MutationAck<SpaceDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8674,7 +8674,7 @@
       "outputs": [
         "Output::Bool"
       ],
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8732,7 +8732,7 @@
       "outputs": [
         "Output::SpaceList"
       ],
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8786,7 +8786,7 @@
       "outputs": [
         "Output::VectorBatchDeleteResults"
       ],
-      "response_model": "BatchResult<VectorMutationItem>",
+      "response_model": "BatchResult<VectorBatchItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8938,7 +8938,7 @@
       "outputs": [
         "Output::VectorBatchGetResults"
       ],
-      "response_model": "BatchResult<Maybe<VectorVersionedData>>",
+      "response_model": "BatchResult<VectorBatchGetItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9028,7 +9028,7 @@
       "outputs": [
         "Output::VectorBatchUpsertResults"
       ],
-      "response_model": "BatchResult<VectorMutationItem>",
+      "response_model": "BatchResult<VectorBatchItemResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9119,7 +9119,7 @@
       "outputs": [
         "Output::VectorCollectionList"
       ],
-      "response_model": "MutationAck<VectorCollectionCreate>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9208,7 +9208,7 @@
       "outputs": [
         "Output::Bool"
       ],
-      "response_model": "MutationAck<VectorCollectionDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9279,7 +9279,7 @@
       "outputs": [
         "Output::VectorCollectionList"
       ],
-      "response_model": "Page<VectorCollectionInfo, String>",
+      "response_model": "Page<VectorCollectionInfo>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9362,7 +9362,7 @@
       "outputs": [
         "Output::VectorCollectionList"
       ],
-      "response_model": "MutationAck<VectorCollectionInfo>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9542,7 +9542,7 @@
       "outputs": [
         "Output::Uint"
       ],
-      "response_model": "StatusValue<u64>",
+      "response_model": "StatusValue<integer>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9608,7 +9608,7 @@
       "outputs": [
         "Output::VectorDeleteResult"
       ],
-      "response_model": "MutationAck<VectorDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9680,7 +9680,7 @@
       "outputs": [
         "Output::VectorBulkDeleteResult"
       ],
-      "response_model": "MutationAck<VectorBulkDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9751,7 +9751,7 @@
       "outputs": [
         "Output::VectorBulkDeleteResult"
       ],
-      "response_model": "MutationAck<VectorBulkDelete>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -9826,7 +9826,7 @@
       "outputs": [
         "Output::Bool"
       ],
-      "response_model": "StatusValue<bool>",
+      "response_model": "StatusValue<boolean>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -10261,7 +10261,7 @@
       "outputs": [
         "Output::VectorKeyPage"
       ],
-      "response_model": "Page<String, String>",
+      "response_model": "Page<string>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -10610,7 +10610,7 @@
       "outputs": [
         "Output::VectorScanResult"
       ],
-      "response_model": "Page<VectorVersionedData, String>",
+      "response_model": "Page<VectorVersionedData>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -10696,7 +10696,7 @@
       "outputs": [
         "Output::VectorMetadataUpdateResult"
       ],
-      "response_model": "MutationAck<VectorMetadataUpdate>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -10772,7 +10772,7 @@
       "outputs": [
         "Output::VectorWriteResult"
       ],
-      "response_model": "MutationAck<VectorWrite>",
+      "response_model": "MutationAck",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",

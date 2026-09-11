@@ -4,8 +4,6 @@ commands:
     title: List product spaces
     input: Command::SpaceList
     output: Output::SpaceList
-    result: String
-    response_model: Page<String, String>
     prose: commands/space.list.md
     errors-:
       - invalid_argument.engine.product_space
@@ -23,7 +21,6 @@ commands:
     title: Create product space
     input: Command::SpaceCreate
     output: Output::SpaceCreateResult
-    result: SpaceCreate
     prose: commands/space.create.md
     display:
       receipt: "{verb} space {/data/space}"
@@ -37,7 +34,6 @@ commands:
     title: Check product space existence
     input: Command::SpaceExists
     output: Output::Bool
-    result: bool
     prose: commands/space.exists.md
     display:
       value: /data
@@ -51,7 +47,6 @@ commands:
     title: Delete product space
     input: Command::SpaceDelete
     output: Output::SpaceDeleteResult
-    result: SpaceDelete
     prose: commands/space.delete.md
     errors+:
       - invalid_argument.engine.space_delete_default

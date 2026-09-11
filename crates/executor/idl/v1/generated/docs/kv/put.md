@@ -40,7 +40,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 
 ## Returns
 
-`MutationAck<KvWrite>`.
+`MutationAck` — an acknowledgement with no payload.
 
 ## Errors
 

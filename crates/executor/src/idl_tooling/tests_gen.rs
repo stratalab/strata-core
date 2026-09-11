@@ -112,8 +112,7 @@ pub(super) fn generated_tests_source(
 
 /// Generates the conformance test file.
 pub fn generate_tests(repo_root: &Path) -> Result<()> {
-    let index = super::resolve_index(repo_root)?;
-    let documents = super::schemas::schema_documents(&index)?;
+    let (index, documents) = super::resolve_index_with_schemas(repo_root)?;
     let source = generated_tests_source(repo_root, &index, &documents)?;
     let path = generated_tests_path(repo_root);
     if let Some(parent) = path.parent() {
@@ -128,8 +127,7 @@ pub fn generate_tests(repo_root: &Path) -> Result<()> {
 
 /// Fails when the committed conformance test file is stale.
 pub fn check_tests(repo_root: &Path) -> Result<()> {
-    let index = super::resolve_index(repo_root)?;
-    let documents = super::schemas::schema_documents(&index)?;
+    let (index, documents) = super::resolve_index_with_schemas(repo_root)?;
     let expected = generated_tests_source(repo_root, &index, &documents)?;
     let path = generated_tests_path(repo_root);
     let actual = fs::read_to_string(&path).map_err(|source| IdlError::Read {

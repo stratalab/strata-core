@@ -1,12 +1,16 @@
 # Response-model divergence ledger (#3313; S0c of the CLI output contract).
 #
-# Every command declares a `response_model` family (`MutationAck<T>`,
-# `Maybe<T>`, `Page<T>`, ...) and every family implies a wire shape. The
-# response-model guard (`crates/executor/src/idl_tooling/response_model.rs`,
-# run by `strata-idl generate` and `check`) classifies what each command's
-# generated schema actually carries and compares it with the declaration.
-# The rows below are the commands where the two disagree: the declaration is
-# the target shape, the wire is what ships today, and normalising the wire is
+# Every command declares a `response_model` family template (`MutationAck`,
+# `Maybe<{payload}>`, `Page<{payload}>`, ...) and every family implies a wire
+# shape. The response-model derivation
+# (`crates/executor/src/idl_tooling/response_model.rs`, run by `strata-idl
+# generate` and `check`) classifies what each command's generated schema
+# actually carries and compares it with the template's family; when they
+# agree it fills `{payload}` from the schema. The rows below are the commands
+# where the two disagree: `declared` is the complete response model the
+# command publishes -- the target, spelled within the family its template
+# declares, with the payload naming a `$def` of the command's schema (or a
+# wire primitive) -- and `wire` is what ships today. Normalising the wire is
 # a separate, tracked change. Every listed command carries
 # `wire_status: transitional`, and the generated reference says so on its
 # page.
@@ -20,10 +24,11 @@
 # SHRINK-ONLY: a row whose command now matches its declaration fails `check`
 # until the row is removed; a command that diverges without a row fails
 # `check` until the declaration is corrected or the row is added with an
-# issue. `declared` must equal the command's resolved `response_model` and
-# `wire` the classifier's name for the schema shape, so a row cannot drift
-# from the facts it records. `budget` MUST equal the number of rows
-# (`enforce_debt_budget`): growth is a reviewed raise, a drain lowers it.
+# issue. `declared` must stay within the family the command's template
+# declares and name a `$def`, and `wire` must be the classifier's name for
+# the schema shape, so a row cannot drift from the facts it records.
+# `budget` MUST equal the number of rows (`enforce_debt_budget`): growth is a
+# reviewed raise, a drain lowers it.
 budget: 10
 divergences:
   - command: admin.remote
@@ -31,35 +36,35 @@ divergences:
     wire: record
     issue: 3313
   - command: event.count
-    declared: StatusValue<u64>
+    declared: StatusValue<integer>
     wire: record
     issue: 3313
   - command: graph.bulk_insert
-    declared: MutationAck<GraphBulkInsert>
+    declared: MutationAck
     wire: record
     issue: 3313
   - command: graph.ontology.freeze
-    declared: MutationAck<GraphOntologyFreeze>
+    declared: MutationAck
     wire: record
     issue: 3313
   - command: json.index.create
-    declared: MutationAck<JsonIndexCreate>
+    declared: MutationAck
     wire: record
     issue: 3313
   - command: json.index.drop
-    declared: MutationAck<JsonIndexDrop>
+    declared: MutationAck
     wire: scalar:boolean
     issue: 3313
   - command: vector.collection.create
-    declared: MutationAck<VectorCollectionCreate>
+    declared: MutationAck
     wire: page
     issue: 3313
   - command: vector.collection.delete
-    declared: MutationAck<VectorCollectionDelete>
+    declared: MutationAck
     wire: scalar:boolean
     issue: 3313
   - command: vector.collection.set_embedding_model
-    declared: MutationAck<VectorCollectionInfo>
+    declared: MutationAck
     wire: page
     issue: 3313
   - command: vector.collection.stats

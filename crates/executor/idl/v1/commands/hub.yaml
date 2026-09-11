@@ -4,8 +4,6 @@ commands:
     title: Read hub info
     input: Command::HubInfo
     output: Output::HubInfo
-    result: HubInfo
-    response_model: StatusResponse<HubInfo>
     cli_path: ["hub", "info"]
     prose: commands/hub.info.md
     display:
@@ -35,8 +33,6 @@ commands:
     title: List hub datasets
     input: Command::HubListDatasets
     output: Output::HubDatasets
-    result: HubDatasetPage
-    response_model: StatusResponse<HubDatasetPage>
     cli_path: ["hub", "list-datasets"]
     prose: commands/hub.list_datasets.md
     errors+:
@@ -65,8 +61,6 @@ commands:
     title: Read hub dataset
     input: Command::HubGetDataset
     output: Output::HubDataset
-    result: HubDatasetCard
-    response_model: StatusResponse<HubDatasetCard>
     cli_path: ["hub", "get-dataset"]
     prose: commands/hub.get_dataset.md
     errors+:
@@ -103,8 +97,6 @@ commands:
     title: List hub dataset refs
     input: Command::HubListRefs
     output: Output::HubRefs
-    result: HubRefList
-    response_model: StatusResponse<HubRefList>
     cli_path: ["hub", "list-refs"]
     prose: commands/hub.list_refs.md
     errors+:
@@ -125,8 +117,6 @@ commands:
     title: List yanked hub refs
     input: Command::HubListYanked
     output: Output::HubYanked
-    result: HubYankedList
-    response_model: StatusResponse<HubYankedList>
     cli_path: ["hub", "list-yanked"]
     prose: commands/hub.list_yanked.md
     errors+:

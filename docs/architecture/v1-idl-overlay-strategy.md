@@ -274,14 +274,18 @@ StatusResponse<T>
 PublicErrorStatus
 ```
 
-The IDL may map executor output DTOs to these concepts:
+The IDL maps executor output DTOs to these concepts by family only:
 
 ```yaml
 output: WriteResult
-response_model: MutationAck<KvWrite>
+response_model: MutationAck
 ```
 
-But the executor DTO still owns the concrete serialized fields.
+The payload inside a family (`Maybe<VersionedValue>`, `Page<Bytes>`,
+`StatusValue<boolean>`) is derived by the generator from the command's
+generated schema — the `$def` at the family's payload slot, or the wire
+primitive — never authored (#3322). The executor DTO still owns the concrete
+serialized fields.
 
 ## Schema Layer (Decided 2026-07-06)
 
@@ -337,7 +341,6 @@ title: Put KV value
 description: Store or replace a binary value by key.
 input: KvPutCommand
 output: WriteResult
-result: KvWrite
 errors+:
   - invalid_argument.kv.key
 fixtures:
@@ -365,7 +368,7 @@ feature: core
 access: write
 input: KvPutCommand
 output: WriteResult
-response_model: MutationAck<KvWrite>
+response_model: MutationAck
 commit: commits_on_success
 pagination: none
 batch: none
@@ -447,7 +450,7 @@ kinds:
     commit: commits_on_success
     pagination: none
     batch: none
-    response_model: MutationAck<{result}>
+    response_model: MutationAck
     errors:
       - failed_precondition.read_only
 
@@ -456,14 +459,14 @@ kinds:
     commit: none
     pagination: none
     batch: none
-    response_model: Maybe<{result}>
+    response_model: Maybe<{payload}>
 
   read.page:
     access: read
     commit: none
     pagination: cursor
     batch: none
-    response_model: Page<{result}>
+    response_model: Page<{payload}>
 ```
 
 ### Command Overrides
@@ -477,7 +480,6 @@ title: Query vector collection
 description: Search a vector collection by similarity.
 input: VectorQueryCommand
 output: VectorMatches
-result: VectorMatch
 docs: /docs/vector/query
 errors+:
   - invalid_argument.vector.dimension

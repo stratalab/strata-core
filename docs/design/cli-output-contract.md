@@ -696,7 +696,7 @@ Verified against `main` at `60db96ac`.
 | Area | State | Gap |
 |---|---|---|
 | Shape declaration | IDL resolves `kind` and `response_model` for all 137 commands; `dto-inventory.yaml` registers 100+ models | nothing renders from them; no `display` declaration exists |
-| Declaration ⇔ wire | `kind` is right everywhere; `response_model` is checked against nothing | nominal for ~14 stable + 6 transitional commands (#3313); three phantom result names; `Maybe`/history have two encodings each |
+| Declaration ⇔ wire | `kind` is right everywhere; `response_model` is checked against nothing | nominal for ~14 stable + 6 transitional commands (#3313); three phantom result names; `Maybe`/history have two encodings each. *Since #3322: the family is checked against the schema and the payload is derived from it (84 models in use, inventory checked both ways).* |
 | Human renderer | 23 designed tag arms over 114 `Output` variants; structural sniff with a JSON fallback for the other 91 | 72 of 389 example lines are JSON dumps; ten families, one designed |
 | `--raw` | its own sniff; nothing for writes; base64 for non-UTF-8 reads | #3116; #3306 |
 | Dates | one wall-clock field (`committed_at`), humanized as a pre-pass to local time with offset | lands inside JSON; time zone of the machine; logical clocks distinguishable only by name |
@@ -917,6 +917,6 @@ is to move rows from the second table to the first or delete them.
 | human output in prose | README `:194` `# pong 1.2.1`; `docs/` fences; site `quickstart.mdx:22` | matrix cells + fence guard (R7, S5) |
 | human output as a release gate | stratadb.org `verify-transcripts.mjs`: 23 exchanges, 11 `applied=true` lines, 8 branch-JSON substrings | regenerated from matrix cells in the release PR (R7); becomes a *consumer* of the pin, not a second pin |
 | the homepage demo | stratadb.org `heroScript.ts`: 8 output beats "kept in sync by hand" | same — generated from the cells at release |
-| response model per command | `response_model:` in `commands/*.yaml`, checked against nothing (#3313) | `check` guard family ⇔ schema + shrink-only `response-model-divergences.yaml` (S0) |
+| response model per command | `response_model:` in `commands/*.yaml`, checked against nothing (#3313) | `check` guard family ⇔ schema + shrink-only `response-model-divergences.yaml` (S0); the payload is derived from the schema and the inventory checked both ways (#3322) |
 | date rendering | `wall_clock::format_instant` + the pre-pass | one `as: date` formatter in the table/receipt rules (R3) |
 | what `--raw` means | `render_raw` sniff; `--raw` help text ("script-friendly raw output where possible") | R1 raw column; help text rewritten to the rule |

@@ -49,7 +49,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 
 ## Returns
 
-`StatusResponse<ArrowImport>`.
+`StatusResponse<ArrowImportResult>`.
 
 ## Errors
 

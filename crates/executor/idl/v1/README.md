@@ -20,16 +20,16 @@ allowlist may *only shrink*. If you skip a step, a guard tells you which one.
 | `prose/commands/<id>.md` | Per-command curated prose (frontmatter + body). |
 | `prose/snippets/` | Reusable prose fragments referenced by `snippets`. |
 | `families.yaml` | Per-family docs URL + family-level error set. |
-| `kinds.yaml` | Operation kinds (access, commit, response-model template, CLI `render:` rule, snippets). |
+| `kinds.yaml` | Operation kinds (access, commit, response-model family template, CLI `render:` rule, snippets). |
 | `defaults.yaml` | Global defaults applied to every command. |
-| `dto-inventory.yaml` | The registry of allowed `response_model` shapes. |
+| `dto-inventory.yaml` | The set of response models the surface publishes — exactly the models `generate` derives, checked both ways (a derived model must be listed; a listed model must be derived). |
 | `errors.yaml` | The registry of public error codes surfaced to SDK docs. |
 | `error-sets.yaml` | Named error sets, referenced as `set:<id>` from any error list (a group that crosses families or kinds lives here, not in copies). |
 | `examples/<id>.yaml` | Optional canonical example (drives docs + SDK doctests). |
 | `manifest.yaml` | Schema + generator version stamps. |
 | `*uncovered*.yaml`, `missing-examples.yaml` | Shrink-only coverage allowlists. |
 | `unknown-key-divergences.yaml` | Shrink-only ledger of schema-closed sites the deserializer wrongly accepts (each entry cites its issue; re-verified every generation). |
-| `response-model-divergences.yaml` | Shrink-only ledger of commands whose generated schema does not carry the shape their `response_model` family declares (each row cites its issue; every listed command is `wire_status: transitional`). |
+| `response-model-divergences.yaml` | Shrink-only ledger of commands whose generated schema does not carry the shape their `response_model` family declares; each row states the complete target model and cites its issue, and every listed command is `wire_status: transitional`. |
 | `generated/` | **Generated — never hand-edit.** Index, schemas, docs, `llms.txt`. |
 
 A command's final facts are resolved by layering **defaults → family → kind →
@@ -57,7 +57,6 @@ Add an entry to `commands/<family>.yaml`:
     title: Put KV value
     input: Command::KvPut         # must be a real Command variant
     output: Output::WriteResult   # must be a real Output variant
-    result: KvWrite               # inner type substituted into the kind's {result}
     prose: commands/kv.put.md
     display:                      # what the CLI shows a human — see "Declare the display"
       receipt: "{verb} {/data/key|bytes}"
@@ -72,12 +71,21 @@ Notes:
 
 - **`kind`** decides most of the shape. Reuse one from `kinds.yaml`; add a new
   kind only for a genuinely new operation category.
-- **`result` + `kind.response_model`** resolve to the response model
-  (`mutation.put` → `MutationAck<{result}>` → `MutationAck<KvWrite>`). When the
-  template does not fit (e.g. pages), override `response_model:` directly on the
-  command (see `kv.list` → `Page<Bytes, Bytes>`).
-- The **resolved `response_model` must be listed in `dto-inventory.yaml`**, or
-  resolution fails.
+- **`response_model` is a family template, and the payload is derived.** The
+  kind supplies the template (`read.get` → `Maybe<{payload}>`, `mutation.put`
+  → `MutationAck`, which carries no payload); `generate` fills `{payload}` from
+  the generated schema — the `$def` at the family's payload slot (`kv.get` →
+  `Maybe<VersionedValue>`, `kv.batch_get` → `BatchResult<BatchGetItemResult>`)
+  or, for a primitive payload, its JSON Schema type (`kv.exists` →
+  `StatusValue<boolean>`, `inference.tokenize` → `integer[]`). Nothing authors
+  the payload name, so it cannot drift from the wire; an anonymous payload
+  fails `generate` until the DTO has a name the schema can `$ref`. When the
+  kind's family does not fit, override `response_model:` on the command with
+  another *template* (`vector.collection.stats` → `StatusResponse<{payload}>`);
+  a complete model in the authored YAML is rejected.
+- The **derived `response_model` must be listed in `dto-inventory.yaml`**, and
+  the inventory must list nothing else: a new model is reviewed once, when it
+  is added there, and a renamed or retired model cannot leave a ghost entry.
 - The **family must match the generated schema**: `generate`/`check` classify
   what `response.data` actually carries and compare it with the declaration
   (`MutationAck<_>` ⇔ an object with `effect`, `Page<_>` ⇔ `{items, has_more,
@@ -88,7 +96,10 @@ Notes:
   declaration is what is wrong, correct it; when the wire is what is wrong,
   list the command in `response-model-divergences.yaml` with its issue and mark
   it `wire_status: transitional` — the reference page then says which shape the
-  wire carries today.
+  wire carries today. A row's `declared` is the complete model the command
+  publishes meanwhile: the target, spelled within the family its template
+  declares, with a payload that names a `$def` of the command's schema or a
+  wire primitive (`event.count` → `StatusValue<integer>`).
 - **Errors**: family-wide codes go in `families.yaml`; command-specific ones via
   `errors+: [<code>]` (and `errors-:` to drop an inherited one). Every code must
   be registered in `errors.yaml`. A group of codes that recurs across commands,
@@ -235,8 +246,9 @@ Data-plane commands flow into the SDK automatically once the IDL is vendored;
 | `check` / `check-cli` / `check-docs` / `check-tests` | `generated/` and the generated conformance suite are fresh (regenerate + diff). |
 | `check-cli` (display layer) | every kind has a `render:`, every command a `display:`; each declaration's shape fits its kind's rule and every pointer/placeholder/filter/`as:` resolves against the generated schema (`idl_display` test target drives each rule). |
 | `check` (SDK boundary) | `command-index.json` carries no `display`/`render` key — the CLI layer never reaches the SDKs. |
-| `check` (response models) | every command's `response_model` family matches the shape its generated schema carries, or the command has a row in `response-model-divergences.yaml` and is `wire_status: transitional`; a row whose command now conforms, or whose `declared`/`wire` no longer match the facts, fails (`idl_response_model` test target). |
+| `check` (response models) | every command's `response_model` is a family template whose family matches the shape its generated schema carries, and its payload is derived from that schema (a `$def` or a primitive; an anonymous payload fails), or the command has a row in `response-model-divergences.yaml` and is `wire_status: transitional`; a row whose command now conforms, or whose `declared` leaves the template's family or names no `$def`, or whose `wire` no longer matches the facts, fails (`idl_response_model` test target). |
 | `response-model-divergences.yaml` | shrink-only: `budget` equals the row count; rows leave when the wire is normalised or the declaration corrected. |
+| `dto-inventory.yaml` | lists exactly the models the commands derive: a derived model it lacks fails `generate`/`check`, and so does a listed model no command derives (`idl_response_model` test target). |
 | `generated_conformance` test target | per-command wire round-trip idempotence, nested unknown-key rejection at schema-closed sites, error-envelope replay, observed-⊆-declared output tags. |
 | `unknown-key-divergences.yaml` | every entry must still be a live schema/deserializer divergence (fixed ⇒ delete the entry). |
 | `verify-fixtures` | fixtures validate against the schema and replay to their response. |

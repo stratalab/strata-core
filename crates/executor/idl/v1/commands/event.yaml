@@ -4,7 +4,6 @@ commands:
     title: Append event
     input: Command::EventAppend
     output: Output::EventAppendResult
-    result: EventAppend
     prose: commands/event.append.md
     errors+:
       - invalid_argument.engine.event_type
@@ -25,7 +24,6 @@ commands:
     title: Batch append events
     input: Command::EventBatchAppend
     output: Output::EventBatchAppendResults
-    result: EventBatchAppendItem
     prose: commands/event.batch_append.md
     errors+:
       - invalid_argument.engine.event_batch
@@ -44,7 +42,6 @@ commands:
     title: Get event
     input: Command::EventGet
     output: Output::EventRecord
-    result: EventVersionedData
     prose: commands/event.get.md
     display:
       fields:
@@ -68,7 +65,6 @@ commands:
     title: Check event existence
     input: Command::EventExists
     output: Output::Bool
-    result: bool
     prose: commands/event.exists.md
     display:
       value: /data
@@ -82,7 +78,6 @@ commands:
     title: Count events
     input: Command::EventCount
     output: Output::EventCount
-    result: u64
     prose: commands/event.count.md
     wire_status: transitional
     display:
@@ -98,8 +93,6 @@ commands:
     title: Read event sequence range
     input: Command::EventRange
     output: Output::EventRangeResult
-    result: EventVersionedData
-    response_model: Page<EventVersionedData, u64>
     prose: commands/event.range.md
     errors+:
       - invalid_argument.engine.event_type
@@ -124,8 +117,6 @@ commands:
     title: Read event time range
     input: Command::EventRangeByTime
     output: Output::EventRangeResult
-    result: EventVersionedData
-    response_model: Page<EventVersionedData, u64>
     prose: commands/event.range_time.md
     errors+:
       - invalid_argument.engine.event_type
@@ -150,8 +141,6 @@ commands:
     title: List event types
     input: Command::EventListTypes
     output: Output::EventTypeList
-    result: String
-    response_model: Page<String, String>
     prose: commands/event.types.md
     display:
       columns:
@@ -167,8 +156,6 @@ commands:
     title: List events
     input: Command::EventList
     output: Output::EventRecords
-    result: EventVersionedData
-    response_model: Page<EventVersionedData, u64>
     prose: commands/event.list.md
     errors+:
       - invalid_argument.engine.event_type
@@ -193,8 +180,7 @@ commands:
     title: Verify event chain
     input: Command::EventVerifyChain
     output: Output::EventChainVerification
-    result: EventChainVerification
-    response_model: StatusResponse<EventChainVerification>
+    response_model: StatusResponse<{payload}>
     prose: commands/event.verify_chain.md
     display:
       fields:
