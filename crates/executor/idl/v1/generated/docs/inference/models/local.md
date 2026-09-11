@@ -13,7 +13,7 @@ _No parameters._
 
 ## Returns
 
-`Page<ModelInfo, String>`.
+`Page<ModelInfo>`.
 
 ## Errors
 

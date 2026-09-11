@@ -2,13 +2,19 @@
 
 ## Status
 
-Status: implemented hand-maintained inventory for
-`crates/executor/src/output.rs`.
+Status: historical hand-maintained inventory for
+`crates/executor/src/output.rs`, written for the response-contract completion
+slices.
 
-This document records every public `Output` variant currently exposed by
-executor and maps it to the target V1 response concept. It is the source
-of truth for the response-contract completion slices until the IDL can generate
-the same inventory automatically.
+This document records every public `Output` variant exposed by executor at
+the time and maps it to the target V1 response concept. The IDL now derives
+that mapping (#3322): each command's `response_model` is resolved by
+`strata-idl generate` from its family template and its generated schema, the
+set of models in use is `crates/executor/idl/v1/dto-inventory.yaml`, and the
+per-command result is `generated/command-index.json`. The `Target V1 model`
+column below is the design-phase spelling (`MutationAck<KvWrite>`); the
+published one is the derived name (`MutationAck`, `Maybe<VersionedValue>`).
+Consult the generated index for the current surface.
 
 Current scope:
 

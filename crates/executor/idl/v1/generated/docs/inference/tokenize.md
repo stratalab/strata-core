@@ -17,7 +17,7 @@ Encodes text into the token id sequence a local model would see and returns the 
 
 ## Returns
 
-`TokenIds`.
+`integer[]`.
 
 ## Errors
 

@@ -40,7 +40,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 
 ## Returns
 
-`StatusValue<u64>`.
+`StatusValue<integer>`.
 
 **Transitional wire:** the response currently carries a bare record rather than a bare scalar; the declaration is the target shape and the wire is scheduled to be normalised.
 

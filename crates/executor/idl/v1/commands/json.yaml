@@ -4,7 +4,6 @@ commands:
     title: Set JSON value
     input: Command::JsonSet
     output: Output::JsonWriteResult
-    result: JsonWrite
     prose: commands/json.set.md
     errors+:
       - invalid_argument.engine.json_path
@@ -34,7 +33,6 @@ commands:
     outputs:
       - Output::JsonValue
       - Output::JsonVersionedValue
-    result: JsonVersionedValue
     prose: commands/json.get.md
     errors+:
       - invalid_argument.engine.json_path
@@ -59,7 +57,6 @@ commands:
     title: Delete JSON value
     input: Command::JsonDelete
     output: Output::JsonDeleteResult
-    result: JsonDelete
     prose: commands/json.delete.md
     errors+:
       - invalid_argument.engine.json_path
@@ -78,7 +75,6 @@ commands:
     title: Read JSON document history
     input: Command::JsonHistory
     output: Output::JsonVersionHistory
-    result: JsonHistoryItem
     prose: commands/json.history.md
     display:
       columns:
@@ -99,7 +95,6 @@ commands:
     title: Check JSON document existence
     input: Command::JsonExists
     output: Output::Bool
-    result: bool
     prose: commands/json.exists.md
     display:
       value: /data
@@ -113,7 +108,6 @@ commands:
     title: Batch check JSON document existence
     input: Command::JsonBatchExists
     output: Output::JsonBatchExistsResults
-    result: BatchExistsPresence
     prose: commands/json.batch_exists.md
     display:
       columns:
@@ -128,7 +122,6 @@ commands:
     title: Batch set JSON values
     input: Command::JsonBatchSet
     output: Output::JsonBatchResults
-    result: JsonMutationItem
     prose: commands/json.batch_set.md
     errors+:
       - invalid_argument.engine.json_path
@@ -151,7 +144,6 @@ commands:
     title: Batch get JSON values
     input: Command::JsonBatchGet
     output: Output::JsonBatchGetResults
-    result: Maybe<JsonValue>
     prose: commands/json.batch_get.md
     errors+:
       - invalid_argument.engine.json_path
@@ -172,7 +164,6 @@ commands:
     title: Batch delete JSON values
     input: Command::JsonBatchDelete
     output: Output::JsonBatchResults
-    result: JsonMutationItem
     prose: commands/json.batch_delete.md
     errors+:
       - invalid_argument.engine.json_path
@@ -192,8 +183,6 @@ commands:
     title: List JSON document keys
     input: Command::JsonList
     output: Output::JsonListResult
-    result: String
-    response_model: Page<String, String>
     prose: commands/json.list.md
     display:
       columns:
@@ -208,8 +197,6 @@ commands:
     title: Scan JSON documents
     input: Command::JsonScan
     output: Output::JsonScanResult
-    result: JsonSampleItem
-    response_model: Page<JsonSampleItem, String>
     prose: commands/json.scan.md
     display:
       columns:
@@ -227,7 +214,6 @@ commands:
     title: Count JSON documents
     input: Command::JsonCount
     output: Output::Uint
-    result: u64
     prose: commands/json.count.md
     display:
       value: /data
@@ -241,7 +227,6 @@ commands:
     title: Sample JSON documents
     input: Command::JsonSample
     output: Output::JsonSampleResult
-    result: JsonSampleItem
     prose: commands/json.sample.md
     display:
       columns:
@@ -259,7 +244,6 @@ commands:
     title: Create JSON index
     input: Command::JsonCreateIndex
     output: Output::JsonIndexDefinition
-    result: JsonIndexCreate
     prose: commands/json.index.create.md
     wire_status: transitional
     errors+:
@@ -282,7 +266,6 @@ commands:
     title: Drop JSON index
     input: Command::JsonDropIndex
     output: Output::Bool
-    result: JsonIndexDrop
     prose: commands/json.index.drop.md
     wire_status: transitional
     errors+:
@@ -305,8 +288,6 @@ commands:
     title: List JSON indexes
     input: Command::JsonListIndexes
     output: Output::JsonIndexList
-    result: JsonIndexDefinition
-    response_model: Page<JsonIndexDefinition, String>
     prose: commands/json.index.list.md
     errors-:
       - invalid_argument.engine.json_document_id

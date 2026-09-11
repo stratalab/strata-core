@@ -4,7 +4,6 @@ commands:
     title: Create vector collection
     input: Command::VectorCreateCollection
     output: Output::VectorCollectionList
-    result: VectorCollectionCreate
     prose: commands/vector.collection.create.md
     wire_status: transitional
     errors+:
@@ -28,7 +27,6 @@ commands:
     title: Delete vector collection
     input: Command::VectorDeleteCollection
     output: Output::Bool
-    result: VectorCollectionDelete
     prose: commands/vector.collection.delete.md
     wire_status: transitional
     display:
@@ -46,8 +44,6 @@ commands:
     title: List vector collections
     input: Command::VectorListCollections
     output: Output::VectorCollectionList
-    result: VectorCollectionInfo
-    response_model: Page<VectorCollectionInfo, String>
     prose: commands/vector.collection.list.md
     display:
       columns:
@@ -66,8 +62,7 @@ commands:
     title: Read vector collection stats
     input: Command::VectorCollectionStats
     output: Output::VectorCollectionList
-    result: VectorCollectionInfo
-    response_model: StatusResponse<VectorCollectionInfo>
+    response_model: StatusResponse<{payload}>
     prose: commands/vector.collection.stats.md
     wire_status: transitional
     display:
@@ -87,7 +82,6 @@ commands:
     title: Declare vector collection embedding model
     input: Command::VectorSetEmbeddingModel
     output: Output::VectorCollectionList
-    result: VectorCollectionInfo
     prose: commands/vector.collection.set_embedding_model.md
     wire_status: transitional
     errors+:
@@ -118,7 +112,6 @@ commands:
     title: Count vectors
     input: Command::VectorCount
     output: Output::Uint
-    result: u64
     prose: commands/vector.count.md
     display:
       value: /data
@@ -132,7 +125,6 @@ commands:
     title: Upsert vector
     input: Command::VectorUpsert
     output: Output::VectorWriteResult
-    result: VectorWrite
     prose: commands/vector.upsert.md
     errors+:
       - invalid_argument.engine.vector_dimension
@@ -174,7 +166,6 @@ commands:
     title: Get vector
     input: Command::VectorGet
     output: Output::VectorData
-    result: VectorVersionedData
     prose: commands/vector.get.md
     display:
       fields:
@@ -200,7 +191,6 @@ commands:
     title: Read vector history
     input: Command::VectorHistory
     output: Output::VectorVersionHistory
-    result: VectorHistoryItem
     prose: commands/vector.history.md
     display:
       columns:
@@ -224,7 +214,6 @@ commands:
     title: Check vector existence
     input: Command::VectorExists
     output: Output::Bool
-    result: bool
     prose: commands/vector.exists.md
     display:
       value: /data
@@ -240,7 +229,6 @@ commands:
     title: Batch check vector existence
     input: Command::VectorBatchExists
     output: Output::VectorBatchExistsResults
-    result: BatchExistsPresence
     prose: commands/vector.batch_exists.md
     display:
       columns:
@@ -257,8 +245,6 @@ commands:
     title: List vector keys
     input: Command::VectorListKeys
     output: Output::VectorKeyPage
-    result: String
-    response_model: Page<String, String>
     prose: commands/vector.keys.md
     display:
       columns:
@@ -275,8 +261,6 @@ commands:
     title: Scan vectors
     input: Command::VectorScan
     output: Output::VectorScanResult
-    result: VectorVersionedData
-    response_model: Page<VectorVersionedData, String>
     prose: commands/vector.scan.md
     display:
       columns:
@@ -299,7 +283,6 @@ commands:
     title: Sample vectors
     input: Command::VectorSample
     output: Output::VectorSampleResult
-    result: VectorVersionedData
     prose: commands/vector.sample.md
     display:
       columns:
@@ -323,7 +306,6 @@ commands:
     cli_path: ["vector", "update-metadata"]
     input: Command::VectorUpdateMetadata
     output: Output::VectorMetadataUpdateResult
-    result: VectorMetadataUpdate
     prose: commands/vector.metadata.update.md
     errors+:
       - invalid_argument.engine.vector_metadata_patch
@@ -344,7 +326,6 @@ commands:
     title: Delete vector
     input: Command::VectorDelete
     output: Output::VectorDeleteResult
-    result: VectorDelete
     prose: commands/vector.delete.md
     display:
       receipt: "{verb} {/data/key} in {/data/collection}"
@@ -363,7 +344,6 @@ commands:
     title: Delete vectors by filter
     input: Command::VectorDeleteByFilter
     output: Output::VectorBulkDeleteResult
-    result: VectorBulkDelete
     prose: commands/vector.delete_by_filter.md
     errors+:
       - invalid_argument.engine.vector_filter
@@ -383,7 +363,6 @@ commands:
     title: Delete all vectors
     input: Command::VectorDeleteAll
     output: Output::VectorBulkDeleteResult
-    result: VectorBulkDelete
     prose: commands/vector.delete_all.md
     display:
       receipt: "deleted {/data/effect/affected_count|plural:vector} from {/data/collection}"
@@ -401,7 +380,6 @@ commands:
     title: Query vectors
     input: Command::VectorQuery
     output: Output::VectorMatches
-    result: VectorMatch
     prose: commands/vector.query.md
     errors+:
       - invalid_argument.engine.vector_filter
@@ -442,7 +420,6 @@ commands:
     cli_surface: wire
     input: Command::VectorIndexQuery
     output: Output::VectorIndexQuery
-    result: VectorMatch
     prose: commands/vector.index.query.md
     errors+:
       - invalid_argument.engine.vector_filter
@@ -503,7 +480,6 @@ commands:
     title: Batch upsert vectors
     input: Command::VectorBatchUpsert
     output: Output::VectorBatchUpsertResults
-    result: VectorMutationItem
     prose: commands/vector.batch_upsert.md
     errors+:
       - invalid_argument.engine.vector_batch
@@ -524,7 +500,6 @@ commands:
     title: Batch get vectors
     input: Command::VectorBatchGet
     output: Output::VectorBatchGetResults
-    result: Maybe<VectorVersionedData>
     prose: commands/vector.batch_get.md
     errors+:
       - invalid_argument.engine.vector_batch
@@ -549,7 +524,6 @@ commands:
     title: Batch delete vectors
     input: Command::VectorBatchDelete
     output: Output::VectorBatchDeleteResults
-    result: VectorMutationItem
     prose: commands/vector.batch_delete.md
     errors+:
       - invalid_argument.engine.vector_batch

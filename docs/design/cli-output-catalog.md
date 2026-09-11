@@ -8,6 +8,8 @@
 
 **S0c (2026-09-11) checked every `response_model` caption below against the generated schema (#3313), and ten rows read differently now.** Six captions named a family the wire never carried and were corrected in the IDL: `branch.create`, `branch.fork`, `branch.fork_at_version` and `branch.fork_at_timestamp` are `StatusResponse<BranchItem>` (not `MutationAck<BranchItem>`), `branch.merge` is `StatusResponse<PromotionOutcomeItem>`, and `event.verify_chain` is `StatusResponse<EventChainVerification>`. Four more captions read `stable` but their wire disagrees with the family they declare, so they are now `transitional` beside the six that already were: `admin.remote`, `event.count`, `graph.bulk_insert` and `graph.ontology.freeze`. The rows themselves are not regenerated; the generated reference pages carry the corrected `Returns` line and a **Transitional wire** note for the ten, and `response-model-divergences.yaml` is the executable form of this paragraph.
 
+**#3322 (2026-09-11) re-spelled the `response_model` caption on every row from the derived name.** The IDL no longer authors a payload name: `strata-idl generate` fills each command's family template from its generated schema — the `$def` at the family's payload slot or the wire primitive — so the captions now read `MutationAck` (no payload), `Page<Bytes>` (no cursor type), `StatusValue<boolean>` / `StatusValue<integer>` / `integer[]` (JSON Schema spellings) and the batch item DTOs the wire actually carries (`BatchResult<BatchGetItemResult>`). The ten ledgered rows carry their row's target model. `crates/executor/idl/v1/dto-inventory.yaml` lists exactly the 84 models in use.
+
 ## 1. How to read it
 
 - `$ strata …` is the real corpus command; commands without a CLI verb show their `command run --command-json` form; `(fixture …)` marks a command the corpus has no step for (hub, inference one-shots); a few steps were captured from the 1.2.1 binary for miss / paging cases the corpus lacks.
@@ -108,7 +110,7 @@ One receipt line on stdout: `<verb> <identity>`, verb from `effect.kind` (`creat
 
 #### `graph.bulk_insert` — `strata graph bulk-insert`
 
-*mutation.put · MutationAck<GraphBulkInsert> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `inserted {nodes_inserted|plural:node}, {edges_inserted|plural:edge} into {graph}` · raw `{graph}`
 
 ```text
@@ -135,7 +137,7 @@ raw proposed        social
 
 #### `graph.edge.add` — `strata graph add-edge`
 
-*mutation.put · MutationAck<GraphEdgeWrite> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `{verb} edge {src} -[{edge_type}]-> {dst} in {graph}` · raw `{src}\t{edge_type}\t{dst}`
 
 ```text
@@ -149,7 +151,7 @@ raw proposed        alice⇥knows⇥bob
 
 #### `graph.node.add` — `strata graph add-node`
 
-*mutation.put · MutationAck<GraphNodeWrite> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `{verb} node {node_id} in {graph}` · raw `{node_id}`
 
 ```text
@@ -163,7 +165,7 @@ raw proposed        alice
 
 #### `graph.ontology.define_link_type` — `strata graph ontology define-link-type`
 
-*mutation.put · MutationAck<GraphOntologyWrite> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `{verb} link type {type_name} in {graph}` · raw `{type_name}`
 
 ```text
@@ -177,7 +179,7 @@ raw proposed        knows
 
 #### `graph.ontology.define_object_type` — `strata graph ontology define-object-type`
 
-*mutation.put · MutationAck<GraphOntologyWrite> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `{verb} object type {type_name} in {graph}` · raw `{type_name}`
 
 ```text
@@ -191,7 +193,7 @@ raw proposed        person
 
 #### `graph.ontology.freeze` — `strata graph ontology freeze`
 
-*mutation.put · MutationAck<GraphOntologyFreeze> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `froze ontology of {graph} ({object_types|plural:object type}, {link_types|plural:link type})` · raw `{graph}`
 
 ```text
@@ -217,7 +219,7 @@ raw proposed        g
 
 #### `json.set` — `strata json set`
 
-*mutation.put · MutationAck<JsonWrite> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `{verb} {key}` · raw `{key}`
 
 ```text
@@ -239,7 +241,7 @@ invalid_argument.engine.json_document_id: The JSON document request is invalid. 
 
 #### `kv.put` — `strata kv put`
 
-*mutation.put · MutationAck<KvWrite> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `{verb} {key|bytes}` · raw `{key|bytes}`
 
 ```text
@@ -269,7 +271,7 @@ invalid_argument.engine.kv_key: The KV request is invalid. (err_…)
 
 #### `vector.collection.set_embedding_model` — `strata vector collection set-embedding-model`
 
-*mutation.put · MutationAck<VectorCollectionInfo> · transitional*  
+*mutation.put · MutationAck · transitional*  
 display: receipt `updated collection {items.0.name}: embedding model {items.0.embedding_model}` · raw `{items.0.name}`
 
 ```text
@@ -297,7 +299,7 @@ not_found.engine.vector_collection: The requested vector collection was not foun
 
 #### `vector.upsert` — `strata vector upsert`
 
-*mutation.put · MutationAck<VectorWrite> · stable*  
+*mutation.put · MutationAck · stable*  
 display: receipt `{verb} {key} in {collection}` · raw `{key}`
 
 ```text
@@ -325,7 +327,7 @@ inference.unknown_model: The requested model is not in the catalog. (err_…)
 
 #### `branch.create` — `strata branch create`
 
-*mutation.create · MutationAck<BranchItem> · stable*  
+*mutation.create · StatusResponse<BranchItem> · stable*  
 display: receipt `created branch {name}` · raw `{name}`
 
 ```text
@@ -356,7 +358,7 @@ already_exists.engine.branch: A branch with this name already exists. (err_…)
 
 #### `branch.fork` — `strata branch fork`
 
-*mutation.create · MutationAck<BranchItem> · stable*  
+*mutation.create · StatusResponse<BranchItem> · stable*  
 display: receipt `forked {name} from {parent.name}` · raw `{name}`
 
 ```text
@@ -385,7 +387,7 @@ raw proposed        experiment
 
 #### `branch.fork_at_timestamp` — `command run --command-json`
 
-*mutation.create · MutationAck<BranchItem> · stable*  
+*mutation.create · StatusResponse<BranchItem> · stable*  
 display: receipt `forked {name} from {parent.name} at timestamp {parent.fork_timestamp}` · raw `{name}`
 
 ```text
@@ -414,7 +416,7 @@ raw proposed        snapshot
 
 #### `branch.fork_at_version` — `command run --command-json`
 
-*mutation.create · MutationAck<BranchItem> · stable*  
+*mutation.create · StatusResponse<BranchItem> · stable*  
 display: receipt `forked {name} from {parent.name} at version {parent.fork_version}` · raw `{name}`
 
 ```text
@@ -443,7 +445,7 @@ raw proposed        snapshot
 
 #### `event.append` — `strata event append`
 
-*mutation.create · MutationAck<EventAppend> · stable*  
+*mutation.create · MutationAck · stable*  
 display: receipt `appended {event_type} #{sequence}` · raw `{sequence}`
 
 ```text
@@ -465,7 +467,7 @@ invalid_argument.engine.event_type: The event request is invalid. (err_…)
 
 #### `graph.create` — `strata graph create`
 
-*mutation.create · MutationAck<GraphInfoData> · stable*  
+*mutation.create · MutationAck · stable*  
 display: receipt `{verb} graph {info.graph}` · raw `{info.graph}`
 
 ```text
@@ -490,7 +492,7 @@ already_exists.engine.graph: A graph with this name already exists. (err_…)
 
 #### `json.index.create` — `strata json index create`
 
-*mutation.create · MutationAck<JsonIndexCreate> · transitional*  
+*mutation.create · MutationAck · transitional*  
 display: receipt `created index {name} on {field_path} ({index_type})` · raw `{name}`
 
 ```text
@@ -511,7 +513,7 @@ raw proposed        by_name
 
 #### `space.create` — `strata space create`
 
-*mutation.create · MutationAck<SpaceCreate> · stable*  
+*mutation.create · MutationAck · stable*  
 display: receipt `{verb} space {space}` · raw `{space}`
 
 ```text
@@ -525,7 +527,7 @@ raw proposed        app
 
 #### `vector.collection.create` — `strata vector collection create`
 
-*mutation.create · MutationAck<VectorCollectionCreate> · transitional*  
+*mutation.create · MutationAck · transitional*  
 display: receipt `created collection {items.0.name} ({items.0.dimension} dimensions, {items.0.metric})` · raw `{items.0.name}`
 
 ```text
@@ -550,7 +552,7 @@ invalid_argument.engine.embedding_model: The embedding model id is invalid. (err
 
 #### `branch.delete` — `strata branch delete`
 
-*mutation.delete · MutationAck<BranchDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} branch {branch.name}` · miss → stderr `no such branch: {branch.name}`, exit 0 (idempotent) · raw `{branch.name}`
 
 ```text
@@ -564,7 +566,7 @@ raw proposed        temp
 
 #### `graph.delete` — `strata graph delete`
 
-*mutation.delete · MutationAck<GraphDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} graph {graph}` · miss → stderr `no such graph: {graph}`, exit 0 (idempotent) · raw `{graph}`
 
 ```text
@@ -588,7 +590,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `graph.edge.remove` — `strata graph remove-edge`
 
-*mutation.delete · MutationAck<GraphDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} edge {src} -[{edge_type}]-> {dst} in {graph}` · miss → stderr `no such edge: {src} -[{edge_type}]-> {dst} in {graph}`, exit 0 (idempotent) · raw `{src}\t{edge_type}\t{dst}`
 
 ```text
@@ -612,7 +614,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `graph.node.remove` — `strata graph remove-node`
 
-*mutation.delete · MutationAck<GraphDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} node {node_id} in {graph}` · miss → stderr `no such node: {node_id} in {graph}`, exit 0 (idempotent) · raw `{node_id}`
 
 ```text
@@ -636,7 +638,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `graph.ontology.delete_link_type` — `strata graph ontology delete-link-type`
 
-*mutation.delete · MutationAck<GraphOntologyDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} link type {type_name} in {graph}` · miss → stderr `no such link type: {type_name} in {graph}`, exit 0 (idempotent) · raw `{type_name}`
 
 ```text
@@ -650,7 +652,7 @@ raw proposed        knows
 
 #### `graph.ontology.delete_object_type` — `strata graph ontology delete-object-type`
 
-*mutation.delete · MutationAck<GraphOntologyDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} object type {type_name} in {graph}` · miss → stderr `no such object type: {type_name} in {graph}`, exit 0 (idempotent) · raw `{type_name}`
 
 ```text
@@ -674,7 +676,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `json.delete` — `strata json delete`
 
-*mutation.delete · MutationAck<JsonDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} {key}` · miss → stderr `no such key: {key}`, exit 0 (idempotent) · raw `{key}`
 
 ```text
@@ -698,7 +700,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `json.index.drop` — `strata json index drop`
 
-*mutation.delete · MutationAck<JsonIndexDrop> · transitional*  
+*mutation.delete · MutationAck · transitional*  
 display: receipt `dropped index {request.name}` · miss → stderr `no such index: {request.name}`, exit 0 (idempotent) · raw `{request.name}`
 
 ```text
@@ -722,7 +724,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `kv.delete` — `strata kv delete`
 
-*mutation.delete · MutationAck<KvDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} {key|bytes}` · miss → stderr `no such key: {key|bytes}`, exit 0 (idempotent) · raw `{key|bytes}`
 
 ```text
@@ -746,7 +748,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `space.delete` — `strata space delete`
 
-*mutation.delete · MutationAck<SpaceDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} space {space} ({deleted_rows|plural:row})` · miss → stderr `no such space: {space}`, exit 0 (idempotent) · raw `{space}`
 
 ```text
@@ -778,7 +780,7 @@ invalid_argument.engine.space_delete_default: The requested space operation cann
 
 #### `vector.collection.delete` — `strata vector collection delete`
 
-*mutation.delete · MutationAck<VectorCollectionDelete> · transitional*  
+*mutation.delete · MutationAck · transitional*  
 display: receipt `deleted collection {request.name}` · miss → stderr `no such collection: {request.name}`, exit 0 (idempotent) · raw `{request.name}`
 
 ```text
@@ -802,7 +804,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `vector.delete` — `strata vector delete`
 
-*mutation.delete · MutationAck<VectorDelete> · stable*  
+*mutation.delete · MutationAck · stable*  
 display: receipt `{verb} {key} in {collection}` · miss → stderr `no such vector: {key} in {collection}`, exit 0 (idempotent) · raw `{key}`
 
 ```text
@@ -826,7 +828,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `graph.apply_delete_policy` — `command run --command-json`
 
-*mutation.bulk_delete · MutationAck<GraphDeletePolicyApply> · stable*  
+*mutation.bulk_delete · MutationAck · stable*  
 display: receipt `applied delete policy {policy} ({effect.affected_count} affected)` · zero matches → receipt with count, exit 0 · raw `{effect.affected_count}`
 
 ```text
@@ -840,7 +842,7 @@ raw proposed        1
 
 #### `vector.delete_all` — `strata vector delete-all`
 
-*mutation.bulk_delete · MutationAck<VectorBulkDelete> · stable*  
+*mutation.bulk_delete · MutationAck · stable*  
 display: receipt `deleted {effect.affected_count|plural:vector} from {collection}` · zero matches → receipt with count, exit 0 · raw `{effect.affected_count}`
 
 ```text
@@ -862,7 +864,7 @@ raw proposed        0
 
 #### `vector.delete_by_filter` — `strata vector delete-by-filter`
 
-*mutation.bulk_delete · MutationAck<VectorBulkDelete> · stable*  
+*mutation.bulk_delete · MutationAck · stable*  
 display: receipt `deleted {effect.affected_count|plural:vector} from {collection}` · zero matches → receipt with count, exit 0 · raw `{effect.affected_count}`
 
 ```text
@@ -876,7 +878,7 @@ raw proposed        1
 
 #### `vector.metadata.update` — `strata vector update-metadata`
 
-*mutation.metadata_update · MutationAck<VectorMetadataUpdate> · stable*  
+*mutation.metadata_update · MutationAck · stable*  
 display: receipt `{verb} {key} in {collection}` · miss → stderr `no such vector: {key} in {collection}`, exit 0 (idempotent) · raw `{key}`
 
 ```text
@@ -890,7 +892,7 @@ raw proposed        a
 
 #### `branch.merge` — `strata branch merge`
 
-*mutation.merge · MutationAck<PromotionOutcomeItem> · stable*  
+*mutation.merge · StatusResponse<PromotionOutcomeItem> · stable*  
 display: receipt `merged {source} into {target}: {applied|len} applied, {deleted|len} deleted, {conflicts|len} conflicts (version {target_version})` · raw `{target_version}`
 
 ```text
@@ -953,7 +955,7 @@ invalid_argument.engine.branch_point: The request contains invalid input. (err_�
 
 #### `admin.config_key` — `strata config get-key`
 
-*read.get · Maybe<String> · stable*  
+*read.get · Maybe<string> · stable*  
 display: value `data` as scalar · miss `(nil)` · raw = the value
 
 ```text
@@ -1410,7 +1412,7 @@ Pages of scalars print one per line (unchanged). Pages of records print a kubect
 
 #### `branch.list` — `strata branch list`
 
-*read.page · Page<BranchItem, String> · stable*  
+*read.page · Page<BranchItem> · stable*  
 display: columns NAME  PARENT  STATUS  GENERATION · raw TSV
 
 ```text
@@ -1429,7 +1431,7 @@ raw proposed        default⇥⇥active⇥1
 
 #### `event.list` — `strata event list`
 
-*read.page · Page<EventVersionedData, u64> · stable*  
+*read.page · Page<EventVersionedData> · stable*  
 display: columns SEQUENCE  EVENT_TYPE  TIMESTAMP (date)  PAYLOAD (json) · raw TSV
 
 ```text
@@ -1448,7 +1450,7 @@ raw proposed        0⇥user.created⇥1789102665415378⇥{"id":1}
 
 #### `event.range` — `strata event range`
 
-*read.page · Page<EventVersionedData, u64> · stable*  
+*read.page · Page<EventVersionedData> · stable*  
 display: columns SEQUENCE  EVENT_TYPE  TIMESTAMP (date)  PAYLOAD (json) · raw TSV
 
 ```text
@@ -1467,7 +1469,7 @@ raw proposed        0⇥user.created⇥1789102665416164⇥{"id":1}
 
 #### `event.range_time` — `strata event range-time`
 
-*read.page · Page<EventVersionedData, u64> · stable*  
+*read.page · Page<EventVersionedData> · stable*  
 display: columns SEQUENCE  EVENT_TYPE  TIMESTAMP (date)  PAYLOAD (json) · raw TSV
 
 ```text
@@ -1486,7 +1488,7 @@ raw proposed        0⇥user.created⇥1789102665417000⇥{"id":1}
 
 #### `event.types` — `strata event types`
 
-*read.page · Page<String, String> · stable*  
+*read.page · Page<string> · stable*  
 
 ```text
 $ strata event types
@@ -1501,7 +1503,7 @@ raw proposed        = unchanged
 
 #### `graph.bindings` — `command run --command-json`
 
-*read.page · Page<GraphBindingHit, String> · stable*  
+*read.page · Page<GraphBindingHit> · stable*  
 display: columns GRAPH  NODE_ID  PRIMITIVE  SPACE  KEY  VERSION · raw TSV
 
 ```text
@@ -1516,7 +1518,7 @@ raw proposed        kb⇥ada⇥kv⇥default⇥user:1⇥4
 
 #### `graph.list` — `strata graph list`
 
-*read.page · Page<String, String> · stable*  
+*read.page · Page<string> · stable*  
 
 ```text
 $ strata graph list
@@ -1529,7 +1531,7 @@ raw proposed        = unchanged
 
 #### `graph.neighbors` — `strata graph neighbors`
 
-*read.page · Page<GraphNeighborHit, String> · stable*  
+*read.page · Page<GraphNeighborHit> · stable*  
 display: columns NODE_ID  DIRECTION  EDGE_TYPE  SRC  DST  WEIGHT (float) · raw TSV
 
 ```text
@@ -1544,7 +1546,7 @@ raw proposed        bob⇥outgoing⇥knows⇥alice⇥bob⇥1.0
 
 #### `graph.node.list` — `strata graph list-nodes`
 
-*read.page · Page<GraphNodeDataOutput, String> · stable*  
+*read.page · Page<GraphNodeDataOutput> · stable*  
 display: columns NODE_ID  OBJECT_TYPE  VERSION · raw TSV
 
 ```text
@@ -1563,7 +1565,7 @@ raw proposed        alice⇥⇥4
 
 #### `graph.nodes_by_type` — `strata graph nodes-by-type`
 
-*read.page · Page<GraphNodeDataOutput, String> · stable*  
+*read.page · Page<GraphNodeDataOutput> · stable*  
 display: columns NODE_ID  OBJECT_TYPE  VERSION · raw TSV
 
 ```text
@@ -1582,7 +1584,7 @@ raw proposed        a⇥person⇥4
 
 #### `json.index.list` — `strata json index list`
 
-*read.page · Page<JsonIndexDefinition, String> · stable*  
+*read.page · Page<JsonIndexDefinition> · stable*  
 display: columns NAME  FIELD_PATH  INDEX_TYPE  SPACE  CREATED_VERSION · raw TSV
 
 ```text
@@ -1597,7 +1599,7 @@ raw proposed        by_name⇥name⇥tag⇥default⇥3
 
 #### `json.list` — `strata json list`
 
-*read.page · Page<String, String> · stable*  
+*read.page · Page<string> · stable*  
 
 ```text
 $ strata json list --prefix user:
@@ -1612,7 +1614,7 @@ raw proposed        = unchanged
 
 #### `json.scan` — `strata json scan`
 
-*read.page · Page<JsonSampleItem, String> · stable*  
+*read.page · Page<JsonSampleItem> · stable*  
 display: columns KEY  VERSION  VALUE (json) · raw TSV
 
 ```text
@@ -1631,7 +1633,7 @@ raw proposed        a⇥3⇥{"v":1}
 
 #### `kv.list` — `strata kv list`
 
-*read.page · Page<Bytes, Bytes> · stable*  
+*read.page · Page<Bytes> · stable*  
 
 ```text
 $ strata kv list --prefix user:
@@ -1667,7 +1669,7 @@ raw proposed        ∅ (prints nothing)
 
 #### `kv.scan` — `strata kv scan`
 
-*read.page · Page<ScanItem, Bytes> · stable*  
+*read.page · Page<ScanItem> · stable*  
 display: columns KEY (bytes)  VERSION  VALUE (bytes) · raw TSV
 
 ```text
@@ -1686,7 +1688,7 @@ raw proposed        a⇥3⇥1
 
 #### `space.list` — `strata space list`
 
-*read.page · Page<String, String> · stable*  
+*read.page · Page<string> · stable*  
 
 ```text
 $ strata space list
@@ -1701,7 +1703,7 @@ raw proposed        = unchanged
 
 #### `vector.collection.list` — `strata vector collection list`
 
-*read.page · Page<VectorCollectionInfo, String> · stable*  
+*read.page · Page<VectorCollectionInfo> · stable*  
 display: columns NAME  DIMENSION  METRIC  COUNT  EMBEDDING_MODEL · raw TSV
 
 ```text
@@ -1716,7 +1718,7 @@ raw proposed        docs⇥3⇥cosine⇥0⇥
 
 #### `vector.keys` — `strata vector keys`
 
-*read.page · Page<String, String> · stable*  
+*read.page · Page<string> · stable*  
 
 ```text
 $ strata vector keys docs
@@ -1731,7 +1733,7 @@ raw proposed        = unchanged
 
 #### `vector.scan` — `strata vector scan`
 
-*read.page · Page<VectorVersionedData, String> · stable*  
+*read.page · Page<VectorVersionedData> · stable*  
 display: columns KEY  VERSION  VECTOR_REVISION  EMBEDDING (json)  METADATA (json) · raw TSV
 
 ```text
@@ -2249,7 +2251,7 @@ invalid_argument.engine.branch_point: The request contains invalid input. (err_�
 
 #### `event.count` — `strata event count`
 
-*read.status · StatusValue<u64> · stable*  
+*read.status · StatusValue<integer> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2263,7 +2265,7 @@ raw proposed        = unchanged
 
 #### `event.exists` — `strata event exists`
 
-*read.status · StatusValue<bool> · stable*  
+*read.status · StatusValue<boolean> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2285,7 +2287,7 @@ raw proposed        = unchanged
 
 #### `event.verify_chain` — `strata event verify-chain`
 
-*read.status · StatusValue<EventChainVerification> · stable*  
+*read.status · StatusResponse<EventChainVerification> · stable*  
 display: fields valid, length, first_invalid, error · raw key/value of the same fields
 
 ```text
@@ -2310,7 +2312,7 @@ raw proposed        valid⇥true
 
 #### `json.count` — `strata json count`
 
-*read.status · StatusValue<u64> · stable*  
+*read.status · StatusValue<integer> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2324,7 +2326,7 @@ raw proposed        = unchanged
 
 #### `json.exists` — `strata json exists`
 
-*read.status · StatusValue<bool> · stable*  
+*read.status · StatusValue<boolean> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2346,7 +2348,7 @@ raw proposed        = unchanged
 
 #### `kv.count` — `strata kv count`
 
-*read.status · StatusValue<u64> · stable*  
+*read.status · StatusValue<integer> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2360,7 +2362,7 @@ raw proposed        = unchanged
 
 #### `kv.exists` — `strata kv exists`
 
-*read.status · StatusValue<bool> · stable*  
+*read.status · StatusValue<boolean> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2382,7 +2384,7 @@ raw proposed        = unchanged
 
 #### `space.exists` — `strata space exists`
 
-*read.status · StatusValue<bool> · stable*  
+*read.status · StatusValue<boolean> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2419,7 +2421,7 @@ raw proposed        docs⇥3⇥cosine⇥0⇥
 
 #### `vector.count` — `strata vector count`
 
-*read.status · StatusValue<u64> · stable*  
+*read.status · StatusValue<integer> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2433,7 +2435,7 @@ raw proposed        = unchanged
 
 #### `vector.exists` — `strata vector exists`
 
-*read.status · StatusValue<bool> · stable*  
+*read.status · StatusValue<boolean> · stable*  
 display: key/value lines (scalar → the scalar) · raw key/value lines
 
 ```text
@@ -2627,7 +2629,7 @@ raw proposed        control_status⇥healthy
 
 #### `admin.ping` — `strata ping`
 
-*read.summary · StatusResponse<PingInfo> · stable*  
+*read.summary · StatusResponse<AdminPing> · stable*  
 display: designed arm — unchanged
 
 ```text
@@ -2868,7 +2870,7 @@ invalid_argument.executor.hub_since: The hub yanked-list timestamp is invalid. (
 
 #### `admin.hub_clone` — `strata clone`
 
-*action.status · StatusResponse<HubClone> · stable*  
+*action.status · StatusResponse<HubCloneResult> · stable*  
 display: receipt `cloned {dataset}@{branch} into {dest} ({object_count|plural:object}, {total_bytes|size})` · raw key/value lines
 
 ```text
@@ -2910,7 +2912,7 @@ raw proposed        stopped⇥false
 
 #### `arrow.export` — `strata arrow export`
 
-*action.status · StatusResponse<ArrowExport> · stable*  
+*action.status · StatusResponse<ArrowExportResult> · stable*  
 display: receipt `exported {row_count|plural:row} of {primitive} to {paths.0} ({size_bytes|size})` · raw key/value lines
 
 ```text
@@ -2936,7 +2938,7 @@ raw proposed        format⇥csv
 
 #### `arrow.import` — `strata arrow import`
 
-*action.status · StatusResponse<ArrowImport> · stable*  
+*action.status · StatusResponse<ArrowImportResult> · stable*  
 display: receipt `imported {rows_imported|plural:row} into {target} from {file_path} ({rows_skipped} skipped)` · raw key/value lines
 
 ```text
@@ -2964,7 +2966,7 @@ A table with one row per item: `#  STATUS  [EFFECT]  <declared columns>` (+ `ERR
 
 #### `event.batch_append` — `command run --command-json`
 
-*batch.itemwise_mutation · BatchResult<EventBatchAppendItem> · stable*  
+*batch.itemwise_mutation · BatchResult<EventBatchAppendItemResult> · stable*  
 display: table # STATUS EFFECT EVENT_TYPE SEQUENCE · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -2983,7 +2985,7 @@ raw proposed        0⇥ok⇥created⇥user.created⇥0
 
 #### `json.batch_delete` — `command run --command-json`
 
-*batch.itemwise_mutation · BatchResult<JsonMutationItem> · stable*  
+*batch.itemwise_mutation · BatchResult<JsonBatchItemResult> · stable*  
 display: table # STATUS EFFECT DOCUMENT_VERSION · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3007,7 +3009,7 @@ raw proposed        0⇥ok⇥deleted⇥
 
 #### `json.batch_set` — `command run --command-json`
 
-*batch.itemwise_mutation · BatchResult<JsonMutationItem> · stable*  
+*batch.itemwise_mutation · BatchResult<JsonBatchItemResult> · stable*  
 display: table # STATUS EFFECT DOCUMENT_VERSION · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3026,7 +3028,7 @@ raw proposed        0⇥ok⇥created⇥1
 
 #### `kv.batch_delete` — `command run --command-json`
 
-*batch.itemwise_mutation · BatchResult<KvMutationItem> · stable*  
+*batch.itemwise_mutation · BatchResult<BatchItemResult> · stable*  
 display: table # STATUS EFFECT KEY · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3058,7 +3060,7 @@ raw proposed        0⇥ok⇥deleted⇥a
 
 #### `kv.batch_put` — `command run --command-json`
 
-*batch.itemwise_mutation · BatchResult<KvMutationItem> · stable*  
+*batch.itemwise_mutation · BatchResult<BatchItemResult> · stable*  
 display: table # STATUS EFFECT KEY · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3085,7 +3087,7 @@ invalid_argument.executor.kv_batch_duplicate_key: The KV batch contains duplicat
 
 #### `vector.batch_delete` — `command run --command-json`
 
-*batch.itemwise_mutation · BatchResult<VectorMutationItem> · stable*  
+*batch.itemwise_mutation · BatchResult<VectorBatchItemResult> · stable*  
 display: table # STATUS EFFECT VECTOR_REVISION · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3104,7 +3106,7 @@ raw proposed        0⇥ok⇥deleted⇥
 
 #### `vector.batch_upsert` — `command run --command-json`
 
-*batch.itemwise_mutation · BatchResult<VectorMutationItem> · stable*  
+*batch.itemwise_mutation · BatchResult<VectorBatchItemResult> · stable*  
 display: table # STATUS EFFECT VECTOR_REVISION · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3146,7 +3148,7 @@ raw proposed        0⇥ok⇥created⇥upsert_node⇥true
 
 #### `json.batch_get` — `command run --command-json`
 
-*batch.itemwise_read · BatchResult<Maybe<JsonValue>> · stable*  
+*batch.itemwise_read · BatchResult<JsonBatchGetItemResult> · stable*  
 display: table # STATUS DOCUMENT_VERSION VERSION VALUE · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3165,7 +3167,7 @@ raw proposed        0⇥ok⇥1⇥3⇥{"v":1}
 
 #### `kv.batch_get` — `command run --command-json`
 
-*batch.itemwise_read · BatchResult<Maybe<Bytes>> · stable*  
+*batch.itemwise_read · BatchResult<BatchGetItemResult> · stable*  
 display: table # STATUS KEY VERSION VALUE · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3189,7 +3191,7 @@ raw proposed        0⇥ok⇥a⇥3⇥1
 
 #### `vector.batch_get` — `command run --command-json`
 
-*batch.itemwise_read · BatchResult<Maybe<VectorVersionedData>> · stable*  
+*batch.itemwise_read · BatchResult<VectorBatchGetItemResult> · stable*  
 display: table # STATUS KEY VERSION VECTOR_REVISION EMBEDDING METADATA · stderr summary only on miss/failure · raw TSV
 
 ```text
@@ -3360,7 +3362,7 @@ inference.invalid_request: The inference request is invalid. (err_…)
 
 #### `inference.detokenize` — `strata inference detokenize`
 
-*inference.runtime_op · DetokenizedText · stable*  
+*inference.runtime_op · string · stable*  
 display: designed arm — unchanged
 
 ```text
@@ -3503,7 +3505,7 @@ raw proposed        = unchanged
 
 #### `inference.tokenize` — `strata inference tokenize`
 
-*inference.runtime_op · TokenIds · stable*  
+*inference.runtime_op · integer[] · stable*  
 display: designed arm — unchanged
 
 ```text
@@ -3525,7 +3527,7 @@ inference.unknown_model: The requested model is not in the catalog. (err_…)
 
 #### `inference.unload` — `strata inference unload`
 
-*inference.runtime_op · UnloadResult · stable*  
+*inference.runtime_op · InferenceUnloadResult · stable*  
 display: designed arm — unchanged
 
 ```text
@@ -3539,7 +3541,7 @@ raw proposed        = unchanged
 
 #### `inference.models.list` — `strata inference models list`
 
-*inference.models_page · Page<ModelInfo, String> · stable*  
+*inference.models_page · Page<ModelInfo> · stable*  
 display: designed arm — unchanged
 
 ```text
@@ -3575,7 +3577,7 @@ raw proposed        = unchanged
 
 #### `inference.models.local` — `strata inference models local`
 
-*inference.models_page · Page<ModelInfo, String> · stable*  
+*inference.models_page · Page<ModelInfo> · stable*  
 display: designed arm — unchanged
 
 ```text

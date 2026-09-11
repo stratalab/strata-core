@@ -4,7 +4,6 @@ commands:
     title: List catalog models
     input: Command::InferenceModelsList
     output: Output::InferenceModels
-    result: ModelInfo
     prose: commands/inference.models.list.md
     display: bespoke
     fixtures:
@@ -15,7 +14,6 @@ commands:
     title: List local models
     input: Command::InferenceModelsLocal
     output: Output::InferenceModels
-    result: ModelInfo
     prose: commands/inference.models.local.md
     display: bespoke
     fixtures:
@@ -26,8 +24,6 @@ commands:
     title: Download a model
     input: Command::InferenceModelsPull
     output: Output::InferenceModelPulled
-    result: PullModelOutput
-    response_model: PullModelOutput
     prose: commands/inference.models.pull.md
     errors+:
       - inference.invalid_request
@@ -53,8 +49,6 @@ commands:
     title: Report model capabilities
     input: Command::InferenceModelCapability
     output: Output::InferenceCapability
-    result: InferenceCapability
-    response_model: InferenceCapability
     prose: commands/inference.capability.md
     errors+:
       - inference.invalid_request
@@ -88,8 +82,6 @@ commands:
     title: Generate text
     input: Command::InferenceGenerate
     output: Output::InferenceGeneration
-    result: ChatResponse
-    response_model: ChatResponse
     prose: commands/inference.generate.md
     errors+:
       - set:inference.model_runtime
@@ -107,8 +99,6 @@ commands:
     title: Tokenize text
     input: Command::InferenceTokenize
     output: Output::InferenceTokenIds
-    result: TokenIds
-    response_model: TokenIds
     prose: commands/inference.tokenize.md
     errors+:
       - set:inference.local_model
@@ -124,8 +114,6 @@ commands:
     title: Detokenize token ids
     input: Command::InferenceDetokenize
     output: Output::InferenceText
-    result: DetokenizedText
-    response_model: DetokenizedText
     prose: commands/inference.detokenize.md
     errors+:
       - set:inference.local_model
@@ -138,8 +126,6 @@ commands:
     title: Embed one or more texts
     input: Command::InferenceEmbed
     output: Output::InferenceEmbeddings
-    result: EmbeddingsResponse
-    response_model: EmbeddingsResponse
     prose: commands/inference.embed.md
     errors+:
       - set:inference.model_runtime
@@ -159,8 +145,6 @@ commands:
     title: Rank passages
     input: Command::InferenceRank
     output: Output::InferenceRanking
-    result: RankResponse
-    response_model: RankResponse
     prose: commands/inference.rank.md
     errors+:
       - set:inference.local_model
@@ -176,8 +160,6 @@ commands:
     title: Unload cached models
     input: Command::InferenceUnload
     output: Output::InferenceUnloadResult
-    result: InferenceUnloadResult
-    response_model: InferenceUnloadResult
     prose: commands/inference.unload.md
     display: bespoke
     fixtures:
@@ -188,8 +170,6 @@ commands:
     title: Report inference readiness
     input: Command::InferenceStatus
     output: Output::InferenceStatus
-    result: InferenceStatus
-    response_model: InferenceStatus
     prose: commands/inference.status.md
     display: bespoke
     fixtures:
@@ -200,8 +180,6 @@ commands:
     title: Report model cache
     input: Command::InferenceCacheStatus
     output: Output::InferenceCacheStatus
-    result: ModelCacheStatus
-    response_model: ModelCacheStatus
     prose: commands/inference.cache_status.md
     display:
       fields:

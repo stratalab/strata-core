@@ -4,7 +4,6 @@ commands:
     title: Put KV value
     input: Command::KvPut
     output: Output::WriteResult
-    result: KvWrite
     prose: commands/kv.put.md
     display:
       receipt: "{verb} {/data/key|bytes}"
@@ -22,7 +21,6 @@ commands:
     title: Get KV value
     input: Command::KvGet
     output: Output::KvVersionedValue
-    result: VersionedValue
     prose: commands/kv.get.md
     errors+:
       - history_unavailable.engine.persistence_history
@@ -43,7 +41,6 @@ commands:
     title: Delete KV value
     input: Command::KvDelete
     output: Output::DeleteResult
-    result: KvDelete
     prose: commands/kv.delete.md
     display:
       receipt: "{verb} {/data/key|bytes}"
@@ -58,8 +55,6 @@ commands:
     title: List KV keys
     input: Command::KvList
     output: Output::KeysPage
-    result: Bytes
-    response_model: Page<Bytes, Bytes>
     prose: commands/kv.list.md
     display:
       columns:
@@ -77,8 +72,6 @@ commands:
     title: Scan KV rows
     input: Command::KvScan
     output: Output::KvScanResult
-    result: ScanItem
-    response_model: Page<ScanItem, Bytes>
     prose: commands/kv.scan.md
     display:
       columns:
@@ -99,7 +92,6 @@ commands:
     title: Batch put KV values
     input: Command::KvBatchPut
     output: Output::BatchResults
-    result: KvMutationItem
     prose: commands/kv.batch_put.md
     errors+:
       - invalid_argument.engine.kv_batch
@@ -120,7 +112,6 @@ commands:
     title: Batch get KV values
     input: Command::KvBatchGet
     output: Output::BatchGetResults
-    result: Maybe<Bytes>
     prose: commands/kv.batch_get.md
     errors+:
       - invalid_argument.engine.kv_batch
@@ -141,7 +132,6 @@ commands:
     title: Batch delete KV values
     input: Command::KvBatchDelete
     output: Output::BatchResults
-    result: KvMutationItem
     prose: commands/kv.batch_delete.md
     errors+:
       - invalid_argument.engine.kv_batch
@@ -161,7 +151,6 @@ commands:
     title: Batch check KV existence
     input: Command::KvBatchExists
     output: Output::BatchExistsResults
-    result: BatchExistsItemResult
     prose: commands/kv.batch_exists.md
     errors+:
       - invalid_argument.engine.kv_batch
@@ -180,7 +169,6 @@ commands:
     title: Check KV existence
     input: Command::KvExists
     output: Output::Bool
-    result: bool
     prose: commands/kv.exists.md
     display:
       value: /data
@@ -194,7 +182,6 @@ commands:
     title: Read KV history
     input: Command::KvHistory
     output: Output::VersionHistory
-    result: HistoryItem
     prose: commands/kv.history.md
     display:
       columns:
@@ -214,7 +201,6 @@ commands:
     title: Count KV keys
     input: Command::KvCount
     output: Output::Uint
-    result: u64
     prose: commands/kv.count.md
     display:
       value: /data
@@ -228,7 +214,6 @@ commands:
     title: Sample KV rows
     input: Command::KvSample
     output: Output::SampleResult
-    result: SampleItem
     prose: commands/kv.sample.md
     display:
       columns:

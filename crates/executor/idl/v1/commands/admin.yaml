@@ -4,8 +4,6 @@ commands:
     title: Ping database
     input: Command::Ping
     output: Output::Pong
-    result: AdminPing
-    response_model: StatusResponse<AdminPing>
     cli_path: ["ping"]
     prose: commands/admin.ping.md
     errors-:
@@ -19,8 +17,6 @@ commands:
     title: Read database info
     input: Command::Info
     output: Output::DatabaseInfo
-    result: AdminDatabaseInfo
-    response_model: StatusResponse<AdminDatabaseInfo>
     cli_path: ["info"]
     prose: commands/admin.info.md
     errors+:
@@ -50,8 +46,6 @@ commands:
     title: Read database health
     input: Command::Health
     output: Output::Health
-    result: AdminHealth
-    response_model: StatusResponse<AdminHealth>
     cli_path: ["health"]
     prose: commands/admin.health.md
     errors+:
@@ -73,8 +67,6 @@ commands:
     title: Read database metrics
     input: Command::Metrics
     output: Output::Metrics
-    result: AdminMetrics
-    response_model: StatusResponse<AdminMetrics>
     cli_path: ["metrics"]
     prose: commands/admin.metrics.md
     errors+:
@@ -94,8 +86,6 @@ commands:
     title: Describe database
     input: Command::Describe
     output: Output::Described
-    result: AdminDescribe
-    response_model: StatusResponse<AdminDescribe>
     cli_path: ["describe"]
     prose: commands/admin.describe.md
     errors+:
@@ -109,8 +99,6 @@ commands:
     title: Read sanitized config
     input: Command::ConfigGet
     output: Output::Config
-    result: AdminConfig
-    response_model: StatusResponse<AdminConfig>
     cli_path: ["config", "get"]
     prose: commands/admin.config.md
     errors-:
@@ -129,8 +117,6 @@ commands:
     title: Read IPC status
     input: Command::IpcStatus
     output: Output::IpcStatus
-    result: AdminIpcStatus
-    response_model: StatusResponse<AdminIpcStatus>
     cli_path: ["ipc", "status"]
     prose: commands/admin.ipc_status.md
     errors-:
@@ -148,8 +134,6 @@ commands:
     title: Stop IPC hosting
     input: Command::IpcStop
     output: Output::IpcStop
-    result: AdminIpcStop
-    response_model: StatusResponse<AdminIpcStop>
     cli_path: ["ipc", "stop"]
     prose: commands/admin.ipc_stop.md
     errors-:
@@ -163,7 +147,6 @@ commands:
     title: Read remote origin
     input: Command::RemoteGet
     output: Output::RemoteOriginResult
-    result: RemoteOriginInfo
     cli_path: ["remote"]
     prose: commands/admin.remote.md
     wire_status: transitional
@@ -187,7 +170,6 @@ commands:
     title: Read one config value
     input: Command::ConfigureGetKey
     output: Output::ConfigValue
-    result: String
     cli_path: ["config", "get-key"]
     prose: commands/admin.config_key.md
     errors+:
@@ -207,7 +189,6 @@ commands:
     outputs:
       - Output::HubCloneResult
       - Output::HubCloneProgress
-    result: HubCloneResult
     access: write
     cli_path: ["clone"]
     prose: commands/admin.hub_clone.md

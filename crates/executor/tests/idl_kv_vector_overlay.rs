@@ -14,9 +14,9 @@ use std::fs;
 use std::path::Path;
 
 use strata_executor::idl_tooling::{
-    check, check_cli, check_docs, default_repo_root, resolve_cli_index, resolve_default_cli_index,
-    resolve_default_index, resolve_default_schemas, to_generated_cli_json, to_generated_json,
-    verify_examples,
+    capture_examples, check, check_cli, check_docs, default_repo_root, resolve_cli_index,
+    resolve_default_cli_index, resolve_default_index, resolve_default_schemas,
+    to_generated_cli_json, to_generated_json, verify_examples, IdlError,
 };
 
 const REQUIRED_ADMIN: &[&str] = &[
@@ -311,22 +311,19 @@ fn kv_vector_concepts_resolve_to_expected_shared_models() {
     };
 
     assert_eq!(model("kv.get"), "Maybe<VersionedValue>");
-    assert_eq!(model("kv.list"), "Page<Bytes, Bytes>");
-    assert_eq!(model("kv.scan"), "Page<ScanItem, Bytes>");
-    assert_eq!(model("kv.batch_get"), "BatchResult<Maybe<Bytes>>");
-    assert_eq!(
-        model("vector.collection.create"),
-        "MutationAck<VectorCollectionCreate>"
-    );
+    assert_eq!(model("kv.list"), "Page<Bytes>");
+    assert_eq!(model("kv.scan"), "Page<ScanItem>");
+    assert_eq!(model("kv.batch_get"), "BatchResult<BatchGetItemResult>");
+    assert_eq!(model("vector.collection.create"), "MutationAck");
     assert_eq!(
         model("vector.collection.stats"),
         "StatusResponse<VectorCollectionInfo>"
     );
     assert_eq!(
         model("vector.collection.list"),
-        "Page<VectorCollectionInfo, String>"
+        "Page<VectorCollectionInfo>"
     );
-    assert_eq!(model("vector.keys"), "Page<String, String>");
+    assert_eq!(model("vector.keys"), "Page<string>");
     assert_eq!(model("vector.query"), "SearchResult<VectorMatch>");
     assert_eq!(
         model("vector.index.query"),
@@ -518,6 +515,92 @@ fn canonical_examples_validate_execute_and_cover_the_catalog() {
     // executor asserting miss-ness — so a stale or wrong example fails here.
     let root = default_repo_root();
     verify_examples(&root).expect("canonical examples validate, cover, and execute");
+}
+
+/// A scratch copy of everything the resolver reads: the IDL tree, the request
+/// fixtures it validates, and the enum sources it scans for variant coverage.
+fn scratch_idl_tree() -> tempfile::TempDir {
+    let root = default_repo_root();
+    let temp = tempfile::tempdir().expect("tempdir creates");
+    for relative in ["crates/executor/idl/v1", "crates/executor/tests/fixtures"] {
+        copy_dir(&root.join(relative), &temp.path().join(relative));
+    }
+    let src = temp.path().join("crates/executor/src");
+    fs::create_dir_all(&src).expect("src dir creates");
+    for file in ["command.rs", "output.rs"] {
+        fs::copy(root.join("crates/executor/src").join(file), src.join(file))
+            .expect("enum source copies");
+    }
+    temp
+}
+
+#[test]
+fn a_lying_example_fails_verification() {
+    // The replay asserts each step's miss-ness, so `verify_examples` is more
+    // than a parser: an example that promises a value for an absent key is
+    // refused, naming the example and the step.
+    let temp = scratch_idl_tree();
+    let example = temp
+        .path()
+        .join("crates/executor/idl/v1/examples/kv.get.yaml");
+    let text = fs::read_to_string(&example).expect("kv.get example reads");
+    assert_eq!(text.matches("    returns: null\n").count(), 1);
+    fs::write(
+        &example,
+        text.replacen("    returns: null\n", "    returns: hello\n", 1),
+    )
+    .expect("example writes");
+    match verify_examples(temp.path()) {
+        Err(IdlError::Invalid(message)) => assert!(
+            message.contains("example `kv.get` step 2")
+                && message.contains("the call returned a miss"),
+            "got: {message}"
+        ),
+        other => panic!("expected the lying example to be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn captured_example_runs_cover_every_example() {
+    // `capture_examples` feeds the docs bundle's `command-examples.json`: one
+    // run per `examples/<id>.yaml`, in id order, every step replayed with the
+    // CLI line it renders and the wire envelope it produced.
+    let root = default_repo_root();
+    let runs = capture_examples(&root).expect("examples capture");
+    let mut expected: Vec<String> = fs::read_dir(root.join("crates/executor/idl/v1/examples"))
+        .expect("examples dir reads")
+        .map(|entry| {
+            let path = entry.expect("entry reads").path();
+            path.file_stem()
+                .expect("example file has a stem")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    expected.sort();
+    let captured: Vec<&str> = runs.iter().map(|run| run.command_id.as_str()).collect();
+    assert_eq!(captured, expected);
+    for run in &runs {
+        assert!(
+            !run.steps.is_empty(),
+            "{}: a run replays its steps",
+            run.command_id
+        );
+        for step in &run.steps {
+            assert!(
+                step.cli_input.starts_with("strata "),
+                "{}: a captured step renders a CLI line, got {:?}",
+                run.command_id,
+                step.cli_input
+            );
+            assert!(
+                step.wire_output.get("type").is_some(),
+                "{}: a captured step carries the wire envelope, got {}",
+                run.command_id,
+                step.wire_output
+            );
+        }
+    }
 }
 
 #[test]

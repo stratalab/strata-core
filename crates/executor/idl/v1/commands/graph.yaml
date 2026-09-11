@@ -4,8 +4,6 @@ commands:
     title: Create graph
     input: Command::GraphCreate
     output: Output::GraphCreateResult
-    result: GraphInfoData
-    response_model: MutationAck<GraphInfoData>
     prose: commands/graph.create.md
     errors+:
       - already_exists.engine.graph
@@ -31,7 +29,6 @@ commands:
     title: Delete graph
     input: Command::GraphDelete
     output: Output::GraphDeleteResult
-    result: GraphDelete
     prose: commands/graph.delete.md
     display:
       receipt: "{verb} graph {/data/graph}"
@@ -48,8 +45,6 @@ commands:
     title: List graphs
     input: Command::GraphList
     output: Output::GraphNamePage
-    result: String
-    response_model: Page<String, String>
     prose: commands/graph.list.md
     errors-:
       - not_found.engine.graph
@@ -66,7 +61,6 @@ commands:
     title: Read graph metadata
     input: Command::GraphGetMeta
     output: Output::GraphInfoResult
-    result: GraphInfoData
     prose: commands/graph.meta.md
     display:
       fields:
@@ -89,7 +83,6 @@ commands:
     cli_path: ["graph", "add-node"]
     input: Command::GraphAddNode
     output: Output::GraphNodeWriteResult
-    result: GraphNodeWrite
     prose: commands/graph.node.add.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -116,7 +109,6 @@ commands:
     cli_path: ["graph", "get-node"]
     input: Command::GraphGetNode
     output: Output::GraphNodeResult
-    result: GraphNodeDataOutput
     prose: commands/graph.node.get.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -140,7 +132,6 @@ commands:
     cli_path: ["graph", "remove-node"]
     input: Command::GraphRemoveNode
     output: Output::GraphDeleteResult
-    result: GraphDelete
     prose: commands/graph.node.remove.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -161,8 +152,6 @@ commands:
     cli_path: ["graph", "list-nodes"]
     input: Command::GraphListNodes
     output: Output::GraphNodePage
-    result: GraphNodeDataOutput
-    response_model: Page<GraphNodeDataOutput, String>
     prose: commands/graph.node.list.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -184,7 +173,6 @@ commands:
     title: Sample graph nodes
     input: Command::GraphSample
     output: Output::GraphSampleResult
-    result: GraphNodeDataOutput
     prose: commands/graph.sample.md
     display:
       columns:
@@ -205,7 +193,6 @@ commands:
     cli_path: ["graph", "add-edge"]
     input: Command::GraphAddEdge
     output: Output::GraphEdgeWriteResult
-    result: GraphEdgeWrite
     prose: commands/graph.edge.add.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -238,7 +225,6 @@ commands:
     cli_path: ["graph", "get-edge"]
     input: Command::GraphGetEdge
     output: Output::GraphEdgeResult
-    result: GraphEdgeDataOutput
     prose: commands/graph.edge.get.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -266,7 +252,6 @@ commands:
     cli_path: ["graph", "remove-edge"]
     input: Command::GraphRemoveEdge
     output: Output::GraphDeleteResult
-    result: GraphDelete
     prose: commands/graph.edge.remove.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -291,8 +276,6 @@ commands:
     title: List graph neighbors
     input: Command::GraphNeighbors
     output: Output::GraphNeighborPage
-    result: GraphNeighborHit
-    response_model: Page<GraphNeighborHit, String>
     prose: commands/graph.neighbors.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -322,8 +305,6 @@ commands:
     cli_surface: wire
     input: Command::GraphBindingsForEntity
     output: Output::GraphBindingPage
-    result: GraphBindingHit
-    response_model: Page<GraphBindingHit, String>
     prose: commands/graph.bindings.md
     errors+:
       - invalid_argument.engine.graph_binding
@@ -349,7 +330,6 @@ commands:
     title: Batch write graph
     input: Command::GraphBatchWrite
     output: Output::GraphBatchWriteResult
-    result: GraphBatchItemResult
     prose: commands/graph.batch_write.md
     errors+:
       - invalid_argument.engine.graph_batch
@@ -372,7 +352,6 @@ commands:
     title: Define graph object type
     input: Command::GraphDefineObjectType
     output: Output::GraphOntologyWriteResult
-    result: GraphOntologyWrite
     prose: commands/graph.ontology.define_object_type.md
     errors+:
       - invalid_argument.engine.graph_type_name
@@ -394,7 +373,6 @@ commands:
     title: Define graph link type
     input: Command::GraphDefineLinkType
     output: Output::GraphOntologyWriteResult
-    result: GraphOntologyWrite
     prose: commands/graph.ontology.define_link_type.md
     errors+:
       - invalid_argument.engine.graph_type_name
@@ -417,7 +395,6 @@ commands:
     title: Delete graph object type
     input: Command::GraphDeleteObjectType
     output: Output::GraphOntologyDeleteResult
-    result: GraphOntologyDelete
     prose: commands/graph.ontology.delete_object_type.md
     errors+:
       - invalid_argument.engine.graph_type_name
@@ -438,7 +415,6 @@ commands:
     title: Delete graph link type
     input: Command::GraphDeleteLinkType
     output: Output::GraphOntologyDeleteResult
-    result: GraphOntologyDelete
     prose: commands/graph.ontology.delete_link_type.md
     errors+:
       - invalid_argument.engine.graph_type_name
@@ -460,7 +436,6 @@ commands:
     title: Freeze graph ontology
     input: Command::GraphFreezeOntology
     output: Output::GraphOntologyFreezeResult
-    result: GraphOntologyFreeze
     prose: commands/graph.ontology.freeze.md
     wire_status: transitional
     errors+:
@@ -482,7 +457,6 @@ commands:
     title: Read graph ontology
     input: Command::GraphGetOntology
     output: Output::GraphOntologyResult
-    result: GraphOntologyData
     prose: commands/graph.ontology.get.md
     display:
       fields:
@@ -506,7 +480,6 @@ commands:
     title: Read graph ontology summary
     input: Command::GraphOntologySummary
     output: Output::GraphOntologySummaryResult
-    result: GraphOntologySummaryData
     prose: commands/graph.ontology.summary.md
     display:
       fields:
@@ -531,8 +504,6 @@ commands:
     title: List graph nodes by type
     input: Command::GraphNodesByType
     output: Output::GraphNodePage
-    result: GraphNodeDataOutput
-    response_model: Page<GraphNodeDataOutput, String>
     prose: commands/graph.nodes_by_type.md
     errors+:
       - invalid_argument.engine.graph_type_name
@@ -556,7 +527,6 @@ commands:
     cli_path: ["graph", "wcc"]
     input: Command::GraphWcc
     output: Output::GraphWccResult
-    result: GraphWccData
     prose: commands/graph.analytics.wcc.md
     errors+:
       - resource_exhausted.engine.graph_analytics_budget
@@ -583,7 +553,6 @@ commands:
     cli_path: ["graph", "lcc"]
     input: Command::GraphLcc
     output: Output::GraphLccResult
-    result: GraphLccData
     prose: commands/graph.analytics.lcc.md
     errors+:
       - resource_exhausted.engine.graph_analytics_budget
@@ -609,7 +578,6 @@ commands:
     cli_path: ["graph", "sssp"]
     input: Command::GraphSssp
     output: Output::GraphSsspResult
-    result: GraphSsspData
     prose: commands/graph.analytics.sssp.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -636,7 +604,6 @@ commands:
     cli_path: ["graph", "pagerank"]
     input: Command::GraphPagerank
     output: Output::GraphPagerankResult
-    result: GraphPagerankData
     prose: commands/graph.analytics.pagerank.md
     errors+:
       - invalid_argument.engine.graph_pagerank_options
@@ -665,7 +632,6 @@ commands:
     cli_path: ["graph", "cdlp"]
     input: Command::GraphCdlp
     output: Output::GraphCdlpResult
-    result: GraphCdlpData
     prose: commands/graph.analytics.cdlp.md
     errors+:
       - resource_exhausted.engine.graph_analytics_budget
@@ -692,7 +658,6 @@ commands:
     cli_path: ["graph", "bfs"]
     input: Command::GraphBfs
     output: Output::GraphBfsResult
-    result: GraphBfsData
     prose: commands/graph.analytics.bfs.md
     errors+:
       - invalid_argument.engine.graph_node_id
@@ -720,7 +685,6 @@ commands:
     commit: chunked_commits
     input: Command::GraphBulkInsert
     output: Output::GraphBulkInsertResult
-    result: GraphBulkInsert
     prose: commands/graph.bulk_insert.md
     wire_status: transitional
     errors+:
@@ -748,7 +712,6 @@ commands:
     cli_surface: wire
     input: Command::GraphApplyDeletePolicy
     output: Output::GraphDeletePolicyResult
-    result: GraphDeletePolicyApply
     prose: commands/graph.apply_delete_policy.md
     errors+:
       - invalid_argument.engine.graph_binding

@@ -4,10 +4,8 @@ commands:
     title: Import Arrow file
     input: Command::ArrowImport
     output: Output::ArrowImportResult
-    result: ArrowImport
     access: write
     commit: commits_on_success
-    response_model: StatusResponse<ArrowImport>
     prose: commands/arrow.import.md
     errors+:
       - invalid_argument.engine.product_space
@@ -39,9 +37,7 @@ commands:
     title: Export Arrow file
     input: Command::ArrowExport
     output: Output::ArrowExportResult
-    result: ArrowExport
     access: read
-    response_model: StatusResponse<ArrowExport>
     prose: commands/arrow.export.md
     errors+:
       - invalid_argument.engine.product_space

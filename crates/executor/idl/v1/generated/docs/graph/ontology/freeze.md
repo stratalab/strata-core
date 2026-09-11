@@ -41,7 +41,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 
 ## Returns
 
-`MutationAck<GraphOntologyFreeze>`.
+`MutationAck` — an acknowledgement with no payload.
 
 **Transitional wire:** the response currently carries a bare record rather than a mutation acknowledgement; the declaration is the target shape and the wire is scheduled to be normalised.
 
