@@ -4,8 +4,8 @@ commands:
     title: Ping database
     input: Command::Ping
     output: Output::Pong
-    result: PingInfo
-    response_model: StatusResponse<PingInfo>
+    result: AdminPing
+    response_model: StatusResponse<AdminPing>
     cli_path: ["ping"]
     prose: commands/admin.ping.md
     errors-:
@@ -207,7 +207,7 @@ commands:
     outputs:
       - Output::HubCloneResult
       - Output::HubCloneProgress
-    result: HubClone
+    result: HubCloneResult
     access: write
     cli_path: ["clone"]
     prose: commands/admin.hub_clone.md

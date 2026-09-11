@@ -1,4 +1,19 @@
 {
+  "$defs": {
+    "AdminPing": {
+      "description": "Liveness probe output.",
+      "properties": {
+        "version": {
+          "description": "Engine package version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "type": "object"
+    }
+  },
   "$id": "https://stratadb.org/idl/v1/schemas/admin.ping.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "command": "admin.ping",
@@ -20,16 +35,7 @@
     "description": "Lightweight admin liveness result.",
     "properties": {
       "data": {
-        "properties": {
-          "version": {
-            "description": "Engine package version.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "version"
-        ],
-        "type": "object"
+        "$ref": "#/$defs/AdminPing"
       },
       "type": {
         "const": "pong",

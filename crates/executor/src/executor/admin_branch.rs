@@ -9,9 +9,9 @@ use super::{
 impl Executor {
     pub(super) fn execute_ping(&mut self) -> ExecutorResult<Output> {
         let summary = self.database.admin()?.ping();
-        Ok(Output::Pong {
+        Ok(Output::Pong(crate::types::AdminPing {
             version: summary.version,
-        })
+        }))
     }
 
     // Infallible: it only reads the injected transport state, so it returns an

@@ -257,6 +257,24 @@ pub enum HubCloneProgressStage {
     Unknown,
 }
 
+/// A completed hub clone.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
+pub struct HubCloneResult {
+    /// Dataset cloned.
+    pub dataset: String,
+    /// Branch fetched.
+    pub branch: String,
+    /// Destination directory holding the new database.
+    pub dest: String,
+    /// The bundle's manifest hash.
+    pub manifest_hash: String,
+    /// Objects fetched.
+    pub object_count: u64,
+    /// Total bytes fetched.
+    pub total_bytes: u64,
+}
+
 /// Machine-readable clone progress emitted by `strata clone --progress jsonl`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
