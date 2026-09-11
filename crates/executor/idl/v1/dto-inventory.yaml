@@ -47,14 +47,13 @@ response_models:
   - BatchResult<EventBatchAppendItem>
   - Maybe<EventVersionedData>
   - Page<EventVersionedData, u64>
-  - StatusValue<EventChainVerification>
+  - StatusResponse<EventChainVerification>
   - Page<BranchItem, String>
   - StatusResponse<BranchItem>
   - StatusResponse<BranchComparisonItem>
   - StatusResponse<BranchPreviewItem>
-  - MutationAck<BranchItem>
   - MutationAck<BranchDelete>
-  - MutationAck<PromotionOutcomeItem>
+  - StatusResponse<PromotionOutcomeItem>
   - MutationAck<SpaceCreate>
   - MutationAck<SpaceDelete>
   - MutationAck<GraphInfoData>

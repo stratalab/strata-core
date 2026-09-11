@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::examples::{self, Example};
+use super::response_model::{self, ResponseFamily};
 use super::{invalid, relative_to, resolve_index, schemas, IdlError, ResolvedCommand, Result};
 
 /// Canonical site origin for absolute links in the machine layer, matching the
@@ -142,7 +143,7 @@ fn render_all(repo_root: &Path) -> Result<BTreeMap<PathBuf, String>> {
                 &documents,
                 example_specs.get(&entry.id),
                 &arg_spec,
-            ),
+            )?,
         );
     }
 
@@ -176,7 +177,7 @@ fn render_page(
     schemas: &BTreeMap<String, Value>,
     example: Option<&Example>,
     arg_spec: &examples::CliArgSpec,
-) -> String {
+) -> Result<String> {
     let mut out = String::new();
     out.push_str("---\n");
     writeln!(out, "title: {}", yaml_quote(&entry.title)).expect(INFALLIBLE);
@@ -193,13 +194,13 @@ fn render_page(
     }
 
     out.push_str(&render_parameters(schema));
-    out.push_str(&render_returns(entry));
+    out.push_str(&render_returns(entry, schema)?);
     out.push_str(&render_errors(entry));
     out.push_str(&render_invocation(entry, schema));
 
     let mut result = out.trim_end().to_owned();
     result.push('\n');
-    result
+    Ok(result)
 }
 
 /// One parameter row for the request table.
@@ -323,17 +324,39 @@ fn expand_object(object: &Value, rows: &mut Vec<ParamRow>) {
     }
 }
 
-fn render_returns(entry: &ResolvedCommand) -> String {
+/// The declared response model, and — for a `transitional` command — what the
+/// wire carries today, derived from the schema by the same classifier the
+/// response-model guard runs, so the page and the ledger cannot disagree.
+fn render_returns(entry: &ResolvedCommand, schema: &Value) -> Result<String> {
+    let family = ResponseFamily::from_declaration(&entry.id, &entry.response_model)?;
     let mut out = String::from("## Returns\n\n");
     write!(out, "`{}`", entry.response_model).expect(INFALLIBLE);
     // `Maybe<T>` models a miss as absence, never an error — call it out.
-    if entry.response_model.starts_with("Maybe") {
+    if matches!(family, ResponseFamily::Maybe | ResponseFamily::MaybeVec) {
         out.push_str(" — a miss returns nothing rather than raising.");
     } else {
         out.push('.');
     }
     out.push_str("\n\n");
-    out
+    if entry.wire_status == "transitional" {
+        let shape = response_model::classify(&entry.id, schema)?;
+        if response_model::accepts(family, &shape) {
+            out.push_str(
+                "**Transitional wire:** this command's response shape is not yet frozen and may \
+                 change.\n\n",
+            );
+        } else {
+            writeln!(
+                out,
+                "**Transitional wire:** the response currently carries {} rather than {}; the \
+                 declaration is the target shape and the wire is scheduled to be normalised.\n",
+                shape.describe(),
+                family.describe()
+            )
+            .expect(INFALLIBLE);
+        }
+    }
+    Ok(out)
 }
 
 fn render_errors(entry: &ResolvedCommand) -> String {

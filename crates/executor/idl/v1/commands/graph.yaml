@@ -462,6 +462,7 @@ commands:
     output: Output::GraphOntologyFreezeResult
     result: GraphOntologyFreeze
     prose: commands/graph.ontology.freeze.md
+    wire_status: transitional
     errors+:
       - failed_precondition.engine.graph_ontology_freeze
       - failed_precondition.engine.graph_ontology_frozen
@@ -721,6 +722,7 @@ commands:
     output: Output::GraphBulkInsertResult
     result: GraphBulkInsert
     prose: commands/graph.bulk_insert.md
+    wire_status: transitional
     errors+:
       - invalid_argument.engine.graph_node_id
       - invalid_argument.engine.graph_edge_type

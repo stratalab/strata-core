@@ -71,6 +71,7 @@ jobs:
           cargo run --locked -p strata-executor --features idl-tooling,inference,testkit --bin strata-idl -- verify-fixtures
           cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --test idl_kv_vector_overlay
           cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --test idl_display
+          cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --test idl_response_model
           cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --test generated_conformance
       - name: Inference feature lanes (offline)
         # The download module and the deterministic testkit are feature-gated

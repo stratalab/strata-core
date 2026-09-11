@@ -9,13 +9,14 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
-use crate::cli_metadata::{CliDisplayDecl, CliRenderRule};
+use crate::cli_metadata::{CliDisplayDecl, CliRenderRule, CliWireEncoding};
 use crate::{public_error_code_entries, Command, Output};
 
 mod display;
 mod docs;
 mod examples;
 pub use examples::{CapturedExample, CapturedStep};
+mod response_model;
 mod schemas;
 mod tests_gen;
 mod verify;
@@ -48,7 +49,7 @@ const COMMAND_FILES: &[&str] = &[
 const SUPPORTED_COMMAND_SCHEMA_VERSION: &str = "strata.idl.v1";
 const SUPPORTED_COMMAND_GENERATOR_VERSION: &str = "strata-executor-idl.1";
 const CLI_SCHEMA_VERSION: &str = "strata.cli.v1";
-const CLI_GENERATOR_VERSION: &str = "strata-executor-cli-idl.2";
+const CLI_GENERATOR_VERSION: &str = "strata-executor-cli-idl.3";
 const COMMAND_SOURCE_FIELDS: &[&str] = &[
     "id",
     "kind",
@@ -436,6 +437,9 @@ pub struct CliCommandEntry {
     pub render: CliRenderRule,
     /// The command's display declaration (`display:`).
     pub display: CliDisplayDecl,
+    /// How an `optional`/`history` value is spelled on the wire, resolved from
+    /// the generated schema; `null` under every other rule.
+    pub encoding: Option<CliWireEncoding>,
 }
 
 /// CLI runtime lookup tables.
@@ -920,6 +924,7 @@ pub fn generate(repo_root: &Path) -> Result<()> {
     let index = resolve_index(repo_root)?;
     let documents = schemas::schema_documents(&index)?;
     schemas::validate_fixtures(repo_root, &index, &documents)?;
+    response_model::enforce_response_models(&repo_root.join(IDL_DIR), &index, &documents)?;
 
     let json = to_generated_json(&index)?;
     let path = command_index_path(repo_root);
@@ -976,6 +981,7 @@ pub fn check(repo_root: &Path) -> Result<()> {
 
     let documents = schemas::schema_documents(&index)?;
     schemas::validate_fixtures(repo_root, &index, &documents)?;
+    response_model::enforce_response_models(&repo_root.join(IDL_DIR), &index, &documents)?;
     let schemas_dir = schemas_dir_path(repo_root);
     let mut expected_files = BTreeSet::new();
     for (id, document) in &documents {
@@ -1120,8 +1126,10 @@ fn cli_index_from_command_index(
     let mut seen_paths = BTreeMap::new();
     let mut commands = Vec::with_capacity(command_index.commands.len());
     for command in command_index.commands {
-        let (render, decl) = display_for_command(repo_root, layer, &command)?;
-        let entry = cli_entry_from_resolved(command, render, decl)?;
+        let document = display::read_schema_document(repo_root, &command.id)?;
+        let (render, decl) = display_for_command(layer, &command, &document)?;
+        let encoding = response_model::encoding_for(&command.id, &document)?;
+        let entry = cli_entry_from_resolved(command, render, decl, encoding)?;
         if !seen_ids.insert(entry.id.clone()) {
             return Err(invalid(format!(
                 "duplicate command id `{}` in command index",
@@ -1203,9 +1211,9 @@ fn validate_cli_source_index(index: &CommandIndex) -> Result<()> {
 /// `render:` and the command's `display:`, checked against the command's
 /// generated schema document so every declared pointer resolves.
 fn display_for_command(
-    repo_root: &Path,
     layer: &display::DisplayLayer,
     command: &ResolvedCommand,
+    document: &serde_json::Value,
 ) -> Result<(CliRenderRule, CliDisplayDecl)> {
     let render = *layer.render_by_kind.get(&command.kind).ok_or_else(|| {
         invalid(format!(
@@ -1218,8 +1226,7 @@ fn display_for_command(
         .get(&command.id)
         .cloned()
         .ok_or_else(|| invalid(format!("command `{}` declares no `display:`", command.id)))?;
-    let document = display::read_schema_document(repo_root, &command.id)?;
-    display::validate_display(&command.id, render, &decl, &document)?;
+    display::validate_display(&command.id, render, &decl, document)?;
     Ok((render, decl))
 }
 
@@ -1227,6 +1234,7 @@ fn cli_entry_from_resolved(
     command: ResolvedCommand,
     render: CliRenderRule,
     display: CliDisplayDecl,
+    encoding: Option<CliWireEncoding>,
 ) -> Result<CliCommandEntry> {
     let wire = variant_wire_tag(&command.input, "Command")?;
     // A `wire` command omits its `cli.path` on the shipped command-index.json
@@ -1264,6 +1272,7 @@ fn cli_entry_from_resolved(
         wire_status: command.wire_status,
         render,
         display,
+        encoding,
     };
     validate_cli_entry(&entry)?;
     Ok(entry)
@@ -1336,7 +1345,13 @@ fn validate_cli_entry(entry: &CliCommandEntry) -> Result<()> {
         }
     }
     validate_wire_status(&entry.id, &entry.wire_status)?;
-    Ok(())
+    crate::cli_metadata::validate_encoding_shape(
+        &entry.id,
+        entry.render,
+        entry.encoding,
+        &entry.wire_status,
+    )
+    .map_err(invalid)
 }
 
 fn validate_executor_ref_prefix(reference: &str, prefix: &str) -> Result<()> {

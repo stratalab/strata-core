@@ -1,0 +1,68 @@
+# Response-model divergence ledger (#3313; S0c of the CLI output contract).
+#
+# Every command declares a `response_model` family (`MutationAck<T>`,
+# `Maybe<T>`, `Page<T>`, ...) and every family implies a wire shape. The
+# response-model guard (`crates/executor/src/idl_tooling/response_model.rs`,
+# run by `strata-idl generate` and `check`) classifies what each command's
+# generated schema actually carries and compares it with the declaration.
+# The rows below are the commands where the two disagree: the declaration is
+# the target shape, the wire is what ships today, and normalising the wire is
+# a separate, tracked change. Every listed command carries
+# `wire_status: transitional`, and the generated reference says so on its
+# page.
+#
+# What is NOT a divergence: an accepted *encoding* of the declared family.
+# `Maybe<T>` may be `{found, value}` or a nullable `data`; `Maybe<Vec<T>>`
+# may be a nullable `{items}` or a nullable bare array. Those spellings are
+# resolved into the CLI index as `encoding` (contract §Root E) and never
+# appear here.
+#
+# SHRINK-ONLY: a row whose command now matches its declaration fails `check`
+# until the row is removed; a command that diverges without a row fails
+# `check` until the declaration is corrected or the row is added with an
+# issue. `declared` must equal the command's resolved `response_model` and
+# `wire` the classifier's name for the schema shape, so a row cannot drift
+# from the facts it records. `budget` MUST equal the number of rows
+# (`enforce_debt_budget`): growth is a reviewed raise, a drain lowers it.
+budget: 10
+divergences:
+  - command: admin.remote
+    declared: Maybe<RemoteOriginInfo>
+    wire: record
+    issue: 3313
+  - command: event.count
+    declared: StatusValue<u64>
+    wire: record
+    issue: 3313
+  - command: graph.bulk_insert
+    declared: MutationAck<GraphBulkInsert>
+    wire: record
+    issue: 3313
+  - command: graph.ontology.freeze
+    declared: MutationAck<GraphOntologyFreeze>
+    wire: record
+    issue: 3313
+  - command: json.index.create
+    declared: MutationAck<JsonIndexCreate>
+    wire: record
+    issue: 3313
+  - command: json.index.drop
+    declared: MutationAck<JsonIndexDrop>
+    wire: scalar:boolean
+    issue: 3313
+  - command: vector.collection.create
+    declared: MutationAck<VectorCollectionCreate>
+    wire: page
+    issue: 3313
+  - command: vector.collection.delete
+    declared: MutationAck<VectorCollectionDelete>
+    wire: scalar:boolean
+    issue: 3313
+  - command: vector.collection.set_embedding_model
+    declared: MutationAck<VectorCollectionInfo>
+    wire: page
+    issue: 3313
+  - command: vector.collection.stats
+    declared: StatusResponse<VectorCollectionInfo>
+    wire: page
+    issue: 3313

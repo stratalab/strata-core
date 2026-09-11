@@ -69,6 +69,39 @@ impl CliRenderRule {
     }
 }
 
+/// How an `optional` or `history` command spells its value on the wire
+/// (contract §Root E). Resolved from the generated schema at authoring time
+/// and carried in the CLI index as `encoding`, so the renderer reads it
+/// rather than sniffing the response. Every other rule carries none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliWireEncoding {
+    /// `Maybe<T>` as `{found, value}`.
+    FoundValue,
+    /// `Maybe<T>` as a nullable `data`.
+    Nullable,
+    /// `Maybe<Vec<T>>` as a nullable `{items}`.
+    Items,
+    /// `Maybe<Vec<T>>` as a nullable bare array.
+    Array,
+}
+
+impl CliWireEncoding {
+    /// Every encoding, in declaration order.
+    pub const ALL: [Self; 4] = [Self::FoundValue, Self::Nullable, Self::Items, Self::Array];
+
+    /// The index spelling, identical to the serde name — pinned by
+    /// `wire_encoding_names_match_serde`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FoundValue => "found_value",
+            Self::Nullable => "nullable",
+            Self::Items => "items",
+            Self::Array => "array",
+        }
+    }
+}
+
 /// A command's `display:` declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliDisplayDecl {
@@ -383,9 +416,87 @@ pub fn validate_display_shape(
     Ok(())
 }
 
+/// Checks that a command's wire encoding is the one its render rule needs:
+/// `optional` reads `found_value` or `nullable`, `history` reads `items` or
+/// `array`, and no other rule carries one. A stable `optional`/`history`
+/// command must carry an encoding; only a `transitional` one — whose wire is
+/// a ledgered divergence from its declared family — may lack it.
+pub fn validate_encoding_shape(
+    command_id: &str,
+    rule: CliRenderRule,
+    encoding: Option<CliWireEncoding>,
+    wire_status: &str,
+) -> Result<(), String> {
+    use CliWireEncoding::{Array, FoundValue, Items, Nullable};
+    match (rule, encoding) {
+        (CliRenderRule::Optional, Some(FoundValue | Nullable))
+        | (CliRenderRule::History, Some(Items | Array)) => Ok(()),
+        (CliRenderRule::Optional | CliRenderRule::History, None) => {
+            if wire_status == "transitional" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "command `{command_id}` renders `{}` but its stable wire resolved to no encoding",
+                    rule.as_str()
+                ))
+            }
+        }
+        (CliRenderRule::Optional | CliRenderRule::History, Some(other)) => Err(format!(
+            "command `{command_id}` renders `{}` but its wire encoding is `{}`",
+            rule.as_str(),
+            other.as_str()
+        )),
+        (_, Some(other)) => Err(format!(
+            "command `{command_id}` carries wire encoding `{}` but its kind renders `{}`, which reads none",
+            other.as_str(),
+            rule.as_str()
+        )),
+        (_, None) => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CliDisplayAs, CliDisplayDecl, CliRenderRule};
+    use super::{
+        validate_encoding_shape, CliDisplayAs, CliDisplayDecl, CliRenderRule, CliWireEncoding,
+    };
+
+    #[test]
+    fn wire_encoding_names_match_serde() {
+        for encoding in CliWireEncoding::ALL {
+            let json = serde_json::to_value(encoding).expect("encoding serializes");
+            assert_eq!(json, serde_json::Value::from(encoding.as_str()));
+            let back: CliWireEncoding = serde_json::from_value(json).expect("encoding round-trips");
+            assert_eq!(back, encoding);
+        }
+    }
+
+    #[test]
+    fn encoding_shape_truth_table() {
+        use CliWireEncoding::{Array, FoundValue, Items, Nullable};
+        for rule in CliRenderRule::ALL {
+            for encoding in CliWireEncoding::ALL.map(Some).into_iter().chain([None]) {
+                let stable = validate_encoding_shape("t.c", rule, encoding, "stable").is_ok();
+                let transitional =
+                    validate_encoding_shape("t.c", rule, encoding, "transitional").is_ok();
+                let reads_one = matches!(rule, CliRenderRule::Optional | CliRenderRule::History);
+                let expected_stable = matches!(
+                    (rule, encoding),
+                    (CliRenderRule::Optional, Some(FoundValue | Nullable))
+                        | (CliRenderRule::History, Some(Items | Array))
+                ) || (!reads_one && encoding.is_none());
+                assert_eq!(stable, expected_stable, "stable {rule:?} {encoding:?}");
+                // Transitional relaxes exactly one cell: a missing encoding
+                // under a rule that reads one.
+                let relaxed = encoding.is_none() && reads_one;
+                assert_eq!(
+                    transitional,
+                    expected_stable || relaxed,
+                    "transitional {rule:?} {encoding:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn render_rule_names_match_serde() {

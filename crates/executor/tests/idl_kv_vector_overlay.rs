@@ -352,8 +352,13 @@ fn kv_list_declares_a_single_keys_page_output() {
     assert!(command.fixtures.responses.is_empty());
 }
 
+/// The reviewed set of commands whose wire is not yet frozen. Each one is a
+/// row in `response-model-divergences.yaml` (#3313): the declaration is the
+/// target shape and the wire is scheduled to be normalised. The set only
+/// changes by a reviewed edit here, so a stray `wire_status: transitional`
+/// (or a quietly dropped one) is visible.
 #[test]
-fn transitional_vector_collection_wire_shapes_are_explicit() {
+fn transitional_wire_shapes_are_explicit() {
     let index = resolve_default_index().expect("IDL resolves");
     let transitional: BTreeSet<&str> = index
         .commands
@@ -365,6 +370,10 @@ fn transitional_vector_collection_wire_shapes_are_explicit() {
     assert_eq!(
         transitional,
         BTreeSet::from([
+            "admin.remote",
+            "event.count",
+            "graph.bulk_insert",
+            "graph.ontology.freeze",
             "json.index.create",
             "json.index.drop",
             "vector.collection.create",
@@ -442,7 +451,7 @@ fn generated_cli_command_index_is_fresh_and_deterministic() {
     assert_eq!(first, second);
     assert!(first.generated);
     assert_eq!(first.schema_version, "strata.cli.v1");
-    assert_eq!(first.generator_version, "strata-executor-cli-idl.2");
+    assert_eq!(first.generator_version, "strata-executor-cli-idl.3");
     assert_eq!(first.source.schema_version, "strata.idl.v1");
     assert_eq!(first.source.generator_version, "strata-executor-idl.1");
     assert_eq!(first.source.checksum_sha256.len(), 64);

@@ -44,7 +44,7 @@ fn embedded_cli_metadata_loads_without_generator_feature() {
     assert_eq!(catalog.index().schema_version, "strata.cli.v1");
     assert_eq!(
         catalog.index().generator_version,
-        "strata-executor-cli-idl.2"
+        "strata-executor-cli-idl.3"
     );
 
     // Every command the IDL declares, and only those, in the embedded index
@@ -321,6 +321,53 @@ fn runtime_validation_rejects_bad_family_group_membership() {
             .len(),
     );
     assert_parse_invalid(&value, "family groups do not cover every command");
+}
+
+/// Mutates the embedded index entry for `id` and hands the whole index back.
+fn embedded_index_with(id: &str, edit: impl FnOnce(&mut Value)) -> Value {
+    let mut value: Value =
+        serde_json::from_str(EMBEDDED_CLI_COMMAND_INDEX_JSON).expect("metadata parses as JSON");
+    let entry = value["commands"]
+        .as_array_mut()
+        .expect("commands is array")
+        .iter_mut()
+        .find(|command| command["id"] == id)
+        .unwrap_or_else(|| panic!("embedded index carries `{id}`"));
+    edit(entry);
+    value
+}
+
+#[test]
+fn runtime_validation_rejects_an_encoding_that_disagrees_with_the_render_rule() {
+    // An `optional` reader needs to know whether a miss is `{found: false}`
+    // or a null `data`; a stable command that resolved neither is a generator
+    // fault the runtime must not paper over.
+    let value = embedded_index_with("kv.get", |entry| entry["encoding"] = Value::Null);
+    assert_parse_invalid(&value, "resolved to no encoding");
+
+    // A history encoding on an optional reader would misread every hit.
+    let value = embedded_index_with("kv.get", |entry| entry["encoding"] = Value::from("items"));
+    assert_parse_invalid(&value, "wire encoding is `items`");
+
+    // A rule that reads no encoding must not carry one.
+    let value = embedded_index_with("kv.put", |entry| {
+        entry["encoding"] = Value::from("found_value");
+    });
+    assert_parse_invalid(&value, "which reads none");
+
+    // Direction control: a transitional optional wire may carry no encoding
+    // (its shape is ledgered, not resolved), and the checked-in index parses.
+    let value = embedded_index_with("kv.get", |entry| {
+        entry["encoding"] = Value::Null;
+        entry["wire_status"] = Value::from("transitional");
+    });
+    let json = serde_json::to_string(&value).expect("metadata serializes");
+    let catalog =
+        CliCommandCatalog::parse(&json).expect("a transitional wire may lack an encoding");
+    assert_eq!(
+        catalog.command("kv.get").expect("kv.get resolves").encoding,
+        None
+    );
 }
 
 #[test]
