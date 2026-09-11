@@ -683,8 +683,135 @@ fn check_map(schema: &SchemaDoc<'_>, display: &CliDisplay) -> Check {
 mod tests {
     use std::path::Path;
 
-    use super::assert_no_display_keys;
+    use serde_json::{json, Value};
+
+    use super::{assert_no_display_keys, classify, nullable_variant, SchemaType};
     use crate::idl_tooling::IdlError;
+
+    /// The schema walk's two pure decisions, truth-tabled: the generated
+    /// documents exercise only the branches the wire happens to take (no
+    /// `allOf`, no `properties` beside `additionalProperties`, null always
+    /// the second `anyOf` variant), so the other rows live here.
+    #[test]
+    fn nullable_variant_accepts_exactly_one_null_beside_one_inner() {
+        let inner = json!({"type": "string"});
+        let other = json!({"type": "integer"});
+        let null = json!({"type": "null"});
+        assert_eq!(
+            nullable_variant(&[inner.clone(), null.clone()]),
+            Some(&inner)
+        );
+        assert_eq!(
+            nullable_variant(&[null.clone(), inner.clone()]),
+            Some(&inner)
+        );
+        assert_eq!(nullable_variant(&[inner.clone(), other]), None);
+        assert_eq!(nullable_variant(&[null.clone(), null.clone()]), None);
+        assert_eq!(nullable_variant(std::slice::from_ref(&inner)), None);
+        assert_eq!(nullable_variant(&[]), None);
+        assert_eq!(nullable_variant(&[inner, null.clone(), null]), None);
+    }
+
+    fn classified(schema: Value) -> std::result::Result<SchemaType, String> {
+        let Value::Object(map) = schema else {
+            panic!("truth table rows are schema objects")
+        };
+        classify(&map)
+    }
+
+    #[test]
+    fn classify_tells_records_from_maps_by_properties_and_additional_properties() {
+        let string = json!({"type": "string"});
+        assert_eq!(
+            classified(json!({"type": "object", "properties": {"a": string}})),
+            Ok(SchemaType::Object)
+        );
+        assert_eq!(
+            classified(json!({"type": "object"})),
+            Ok(SchemaType::Object)
+        );
+        assert_eq!(
+            classified(json!({"type": "object", "additionalProperties": false})),
+            Ok(SchemaType::Object)
+        );
+        // Declared fields win even when the schema also admits extras.
+        assert_eq!(
+            classified(json!({
+                "type": "object",
+                "properties": {"a": string},
+                "additionalProperties": string
+            })),
+            Ok(SchemaType::Object)
+        );
+        assert_eq!(
+            classified(json!({"type": "object", "additionalProperties": string})),
+            Ok(SchemaType::Map)
+        );
+        assert_eq!(
+            classified(json!({"type": "object", "additionalProperties": true})),
+            Ok(SchemaType::Map)
+        );
+    }
+
+    #[test]
+    fn classify_reads_scalars_encodings_and_nullable_type_lists() {
+        assert_eq!(classified(json!({"type": "array"})), Ok(SchemaType::Array));
+        assert_eq!(classified(json!({"type": "string"})), Ok(SchemaType::Text));
+        assert_eq!(
+            classified(json!({"type": "string", "contentEncoding": "base64"})),
+            Ok(SchemaType::Base64)
+        );
+        assert_eq!(
+            classified(json!({"type": "integer"})),
+            Ok(SchemaType::Integer)
+        );
+        assert_eq!(
+            classified(json!({"type": "number"})),
+            Ok(SchemaType::Number)
+        );
+        assert_eq!(
+            classified(json!({"type": "boolean"})),
+            Ok(SchemaType::Boolean)
+        );
+        assert_eq!(
+            classified(json!({"type": ["integer", "null"]})),
+            Ok(SchemaType::Integer)
+        );
+        assert_eq!(
+            classified(json!({"type": ["null", "string"]})),
+            Ok(SchemaType::Text)
+        );
+        let multi =
+            classified(json!({"type": ["string", "integer"]})).expect_err("two non-null types");
+        assert!(multi.contains("multi-typed"), "{multi}");
+        let malformed = classified(json!({"type": 42})).expect_err("a number is not a type");
+        assert!(malformed.contains("malformed `type`"), "{malformed}");
+        let unsupported = classified(json!({"type": "date"})).expect_err("no such JSON type");
+        assert!(
+            unsupported.contains("unsupported type `date`"),
+            "{unsupported}"
+        );
+    }
+
+    #[test]
+    fn classify_admits_const_enums_and_refuses_other_unions_and_compositions() {
+        let ok = json!({"const": "ok", "type": "string"});
+        let record = json!({"type": "object", "properties": {"code": {"type": "string"}}});
+        assert_eq!(
+            classified(json!({"oneOf": [ok.clone(), {"const": "err"}]})),
+            Ok(SchemaType::Enum)
+        );
+        let mixed = classified(json!({"oneOf": [ok, record.clone()]}))
+            .expect_err("a tagged union is not an enum");
+        assert!(mixed.contains("is a union"), "{mixed}");
+        let composed = classified(json!({"allOf": [record]})).expect_err("no compositions");
+        assert!(composed.contains("is a composition"), "{composed}");
+        assert_eq!(classified(json!({})), Ok(SchemaType::Any));
+        assert_eq!(
+            classified(json!({"description": "anything"})),
+            Ok(SchemaType::Any)
+        );
+    }
 
     fn rejection(text: &str) -> String {
         match assert_no_display_keys(text, Path::new("command-index.json")) {

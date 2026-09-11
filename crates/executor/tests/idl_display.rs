@@ -526,6 +526,70 @@ fn stepping_into_a_scalar_is_rejected() {
     );
 }
 
+#[test]
+fn a_map_is_stepped_into_with_a_star_not_a_key() {
+    // `hub.get_dataset` is the one wire with a map on the data side.
+    let scratch = Scratch::new();
+    scratch.set_display(
+        "hub.yaml",
+        "hub.get_dataset",
+        "    display:\n      fields:\n        - field: /data/quick_start_snippets/python\n",
+    );
+
+    assert_rejects(
+        &scratch,
+        "hub.get_dataset",
+        "`/data/quick_start_snippets` is a map; step into its values with `*`",
+    );
+}
+
+#[test]
+fn an_array_is_stepped_into_with_a_star_or_an_index() {
+    let scratch = Scratch::new();
+    scratch.set_display(
+        "arrow.yaml",
+        "arrow.export",
+        "    display:\n      receipt: \"exported to {/data/paths/first}\"\n",
+    );
+    assert_rejects(
+        &scratch,
+        "arrow.export",
+        "`/data/paths` is an array; step into its items with `*` or an index",
+    );
+
+    // Both sides of the boundary: an index other than the real declaration's
+    // `0` steps into the same item schema.
+    let scratch = Scratch::new();
+    scratch.set_display(
+        "arrow.yaml",
+        "arrow.export",
+        "    display:\n      receipt: \"exported to {/data/paths/1}\"\n",
+    );
+    scratch
+        .resolve()
+        .expect("an index steps into the array's items");
+}
+
+#[test]
+fn a_union_the_layer_cannot_render_is_named_at_its_pointer() {
+    // The rank items are a tagged union (`ok` | `error`), the one shape
+    // besides a `null` pairing the walk refuses; the command is `bespoke`
+    // for exactly that reason, and a declaration must not get past the
+    // pointer.
+    let scratch = Scratch::new();
+    scratch.set_display(
+        "inference.yaml",
+        "inference.rank",
+        "    display:\n      fields:\n        - field: /data/items/0\n",
+    );
+
+    assert_rejects(
+        &scratch,
+        "inference.rank",
+        "`/data/items/0` is a union the display layer cannot render; declare `bespoke`",
+    );
+}
+
 // ------------------------------------------------------------------- receipts
 
 #[test]
@@ -598,6 +662,31 @@ fn a_filter_needs_its_type() {
         "kv.put",
         "`|len` needs an array, but `/data/key` is a base64 string",
     );
+}
+
+#[test]
+fn a_plural_filter_without_a_noun_is_rejected() {
+    let scratch = Scratch::new();
+    scratch.set_display(
+        "space.yaml",
+        "space.delete",
+        "    display:\n      receipt: \"{verb} space {/data/space} ({/data/deleted_rows|plural})\"\n      noun: space\n      identity:\n        - /data/space\n",
+    );
+
+    assert_rejects(&scratch, "space.delete", "`|plural` needs a noun");
+}
+
+#[test]
+fn a_plural_filter_with_an_empty_noun_is_rejected() {
+    // The colon alone is not a noun, even on the integer the filter needs.
+    let scratch = Scratch::new();
+    scratch.set_display(
+        "space.yaml",
+        "space.delete",
+        "    display:\n      receipt: \"{verb} space {/data/space} ({/data/deleted_rows|plural:})\"\n      noun: space\n      identity:\n        - /data/space\n",
+    );
+
+    assert_rejects(&scratch, "space.delete", "`|plural` needs a noun");
 }
 
 #[test]

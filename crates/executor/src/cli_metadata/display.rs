@@ -429,5 +429,14 @@ mod tests {
         let error = serde_json::from_str::<CliDisplayDecl>(r#"{"colums":[]}"#)
             .expect_err("unknown keys are rejected");
         assert!(error.to_string().contains("unknown field `colums`"));
+        // Neither a word nor a map: the visitor says what it expected.
+        let error = serde_json::from_str::<CliDisplayDecl>("42")
+            .expect_err("a number is neither `bespoke` nor a shape");
+        assert!(
+            error
+                .to_string()
+                .contains("expected `bespoke` or a display shape map"),
+            "{error}"
+        );
     }
 }

@@ -1,11 +1,11 @@
-//! The `strata-idl` bin dispatch for the TCP4.1 test-generation verbs,
-//! exercised hermetically: `STRATA_IDL_REPO_ROOT` points the bin at a scratch
-//! copy of the IDL tree, so `generate-tests` never writes into the real
+//! The `strata-idl` bin dispatch for the generation verbs, exercised
+//! hermetically: `STRATA_IDL_REPO_ROOT` points the bin at a scratch copy of
+//! the IDL tree, so `generate` and `generate-tests` never write into the real
 //! repository. Kills the match-arm mutants `cargo test` alone cannot see
 //! (a deleted arm falls through to the unknown-verb exit 2).
 #![cfg(all(feature = "idl-tooling", feature = "inference", feature = "testkit"))]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn copy_tree(source: &Path, destination: &Path) {
@@ -21,6 +21,28 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
+/// A scratch copy of everything the bin reads: the IDL tree, the fixtures,
+/// and the enum sources the resolver scans for variant coverage. Returns the
+/// real repo root beside it for restoring single files.
+fn scratch_tree() -> (PathBuf, tempfile::TempDir) {
+    let real = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("executor lives under crates/")
+        .to_path_buf();
+    let scratch = tempfile::tempdir().expect("scratch root");
+    for relative in ["crates/executor/idl/v1", "crates/executor/tests/fixtures"] {
+        copy_tree(&real.join(relative), &scratch.path().join(relative));
+    }
+    let src = scratch.path().join("crates/executor/src");
+    std::fs::create_dir_all(&src).expect("scratch src dir");
+    for file in ["command.rs", "output.rs"] {
+        std::fs::copy(real.join("crates/executor/src").join(file), src.join(file))
+            .expect("copy enum source");
+    }
+    (real, scratch)
+}
+
 fn run(scratch: &Path, verb: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_strata-idl"))
         .arg(verb)
@@ -31,22 +53,7 @@ fn run(scratch: &Path, verb: &str) -> std::process::Output {
 
 #[test]
 fn the_test_generation_verbs_dispatch_and_the_unknown_verb_refuses() {
-    let real = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("executor lives under crates/")
-        .to_path_buf();
-    let scratch = tempfile::tempdir().expect("scratch root");
-    for relative in ["crates/executor/idl/v1", "crates/executor/tests/fixtures"] {
-        copy_tree(&real.join(relative), &scratch.path().join(relative));
-    }
-    // The resolver also scans the enum sources for variant coverage.
-    let src = scratch.path().join("crates/executor/src");
-    std::fs::create_dir_all(&src).expect("scratch src dir");
-    for file in ["command.rs", "output.rs"] {
-        std::fs::copy(real.join("crates/executor/src").join(file), src.join(file))
-            .expect("copy enum source");
-    }
+    let (_, scratch) = scratch_tree();
     let generated = scratch
         .path()
         .join("crates/executor/tests/generated/conformance_cases.rs");
@@ -78,6 +85,50 @@ fn the_test_generation_verbs_dispatch_and_the_unknown_verb_refuses() {
     assert_eq!(unknown.status.code(), Some(2), "unknown verb must exit 2");
 }
 
+/// `generate` is the writer behind the SDK index and every schema document,
+/// and `check` is the gate that reads them back. Corrupt both in the scratch
+/// copy: the verb must repair them, so a `generate` that returns without
+/// writing leaves the gate red.
+#[test]
+fn generate_rewrites_the_index_and_the_schema_documents() {
+    let (_, scratch) = scratch_tree();
+    let generated = scratch.path().join("crates/executor/idl/v1/generated");
+    let index = generated.join("command-index.json");
+    let schema = generated.join("schemas/kv.get.json");
+    std::fs::write(&index, "{}\n").expect("corrupt the index");
+    std::fs::remove_file(&schema).expect("drop a schema document");
+
+    let stale = run(scratch.path(), "check");
+    assert_eq!(
+        stale.status.code(),
+        Some(1),
+        "a corrupt index must fail check"
+    );
+
+    let generate = run(scratch.path(), "generate");
+    assert!(
+        generate.status.success(),
+        "generate failed: {}",
+        String::from_utf8_lossy(&generate.stderr)
+    );
+    assert!(
+        schema.is_file(),
+        "generate must rewrite the dropped document"
+    );
+    assert_ne!(
+        std::fs::read_to_string(&index).expect("read the index"),
+        "{}\n",
+        "generate must rewrite the index"
+    );
+
+    let fresh = run(scratch.path(), "check");
+    assert!(
+        fresh.status.success(),
+        "fresh check failed: {}",
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+}
+
 /// Bump the `budget:` line in a debt-ledger YAML by one, so its budget no longer
 /// equals its entry count.
 fn bump_budget(path: &Path) {
@@ -104,21 +155,7 @@ fn bump_budget(path: &Path) {
 /// call-site mutant that drops or neuters either `enforce_debt_budget` call.
 #[test]
 fn the_debt_budget_gates_reject_a_count_mismatch() {
-    let real = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("executor lives under crates/")
-        .to_path_buf();
-    let scratch = tempfile::tempdir().expect("scratch root");
-    for relative in ["crates/executor/idl/v1", "crates/executor/tests/fixtures"] {
-        copy_tree(&real.join(relative), &scratch.path().join(relative));
-    }
-    let src = scratch.path().join("crates/executor/src");
-    std::fs::create_dir_all(&src).expect("scratch src dir");
-    for file in ["command.rs", "output.rs"] {
-        std::fs::copy(real.join("crates/executor/src").join(file), src.join(file))
-            .expect("copy enum source");
-    }
+    let (real, scratch) = scratch_tree();
 
     let idl = scratch.path().join("crates/executor/idl/v1");
     let skip_yaml = idl.join("replay-skipped-commands.yaml");
