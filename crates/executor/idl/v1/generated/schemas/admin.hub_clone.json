@@ -102,6 +102,48 @@
           "type": "string"
         }
       ]
+    },
+    "HubCloneResult": {
+      "description": "A completed hub clone.",
+      "properties": {
+        "branch": {
+          "description": "Branch fetched.",
+          "type": "string"
+        },
+        "dataset": {
+          "description": "Dataset cloned.",
+          "type": "string"
+        },
+        "dest": {
+          "description": "Destination directory holding the new database.",
+          "type": "string"
+        },
+        "manifest_hash": {
+          "description": "The bundle's manifest hash.",
+          "type": "string"
+        },
+        "object_count": {
+          "description": "Objects fetched.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_bytes": {
+          "description": "Total bytes fetched.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dataset",
+        "branch",
+        "dest",
+        "manifest_hash",
+        "object_count",
+        "total_bytes"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://stratadb.org/idl/v1/schemas/admin.hub_clone.json",
@@ -149,45 +191,7 @@
     "description": "A completed hub clone.",
     "properties": {
       "data": {
-        "properties": {
-          "branch": {
-            "description": "Branch fetched.",
-            "type": "string"
-          },
-          "dataset": {
-            "description": "Dataset cloned.",
-            "type": "string"
-          },
-          "dest": {
-            "description": "Destination directory holding the new database.",
-            "type": "string"
-          },
-          "manifest_hash": {
-            "description": "The bundle's manifest hash.",
-            "type": "string"
-          },
-          "object_count": {
-            "description": "Objects fetched.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "total_bytes": {
-            "description": "Total bytes fetched.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "dataset",
-          "branch",
-          "dest",
-          "manifest_hash",
-          "object_count",
-          "total_bytes"
-        ],
-        "type": "object"
+        "$ref": "#/$defs/HubCloneResult"
       },
       "type": {
         "const": "hub_clone_result",
@@ -205,45 +209,7 @@
       "description": "A completed hub clone.",
       "properties": {
         "data": {
-          "properties": {
-            "branch": {
-              "description": "Branch fetched.",
-              "type": "string"
-            },
-            "dataset": {
-              "description": "Dataset cloned.",
-              "type": "string"
-            },
-            "dest": {
-              "description": "Destination directory holding the new database.",
-              "type": "string"
-            },
-            "manifest_hash": {
-              "description": "The bundle's manifest hash.",
-              "type": "string"
-            },
-            "object_count": {
-              "description": "Objects fetched.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "total_bytes": {
-              "description": "Total bytes fetched.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "dataset",
-            "branch",
-            "dest",
-            "manifest_hash",
-            "object_count",
-            "total_bytes"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/HubCloneResult"
         },
         "type": {
           "const": "hub_clone_result",

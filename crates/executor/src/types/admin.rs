@@ -39,6 +39,14 @@ pub enum AdminControlStatus {
     Unavailable,
 }
 
+/// Liveness probe output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
+pub struct AdminPing {
+    /// Engine package version.
+    pub version: String,
+}
+
 /// Multi-process IPC stop output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]

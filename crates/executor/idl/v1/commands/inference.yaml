@@ -176,8 +176,8 @@ commands:
     title: Unload cached models
     input: Command::InferenceUnload
     output: Output::InferenceUnloadResult
-    result: UnloadResult
-    response_model: UnloadResult
+    result: InferenceUnloadResult
+    response_model: InferenceUnloadResult
     prose: commands/inference.unload.md
     display: bespoke
     fixtures:

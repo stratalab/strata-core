@@ -10,7 +10,9 @@ use std::sync::Arc;
 use strata_engine::{
     BranchName as EngineBranchName, Database, DurableLocalOpenOptions, KvKey, KvValue, ProductSpace,
 };
-use strata_executor::{Command, Executor, ExecutorErrorClass, HubCloneProgressStage, Output};
+use strata_executor::{
+    Command, Executor, ExecutorErrorClass, HubCloneProgressStage, HubCloneResult, Output,
+};
 use strata_hub::stratahub_protocol::{ErrorCode, Hash, ProblemDetails};
 use strata_hub::{EngineExportOptions, StrataCoreEngine};
 
@@ -287,12 +289,12 @@ fn hub_clone_reconstitutes_a_queryable_database_with_origin() {
             hub_url: Some(base.clone()),
         })
         .expect("clone succeeds");
-    let Output::HubCloneResult {
+    let Output::HubCloneResult(HubCloneResult {
         dataset,
         branch,
         manifest_hash: reported_hash,
         ..
-    } = outcome
+    }) = outcome
     else {
         panic!("unexpected output: {outcome:?}");
     };
@@ -536,7 +538,7 @@ fn hub_clone_progress_callback_reports_machine_readable_stages() {
         )
         .expect("clone succeeds");
 
-    assert!(matches!(outcome, Output::HubCloneResult { .. }));
+    assert!(matches!(outcome, Output::HubCloneResult(_)));
     let stages = events
         .iter()
         .map(|event| match event {

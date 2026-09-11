@@ -52,6 +52,8 @@ pub use executor::Executor;
 pub use inference_settings::default_inference_runtime;
 pub use ipc_host_state::{IpcClientEntry, IpcClientRegistry, IpcHostState};
 pub use ipc_mode::IpcMode;
+#[cfg(feature = "inference")]
+pub use output::InferenceUnloadResult;
 pub use output::{Output, RemoteOriginFrontierInfo, RemoteOriginInfo};
 pub use session_access::SessionAccess;
 pub use strata_engine::{
@@ -94,24 +96,24 @@ pub use strata_inference::{
 pub use types::{
     AdminCapabilities, AdminConfig, AdminControlStatus, AdminDatabaseInfo, AdminDescribe,
     AdminGraph, AdminHealth, AdminHealthStatus, AdminMemoryBudget, AdminMemoryBudgetSource,
-    AdminMetrics, AdminOpenTarget, AdminPrimitives, AdminVectorCollection, ArrowExportPrimitive,
-    ArrowExportResult, ArrowFileFormat, ArrowImportResult, ArrowImportTarget, BatchEventEntry,
-    BatchExistsItemResult, BatchExistsPresence, BatchGetItemResult, BatchItem, BatchItemResult,
-    BatchItemStatus, BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry, BatchKvEntry,
-    BatchMode, BatchResult, BatchStatus, BatchVectorEntry, BranchCleanupItem, BranchComparisonItem,
-    BranchItem, BranchParentItem, BranchPreviewItem, BranchStatus, Bytes, CommitDurability,
-    CommitReceipt, ComparedCapability, ComparedEntityItem, ConflictKind, ConflictStrategyResult,
-    EventBatchAppendItemResult, EventChainVerification, EventData, EventRangeDirection,
-    EventVersionedData, GraphAnalyticsBudget, GraphBatchItemResult, GraphBatchOperation,
-    GraphBfsData, GraphBfsEdgeData, GraphBindingHit, GraphBindingPrimitive, GraphBindingTarget,
-    GraphBulkEdge, GraphBulkNode, GraphCdlpData, GraphDeletePolicy, GraphDirection, GraphEdgeData,
-    GraphEdgeDataOutput, GraphEntityBinding, GraphInfoData, GraphLccData, GraphLinkTypeDefData,
-    GraphLinkTypeSummaryData, GraphNeighborHit, GraphNodeData, GraphNodeDataOutput,
-    GraphObjectTypeDefData, GraphObjectTypeSummaryData, GraphOntologyData,
+    AdminMetrics, AdminOpenTarget, AdminPing, AdminPrimitives, AdminVectorCollection,
+    ArrowExportPrimitive, ArrowExportResult, ArrowFileFormat, ArrowImportResult, ArrowImportTarget,
+    BatchEventEntry, BatchExistsItemResult, BatchExistsPresence, BatchGetItemResult, BatchItem,
+    BatchItemResult, BatchItemStatus, BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry,
+    BatchKvEntry, BatchMode, BatchResult, BatchStatus, BatchVectorEntry, BranchCleanupItem,
+    BranchComparisonItem, BranchItem, BranchParentItem, BranchPreviewItem, BranchStatus, Bytes,
+    CommitDurability, CommitReceipt, ComparedCapability, ComparedEntityItem, ConflictKind,
+    ConflictStrategyResult, EventBatchAppendItemResult, EventChainVerification, EventData,
+    EventRangeDirection, EventVersionedData, GraphAnalyticsBudget, GraphBatchItemResult,
+    GraphBatchOperation, GraphBfsData, GraphBfsEdgeData, GraphBindingHit, GraphBindingPrimitive,
+    GraphBindingTarget, GraphBulkEdge, GraphBulkNode, GraphCdlpData, GraphDeletePolicy,
+    GraphDirection, GraphEdgeData, GraphEdgeDataOutput, GraphEntityBinding, GraphInfoData,
+    GraphLccData, GraphLinkTypeDefData, GraphLinkTypeSummaryData, GraphNeighborHit, GraphNodeData,
+    GraphNodeDataOutput, GraphObjectTypeDefData, GraphObjectTypeSummaryData, GraphOntologyData,
     GraphOntologySummaryData, GraphPagerankData, GraphPropertyDef, GraphSsspData, GraphWccData,
     HistoryItem, HistoryResult, HubBranchHighlight, HubCloneProgress, HubCloneProgressStage,
-    HubDatasetCard, HubDatasetPage, HubDatasetSort, HubDatasetSummary, HubInfo, HubProvenance,
-    HubRefEntry, HubRefList, HubStrataFeatures, HubYankedEntry, HubYankedList,
+    HubCloneResult, HubDatasetCard, HubDatasetPage, HubDatasetSort, HubDatasetSummary, HubInfo,
+    HubProvenance, HubRefEntry, HubRefList, HubStrataFeatures, HubYankedEntry, HubYankedList,
     JsonBatchGetItemResult, JsonBatchItemResult, JsonHistoryItem, JsonIndexDefinition,
     JsonIndexType, JsonSampleItem, JsonVersionedValue, Maybe, MaybeJsonValue,
     MaybeJsonVersionedValue, MutationEffect, MutationEffectKind, PageInfo, PreviewConflictItem,

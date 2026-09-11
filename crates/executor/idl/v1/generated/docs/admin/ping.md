@@ -31,7 +31,7 @@ _No parameters._
 
 ## Returns
 
-`StatusResponse<PingInfo>`.
+`StatusResponse<AdminPing>`.
 
 ## Errors
 

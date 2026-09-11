@@ -242,7 +242,7 @@
         "Output::HubCloneProgress"
       ],
       "wire_status": "stable",
-      "response_model": "StatusResponse<HubClone>",
+      "response_model": "StatusResponse<HubCloneResult>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -523,7 +523,7 @@
         "Output::Pong"
       ],
       "wire_status": "stable",
-      "response_model": "StatusResponse<PingInfo>",
+      "response_model": "StatusResponse<AdminPing>",
       "commit": "none",
       "pagination": "none",
       "batch": "none",
@@ -5903,7 +5903,7 @@
         "Output::InferenceUnloadResult"
       ],
       "wire_status": "stable",
-      "response_model": "UnloadResult",
+      "response_model": "InferenceUnloadResult",
       "commit": "none",
       "pagination": "none",
       "batch": "none",

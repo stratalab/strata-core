@@ -80,7 +80,7 @@ response_models:
   - AnalyticsResult<GraphBfsData>
   - MutationAck<GraphBulkInsert>
   - MutationAck<GraphDeletePolicyApply>
-  - StatusResponse<PingInfo>
+  - StatusResponse<AdminPing>
   - StatusResponse<AdminDatabaseInfo>
   - StatusResponse<AdminIpcStatus>
   - StatusResponse<AdminIpcStop>
@@ -90,7 +90,7 @@ response_models:
   - StatusResponse<AdminConfig>
   - Maybe<RemoteOriginInfo>
   - Maybe<String>
-  - StatusResponse<HubClone>
+  - StatusResponse<HubCloneResult>
   - StatusResponse<HubCloneProgress>
   - StatusResponse<HubInfo>
   - StatusResponse<HubDatasetPage>
@@ -107,6 +107,6 @@ response_models:
   - DetokenizedText
   - EmbeddingsResponse
   - RankResponse
-  - UnloadResult
+  - InferenceUnloadResult
   - InferenceStatus
   - ModelCacheStatus

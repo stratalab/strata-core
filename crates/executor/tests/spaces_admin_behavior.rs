@@ -2,7 +2,7 @@
 
 use serde_json::json;
 use strata_executor::{
-    AdminHealthStatus, AdminOpenTarget, Bytes, Command, Executor, ExecutorErrorClass,
+    AdminHealthStatus, AdminOpenTarget, AdminPing, Bytes, Command, Executor, ExecutorErrorClass,
     MutationEffect, MutationEffectKind, Output, VectorDistanceMetric, DEFAULT_BRANCH,
 };
 use tempfile::TempDir;
@@ -305,7 +305,8 @@ fn admin_commands_report_sanitized_database_facts() {
     let mut executor = Executor::open_cache().expect("cache executor opens");
     populate_rebuilt_primitives_in_space(&mut executor, "default");
 
-    let Output::Pong { version } = executor.execute(Command::Ping {}).expect("ping succeeds")
+    let Output::Pong(AdminPing { version }) =
+        executor.execute(Command::Ping {}).expect("ping succeeds")
     else {
         panic!("unexpected ping output");
     };

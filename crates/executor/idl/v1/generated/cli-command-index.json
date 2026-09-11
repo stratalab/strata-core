@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "69e04a8e0163ee021d815b7f9656b60002a66a19407357b6eb05a6426cbb74ae",
+    "checksum_sha256": "13d64abfae91a0d0840aec189003a5bd34f40805001602eec2fb144a034648e9",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -1172,7 +1172,7 @@
         "Output::HubCloneResult",
         "Output::HubCloneProgress"
       ],
-      "response_model": "StatusResponse<HubClone>",
+      "response_model": "StatusResponse<HubCloneResult>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -6093,7 +6093,7 @@
       "outputs": [
         "Output::InferenceUnloadResult"
       ],
-      "response_model": "UnloadResult",
+      "response_model": "InferenceUnloadResult",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",
@@ -8432,7 +8432,7 @@
       "outputs": [
         "Output::Pong"
       ],
-      "response_model": "StatusResponse<PingInfo>",
+      "response_model": "StatusResponse<AdminPing>",
       "errors": [
         {
           "code": "failed_precondition.engine.runtime_closed",

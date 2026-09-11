@@ -9,7 +9,7 @@ use std::sync::Arc;
 use strata_executor::cli_metadata::{CliCommandCatalog, CliCommandEntry};
 use strata_executor::{
     public_error_code_entries, Command, CommitOutcomeStatus, ErrorClass, Executor, ExecutorError,
-    ExecutorErrorClass, Output, PageInfo, RetryPolicy,
+    ExecutorErrorClass, InferenceUnloadResult, Output, PageInfo, RetryPolicy,
 };
 use strata_inference::{
     ChatChoice, ChatMessage, ChatRequest, ChatResponse, EmbedInput, EmbeddingItem,
@@ -184,7 +184,7 @@ fn inference_outputs_round_trip_through_json() {
                 },
             ],
         }),
-        Output::InferenceUnloadResult { unloaded: true },
+        Output::InferenceUnloadResult(InferenceUnloadResult { unloaded: true }),
         Output::InferenceCacheStatus(ModelCacheStatus {
             generation_models: vec!["local:qwen3".to_owned()],
             embedding_models: vec!["openai:text-embedding-3-small".to_owned()],

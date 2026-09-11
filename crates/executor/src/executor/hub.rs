@@ -87,14 +87,14 @@ impl Executor {
         )
         .map_err(|error| clone_error(&error))?;
 
-        Ok(Output::HubCloneResult {
+        Ok(Output::HubCloneResult(crate::types::HubCloneResult {
             dataset: dataset.as_str().to_owned(),
             branch: outcome.branch.as_str().to_owned(),
             dest: dest.to_owned(),
             manifest_hash: outcome.manifest_hash.as_str().to_owned(),
             object_count: outcome.object_count,
             total_bytes: outcome.total_bytes,
-        })
+        }))
     }
 
     /// Reads the hub capability advertisement.

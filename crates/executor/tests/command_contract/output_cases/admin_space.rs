@@ -8,9 +8,9 @@ pub(super) fn admin_space_outputs() -> Vec<Output> {
 
 pub(super) fn admin_outputs() -> Vec<Output> {
     vec![
-        Output::Pong {
+        Output::Pong(strata_executor::AdminPing {
             version: "1.0.0".to_owned(),
-        },
+        }),
         Output::DatabaseInfo(AdminDatabaseInfo {
             version: "1.0.0".to_owned(),
             target: AdminOpenTarget::Cache,

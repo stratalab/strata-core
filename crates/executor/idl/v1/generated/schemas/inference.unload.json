@@ -1,4 +1,19 @@
 {
+  "$defs": {
+    "InferenceUnloadResult": {
+      "description": "Result of evicting a model from the inference runtime cache.",
+      "properties": {
+        "unloaded": {
+          "description": "True when a cached entry was removed.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "unloaded"
+      ],
+      "type": "object"
+    }
+  },
   "$id": "https://stratadb.org/idl/v1/schemas/inference.unload.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "command": "inference.unload",
@@ -27,16 +42,7 @@
     "description": "Inference unload result.",
     "properties": {
       "data": {
-        "properties": {
-          "unloaded": {
-            "description": "True when a cached entry was removed.",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "unloaded"
-        ],
-        "type": "object"
+        "$ref": "#/$defs/InferenceUnloadResult"
       },
       "type": {
         "const": "inference_unload_result",

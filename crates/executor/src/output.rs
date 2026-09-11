@@ -2,18 +2,19 @@
 
 use crate::types::{
     AdminConfig, AdminDatabaseInfo, AdminDescribe, AdminHealth, AdminIpcStatus, AdminIpcStop,
-    AdminMetrics, ArrowExportResult, ArrowImportResult, BatchExistsItemResult, BatchExistsPresence,
-    BatchGetItemResult, BatchItemResult, BatchResult, BranchCleanupItem, BranchComparisonItem,
-    BranchItem, BranchPreviewItem, Bytes, CommitReceipt, EventBatchAppendItemResult,
-    EventChainVerification, EventVersionedData, GraphBatchItemResult, GraphBfsData,
-    GraphBindingHit, GraphCdlpData, GraphEdgeDataOutput, GraphInfoData, GraphLccData,
+    AdminMetrics, AdminPing, ArrowExportResult, ArrowImportResult, BatchExistsItemResult,
+    BatchExistsPresence, BatchGetItemResult, BatchItemResult, BatchResult, BranchCleanupItem,
+    BranchComparisonItem, BranchItem, BranchPreviewItem, Bytes, CommitReceipt,
+    EventBatchAppendItemResult, EventChainVerification, EventVersionedData, GraphBatchItemResult,
+    GraphBfsData, GraphBindingHit, GraphCdlpData, GraphEdgeDataOutput, GraphInfoData, GraphLccData,
     GraphNeighborHit, GraphNodeDataOutput, GraphOntologyData, GraphOntologySummaryData,
     GraphPagerankData, GraphSsspData, GraphWccData, HistoryResult, HubCloneProgress,
-    HubDatasetCard, HubDatasetPage, HubInfo, HubRefList, HubYankedList, JsonBatchGetItemResult,
-    JsonBatchItemResult, JsonHistoryItem, JsonIndexDefinition, JsonSampleItem, Maybe,
-    MaybeJsonValue, MaybeJsonVersionedValue, MutationEffect, PageInfo, PromotionOutcomeItem,
-    SampleItem, ScanItem, VectorBatchGetItemResult, VectorBatchItemResult, VectorCollectionInfo,
-    VectorHistoryResult, VectorIndexQueryResult, VectorMatch, VectorVersionedData, VersionedValue,
+    HubCloneResult, HubDatasetCard, HubDatasetPage, HubInfo, HubRefList, HubYankedList,
+    JsonBatchGetItemResult, JsonBatchItemResult, JsonHistoryItem, JsonIndexDefinition,
+    JsonSampleItem, Maybe, MaybeJsonValue, MaybeJsonVersionedValue, MutationEffect, PageInfo,
+    PromotionOutcomeItem, SampleItem, ScanItem, VectorBatchGetItemResult, VectorBatchItemResult,
+    VectorCollectionInfo, VectorHistoryResult, VectorIndexQueryResult, VectorMatch,
+    VectorVersionedData, VersionedValue,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,10 +27,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Output {
     /// Lightweight admin liveness result.
-    Pong {
-        /// Engine package version.
-        version: String,
-    },
+    Pong(AdminPing),
     /// Database identity and catalog summary.
     DatabaseInfo(AdminDatabaseInfo),
     /// Multi-process IPC state for this process.
@@ -37,20 +35,7 @@ pub enum Output {
     /// Result of stopping multi-process IPC hosting.
     IpcStop(AdminIpcStop),
     /// A completed hub clone.
-    HubCloneResult {
-        /// Dataset cloned.
-        dataset: String,
-        /// Branch fetched.
-        branch: String,
-        /// Destination directory holding the new database.
-        dest: String,
-        /// The bundle's manifest hash.
-        manifest_hash: String,
-        /// Objects fetched.
-        object_count: u64,
-        /// Total bytes fetched.
-        total_bytes: u64,
-    },
+    HubCloneResult(HubCloneResult),
     /// A hub clone progress event.
     HubCloneProgress(HubCloneProgress),
     /// Hub capability advertisement.
@@ -652,16 +637,22 @@ pub enum Output {
     InferenceRanking(strata_inference::RankResponse),
     /// Inference unload result.
     #[cfg(feature = "inference")]
-    InferenceUnloadResult {
-        /// True when a cached entry was removed.
-        unloaded: bool,
-    },
+    InferenceUnloadResult(InferenceUnloadResult),
     /// Inference runtime cache diagnostics.
     #[cfg(feature = "inference")]
     InferenceCacheStatus(strata_inference::ModelCacheStatus),
     /// What this binary can do before anything is attempted.
     #[cfg(feature = "inference")]
     InferenceStatus(strata_inference::InferenceStatus),
+}
+
+/// Result of evicting a model from the inference runtime cache.
+#[cfg(feature = "inference")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
+pub struct InferenceUnloadResult {
+    /// True when a cached entry was removed.
+    pub unloaded: bool,
 }
 
 /// Serialized view of a database's recorded remote origin.

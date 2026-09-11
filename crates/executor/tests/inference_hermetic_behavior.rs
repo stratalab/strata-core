@@ -9,7 +9,7 @@
 
 #![cfg(all(feature = "testkit", feature = "inference"))]
 
-use strata_executor::{Command, Executor, Output};
+use strata_executor::{Command, Executor, InferenceUnloadResult, Output};
 use strata_inference::testkit::FakeInferenceService;
 use strata_inference::{
     ChatRequest, EmbedInput, EmbeddingsRequest, RankRequest, RankRuntimeOutcome,
@@ -194,7 +194,7 @@ fn rank_scores_passages_by_query_overlap() {
 #[test]
 fn unload_and_cache_status_report_an_empty_fake_cache() {
     let mut executor = executor();
-    let Output::InferenceUnloadResult { unloaded } = executor
+    let Output::InferenceUnloadResult(InferenceUnloadResult { unloaded }) = executor
         .execute(Command::InferenceUnload { model: None })
         .expect("unload")
     else {

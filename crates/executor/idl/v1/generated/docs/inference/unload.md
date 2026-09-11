@@ -31,7 +31,7 @@ $ strata inference unload
 
 ## Returns
 
-`UnloadResult`.
+`InferenceUnloadResult`.
 
 ## Errors
 

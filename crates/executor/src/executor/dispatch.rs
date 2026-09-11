@@ -1232,7 +1232,9 @@ impl Executor {
             Command::InferenceUnload { model } => self
                 .inference
                 .unload(model.as_deref())
-                .map(|unloaded| Output::InferenceUnloadResult { unloaded })
+                .map(|unloaded| {
+                    Output::InferenceUnloadResult(crate::output::InferenceUnloadResult { unloaded })
+                })
                 .map_err(ExecutorError::from),
             #[cfg(feature = "inference")]
             Command::InferenceCacheStatus {} => self
