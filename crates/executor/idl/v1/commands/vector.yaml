@@ -11,6 +11,10 @@ commands:
       - invalid_argument.engine.vector_dimension
       - invalid_argument.engine.embedding_model
       - invalid_argument.executor.vector_dimension
+    display:
+      receipt: "created collection {/data/items/0/name} ({/data/items/0/dimension} dimensions, {/data/items/0/metric})"
+      identity:
+        - /data/items/0/name
     fixtures:
       request: requests/v1/vector/collection_create.json
       response: responses/v1/vector/collection_list.json
@@ -27,6 +31,11 @@ commands:
     result: VectorCollectionDelete
     prose: commands/vector.collection.delete.md
     wire_status: transitional
+    display:
+      receipt: "deleted collection {/request/collection}"
+      noun: collection
+      identity:
+        - /request/collection
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -40,6 +49,13 @@ commands:
     result: VectorCollectionInfo
     response_model: Page<VectorCollectionInfo, String>
     prose: commands/vector.collection.list.md
+    display:
+      columns:
+        - field: /data/items/*/name
+        - field: /data/items/*/dimension
+        - field: /data/items/*/metric
+        - field: /data/items/*/count
+        - field: /data/items/*/embedding_model
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -54,6 +70,13 @@ commands:
     response_model: StatusResponse<VectorCollectionInfo>
     prose: commands/vector.collection.stats.md
     wire_status: transitional
+    display:
+      columns:
+        - field: /data/items/*/name
+        - field: /data/items/*/dimension
+        - field: /data/items/*/metric
+        - field: /data/items/*/count
+        - field: /data/items/*/embedding_model
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -70,6 +93,10 @@ commands:
     errors+:
       - invalid_argument.engine.embedding_model
       - failed_precondition.engine.embedding_model_mismatch
+    display:
+      receipt: "updated collection {/data/items/0/name}: embedding model {/data/items/0/embedding_model}"
+      identity:
+        - /data/items/0/name
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -93,6 +120,8 @@ commands:
     output: Output::Uint
     result: u64
     prose: commands/vector.count.md
+    display:
+      value: /data
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -113,6 +142,11 @@ commands:
       - invalid_argument.executor.vector_input
       - failed_precondition.engine.embedding_model_missing
       - set:inference.model_runtime
+    display:
+      receipt: "{verb} {/data/key} in {/data/collection}"
+      noun: vector
+      identity:
+        - /data/key
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -142,6 +176,15 @@ commands:
     output: Output::VectorData
     result: VectorVersionedData
     prose: commands/vector.get.md
+    display:
+      fields:
+        - field: /data/value/key
+        - field: /data/value/vector_revision
+        - field: /data/value/version
+        - field: /data/value/data/embedding
+          as: json
+        - field: /data/value/data/metadata
+          as: json
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -159,6 +202,16 @@ commands:
     output: Output::VectorVersionHistory
     result: VectorHistoryItem
     prose: commands/vector.history.md
+    display:
+      columns:
+        - field: /data/items/*/version
+        - field: /data/items/*/vector_revision
+        - field: /data/items/*/committed_at
+          as: date
+        - field: /data/items/*/data/embedding
+          as: json
+        - field: /data/items/*/data/metadata
+          as: json
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -173,6 +226,8 @@ commands:
     output: Output::Bool
     result: bool
     prose: commands/vector.exists.md
+    display:
+      value: /data
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -187,6 +242,9 @@ commands:
     output: Output::VectorBatchExistsResults
     result: BatchExistsPresence
     prose: commands/vector.batch_exists.md
+    display:
+      columns:
+        - field: /data/items/*/result/exists
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -202,6 +260,9 @@ commands:
     result: String
     response_model: Page<String, String>
     prose: commands/vector.keys.md
+    display:
+      columns:
+        - field: /data/items/*
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -217,6 +278,15 @@ commands:
     result: VectorVersionedData
     response_model: Page<VectorVersionedData, String>
     prose: commands/vector.scan.md
+    display:
+      columns:
+        - field: /data/items/*/key
+        - field: /data/items/*/version
+        - field: /data/items/*/vector_revision
+        - field: /data/items/*/data/embedding
+          as: json
+        - field: /data/items/*/data/metadata
+          as: json
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -231,6 +301,15 @@ commands:
     output: Output::VectorSampleResult
     result: VectorVersionedData
     prose: commands/vector.sample.md
+    display:
+      columns:
+        - field: /data/items/*/key
+        - field: /data/items/*/version
+        - field: /data/items/*/vector_revision
+        - field: /data/items/*/data/embedding
+          as: json
+        - field: /data/items/*/data/metadata
+          as: json
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -248,6 +327,11 @@ commands:
     prose: commands/vector.metadata.update.md
     errors+:
       - invalid_argument.engine.vector_metadata_patch
+    display:
+      receipt: "{verb} {/data/key} in {/data/collection}"
+      noun: vector
+      identity:
+        - /data/key
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -262,6 +346,11 @@ commands:
     output: Output::VectorDeleteResult
     result: VectorDelete
     prose: commands/vector.delete.md
+    display:
+      receipt: "{verb} {/data/key} in {/data/collection}"
+      noun: vector
+      identity:
+        - /data/key
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -278,6 +367,10 @@ commands:
     prose: commands/vector.delete_by_filter.md
     errors+:
       - invalid_argument.engine.vector_filter
+    display:
+      receipt: "deleted {/data/effect/affected_count|plural:vector} from {/data/collection}"
+      identity:
+        - /data/effect/affected_count
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -292,6 +385,10 @@ commands:
     output: Output::VectorBulkDeleteResult
     result: VectorBulkDelete
     prose: commands/vector.delete_all.md
+    display:
+      receipt: "deleted {/data/effect/affected_count|plural:vector} from {/data/collection}"
+      identity:
+        - /data/effect/affected_count
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -312,6 +409,13 @@ commands:
       - invalid_argument.executor.vector_input
       - failed_precondition.engine.embedding_model_missing
       - set:inference.model_runtime
+    display:
+      columns:
+        - field: /data/*/key
+        - field: /data/*/score
+          as: float
+        - field: /data/*/metadata
+          as: json
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -343,6 +447,50 @@ commands:
     errors+:
       - invalid_argument.engine.vector_filter
       - invalid_argument.executor.vector_limit
+    display:
+      columns:
+        - field: /data/matches/*/key
+        - field: /data/matches/*/score
+          as: float
+        - field: /data/matches/*/metadata
+          as: json
+      fields:
+        - field: /data/diagnostics
+          fields:
+            - field: /data/diagnostics/active_delta_count
+            - field: /data/diagnostics/active_delta_seal_threshold
+            - field: /data/diagnostics/active_delta_source_count
+            - field: /data/diagnostics/artifact_sources
+              as: table
+            - field: /data/diagnostics/collection
+            - field: /data/diagnostics/collection_exact_threshold
+            - field: /data/diagnostics/derived_bytes
+              header: derived
+              as: size
+            - field: /data/diagnostics/exact_fallback_count
+            - field: /data/diagnostics/exact_source_count
+            - field: /data/diagnostics/filtered_underfill_fallback
+            - field: /data/diagnostics/flat_source_count
+            - field: /data/diagnostics/hnsw_graph_builds
+            - field: /data/diagnostics/hnsw_memory_budget_bytes
+              header: hnsw_memory_budget
+              as: size
+            - field: /data/diagnostics/hnsw_source_count
+            - field: /data/diagnostics/indexed_source_count
+            - field: /data/diagnostics/indexed_vector_count
+            - field: /data/diagnostics/last_query_fallback_reason
+            - field: /data/diagnostics/last_query_used_index
+            - field: /data/diagnostics/manifest_generation
+            - field: /data/diagnostics/manifest_inherited_ref_count
+            - field: /data/diagnostics/manifest_owned_ref_count
+            - field: /data/diagnostics/manifest_ref_count
+            - field: /data/diagnostics/manifest_status
+            - field: /data/diagnostics/overfetch_factor
+            - field: /data/diagnostics/policy_mode
+            - field: /data/diagnostics/resolved_index_kind_summary
+            - field: /data/diagnostics/source_candidate_limit
+            - field: /data/diagnostics/source_flat_threshold
+            - field: /data/diagnostics/source_hnsw_threshold
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -363,6 +511,9 @@ commands:
       - invalid_argument.engine.vector_embedding
       - invalid_argument.executor.vector_dimension
       - invalid_argument.executor.vector_batch_duplicate_key
+    display:
+      columns:
+        - field: /data/items/*/result/vector_revision
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -377,6 +528,15 @@ commands:
     prose: commands/vector.batch_get.md
     errors+:
       - invalid_argument.engine.vector_batch
+    display:
+      columns:
+        - field: /data/items/*/result/value/key
+        - field: /data/items/*/result/value/version
+        - field: /data/items/*/result/value/vector_revision
+        - field: /data/items/*/result/value/data/embedding
+          as: json
+        - field: /data/items/*/result/value/data/metadata
+          as: json
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -394,6 +554,9 @@ commands:
     errors+:
       - invalid_argument.engine.vector_batch
       - invalid_argument.executor.vector_batch_duplicate_key
+    display:
+      columns:
+        - field: /data/items/*/result/vector_revision
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json

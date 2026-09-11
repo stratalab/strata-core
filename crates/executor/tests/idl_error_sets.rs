@@ -35,9 +35,10 @@ const MEMBER_C: &str = "invalid_argument.executor.hub_url";
 /// resolved list is the two defaults codes plus whatever the test authors.
 const PROBE: &str = "inference.capability";
 /// The lines bracketing the probe's `errors+` block; `set_probe_errors`
-/// rewrites whatever lies between them, so it can be called repeatedly.
+/// rewrites whatever lies between them, so it can be called repeatedly. The
+/// command's CLI `display:` block follows the errors and stays untouched.
 const PROBE_BEFORE: &str = "    prose: commands/inference.capability.md\n";
-const PROBE_AFTER: &str = "    fixtures:\n      request: requests/v1/inference/capability.json\n";
+const PROBE_AFTER: &str = "    display:\n      fields:\n        - field: /data/provider\n";
 
 struct Scratch {
     root: tempfile::TempDir,
@@ -223,7 +224,7 @@ fn a_set_reference_in_errors_minus_removes_every_code_of_the_set() {
     scratch.replace_in(
         "commands/inference.yaml",
         PROBE_AFTER,
-        "    errors-:\n      - set:probe.defaults\n    fixtures:\n      request: requests/v1/inference/capability.json\n",
+        &format!("    errors-:\n      - set:probe.defaults\n{PROBE_AFTER}"),
     );
     // The defaults layer itself now lists the set's two codes literally; it
     // must reference the set instead (the anti-copy rule), so make it.

@@ -7,12 +7,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod display;
+pub use display::{
+    validate_display_shape, CliDisplay, CliDisplayAs, CliDisplayDecl, CliDisplayField,
+    CliDisplayShape, CliDisplaySort, CliRenderRule,
+};
+
 /// Embedded generated CLI command metadata JSON.
 pub const EMBEDDED_CLI_COMMAND_INDEX_JSON: &str =
     include_str!("../idl/v1/generated/cli-command-index.json");
 
 const SUPPORTED_SCHEMA_VERSION: &str = "strata.cli.v1";
-const SUPPORTED_GENERATOR_VERSION: &str = "strata-executor-cli-idl.1";
+const SUPPORTED_GENERATOR_VERSION: &str = "strata-executor-cli-idl.2";
 // Crate-visible: the IPC hello echoes these same stamps (protocol.rs), so the
 // hello and the embedded command index cannot disagree about the source IDL.
 pub(crate) const SUPPORTED_SOURCE_SCHEMA_VERSION: &str = "strata.idl.v1";
@@ -271,6 +277,11 @@ pub struct CliCommandEntry {
     pub fixtures: CliFixtureRefs,
     /// Stability marker for the current executor wire shape.
     pub wire_status: String,
+    /// Layout rule inherited from the command's kind (`render:`).
+    pub render: CliRenderRule,
+    /// The command's display declaration (`display:`), validated against
+    /// `render` and, at authoring time, against the generated schema.
+    pub display: CliDisplayDecl,
 }
 
 /// Registered public error reference for CLI metadata.
@@ -461,12 +472,15 @@ fn validate_command(command: &CliCommandEntry) -> CliMetadataResult<()> {
         validate_fixture_path(response, "responses/v1")?;
     }
     match command.wire_status.as_str() {
-        "stable" | "transitional" => Ok(()),
-        _ => Err(invalid(format!(
-            "command `{}` has invalid wire_status `{}`",
-            command.id, command.wire_status
-        ))),
+        "stable" | "transitional" => {}
+        _ => {
+            return Err(invalid(format!(
+                "command `{}` has invalid wire_status `{}`",
+                command.id, command.wire_status
+            )))
+        }
     }
+    validate_display_shape(&command.id, command.render, &command.display).map_err(invalid)
 }
 
 fn validate_families(index: &CliCommandIndex) -> CliMetadataResult<()> {

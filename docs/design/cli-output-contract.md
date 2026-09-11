@@ -1,7 +1,7 @@
 # CLI output: one human mode, derived from the IDL
 
 **Status:** accepted 2026-09-11 after three review rounds; S0 in progress
-(S0a lands the §5 matrix). Tracking issue **#3314** (slices S0–S5). Every
+(S0a landed the §5 matrix, S0b the declarations and their guard). Tracking issue **#3314** (slices S0–S5). Every
 file:line below was read on `main` at `60db96ac`. Follows the shape of `inference-model-resolution.md`: name the
 mechanism, replace it, leave an executable contract behind.
 
@@ -297,52 +297,122 @@ byte-identical before and after every slice; the matrix pins that.
 
 ### R2 — the declaration lives in the IDL, the renderer interprets it
 
-Two additions to the authored IDL, both validated by `strata-idl check`:
+*Amended 2026-09-11 by S0b (#3314) to the vocabulary as built; the original
+proposal is in the history of this file. Nothing below renders yet — S1 turns
+the renderer into the interpreter.*
 
-- `kinds.yaml`: each kind gains `render: <rule>` naming one of the R1 rules
-  (`mutation_ack`, `optional`, `history`, `page`, `search`, `analytics`,
-  `status_sections`, `status_value`, `batch`, `bespoke`). Eleven lines.
-- `commands/*.yaml`: each **command** whose response carries a record gains
-  a `display:` block — `identity: <pointer>` for `MutationAck` / raw output,
-  `columns: [{field: <pointer>, header?, as?: date|bytes|json|size}]` for
-  pages, histories, searches and analytics, and
-  `fields: [{field: <pointer>, header?, as?}]` for status sections and
-  record reads. A `read.get` command declares **exactly one** of
-  `value: <pointer>` (the payload — `kv get`, `json get`, `config <key>`;
-  human prints it, `--raw` prints it verbatim) or `fields:` (a record —
-  human prints the key/value block, `--raw` prints `key<TAB>value` lines of
-  the same fields). That single declaration drives both human and raw mode;
-  there is no separate `raw:` projection (review round 3 found five raw
-  behaviours for one family and replaced them with this rule).
-  `fields` **selects as well as orders**: the family fixes the layout, the
-  command decides which facts a person sees (`hub get-dataset` declares 15
-  of its 27 wire fields; `admin info` drops `open` and `created`;
-  `branch get` drops `branch_id` and `state_revision`), and `--json` is the
-  complete record — that is what it is for. Every status command declares
-  its list, even when the list is "all of them", so a new wire field is a
-  `check` failure until someone decides where it goes.
-  `header:` is optional and defaults to the wire field name (Q18); it is
-  permitted where the wire name would misstate the humanised value — the
-  one class today is byte counts, `size_bytes` shown as `1 kB` under the
-  header `SIZE` rather than `SIZE_BYTES`. A `header` is a human-mode label
-  only; `--raw` keys are always the wire names.
-  Every `<pointer>` is a JSON pointer into the command's **response
-  schema** (`/data/key`, `/data/items/*/name`), not a DTO field name. The
-  declaration is keyed by command, not by DTO, because one DTO carries
-  different identity fields under different commands (`graph_delete_result`
-  is `graph`, `graph`+`node_id`, or `graph`+`src`+`edge_type`+`dst`
-  depending on the verb) — the catalog's finding, §4 there.
+Two additions to the authored IDL, both validated when the CLI index is
+generated (`strata-idl generate-cli`, gated by `check-cli`):
 
-The guard, which is what makes this derive-never-copy (#3250, #3244,
-#3226): every pointer must resolve in that command's
-`generated/schemas/<id>.json`; every command whose kind renders as a table
-must declare `columns`; every `status_sections` command must declare
-`fields`; every `read.get` command must declare exactly one of `value` /
-`fields`; every `mutation_ack` command must declare an `identity`. A
-command without a declaration fails `check`; there is no fallback to JSON.
-A renamed DTO field is a `check` failure, not an empty column, and a
-phantom result type (#3313's `VectorCollectionDelete`) cannot be pointed at
-because it has no schema.
+- `kinds.yaml`: every kind carries `render: <rule>` naming one of the R1
+  rules — `mutation_ack`, `optional`, `history`, `page`, `search`,
+  `analytics`, `status_value`, `status_sections`, `batch`. Twenty-two lines,
+  one per kind; a kind cannot be `bespoke`, because a hand-written arm is a
+  property of one command, not of an operation category.
+- `commands/*.yaml`: **every** command carries `display:` — either the word
+  `bespoke` (a hand-written renderer arm; fourteen today, pinned by
+  `crates/executor/tests/idl_display.rs`: `admin.describe`, `admin.ipc_stop`,
+  `admin.ping`, `branch.diff`, and the ten `inference.*` arms) or exactly one
+  of five shapes:
+
+  | Shape | Keys | Allowed under |
+  |---|---|---|
+  | **receipt** | `receipt: "<template>"`; `identity: [<pointer>…]`; `noun: <word>` | `mutation_ack` (identity required), `status_sections` (identity forbidden) |
+  | **value** | `value: <pointer>`; `as:` | `optional`, `status_value` |
+  | **fields** | `fields: [{field, header?, as?, fields?}…]` | `optional`, `status_value`, `status_sections` |
+  | **columns** | `columns: [{field, header?, as?}…]`; `fields:` only under `search` | `history`, `page`, `search`, `batch`, `status_value`, `status_sections` |
+  | **map** | `map: <pointer>`; `header:`; `sort: key \| asc \| desc` | `analytics` |
+
+  The family (via the kind's rule) fixes the layout; the shape says which
+  facts appear, in which order, and how. A shape the rule cannot render, two
+  shapes at once, or a key from another shape is a `check-cli` failure that
+  names the command and the reason.
+
+**Pointers.** Every `/…` string is a JSON pointer into the command's
+generated schema document (`generated/schemas/<id>.json`): `/data/…` walks
+the response payload, `/request/…` walks the request. `*` steps into array
+items or map values; a decimal index steps into one array item. A pointer
+that names a field the wire does not carry fails with the fields the wire
+does carry (`/request has no field name (fields: branch, collection, space,
+type)`); a pointer that steps into a scalar, or steps into every item where
+one value is needed, fails the same way. The `/request` root exists for the
+two `bool`-wire acks (`json index drop`, `vector collection delete`): the
+receipt names what the request named (`deleted collection
+{/request/collection}`) until the #3313 wire normalisation puts the identity
+on the wire (Q15). Those are the only two `/request` pointers today.
+
+**Receipts.** A `receipt` is a template: literal text plus `{/pointer}`
+placeholders, each taking at most one filter — `|bytes` (a base64 payload
+shown as text), `|size` (a byte count with a unit), `|len` (an array's
+length), `|plural:<noun>` (a count with its noun) — plus `{verb}`, which
+reads `/data/effect/kind` and is refused on a response without an `effect`
+(those acks — branch create/fork/merge, bulk insert, ontology freeze, index
+and collection create — spell their verb out). A placeholder must land on a
+scalar or carry the filter that makes one; the guard types every filter
+against the schema (`|len` needs an array, but `/data/key` is a base64
+string). `identity` lists the pointers `--raw` prints for a write (R4), with
+the same filter grammar, no `verb`, no repeats. `noun` is the word in the
+idempotent miss line (`no such key: greeting`, Q2) and needs an applied
+signal on the wire (`/data/effect/applied`, or a bare boolean `/data`) —
+without one a miss cannot be told from a hit, so the guard refuses it.
+The identity law is keyed by rule: under `mutation_ack` a receipt **must**
+declare `identity`, because `--raw` for a write is its identity; under
+`status_sections` (action receipts: `arrow export`, `arrow import`, `hub
+clone`) it **must not**, because `--raw` there is the record's
+key/value lines (Q16) and a second projection would be a second rule.
+
+**Values and fields.** A `read.get` command declares exactly one of `value`
+(the payload — `kv get`, `json get`, `config <key>`; human prints it, `--raw`
+prints it verbatim) or `fields` (a record — human prints the key/value
+block, `--raw` prints `key<TAB>value` lines of the same fields). One
+declaration drives both modes; there is no `raw:` projection (review round 3
+found five raw behaviours for one family and replaced them with this rule).
+`fields` **selects as well as orders**: `hub get-dataset` declares 15 of its
+27 wire fields, `admin info` drops `open` and `created`, `branch get` drops
+`branch_id` and `state_revision`; `--json` is the complete record, which is
+what it is for. Every status command declares its list even when the list is
+"all of them", so a new wire field is a `check-cli` failure until someone
+decides where it goes. A record-valued field may carry its own `fields:`
+(one level down, the same selection rule: `admin info` shows three of
+`memory_budget`'s fields); a nested pointer must stay under its parent, and
+a field cannot pair `as` with nested `fields`. `header:` is optional and
+defaults to the wire name (Q18); it is permitted where the wire name would
+misstate the humanised value — the one class today is byte counts,
+`size_bytes` shown as `1 kB` under `SIZE`. A `header` is a human-mode label
+only; `--raw` keys are always the wire names.
+
+**Presentation.** `as:` on a `value`, field or column is one of `bytes`
+(a base64 string), `json` (a structured or untyped value, shown compact),
+`date` (an integer timestamp, R3), `size` (an integer byte count), `float`
+(a number), `list` (an array of scalars, space-joined), `table` (an array of
+records, an indented table inside a fields block — the `artifact_sources`
+of vector diagnostics). Each is typed against the schema (`as: date needs an
+integer, but /data/name is a string`).
+
+**Columns and maps.** A column steps into exactly one row array with `/*`,
+and every column of a table reads from the same array; the batch rule
+additionally pins the array to `/data/items/*`, so a batch response that
+grows a second array cannot silently become the table. Rows come from an
+array, never from a map. `columns` pairs with `fields` only under `search`,
+where the fields are the diagnostics block that follows the table. A `map`
+names an object keyed by node whose values are scalars (the six analytics
+payloads), with `header` for the value column and `sort` for row order.
+
+The declaration is keyed by command, not by DTO, because one DTO carries
+different identity fields under different commands (`graph_delete_result`
+is `graph`, `graph`+`node_id`, or `graph`+`src`+`edge_type`+`dst` depending
+on the verb) — the catalog's finding, §4 there.
+
+**The guard** is what makes this derive-never-copy (#3250, #3244, #3226):
+every kind has a `render:` and every command a `display:` (a missing one
+does not parse, so it fails `check` before `check-cli` is reached); the
+shape fits the rule; every pointer resolves in that command's schema
+document; every placeholder, filter and `as:` is typed. There is no
+fallback to JSON. A renamed DTO field is a `check-cli` failure, not an empty column, and
+a phantom result type (#3313's `VectorCollectionDelete`) cannot be pointed
+at because it has no schema. The guard runs at authoring time only: the CLI
+embeds the resolved index and re-runs the cheap rule ⇔ shape check on it,
+never the schema walk.
 
 **`display:` is CLI-only.** The Python SDK is a sibling of the CLI, not a
 wrapper around it: both derive from the IDL, and an SDK method returns the
@@ -350,33 +420,31 @@ typed wire record (`db.branch.get("x")` → a `BranchItem` with every field),
 never the CLI's curated subset or its receipt strings. The SDK generator
 never reads `display:` — and cannot: the declaration is resolved into
 `cli-command-index.json` (the index the CLI embeds), never into
-`command-index.json`, which is what the SDK vendors; S0 adds the guard that
-no `display` key appears there, so a future generator cannot quietly start
-consuming it. The same holds for MCP and the VS Code extension, which
-consume `--json`. The SDK's
-own redesign (`db.kv.put("greeting", b"hello")`, `db.json.set("user", {…})`,
-`db.branch.fork("experiment")`, `db.vector.query("docs", vector, k=10)`)
-follows the #3313 wire normalisation: the nominal-vs-wire divergences are
-fixed or declared first, then the Python surface is designed on a wire that
-is true. Sequencing decided 2026-09-11: CLI contract, then #3313, then the
-Python SDK.
+`command-index.json`, which is what the SDK vendors. `generate` and `check`
+reject a `command-index.json` that carries a `display` or `render` key
+anywhere in its tree, so a future generator cannot quietly start consuming
+it. The same holds for MCP and the VS Code extension, which consume
+`--json`. The SDK's own redesign (`db.kv.put("greeting", b"hello")`,
+`db.json.set("user", {…})`, `db.branch.fork("experiment")`,
+`db.vector.query("docs", vector, k=10)`) follows the #3313 wire
+normalisation: the nominal-vs-wire divergences are fixed or declared first,
+then the Python surface is designed on a wire that is true. Sequencing
+decided 2026-09-11: CLI contract, then #3313, then the Python SDK.
 
 **Kind selects the rule; schema supplies the shape** (Root E). The two
 places the wire disagrees with the declared family today are handled
-without a special case in the renderer:
+without a special case in the renderer, and both are S0c/S1 work — S0b
+declares, it does not resolve encodings:
 
 - *Encoding* — whether a `Maybe` is `{found, value}` or a nullable `data`,
   whether a history is `{items}` or a bare array — is read from the schema
   at generation time and resolved into the index as `optional.encoding` /
   `history.encoding`. The renderer never sniffs it.
-- *Verb* — `mutation_ack` reads `effect.kind` when the schema has an
-  `effect`; when it does not (`branch create`, `graph bulk_insert`, the
-  transitional six) the verb derives from the command's `op`
-  (`mutation.create` → `created`, `mutation.delete` → `deleted`,
-  `mutation.put` → `updated`, `mutation.merge` → `merged`). A `bool` wire
-  (`json index drop`, `vector collection delete`) declares
-  `identity: request.name` — the receipt names what the request named
-  (`dropped index by_name`) until the wire normalizes (Q15).
+- *Verb* — `mutation_ack` reads `effect.kind` through `{verb}` when the
+  schema has an `effect`; when it does not, the receipt spells the verb
+  (`created branch {/data/name}`), which the guard enforces by refusing
+  `{verb}` on an effect-less response. The `bool` wires use `/request`
+  pointers as above (Q15).
 
 The rows where declaration and schema disagree live in a shrink-only
 `response-model-divergences.yaml` beside `cross-surface-divergences.yaml`
@@ -386,11 +454,10 @@ executable form of the inventory; nothing renders differently until S1.
 
 The generator resolves the declaration into `cli-command-index.json` per
 command; the CLI already embeds that index, and `render.rs` becomes an
-interpreter: `kind.render` picks the rule, `display` supplies the pointers.
-The 23 tag arms shrink to the ten bespoke inference arms plus `pong` and
-`described`; `render_human_data` and the `_ => to_string_pretty` exit are
-deleted. A new command gets its human output by declaring its shape, which
-it must do anyway to pass `check`.
+interpreter: `render` picks the rule, `display` supplies the pointers. The
+23 tag arms shrink to the fourteen bespoke arms; `render_human_data` and the
+`_ => to_string_pretty` exit are deleted. A new command gets its human
+output by declaring its shape, which it must do anyway to pass `check-cli`.
 
 Why the IDL and not a Rust table beside the renderer: a Rust table is a copy
 of field names that the schema already holds. The pointer guard is the
@@ -578,7 +645,7 @@ a visible CLI change and carries release notes in the PR body.
 
 | Slice | Content | Wire change | Closes |
 |---|---|---|---|
-| **S0** (three PRs under the ≤1,500-LOC rule) | **S0a** — the matrix (§5.2: in-process, binary, examples cross-check; playground cells come with #3312), blessed on today's output; the three plants; both design documents committed. **S0b** — `display:` per command in `commands/*.yaml` (R2: `identity`, `columns`, `fields`, `value`, `header`, `as`), resolved into `cli-command-index.json` and **declared and guarded but not yet read** by the renderer (so the declaration review happens on a PR that changes no output), with the guard that `command-index.json` never carries it (the SDK boundary). **S0c** — the #3313 `check` guard (family ⇔ schema) with its shrink-only `response-model-divergences.yaml`, `wire_status: transitional` on the divergent rows, and the declarations that are simply wrong corrected (Q13) — a docs-only change to `Returns:` | none (docs `Returns:` lines change in S0c) | #3313 asks 1–2 |
+| **S0** (three PRs under the ≤1,500-LOC rule) | **S0a** — the matrix (§5.2: in-process, binary, examples cross-check; playground cells come with #3312), blessed on today's output; the three plants; both design documents committed. **S0b** — `render:` per kind in `kinds.yaml` and `display:` per command in `commands/*.yaml` (R2 as amended: `receipt`/`identity`/`noun`, `value`, `fields`, `columns`, `map`, `header`, `as`, `sort`, or `bespoke`), resolved into `cli-command-index.json` and **declared and guarded but not yet read** by the renderer (so the declaration review happens on a PR that changes no output), with the guard that `command-index.json` never carries it (the SDK boundary). **S0c** — the #3313 `check` guard (family ⇔ schema) with its shrink-only `response-model-divergences.yaml`, `wire_status: transitional` on the divergent rows, and the declarations that are simply wrong corrected (Q13) — a docs-only change to `Returns:` | none (docs `Returns:` lines change in S0c) | #3313 asks 1–2 |
 | **#3312** (its own small PR, before S1) | `command_from_line` returns the format with the command; `execute_cli` renders with it; playground cells added | none | #3312 |
 | **S1** | R1 `mutation_ack` rule from the declaration; R5 stderr line for `applied: false` (exit stays 0); R4 raw identity for writes and the `--raw` help text rewritten to "shell-composable"; `mutation_summary` deleted | none (CLI text; exit codes unchanged; release note) | #3306 (writes, `--raw` writes) |
 | **S2** | R1-table; `page`, `history`, `search`, `analytics` rules from `display.columns`; R3 dates in cells; hint to stderr; raw identities | none (release note) | #3306 (lists, dates), #3205 §3/§5 |
@@ -666,7 +733,7 @@ Verified against `main` at `60db96ac`.
 | Q12 | Playground channel order | stdout then stderr, no exit marker |
 | Q13 | Rendering authority where declaration and wire disagree (#3313): render from the **schema** and correct/flag the declarations now, or from the **declaration** and normalize the wire? | **schema now, wire later.** The wire is what `--json` callers, fixtures and the SDK already depend on; the declaration is a docs artifact nobody executes. S0 corrects the declarations it can (`branch create` is `StatusResponse<BranchItem>` in fact) and flags the rest `transitional` in a shrink-only allowlist. Normalizing the wire (one encoding per family) is a wire change, so a major — tracked from #3313, not here |
 | Q14 | A bulk delete (`vector delete-all`, `vector delete-by-filter`, `graph apply_delete_policy`) that matches nothing reports `applied: false` — a miss? | **Not a miss — decided 2026-09-11.** stdout `deleted 0 vectors from docs`, exit 0. A filter that matches nothing did what it was asked; only a *named* absent target is a miss (Q2) |
-| Q15 | `bool` acks (`json index drop`, `vector collection delete`) carry no identity on the wire | receipt takes the name from the request, declared `identity: request.name` (`dropped index by_name`), until #3313 puts it on the wire |
+| Q15 | `bool` acks (`json index drop`, `vector collection delete`) carry no identity on the wire | receipt takes the name from the request through a `/request/…` pointer (`dropped index {/request/name}`, `identity: [/request/name]`), until #3313 puts it on the wire |
 | Q16 | `--raw` for status objects (`admin info`, `inference status`, `branch get`) — today compact JSON | **`key<TAB>value` lines — decided 2026-09-11.** Dotted keys for nesting, arrays as one compact-JSON field, null as an empty value; `--raw` is TSV everywhere and `--json` is the only JSON |
 | Q17 | `action.status` commands (`arrow export/import`, `clone`, `ipc stop`) — today pretty JSON | one-line receipt like a write (`exported 1 row of kv to /tmp/exports/kv.parquet (1.9 kB)`); `--raw` = key/value lines as any status; the record stays in `--json` |
 | Q18 | Human labels and headers | **Wire field names by default; an explicit `header:` permitted where the wire name misstates the humanised value — relaxed 2026-09-11 on review** (round 1 had said "always", which yields `SIZE_BYTES  1 kB`). Headers are the wire name in UPPERCASE unless the command declares a `header:`; the one class today is byte counts (`size_bytes` → `SIZE` / `size`, `total_bytes` → `total`). `header:` is human-only, `--raw` keys stay wire names, and the declaration lives in the IDL beside the field it labels, so there is still no alias table to drift |

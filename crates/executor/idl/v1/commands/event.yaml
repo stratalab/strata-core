@@ -10,6 +10,10 @@ commands:
       - invalid_argument.engine.event_type
       - invalid_argument.engine.event_payload
       - invalid_argument.engine.event_payload_too_large
+    display:
+      receipt: "appended {/data/event_type} #{/data/sequence}"
+      identity:
+        - /data/sequence
     fixtures:
       request: requests/v1/event/append.json
       response: responses/v1/event/append_applied.json
@@ -28,6 +32,10 @@ commands:
       - invalid_argument.engine.event_type
       - invalid_argument.engine.event_payload
       - invalid_argument.engine.event_payload_too_large
+    display:
+      columns:
+        - field: /data/items/*/result/event_type
+        - field: /data/items/*/result/sequence
     fixtures:
       request: requests/v1/event/batch_append.json
       response: responses/v1/event/batch_append_ok.json
@@ -38,6 +46,17 @@ commands:
     output: Output::EventRecord
     result: EventVersionedData
     prose: commands/event.get.md
+    display:
+      fields:
+        - field: /data/value/event/sequence
+        - field: /data/value/event/event_type
+        - field: /data/value/event/timestamp
+          as: date
+        - field: /data/value/event/payload
+          as: json
+        - field: /data/value/event/hash
+        - field: /data/value/event/previous_hash
+        - field: /data/value/version
     fixtures:
       setup:
         - requests/v1/event/append.json
@@ -51,6 +70,8 @@ commands:
     output: Output::Bool
     result: bool
     prose: commands/event.exists.md
+    display:
+      value: /data
     fixtures:
       setup:
         - requests/v1/event/append.json
@@ -63,6 +84,8 @@ commands:
     output: Output::EventCount
     result: u64
     prose: commands/event.count.md
+    display:
+      value: /data/count
     fixtures:
       setup:
         - requests/v1/event/append.json
@@ -80,6 +103,14 @@ commands:
     errors+:
       - invalid_argument.engine.event_type
       - invalid_argument.executor.limit
+    display:
+      columns:
+        - field: /data/items/*/event/sequence
+        - field: /data/items/*/event/event_type
+        - field: /data/items/*/event/timestamp
+          as: date
+        - field: /data/items/*/event/payload
+          as: json
     fixtures:
       setup:
         - requests/v1/event/append.json
@@ -98,6 +129,14 @@ commands:
     errors+:
       - invalid_argument.engine.event_type
       - invalid_argument.executor.limit
+    display:
+      columns:
+        - field: /data/items/*/event/sequence
+        - field: /data/items/*/event/event_type
+        - field: /data/items/*/event/timestamp
+          as: date
+        - field: /data/items/*/event/payload
+          as: json
     fixtures:
       setup:
         - requests/v1/event/append.json
@@ -113,6 +152,9 @@ commands:
     result: String
     response_model: Page<String, String>
     prose: commands/event.types.md
+    display:
+      columns:
+        - field: /data/items/*
     fixtures:
       setup:
         - requests/v1/event/append.json
@@ -130,6 +172,14 @@ commands:
     errors+:
       - invalid_argument.engine.event_type
       - invalid_argument.executor.limit
+    display:
+      columns:
+        - field: /data/items/*/event/sequence
+        - field: /data/items/*/event/event_type
+        - field: /data/items/*/event/timestamp
+          as: date
+        - field: /data/items/*/event/payload
+          as: json
     fixtures:
       setup:
         - requests/v1/event/append.json
@@ -144,6 +194,12 @@ commands:
     output: Output::EventChainVerification
     result: EventChainVerification
     prose: commands/event.verify_chain.md
+    display:
+      fields:
+        - field: /data/valid
+        - field: /data/length
+        - field: /data/first_invalid
+        - field: /data/error
     fixtures:
       setup:
         - requests/v1/event/append.json

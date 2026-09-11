@@ -442,7 +442,7 @@ fn generated_cli_command_index_is_fresh_and_deterministic() {
     assert_eq!(first, second);
     assert!(first.generated);
     assert_eq!(first.schema_version, "strata.cli.v1");
-    assert_eq!(first.generator_version, "strata-executor-cli-idl.1");
+    assert_eq!(first.generator_version, "strata-executor-cli-idl.2");
     assert_eq!(first.source.schema_version, "strata.idl.v1");
     assert_eq!(first.source.generator_version, "strata-executor-idl.1");
     assert_eq!(first.source.checksum_sha256.len(), 64);
@@ -601,30 +601,49 @@ fn cli_command_index_has_required_coverage_and_lookup_tables() {
 }
 
 #[test]
-fn cli_generation_reads_resolved_index_not_authored_yaml_or_prose() {
+fn cli_generation_reads_command_facts_from_the_resolved_index_and_only_display_from_yaml() {
     let root = default_repo_root();
     let temp = tempfile::tempdir().expect("tempdir creates");
-    let generated_dir = temp.path().join("crates/executor/idl/v1/generated");
-    fs::create_dir_all(&generated_dir).expect("generated dir creates");
-    fs::copy(
-        root.join("crates/executor/idl/v1/generated/command-index.json"),
-        generated_dir.join("command-index.json"),
+    let idl = "crates/executor/idl/v1";
+    // What `generate-cli` reads: the resolved index and schemas for command
+    // facts, `kinds.yaml` and `commands/*.yaml` for the CLI-only display
+    // layer. Prose is deliberately absent.
+    for relative in ["generated/command-index.json", "kinds.yaml"] {
+        let target = temp.path().join(idl).join(relative);
+        fs::create_dir_all(target.parent().expect("parent")).expect("dir creates");
+        fs::copy(root.join(idl).join(relative), target).expect("file copies");
+    }
+    for relative in ["generated/schemas", "commands"] {
+        copy_dir(
+            &root.join(idl).join(relative),
+            &temp.path().join(idl).join(relative),
+        );
+    }
+    // A command fact edited in the YAML must not reach the CLI index: the
+    // display layer is the only thing generate-cli takes from authored files.
+    let kv_yaml = temp.path().join(idl).join("commands/kv.yaml");
+    let text = fs::read_to_string(&kv_yaml).expect("kv.yaml reads");
+    assert_eq!(text.matches("    title: Put KV value\n").count(), 1);
+    fs::write(
+        &kv_yaml,
+        text.replacen("    title: Put KV value\n", "    title: TAMPERED\n", 1),
     )
-    .expect("command index copies");
+    .expect("kv.yaml writes");
 
-    let index =
-        resolve_cli_index(temp.path()).expect("CLI index resolves from generated JSON only");
+    let index = resolve_cli_index(temp.path()).expect("CLI index resolves");
     assert_eq!(index.command_count, required_command_count());
     assert_eq!(
         index.source.path,
         "crates/executor/idl/v1/generated/command-index.json"
     );
-    assert!(
-        !temp
-            .path()
-            .join("crates/executor/idl/v1/commands/kv.yaml")
-            .exists(),
-        "test fixture intentionally excludes authored YAML"
+    let put = index
+        .commands
+        .iter()
+        .find(|command| command.id == "kv.put")
+        .expect("kv.put resolves");
+    assert_eq!(
+        put.title, "Put KV value",
+        "facts come from the resolved index"
     );
     assert!(
         !temp
@@ -633,6 +652,19 @@ fn cli_generation_reads_resolved_index_not_authored_yaml_or_prose() {
             .exists(),
         "test fixture intentionally excludes authored prose"
     );
+}
+
+fn copy_dir(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("dir creates");
+    for entry in fs::read_dir(source).expect("dir reads") {
+        let entry = entry.expect("entry reads");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).expect("file copies");
+        }
+    }
 }
 
 #[test]

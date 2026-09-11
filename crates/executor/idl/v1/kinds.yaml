@@ -2,54 +2,63 @@ kinds:
   - id: mutation.create
     access: write
     commit: commits_on_success
+    render: mutation_ack
     response_model: MutationAck<{result}>
     snippets:
       - mutation-ack.md
   - id: mutation.put
     access: write
     commit: commits_on_success
+    render: mutation_ack
     response_model: MutationAck<{result}>
     snippets:
       - mutation-ack.md
   - id: mutation.delete
     access: write
     commit: commits_on_success
+    render: mutation_ack
     response_model: MutationAck<{result}>
     snippets:
       - mutation-ack.md
   - id: mutation.bulk_delete
     access: write
     commit: commits_on_success
+    render: mutation_ack
     response_model: MutationAck<{result}>
     snippets:
       - mutation-ack.md
   - id: mutation.metadata_update
     access: write
     commit: commits_on_success
+    render: mutation_ack
     response_model: MutationAck<{result}>
     snippets:
       - mutation-ack.md
   - id: mutation.merge
     access: write
     commit: commits_on_success
+    render: mutation_ack
     response_model: MutationAck<{result}>
     snippets:
       - mutation-ack.md
   - id: read.get
     access: read
     commit: none
+    render: optional
     response_model: Maybe<{result}>
     snippets:
       - optional-read.md
   - id: read.history
     access: read
     commit: none
+    render: history
     response_model: Maybe<Vec<{result}>>
     snippets:
       - optional-read.md
   - id: read.page
     access: read
     commit: none
+    render: page
     pagination: cursor
     response_model: Page<{result}>
     snippets:
@@ -57,6 +66,7 @@ kinds:
   - id: read.search
     access: read
     commit: none
+    render: search
     pagination: bounded
     response_model: SearchResult<{result}>
     snippets:
@@ -64,6 +74,7 @@ kinds:
   - id: read.diagnostics
     access: read
     commit: none
+    render: search
     pagination: bounded
     response_model: SearchResult<{result}> + IndexDiagnostics
     snippets:
@@ -72,12 +83,14 @@ kinds:
   - id: read.status
     access: read
     commit: none
+    render: status_value
     response_model: StatusValue<{result}>
     snippets:
       - status-value.md
   - id: read.sample
     access: read
     commit: none
+    render: page
     pagination: sample
     response_model: SamplePage<{result}>
     snippets:
@@ -86,6 +99,7 @@ kinds:
     cli_surface: wire
     access: write
     commit: itemwise_shared_commit
+    render: batch
     batch: itemwise
     response_model: BatchResult<{result}>
     snippets:
@@ -94,6 +108,7 @@ kinds:
     cli_surface: wire
     access: read
     commit: none
+    render: batch
     batch: itemwise
     response_model: BatchResult<{result}>
     snippets:
@@ -102,6 +117,7 @@ kinds:
     cli_surface: wire
     access: read
     commit: none
+    render: batch
     batch: itemwise
     response_model: BatchResult<{result}>
     snippets:
@@ -109,6 +125,7 @@ kinds:
   - id: read.analytics
     access: read
     commit: none
+    render: analytics
     response_model: AnalyticsResult<{result}>
     snippets:
       - analytics-result.md
@@ -116,6 +133,7 @@ kinds:
     cli_surface: wire
     access: write
     commit: commits_on_success
+    render: batch
     batch: atomic
     response_model: BatchResult<{result}>
     snippets:
@@ -123,20 +141,24 @@ kinds:
   - id: read.summary
     access: read
     commit: none
+    render: status_sections
     response_model: StatusResponse<{result}>
     snippets:
       - status-value.md
   - id: action.status
     access: write
     commit: none
+    render: status_sections
     response_model: StatusResponse<{result}>
     snippets:
       - status-value.md
   - id: inference.models_page
     access: read
     commit: none
+    render: page
     pagination: cursor
     response_model: Page<ModelInfo, String>
   - id: inference.runtime_op
     access: read
     commit: none
+    render: status_sections

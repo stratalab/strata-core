@@ -9,8 +9,10 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
+use crate::cli_metadata::{CliDisplayDecl, CliRenderRule};
 use crate::{public_error_code_entries, Command, Output};
 
+mod display;
 mod docs;
 mod examples;
 pub use examples::{CapturedExample, CapturedStep};
@@ -29,10 +31,24 @@ const UNCOVERED_ERROR_CODES_FILE: &str = "uncovered-error-codes.yaml";
 const UNREPLAYED_ERROR_CODES_FILE: &str = "unreplayed-error-codes.yaml";
 const REPLAY_SKIPPED_COMMANDS_FILE: &str = "replay-skipped-commands.yaml";
 const CLI_SURFACES: &[&str] = &["verb", "wire"];
+/// The authored command files under `idl/v1/commands/`, in resolution order.
+const COMMAND_FILES: &[&str] = &[
+    "admin.yaml",
+    "arrow.yaml",
+    "branch.yaml",
+    "event.yaml",
+    "graph.yaml",
+    "hub.yaml",
+    "inference.yaml",
+    "json.yaml",
+    "kv.yaml",
+    "space.yaml",
+    "vector.yaml",
+];
 const SUPPORTED_COMMAND_SCHEMA_VERSION: &str = "strata.idl.v1";
 const SUPPORTED_COMMAND_GENERATOR_VERSION: &str = "strata-executor-idl.1";
 const CLI_SCHEMA_VERSION: &str = "strata.cli.v1";
-const CLI_GENERATOR_VERSION: &str = "strata-executor-cli-idl.1";
+const CLI_GENERATOR_VERSION: &str = "strata-executor-cli-idl.2";
 const COMMAND_SOURCE_FIELDS: &[&str] = &[
     "id",
     "kind",
@@ -56,6 +72,7 @@ const COMMAND_SOURCE_FIELDS: &[&str] = &[
     "snippets",
     "errors+",
     "errors-",
+    "display",
     "fixtures",
 ];
 
@@ -415,6 +432,10 @@ pub struct CliCommandEntry {
     pub fixtures: FixtureRefs,
     /// Stability marker for the current executor wire shape.
     pub wire_status: String,
+    /// Layout rule inherited from the command's kind (`render:`).
+    pub render: CliRenderRule,
+    /// The command's display declaration (`display:`).
+    pub display: CliDisplayDecl,
 }
 
 /// CLI runtime lookup tables.
@@ -478,7 +499,27 @@ struct FamiliesSource {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KindsSource {
-    kinds: Vec<NamedLayerSource>,
+    kinds: Vec<KindLayerSource>,
+}
+
+/// A kind is a reuse layer plus the one fact no other layer carries: the CLI
+/// render rule. `render` is required, so a kind without one fails `check`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KindLayerSource {
+    id: String,
+    render: CliRenderRule,
+    #[serde(flatten)]
+    fields: LayerFields,
+}
+
+impl KindLayerSource {
+    fn into_layer(self) -> NamedLayerSource {
+        NamedLayerSource {
+            id: self.id,
+            fields: self.fields,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -616,6 +657,10 @@ struct CommandSource {
     errors_add: Vec<String>,
     #[serde(default, rename = "errors-")]
     errors_remove: Vec<String>,
+    /// Required: every command says how the CLI shows it, even if the
+    /// answer is `bespoke`. The display layer is joined into the CLI index
+    /// only; `command-index.json` never carries it.
+    display: CliDisplayDecl,
     fixtures: FixtureRefs,
 }
 
@@ -765,7 +810,14 @@ pub fn resolve_index(repo_root: &Path) -> Result<CommandIndex> {
     let dto_inventory: DtoInventorySource = read_yaml(&idl_root.join("dto-inventory.yaml"))?;
 
     let mut family_layers = named_layers(families.families, "family")?;
-    let mut kind_layers = named_layers(kinds.kinds, "kind")?;
+    let mut kind_layers = named_layers(
+        kinds
+            .kinds
+            .into_iter()
+            .map(KindLayerSource::into_layer)
+            .collect(),
+        "kind",
+    )?;
     let registered_errors = registered_error_map();
     validate_error_overlay(&overlay_errors.errors, &registered_errors)?;
     enforce_error_code_exhaustiveness(&idl_root, &overlay_errors.errors, &registered_errors)?;
@@ -787,19 +839,7 @@ pub fn resolve_index(repo_root: &Path) -> Result<CommandIndex> {
     let response_models: BTreeSet<String> = dto_inventory.response_models.into_iter().collect();
 
     let mut command_entries = Vec::new();
-    for file_name in [
-        "admin.yaml",
-        "arrow.yaml",
-        "branch.yaml",
-        "event.yaml",
-        "graph.yaml",
-        "hub.yaml",
-        "inference.yaml",
-        "json.yaml",
-        "kv.yaml",
-        "space.yaml",
-        "vector.yaml",
-    ] {
+    for file_name in COMMAND_FILES {
         let command_path = idl_root.join("commands").join(file_name);
         validate_command_source_text(&command_path)?;
         let command_file: CommandsFileSource = read_yaml(&command_path)?;
@@ -883,6 +923,7 @@ pub fn generate(repo_root: &Path) -> Result<()> {
 
     let json = to_generated_json(&index)?;
     let path = command_index_path(repo_root);
+    display::assert_no_display_keys(&json, &path)?;
     fs::write(&path, json).map_err(|source| IdlError::Write { path, source })?;
 
     let schemas_dir = schemas_dir_path(repo_root);
@@ -924,6 +965,7 @@ pub fn check(repo_root: &Path) -> Result<()> {
     let index = resolve_index(repo_root)?;
     let expected = to_generated_json(&index)?;
     let path = command_index_path(repo_root);
+    display::assert_no_display_keys(&expected, &path)?;
     let actual = fs::read_to_string(&path).map_err(|source| IdlError::Read {
         path: path.clone(),
         source,
@@ -985,7 +1027,8 @@ pub fn resolve_cli_index(repo_root: &Path) -> Result<CliCommandIndex> {
             path: path.clone(),
             source,
         })?;
-    cli_index_from_command_index(repo_root, &path, source_checksum, command_index)
+    let layer = display::load_display_layer(&repo_root.join(IDL_DIR))?;
+    cli_index_from_command_index(repo_root, &path, source_checksum, command_index, &layer)
 }
 
 /// Serializes generated CLI command metadata with stable formatting.
@@ -1063,6 +1106,7 @@ fn cli_index_from_command_index(
     source_path: &Path,
     source_checksum: String,
     command_index: CommandIndex,
+    layer: &display::DisplayLayer,
 ) -> Result<CliCommandIndex> {
     validate_cli_source_index(&command_index)?;
     let source = CliIndexSourceInfo {
@@ -1076,7 +1120,8 @@ fn cli_index_from_command_index(
     let mut seen_paths = BTreeMap::new();
     let mut commands = Vec::with_capacity(command_index.commands.len());
     for command in command_index.commands {
-        let entry = cli_entry_from_resolved(command)?;
+        let (render, decl) = display_for_command(repo_root, layer, &command)?;
+        let entry = cli_entry_from_resolved(command, render, decl)?;
         if !seen_ids.insert(entry.id.clone()) {
             return Err(invalid(format!(
                 "duplicate command id `{}` in command index",
@@ -1154,7 +1199,35 @@ fn validate_cli_source_index(index: &CommandIndex) -> Result<()> {
     Ok(())
 }
 
-fn cli_entry_from_resolved(command: ResolvedCommand) -> Result<CliCommandEntry> {
+/// Joins the authored display layer onto one resolved command: the kind's
+/// `render:` and the command's `display:`, checked against the command's
+/// generated schema document so every declared pointer resolves.
+fn display_for_command(
+    repo_root: &Path,
+    layer: &display::DisplayLayer,
+    command: &ResolvedCommand,
+) -> Result<(CliRenderRule, CliDisplayDecl)> {
+    let render = *layer.render_by_kind.get(&command.kind).ok_or_else(|| {
+        invalid(format!(
+            "kind `{}` of command `{}` declares no `render:`",
+            command.kind, command.id
+        ))
+    })?;
+    let decl = layer
+        .display_by_command
+        .get(&command.id)
+        .cloned()
+        .ok_or_else(|| invalid(format!("command `{}` declares no `display:`", command.id)))?;
+    let document = display::read_schema_document(repo_root, &command.id)?;
+    display::validate_display(&command.id, render, &decl, &document)?;
+    Ok((render, decl))
+}
+
+fn cli_entry_from_resolved(
+    command: ResolvedCommand,
+    render: CliRenderRule,
+    display: CliDisplayDecl,
+) -> Result<CliCommandEntry> {
     let wire = variant_wire_tag(&command.input, "Command")?;
     // A `wire` command omits its `cli.path` on the shipped command-index.json
     // (#3058), but the CLI-routing catalog still needs the logical path.
@@ -1189,6 +1262,8 @@ fn cli_entry_from_resolved(command: ResolvedCommand) -> Result<CliCommandEntry> 
         errors: command.errors,
         fixtures: command.fixtures,
         wire_status: command.wire_status,
+        render,
+        display,
     };
     validate_cli_entry(&entry)?;
     Ok(entry)
@@ -1501,22 +1576,35 @@ fn validate_command_source_text(path: &Path) -> Result<()> {
         path: path.to_path_buf(),
         source,
     })?;
-    for forbidden in [
-        "fields:",
-        "schema:",
-        "properties:",
-        "request_schema:",
-        "response_schema:",
-    ] {
-        if text.contains(forbidden) {
-            return Err(invalid(format!(
-                "{} defines DTO fields via `{forbidden}`; command YAML may only reference executor DTOs",
-                path.display()
-            )));
-        }
-    }
+    // `fields:` is the one DTO-shaped word a `display:` block legitimately
+    // uses (it selects wire fields, it does not define them), so the guard
+    // tracks the block: a line indented deeper than the `display:` key is
+    // inside it, anything at or above that indent ends it.
+    let mut in_display = false;
     for line in text.lines() {
         let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if in_display && indent <= 4 && !trimmed.is_empty() {
+            in_display = false;
+        }
+        if indent == 4 && trimmed.starts_with("display:") {
+            in_display = true;
+            continue;
+        }
+        for forbidden in [
+            "fields:",
+            "schema:",
+            "properties:",
+            "request_schema:",
+            "response_schema:",
+        ] {
+            if line.contains(forbidden) && !(in_display && forbidden == "fields:") {
+                return Err(invalid(format!(
+                    "{} defines DTO fields via `{forbidden}`; command YAML may only reference executor DTOs",
+                    path.display()
+                )));
+            }
+        }
         if trimmed.starts_with('&') || trimmed.contains(": &") || trimmed.contains("<<:") {
             return Err(invalid(format!(
                 "{} uses YAML anchors or merge keys; use explicit IDL layers instead",

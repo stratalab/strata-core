@@ -11,6 +11,13 @@ commands:
       - not_found.engine.branch
       - invalid_argument.engine.branch_name
       - invalid_argument.engine.branch_name_reserved
+    display:
+      columns:
+        - field: /data/items/*/name
+        - field: /data/items/*/parent/name
+          header: PARENT
+        - field: /data/items/*/status
+        - field: /data/items/*/generation
     fixtures:
       setup:
         - requests/v1/branches/create.json
@@ -24,6 +31,15 @@ commands:
     result: BranchItem
     response_model: StatusResponse<BranchItem>
     prose: commands/branch.get.md
+    display:
+      fields:
+        - field: /data/name
+        - field: /data/parent/name
+          header: parent
+        - field: /data/status
+        - field: /data/generation
+        - field: /data/created_at
+        - field: /data/deleted_at
     fixtures:
       setup:
         - requests/v1/branches/create.json
@@ -37,6 +53,7 @@ commands:
     result: BranchComparisonItem
     response_model: StatusResponse<BranchComparisonItem>
     prose: commands/branch.diff.md
+    display: bespoke
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -53,6 +70,10 @@ commands:
       - conflict.engine.promotion
       - invalid_argument.engine.branch_point
     prose: commands/branch.merge.md
+    display:
+      receipt: "merged {/data/source} into {/data/target}: {/data/applied|len} applied, {/data/deleted|len} deleted, {/data/conflicts|len} conflicts (version {/data/target_version})"
+      identity:
+        - /data/target_version
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -82,6 +103,22 @@ commands:
     errors+:
       - invalid_argument.engine.branch_point
     prose: commands/branch.preview.md
+    display:
+      fields:
+        - field: /data/source
+        - field: /data/target
+        - field: /data/strategy
+        - field: /data/branch_point
+        - field: /data/spaces_covered
+          as: list
+        - field: /data/capabilities_covered
+          as: list
+        - field: /data/capabilities_unsupported
+          as: list
+        - field: /data/conflicts
+          as: table
+        - field: /data/derived_state
+          as: table
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -106,6 +143,10 @@ commands:
       - already_exists.engine.branch
     errors-:
       - not_found.engine.branch
+    display:
+      receipt: "created branch {/data/name}"
+      identity:
+        - /data/name
     fixtures:
       request: requests/v1/branches/create.json
       response: responses/v1/branches/create.json
@@ -123,6 +164,10 @@ commands:
     prose: commands/branch.fork.md
     errors+:
       - already_exists.engine.branch
+    display:
+      receipt: "forked {/data/name} from {/data/parent/name}"
+      identity:
+        - /data/name
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -139,6 +184,10 @@ commands:
     errors+:
       - already_exists.engine.branch
       - history_unavailable.engine.persistence_history
+    display:
+      receipt: "forked {/data/name} from {/data/parent/name} at version {/data/parent/fork_version}"
+      identity:
+        - /data/name
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -155,6 +204,10 @@ commands:
     errors+:
       - already_exists.engine.branch
       - history_unavailable.engine.persistence_history
+    display:
+      receipt: "forked {/data/name} from {/data/parent/name} at timestamp {/data/parent/fork_timestamp}"
+      identity:
+        - /data/name
     fixtures:
       setup:
         - requests/v1/kv/put.json
@@ -169,6 +222,11 @@ commands:
     prose: commands/branch.delete.md
     errors+:
       - invalid_argument.engine.branch_delete
+    display:
+      receipt: "{verb} branch {/data/branch/name}"
+      noun: branch
+      identity:
+        - /data/branch/name
     fixtures:
       setup:
         - requests/v1/branches/create.json

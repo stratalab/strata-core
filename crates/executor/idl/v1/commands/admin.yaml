@@ -10,6 +10,7 @@ commands:
     prose: commands/admin.ping.md
     errors-:
       - not_found.engine.branch
+    display: bespoke
     fixtures:
       request: requests/v1/admin/ping.json
       response: responses/v1/admin/ping.json
@@ -24,6 +25,23 @@ commands:
     prose: commands/admin.info.md
     errors+:
       - invalid_argument.engine.branch_name
+    display:
+      fields:
+        - field: /data/target
+        - field: /data/version
+        - field: /data/durable
+        - field: /data/default_branch
+        - field: /data/branch_count
+        - field: /data/space_count
+        - field: /data/memory_budget
+          fields:
+            - field: /data/memory_budget/source
+            - field: /data/memory_budget/total_bytes
+              header: total
+              as: size
+            - field: /data/memory_budget/usable_host_bytes
+              header: usable_host
+              as: size
     fixtures:
       request: requests/v1/admin/info.json
       response: responses/v1/admin/info.json
@@ -38,6 +56,15 @@ commands:
     prose: commands/admin.health.md
     errors+:
       - invalid_argument.engine.branch_name
+    display:
+      fields:
+        - field: /data/status
+        - field: /data/identity
+        - field: /data/registry
+        - field: /data/branch_catalog
+        - field: /data/space_catalog
+        - field: /data/default_branch
+        - field: /data/branch_count
     fixtures:
       request: requests/v1/admin/health.json
       response: responses/v1/admin/health.json
@@ -52,6 +79,13 @@ commands:
     prose: commands/admin.metrics.md
     errors+:
       - invalid_argument.engine.branch_name
+    display:
+      fields:
+        - field: /data/control_status
+        - field: /data/target
+        - field: /data/durable
+        - field: /data/branch_count
+        - field: /data/space_count
     fixtures:
       request: requests/v1/admin/metrics.json
       response: responses/v1/admin/metrics.json
@@ -66,6 +100,7 @@ commands:
     prose: commands/admin.describe.md
     errors+:
       - invalid_argument.engine.branch_name
+    display: bespoke
     fixtures:
       request: requests/v1/admin/describe.json
       response: responses/v1/admin/describe.json
@@ -80,6 +115,12 @@ commands:
     prose: commands/admin.config.md
     errors-:
       - not_found.engine.branch
+    display:
+      fields:
+        - field: /data/target
+        - field: /data/durable
+        - field: /data/default_branch
+        - field: /data/created
     fixtures:
       request: requests/v1/admin/config_get.json
       response: responses/v1/admin/config.json
@@ -94,6 +135,11 @@ commands:
     prose: commands/admin.ipc_status.md
     errors-:
       - not_found.engine.branch
+    display:
+      fields:
+        - field: /data/hosting
+        - field: /data/is_owner
+        - field: /data/client_count
     fixtures:
       request: requests/v1/admin/ipc_status.json
       response: responses/v1/admin/ipc_status.json
@@ -108,6 +154,7 @@ commands:
     prose: commands/admin.ipc_stop.md
     errors-:
       - not_found.engine.branch
+    display: bespoke
     fixtures:
       request: requests/v1/admin/ipc_stop.json
       response: responses/v1/admin/ipc_stop.json
@@ -121,6 +168,16 @@ commands:
     prose: commands/admin.remote.md
     errors-:
       - not_found.engine.branch
+    display:
+      fields:
+        - field: /data/origin/dataset
+        - field: /data/origin/branch
+        - field: /data/origin/remote_url
+        - field: /data/origin/manifest_hash
+        - field: /data/origin/fetched_at_micros
+          as: date
+        - field: /data/origin/base_frontier
+          as: table
     fixtures:
       request: requests/v1/admin/remote_get.json
       response: responses/v1/admin/remote_null.json
@@ -136,6 +193,8 @@ commands:
       - invalid_argument.engine.config_key
     errors-:
       - not_found.engine.branch
+    display:
+      value: /data
     fixtures:
       request: requests/v1/admin/config_key.json
       response: responses/v1/admin/config_value_default_branch.json
@@ -160,6 +219,8 @@ commands:
       - unavailable.executor.hub_transport
     errors-:
       - not_found.engine.branch
+    display:
+      receipt: "cloned {/data/dataset}@{/data/branch} into {/data/dest} ({/data/object_count|plural:object}, {/data/total_bytes|size})"
     fixtures:
       request: requests/v1/admin/hub_clone.json
       response: responses/v1/admin/hub_clone.json

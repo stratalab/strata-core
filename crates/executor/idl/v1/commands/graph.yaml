@@ -12,6 +12,10 @@ commands:
       - invalid_argument.engine.graph_name_reserved
     errors-:
       - not_found.engine.graph
+    display:
+      receipt: "{verb} graph {/data/info/graph}"
+      identity:
+        - /data/info/graph
     fixtures:
       request: requests/v1/graph/create.json
       response: responses/v1/graph/create_applied.json
@@ -29,6 +33,11 @@ commands:
     output: Output::GraphDeleteResult
     result: GraphDelete
     prose: commands/graph.delete.md
+    display:
+      receipt: "{verb} graph {/data/graph}"
+      noun: graph
+      identity:
+        - /data/graph
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -44,6 +53,9 @@ commands:
     prose: commands/graph.list.md
     errors-:
       - not_found.engine.graph
+    display:
+      columns:
+        - field: /data/items/*
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -56,6 +68,13 @@ commands:
     output: Output::GraphInfoResult
     result: GraphInfoData
     prose: commands/graph.meta.md
+    display:
+      fields:
+        - field: /data/graph
+        - field: /data/node_count
+        - field: /data/edge_count
+        - field: /data/created_version
+        - field: /data/updated_version
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -81,6 +100,11 @@ commands:
       - unsupported.engine.graph_binding_cross_branch
       - failed_precondition.engine.graph_ontology_node_type
       - failed_precondition.engine.graph_ontology_required_property
+    display:
+      receipt: "{verb} node {/data/node_id} in {/data/graph}"
+      noun: node
+      identity:
+        - /data/node_id
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -96,6 +120,14 @@ commands:
     prose: commands/graph.node.get.md
     errors+:
       - invalid_argument.engine.graph_node_id
+    display:
+      fields:
+        - field: /data/value/node_id
+        - field: /data/value/graph
+        - field: /data/value/object_type
+        - field: /data/value/properties
+          as: json
+        - field: /data/value/version
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -112,6 +144,11 @@ commands:
     prose: commands/graph.node.remove.md
     errors+:
       - invalid_argument.engine.graph_node_id
+    display:
+      receipt: "{verb} node {/data/node_id} in {/data/graph}"
+      noun: node
+      identity:
+        - /data/node_id
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -129,6 +166,11 @@ commands:
     prose: commands/graph.node.list.md
     errors+:
       - invalid_argument.engine.graph_node_id
+    display:
+      columns:
+        - field: /data/items/*/node_id
+        - field: /data/items/*/object_type
+        - field: /data/items/*/version
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -144,6 +186,11 @@ commands:
     output: Output::GraphSampleResult
     result: GraphNodeDataOutput
     prose: commands/graph.sample.md
+    display:
+      columns:
+        - field: /data/items/*/node_id
+        - field: /data/items/*/object_type
+        - field: /data/items/*/version
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -171,6 +218,13 @@ commands:
       - failed_precondition.engine.graph_negative_weight
       - failed_precondition.engine.graph_ontology_edge_type
       - failed_precondition.engine.graph_ontology_endpoint_type
+    display:
+      receipt: "{verb} edge {/data/src} -[{/data/edge_type}]-> {/data/dst} in {/data/graph}"
+      noun: edge
+      identity:
+        - /data/src
+        - /data/edge_type
+        - /data/dst
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -189,6 +243,15 @@ commands:
     errors+:
       - invalid_argument.engine.graph_node_id
       - invalid_argument.engine.graph_edge_type
+    display:
+      fields:
+        - field: /data/value/src
+        - field: /data/value/edge_type
+        - field: /data/value/dst
+        - field: /data/value/graph
+        - field: /data/value/weight
+          as: float
+        - field: /data/value/version
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -208,6 +271,13 @@ commands:
     errors+:
       - invalid_argument.engine.graph_node_id
       - invalid_argument.engine.graph_edge_type
+    display:
+      receipt: "{verb} edge {/data/src} -[{/data/edge_type}]-> {/data/dst} in {/data/graph}"
+      noun: edge
+      identity:
+        - /data/src
+        - /data/edge_type
+        - /data/dst
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -227,6 +297,15 @@ commands:
     errors+:
       - invalid_argument.engine.graph_node_id
       - invalid_argument.engine.graph_edge_type
+    display:
+      columns:
+        - field: /data/items/*/node_id
+        - field: /data/items/*/direction
+        - field: /data/items/*/edge_type
+        - field: /data/items/*/src
+        - field: /data/items/*/dst
+        - field: /data/items/*/edge/weight
+          as: float
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -251,6 +330,14 @@ commands:
     errors-:
       - invalid_argument.engine.graph_name
       - not_found.engine.graph
+    display:
+      columns:
+        - field: /data/items/*/graph
+        - field: /data/items/*/node_id
+        - field: /data/items/*/binding/target/primitive
+        - field: /data/items/*/binding/target/space
+        - field: /data/items/*/binding/target/key
+        - field: /data/items/*/version
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -271,6 +358,10 @@ commands:
       - invalid_argument.engine.graph_edge_endpoint
       - failed_precondition.engine.graph_ontology_node_type
       - failed_precondition.engine.graph_ontology_edge_type
+    display:
+      columns:
+        - field: /data/items/*/result/operation
+        - field: /data/items/*/result/created
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -288,6 +379,11 @@ commands:
       - invalid_argument.engine.graph_type_name_reserved
       - invalid_argument.engine.graph_property_name
       - failed_precondition.engine.graph_ontology_frozen
+    display:
+      receipt: "{verb} object type {/data/type_name} in {/data/graph}"
+      noun: "object type"
+      identity:
+        - /data/type_name
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -305,6 +401,11 @@ commands:
       - invalid_argument.engine.graph_type_name_reserved
       - invalid_argument.engine.graph_property_name
       - failed_precondition.engine.graph_ontology_frozen
+    display:
+      receipt: "{verb} link type {/data/type_name} in {/data/graph}"
+      noun: "link type"
+      identity:
+        - /data/type_name
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -321,6 +422,11 @@ commands:
     errors+:
       - invalid_argument.engine.graph_type_name
       - failed_precondition.engine.graph_ontology_frozen
+    display:
+      receipt: "{verb} object type {/data/type_name} in {/data/graph}"
+      noun: "object type"
+      identity:
+        - /data/type_name
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -337,6 +443,11 @@ commands:
     errors+:
       - invalid_argument.engine.graph_type_name
       - failed_precondition.engine.graph_ontology_frozen
+    display:
+      receipt: "{verb} link type {/data/type_name} in {/data/graph}"
+      noun: "link type"
+      identity:
+        - /data/type_name
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -354,6 +465,10 @@ commands:
     errors+:
       - failed_precondition.engine.graph_ontology_freeze
       - failed_precondition.engine.graph_ontology_frozen
+    display:
+      receipt: "froze ontology of {/data/graph} ({/data/object_types|plural:object type}, {/data/link_types|plural:link type})"
+      identity:
+        - /data/graph
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -368,6 +483,15 @@ commands:
     output: Output::GraphOntologyResult
     result: GraphOntologyData
     prose: commands/graph.ontology.get.md
+    display:
+      fields:
+        - field: /data/graph
+        - field: /data/status
+        - field: /data/version
+        - field: /data/object_types
+          as: table
+        - field: /data/link_types
+          as: table
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -383,6 +507,15 @@ commands:
     output: Output::GraphOntologySummaryResult
     result: GraphOntologySummaryData
     prose: commands/graph.ontology.summary.md
+    display:
+      fields:
+        - field: /data/graph
+        - field: /data/status
+        - field: /data/version
+        - field: /data/object_types
+          as: table
+        - field: /data/link_types
+          as: table
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -403,6 +536,11 @@ commands:
     errors+:
       - invalid_argument.engine.graph_type_name
       - invalid_argument.engine.graph_node_id
+    display:
+      columns:
+        - field: /data/items/*/node_id
+        - field: /data/items/*/object_type
+        - field: /data/items/*/version
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -422,6 +560,10 @@ commands:
     errors+:
       - resource_exhausted.engine.graph_analytics_budget
       - invalid_argument.executor.graph_analytics_budget
+    display:
+      map: /data/components
+      header: COMPONENT
+      sort: key
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -445,6 +587,10 @@ commands:
     errors+:
       - resource_exhausted.engine.graph_analytics_budget
       - invalid_argument.executor.graph_analytics_budget
+    display:
+      map: /data/coefficients
+      header: COEFFICIENT
+      sort: key
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -469,6 +615,10 @@ commands:
       - not_found.engine.graph_node
       - resource_exhausted.engine.graph_analytics_budget
       - invalid_argument.executor.graph_analytics_budget
+    display:
+      map: /data/distances
+      header: DISTANCE
+      sort: asc
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -492,6 +642,10 @@ commands:
       - invalid_argument.engine.graph_personalization
       - resource_exhausted.engine.graph_analytics_budget
       - invalid_argument.executor.graph_analytics_budget
+    display:
+      map: /data/ranks
+      header: RANK
+      sort: desc
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -515,6 +669,10 @@ commands:
     errors+:
       - resource_exhausted.engine.graph_analytics_budget
       - invalid_argument.executor.graph_analytics_budget
+    display:
+      map: /data/labels
+      header: LABEL
+      sort: key
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -541,6 +699,10 @@ commands:
       - not_found.engine.graph_node
       - resource_exhausted.engine.graph_analytics_budget
       - invalid_argument.executor.graph_analytics_budget
+    display:
+      map: /data/depths
+      header: DEPTH
+      sort: asc
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -569,6 +731,10 @@ commands:
       - failed_precondition.engine.graph_negative_weight
       - failed_precondition.engine.graph_ontology_node_type
       - failed_precondition.engine.graph_ontology_edge_type
+    display:
+      receipt: "inserted {/data/nodes_inserted|plural:node}, {/data/edges_inserted|plural:edge} into {/data/graph}"
+      identity:
+        - /data/graph
     fixtures:
       setup:
         - requests/v1/graph/create.json
@@ -587,6 +753,10 @@ commands:
     errors-:
       - invalid_argument.engine.graph_name
       - not_found.engine.graph
+    display:
+      receipt: "applied delete policy {/data/policy} ({/data/effect/affected_count} affected)"
+      identity:
+        - /data/effect/affected_count
     fixtures:
       setup:
         - requests/v1/graph/create.json

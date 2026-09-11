@@ -4,6 +4,8 @@
 
 137 commands · 169 example steps · 109 commands whose human or raw output changes · `--json` byte-identical throughout.
 
+**S0b (2026-09-11) declared every row below in the IDL, and the guard disagreed with this file in two places.** The `display:` one-liners here are shorthand; the built declarations (`crates/executor/idl/v1/commands/*.yaml`, resolved into `generated/cli-command-index.json`) are authoritative, and the amended R2 in the contract is their vocabulary. The two deviations: `vector collection delete` reads `{/request/collection}`, not `{request.name}` — the request field is `collection`, and the pointer guard refused the name this file guessed; and `vector index query` declares `manifest_generation` in its diagnostics block — the schema carries it, the sample step's wire happened not to (it is optional), so it is absent from the "proposed" text below. Neither changes what a reader should expect to see; both are the guard doing its job.
+
 ## 1. How to read it
 
 - `$ strata …` is the real corpus command; commands without a CLI verb show their `command run --command-json` form; `(fixture …)` marks a command the corpus has no step for (hub, inference one-shots); a few steps were captured from the 1.2.1 binary for miss / paging cases the corpus lacks.
