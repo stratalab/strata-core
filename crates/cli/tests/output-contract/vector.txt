@@ -151,22 +151,23 @@ updated collection docs: embedding model miniLM
 docs
 ∎
 ### vector.collection.stats · edge:has_more=true · human
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+NAME  DIMENSION  METRIC  COUNT  EMBEDDING_MODEL
+docs          2  cosine      0  -
 ∎
 ### vector.collection.stats · edge:has_more=true · raw
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+docs	2	cosine	0	
 ∎
 ### vector.collection.stats · edge:items=[] · human
 (empty)
 ∎
 ### vector.collection.stats · edge:items=[] · raw
-(empty)
 ∎
 ### vector.collection.stats · responses/v1/vector/collection_list.json · human
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+NAME  DIMENSION  METRIC  COUNT  EMBEDDING_MODEL
+docs          2  cosine      0  -
 ∎
 ### vector.collection.stats · responses/v1/vector/collection_list.json · raw
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+docs	2	cosine	0	
 ∎
 ### vector.count · responses/v1/vector/count.json · human
 0
@@ -248,24 +249,18 @@ not_found.engine.vector_collection: command failed∎
 ### vector.get · responses/v1/errors/vector/get_missing_collection.json · raw
 not_found.engine.vector_collection: command failed∎
 ### vector.get · responses/v1/vector/get_found.json · human
-{
-  "data": {
-    "embedding": [
-      1.0,
-      0.0
-    ],
-    "metadata": {
-      "kind": "doc"
-    }
-  },
-  "key": "doc-a",
-  "timestamp": 4,
-  "vector_revision": 1,
-  "version": 4
-}
+key              doc-a
+vector_revision  1
+version          4
+embedding        [1.0,0.0]
+metadata         {"kind":"doc"}
 ∎
 ### vector.get · responses/v1/vector/get_found.json · raw
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
+key	doc-a
+vector_revision	1
+version	4
+data.embedding	[1.0,0.0]
+data.metadata	{"kind":"doc"}
 ∎
 ### vector.history · edge:committed_at=fixed · human
 VERSION  VECTOR_REVISION  COMMITTED_AT                    EMBEDDING  METADATA
@@ -289,6 +284,37 @@ VERSION  VECTOR_REVISION  COMMITTED_AT  EMBEDDING  METADATA
 ### vector.index.query · responses/v1/vector/index_query_exact.json · human
 KEY    SCORE  METADATA
 doc-a    1.0  {"kind":"doc"}
+
+diagnostics
+  active_delta_count            0
+  active_delta_seal_threshold   16
+  active_delta_source_count     0
+  artifact_sources              -
+  collection                    docs
+  collection_exact_threshold    64
+  derived                       0 bytes
+  exact_fallback_count          0
+  exact_source_count            1
+  filtered_underfill_fallback   true
+  flat_source_count             0
+  hnsw_graph_builds             0
+  hnsw_memory_budget            67 MB
+  hnsw_source_count             0
+  indexed_source_count          0
+  indexed_vector_count          0
+  last_query_fallback_reason    collection_below_exact_threshold
+  last_query_used_index         false
+  manifest_generation           -
+  manifest_inherited_ref_count  0
+  manifest_owned_ref_count      0
+  manifest_ref_count            0
+  manifest_status               missing
+  overfetch_factor              4
+  policy_mode                   auto
+  resolved_index_kind_summary   exact
+  source_candidate_limit        18446744073709551615
+  source_flat_threshold         64
+  source_hnsw_threshold         18446744073709551615
 ∎
 ### vector.index.query · responses/v1/vector/index_query_exact.json · raw
 doc-a	1.0	{"kind":"doc"}

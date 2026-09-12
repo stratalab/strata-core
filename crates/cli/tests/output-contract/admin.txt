@@ -1,13 +1,14 @@
 ### admin.config · responses/v1/admin/config.json · human
-{
-  "created": true,
-  "default_branch": "default",
-  "durable": false,
-  "target": "cache"
-}
+target          cache
+durable         false
+default_branch  default
+created         true
 ∎
 ### admin.config · responses/v1/admin/config.json · raw
-{"created":true,"default_branch":"default","durable":false,"target":"cache"}
+target	cache
+durable	false
+default_branch	default
+created	true
 ∎
 ### admin.config_key · responses/v1/admin/config_value_default_branch.json · human
 default
@@ -25,31 +26,33 @@ kv 0 · json 0 · events 0
 {"branch":"default","branches":["default"],"capabilities":{"arrow":true,"event":true,"graph_core":true,"inference":true,"json":true,"kv":true,"vector":true,"vector_index":true},"config":{"created":true,"default_branch":"default","durable":false,"target":"cache"},"default_branch":"default","primitives":{"event_count":0,"graphs":[],"json_count":0,"kv_count":0,"vector_collections":[]},"spaces":["default"],"target":"cache","version":"1.2.1"}
 ∎
 ### admin.health · responses/v1/admin/health.json · human
-{
-  "branch_catalog": "healthy",
-  "branch_count": 1,
-  "default_branch": "default",
-  "identity": "healthy",
-  "registry": "healthy",
-  "space_catalog": "healthy",
-  "status": "healthy"
-}
+status          healthy
+identity        healthy
+registry        healthy
+branch_catalog  healthy
+space_catalog   healthy
+default_branch  default
+branch_count    1
 ∎
 ### admin.health · responses/v1/admin/health.json · raw
-{"branch_catalog":"healthy","branch_count":1,"default_branch":"default","identity":"healthy","registry":"healthy","space_catalog":"healthy","status":"healthy"}
+status	healthy
+identity	healthy
+registry	healthy
+branch_catalog	healthy
+space_catalog	healthy
+default_branch	default
+branch_count	1
 ∎
 ### admin.hub_clone · responses/v1/admin/hub_clone.json · human
-{
-  "branch": "default",
-  "dataset": "strata/titanic",
-  "dest": "./titanic.strata",
-  "manifest_hash": "blake3:8ac589d2e4965c755758414a8f952e1b0f2a01cefea8d6841d1ce8246fc41175",
-  "object_count": 12,
-  "total_bytes": 40960
-}
+cloned strata/titanic@default into ./titanic.strata (12 objects, 40960 bytes)
 ∎
 ### admin.hub_clone · responses/v1/admin/hub_clone.json · raw
-{"branch":"default","dataset":"strata/titanic","dest":"./titanic.strata","manifest_hash":"blake3:8ac589d2e4965c755758414a8f952e1b0f2a01cefea8d6841d1ce8246fc41175","object_count":12,"total_bytes":40960}
+branch	default
+dataset	strata/titanic
+dest	./titanic.strata
+manifest_hash	blake3:8ac589d2e4965c755758414a8f952e1b0f2a01cefea8d6841d1ce8246fc41175
+object_count	12
+total_bytes	40960
 ∎
 ### admin.hub_clone · responses/v1/hub/clone_progress_resolved.json · human
 {
@@ -63,55 +66,57 @@ kv 0 · json 0 · events 0
 {"branch":"main","dataset":"titanic","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","stage":"resolved"}
 ∎
 ### admin.info · responses/v1/admin/info.json · human
-{
-  "branch_count": 1,
-  "created": true,
-  "default_branch": "default",
-  "durable": false,
-  "memory_budget": {
-    "source": "derived_from_host",
-    "total_bytes": 536870912,
-    "usable_host_bytes": 2147483648
-  },
-  "open": true,
-  "space_count": 1,
-  "target": "cache",
-  "version": "1.2.1"
-}
+target          cache
+version         1.2.1
+durable         false
+default_branch  default
+branch_count    1
+space_count     1
+memory_budget
+  source       derived_from_host
+  total        537 MB
+  usable_host  2.1 GB
 ∎
 ### admin.info · responses/v1/admin/info.json · raw
-{"branch_count":1,"created":true,"default_branch":"default","durable":false,"memory_budget":{"source":"derived_from_host","total_bytes":536870912,"usable_host_bytes":2147483648},"open":true,"space_count":1,"target":"cache","version":"1.2.1"}
+target	cache
+version	1.2.1
+durable	false
+default_branch	default
+branch_count	1
+space_count	1
+memory_budget.source	derived_from_host
+memory_budget.total_bytes	536870912
+memory_budget.usable_host_bytes	2147483648
 ∎
 ### admin.ipc_status · responses/v1/admin/ipc_status.json · human
-{
-  "client_count": 0,
-  "hosting": false,
-  "is_owner": true
-}
+hosting       false
+is_owner      true
+client_count  0
 ∎
 ### admin.ipc_status · responses/v1/admin/ipc_status.json · raw
-{"client_count":0,"hosting":false,"is_owner":true}
+hosting	false
+is_owner	true
+client_count	0
 ∎
 ### admin.ipc_stop · responses/v1/admin/ipc_stop.json · human
-{
-  "stopped": false
-}
+stopped  false
 ∎
 ### admin.ipc_stop · responses/v1/admin/ipc_stop.json · raw
-{"stopped":false}
+stopped	false
 ∎
 ### admin.metrics · responses/v1/admin/metrics.json · human
-{
-  "branch_count": 1,
-  "control_status": "healthy",
-  "durable": false,
-  "open": true,
-  "space_count": 1,
-  "target": "cache"
-}
+control_status  healthy
+target          cache
+durable         false
+branch_count    1
+space_count     1
 ∎
 ### admin.metrics · responses/v1/admin/metrics.json · raw
-{"branch_count":1,"control_status":"healthy","durable":false,"open":true,"space_count":1,"target":"cache"}
+control_status	healthy
+target	cache
+durable	false
+branch_count	1
+space_count	1
 ∎
 ### admin.ping · responses/v1/admin/ping.json · human
 pong 1.2.1
@@ -120,10 +125,7 @@ pong 1.2.1
 {"version":"1.2.1"}
 ∎
 ### admin.remote · responses/v1/admin/remote_null.json · human
-{
-  "origin": null
-}
+(nil)
 ∎
 ### admin.remote · responses/v1/admin/remote_null.json · raw
-{"origin":null}
 ∎

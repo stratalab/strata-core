@@ -138,7 +138,9 @@ commands:
     prose: commands/admin.ipc_stop.md
     errors-:
       - not_found.engine.branch
-    display: bespoke
+    display:
+      fields:
+        - field: /data/stopped
     fixtures:
       request: requests/v1/admin/ipc_stop.json
       response: responses/v1/admin/ipc_stop.json

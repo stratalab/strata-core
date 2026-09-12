@@ -1137,11 +1137,45 @@
           },
           {
             "field": "/data/conflicts",
-            "as": "table"
+            "as": "table",
+            "columns": [
+              {
+                "field": "/data/conflicts/*/capability"
+              },
+              {
+                "field": "/data/conflicts/*/identity",
+                "as": "bytes"
+              },
+              {
+                "field": "/data/conflicts/*/kind"
+              },
+              {
+                "field": "/data/conflicts/*/source_value",
+                "as": "bytes"
+              },
+              {
+                "field": "/data/conflicts/*/space"
+              },
+              {
+                "field": "/data/conflicts/*/strategy_result"
+              },
+              {
+                "field": "/data/conflicts/*/target_value",
+                "as": "bytes"
+              }
+            ]
           },
           {
             "field": "/data/derived_state",
-            "as": "table"
+            "as": "table",
+            "columns": [
+              {
+                "field": "/data/derived_state/*/capability"
+              },
+              {
+                "field": "/data/derived_state/*/disposition"
+              }
+            ]
           }
         ]
       },
@@ -4047,11 +4081,38 @@
           },
           {
             "field": "/data/object_types",
-            "as": "table"
+            "as": "table",
+            "columns": [
+              {
+                "field": "/data/object_types/*/name"
+              },
+              {
+                "field": "/data/object_types/*/properties",
+                "as": "json"
+              }
+            ]
           },
           {
             "field": "/data/link_types",
-            "as": "table"
+            "as": "table",
+            "columns": [
+              {
+                "field": "/data/link_types/*/cardinality"
+              },
+              {
+                "field": "/data/link_types/*/name"
+              },
+              {
+                "field": "/data/link_types/*/properties",
+                "as": "json"
+              },
+              {
+                "field": "/data/link_types/*/source"
+              },
+              {
+                "field": "/data/link_types/*/target"
+              }
+            ]
           }
         ]
       },
@@ -4132,11 +4193,44 @@
           },
           {
             "field": "/data/object_types",
-            "as": "table"
+            "as": "table",
+            "columns": [
+              {
+                "field": "/data/object_types/*/name"
+              },
+              {
+                "field": "/data/object_types/*/node_count"
+              },
+              {
+                "field": "/data/object_types/*/properties",
+                "as": "json"
+              }
+            ]
           },
           {
             "field": "/data/link_types",
-            "as": "table"
+            "as": "table",
+            "columns": [
+              {
+                "field": "/data/link_types/*/cardinality"
+              },
+              {
+                "field": "/data/link_types/*/edge_count"
+              },
+              {
+                "field": "/data/link_types/*/name"
+              },
+              {
+                "field": "/data/link_types/*/properties",
+                "as": "json"
+              },
+              {
+                "field": "/data/link_types/*/source"
+              },
+              {
+                "field": "/data/link_types/*/target"
+              }
+            ]
           }
         ]
       },
@@ -5072,7 +5166,18 @@
           },
           {
             "field": "/data/refs",
-            "as": "table"
+            "as": "table",
+            "columns": [
+              {
+                "field": "/data/refs/*/branch"
+              },
+              {
+                "field": "/data/refs/*/last_updated"
+              },
+              {
+                "field": "/data/refs/*/manifest_hash"
+              }
+            ]
           }
         ]
       },
@@ -6291,7 +6396,13 @@
       },
       "wire_status": "stable",
       "render": "status_sections",
-      "display": "bespoke",
+      "display": {
+        "fields": [
+          {
+            "field": "/data/stopped"
+          }
+        ]
+      },
       "encoding": null
     },
     {
@@ -8501,7 +8612,18 @@
           },
           {
             "field": "/data/origin/base_frontier",
-            "as": "table"
+            "as": "table",
+            "columns": [
+              {
+                "field": "/data/origin/base_frontier/*/base"
+              },
+              {
+                "field": "/data/origin/base_frontier/*/branch"
+              },
+              {
+                "field": "/data/origin/base_frontier/*/local_version"
+              }
+            ]
           }
         ]
       },
@@ -10145,7 +10267,18 @@
               },
               {
                 "field": "/data/diagnostics/artifact_sources",
-                "as": "table"
+                "as": "table",
+                "columns": [
+                  {
+                    "field": "/data/diagnostics/artifact_sources/*/artifact_id"
+                  },
+                  {
+                    "field": "/data/diagnostics/artifact_sources/*/searched"
+                  },
+                  {
+                    "field": "/data/diagnostics/artifact_sources/*/status"
+                  }
+                ]
               },
               {
                 "field": "/data/diagnostics/collection"

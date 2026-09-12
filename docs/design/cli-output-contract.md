@@ -332,8 +332,10 @@ proposal is in the history of this file. S1 (2026-09-11) made the renderer
 read `mutation_ack` declarations (`Invocation` in `crates/cli/src/render.rs`);
 S2 (2026-09-12) made it read `columns` under `page`, `history` and `search`
 and `map` under `analytics`, laid out by one `Table` (`crates/cli/src/table.rs`);
-`optional`, `status_value`, `status_sections` and `batch` still render
-through the family arms until S3.*
+S3a (2026-09-12) made it read `value`, `fields` and `receipt` under
+`optional`, `status_value` and `status_sections`, and rendered the `search`
+rule's declared `fields` block under its table; only `batch` still renders
+through the family arms, until S3b.*
 
 Two additions to the authored IDL, both validated when the CLI index is
 generated (`strata-idl generate-cli`, gated by `check-cli`):
@@ -344,10 +346,11 @@ generated (`strata-idl generate-cli`, gated by `check-cli`):
   one per kind; a kind cannot be `bespoke`, because a hand-written arm is a
   property of one command, not of an operation category.
 - `commands/*.yaml`: **every** command carries `display:` — either the word
-  `bespoke` (a hand-written renderer arm; fourteen today, pinned by
-  `crates/executor/tests/idl_display.rs`: `admin.describe`, `admin.ipc_stop`,
-  `admin.ping`, `branch.diff`, and the ten `inference.*` arms) or exactly one
-  of five shapes:
+  `bespoke` (a hand-written renderer arm; thirteen today, pinned by
+  `crates/executor/tests/idl_display.rs`: `admin.describe`, `admin.ping`,
+  `branch.diff`, and the ten `inference.*` arms — `admin.ipc_stop` became a
+  declared `fields` record at S3a, which left its conditional sentence to
+  #3332) or exactly one of five shapes:
 
   | Shape | Keys | Allowed under |
   |---|---|---|
@@ -686,7 +689,8 @@ Grouped by the slice that closes them; counts from the §2.1 table.
 |---|---|---|
 | S1 (landed) | 36 `MutationAck` × human, × raw; the binary cells for a missed delete | `applied=` gone; miss → stderr line, exit stays 0, nothing on stdout; raw echoes identity |
 | S2 (landed) | 21 `Page` + 4 `SamplePage` + 3 history + 6 analytics + 2 search × human, × raw | tables with declared columns; hint to stderr (sample notice only when partial); dates in cells; raw = declared columns as TSV |
-| S3 | 20 `StatusResponse` (minus the 3 bespoke) + 4 record `Maybe` + 14 `BatchResult` × human, × raw | key-value lines / sections; batch summary |
+| S3a (landed) | 20 `StatusResponse` (minus the 3 bespoke) + 11 record `Maybe` + the `search` diagnostics block × human, × raw | key-value lines, receipts, declared tables inside a record; raw = `key<TAB>value` under wire names |
+| S3b | 14 `BatchResult` + `branch diff` × human, × raw | one row per item; batch summary on stderr only when an item missed |
 | S4 | KV `Maybe` × raw, every `committed_at` cell | raw bytes verbatim (#3116); `humanize_committed_at` deleted (R3 lands with S2's tables, so S4 is the deletion of the pre-pass and the raw-bytes change) |
 | — | every `json` and `pretty` cell | **none** — pinned unchanged through every slice |
 
@@ -707,12 +711,13 @@ a visible CLI change and carries release notes in the PR body.
 | **#3326 + #3328** (one small PR, after S1) | one line reader, `SessionLine::parse`, for the REPL, the pipe and the playground; a line's `--json` / `--raw` / `--output-format` wins over the session's format for its answer and its error alike; a line of flags with no command is refused, not dropped; the REPL's `handle_line` is the one place a line is run and reported, so a failed pipe line reports once and in the same shape as an interactive one (code-led line or JSON envelope, not a bare `error: <message>`) | none (CLI text; exit codes unchanged; release note) | #3326, #3328 |
 | **S1** (landed 2026-09-11) | R1 `mutation_ack` rule from the declaration; R5 stderr line for a `not_found` miss (exit stays 0; `unchanged` is a hit); R4 raw identity for writes and the `--raw` help text rewritten to "shell-composable"; `mutation_summary` deleted; the harness snapshots stderr as its own cell | none (CLI text; exit codes unchanged; release note) | #3306 (writes, `--raw` writes) |
 | **S2** (landed 2026-09-12) | R1-table (`crates/cli/src/table.rs`); `page`, `history`, `search`, `analytics` rules from `display.columns` / `display.map` through `Invocation`; R3 dates in cells; `-- more` / `-- sampled` to stderr, human only; raw = declared columns as TSV; the `page` / `sample_page` encodings; the harness's `edge:total_count=more` cell | none (release note) | #3306 (lists, dates), #3205 §3/§5 |
-| **S3** | `status_sections` for `StatusResponse` and record `Maybe`; `batch` rule; `render_human_data` and the JSON fallback **deleted**; `check` refuses an undeclared shape | none (release note) | #3306 (admin), #3205 §1/§2/§4 |
-| **S4** | R4 raw bytes verbatim for KV reads and `base64:` labelling in human mode; `humanize_committed_at` deleted; Q5 (`--output-format` / `pretty`) | hidden flag removal if Q5 says so (release note) | #3116 |
+| **S3a** (landed 2026-09-12) | `optional`, `status_value` and `status_sections` from `value` / `fields` / `columns` / `receipt`: label-and-value blocks, nested records one level in, an `as: table` field as an indented table whose columns `generate-cli` resolves from the row schema, and an action's one-line receipt (raw: the action's record). The `search` rule's declared `fields` block renders under its table (human only). `admin.ipc_stop` moves from bespoke to a declared record; the optional/status tag arms, their helpers and the KV/preview byte pre-pass arms are **deleted** | none (release note) | — |
+| **S3b** | `batch` rule; `branch diff`'s bespoke arm; `render_human_data`, the JSON fallback, `render_raw`'s sniffs and `humanize_kv_bytes` **deleted**; the `_` arm becomes an internal error; `check` refuses an undeclared shape | none (release note) | #3306 (admin), #3205 §1/§2/§4 |
+| **S4** | R4 raw bytes verbatim for KV reads (the `base64:` labelling in human mode landed with S3a's `as: bytes`); `humanize_committed_at` deleted; Q5 (`--output-format` / `pretty`) | hidden flag removal if Q5 says so (release note) | #3116 |
 | **S5** | R7: `generate-docs` human transcript block; README / agents-skill / docs output-fence guard; site hero + `verify-transcripts.mjs` regenerated in the release PR; `command-examples.json` `reproducible: false` count asserted ≤ the post-S3 number (shrink-only) | none | #3205 acceptance criteria |
 
-Sequencing: S0 → #3312 → S1 → S2 → S3 → S4 → S5, each depending on the
-declaration the previous one made the renderer read. S1–S3 can ship in one
+Sequencing: S0 → #3312 → S1 → S2 → S3a → S3b → S4 → S5, each depending on
+the declaration the previous one made the renderer read. S1–S3 can ship in one
 release or three; the site regeneration (S5) happens once, at the release
 that carries the last of them, because the website documents the released
 binary, not `main`.
@@ -747,8 +752,8 @@ Verified against `main` at `60db96ac`.
 |---|---|---|
 | Shape declaration | IDL resolves `kind` and `response_model` for all 137 commands; `dto-inventory.yaml` registers 100+ models | nothing renders from them; no `display` declaration exists |
 | Declaration ⇔ wire | `kind` is right everywhere; `response_model` is checked against nothing | nominal for ~14 stable + 6 transitional commands (#3313); three phantom result names; `Maybe`/history have two encodings each. *Since #3322: the family is checked against the schema and the payload is derived from it (84 models in use, inventory checked both ways).* |
-| Human renderer | 23 designed tag arms over 114 `Output` variants; structural sniff with a JSON fallback for the other 91. *Since S1: the 36 `mutation_ack` commands render from their `display:` declaration through `Invocation` (receipt, identity, noun); the family arms remain for every other rule. Since S2: the 25 `page`, 3 `history`, 2 `search` and 6 `analytics` commands render their declared columns / map as one table; the `json_version_history` and `vector_matches` arms, the page tail, the `matches`/`items` page sniffs and the page/history byte pre-pass are deleted* | example lines that are JSON dumps shrink by the writes and the lists; `optional`, the status rules and `batch` still sniffed (S3) |
-| `--raw` | its own sniff; base64 for non-UTF-8 reads. *Since S1: a write prints its declared identity, tab-separated; the help text says "shell-composable". Since S2: a table prints its declared columns tab-separated, no header, no hint, an empty cell for null, full float precision, bare base64 for bytes* | #3116 (reads) |
+| Human renderer | 23 designed tag arms over 114 `Output` variants; structural sniff with a JSON fallback for the other 91. *Since S1: the 36 `mutation_ack` commands render from their `display:` declaration through `Invocation` (receipt, identity, noun); the family arms remain for every other rule. Since S2: the 25 `page`, 3 `history`, 2 `search` and 6 `analytics` commands render their declared columns / map as one table; the `json_version_history` and `vector_matches` arms, the page tail, the `matches`/`items` page sniffs and the page/history byte pre-pass are deleted. Since S3a: every `optional`, `status_value` and `status_sections` command renders its declared value, record or receipt, the `search` rule shows its declared diagnostics block, and the eleven tag arms those replaced — with `point_read_record`, `print_optional_data`, `print_optional_record`, `print_maybe_json`, `json_leaf`, `print_count` and the KV/preview byte pre-pass arms — are deleted* | `batch` and `branch diff` are still sniffed (S3b), which is what keeps `render_human_data` and the JSON fallback alive |
+| `--raw` | its own sniff; base64 for non-UTF-8 reads. *Since S1: a write prints its declared identity, tab-separated; the help text says "shell-composable". Since S2: a table prints its declared columns tab-separated, no header, no hint, an empty cell for null, full float precision, bare base64 for bytes. Since S3a: a record prints `key<TAB>value` lines under the wire's own names — the pointer relative to the record's root, one dot per level, so a `header:` never reaches a script (Q18) — and an action prints its whole record the same way (Q17)* | #3116 (reads) |
 | Dates | one wall-clock field (`committed_at`), humanized as a pre-pass to local time with offset. *Since S2: every declared `as: date` cell prints `2026-09-10 20:19:44.123456 UTC` (raw: the micros), and `--as-of-time` accepts that spelling back; the pre-pass no longer reaches a declared command* | the pre-pass still runs for the undeclared families (S4 deletes it) |
 | Channels / exit | data + status lines on stdout; errors on stderr; exit 0/1/2. *Since S1: a missed write is `no such <noun>: <identity>` on stderr, nothing on stdout, exit 0, in human and `--raw`; `--json` keeps the envelope on stdout and stderr silent. Since S2: `-- more: add --cursor <c> to the same command` and `-- sampled N of M` (only when N < M) are stderr, human mode only* | the batch summary still lands on stdout (S3); the tombstone `(deleted)` and bfs `-- truncated` notices are not yet declarable (#3332) |
 | Playground | real clap grammar, real renderer | format flags dropped (#3312); one stream |

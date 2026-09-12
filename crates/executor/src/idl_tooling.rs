@@ -1212,7 +1212,8 @@ fn validate_cli_source_index(index: &CommandIndex) -> Result<()> {
 
 /// Joins the authored display layer onto one resolved command: the kind's
 /// `render:` and the command's `display:`, checked against the command's
-/// generated schema document so every declared pointer resolves.
+/// generated schema document so every declared pointer resolves, and
+/// resolved against it so every `as: table` field carries its columns.
 fn display_for_command(
     layer: &display::DisplayLayer,
     command: &ResolvedCommand,
@@ -1229,7 +1230,7 @@ fn display_for_command(
         .get(&command.id)
         .cloned()
         .ok_or_else(|| invalid(format!("command `{}` declares no `display:`", command.id)))?;
-    display::validate_display(&command.id, render, &decl, document)?;
+    let decl = display::resolve_display(&command.id, render, &decl, document)?;
     Ok((render, decl))
 }
 

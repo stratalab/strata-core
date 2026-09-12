@@ -106,7 +106,7 @@ true
 ### kv.get · edge:found=false · raw
 ∎
 ### kv.get · edge:value=non-utf8 · human
-/w==
+base64:/w==
 ∎
 ### kv.get · edge:value=non-utf8 · raw
 /w==
