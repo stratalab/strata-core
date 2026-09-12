@@ -8,7 +8,7 @@ use crate::branch::catalog::{
     DEFAULT_BRANCH_GENERATION, SYSTEM_BRANCH_ID,
 };
 use crate::branch::BranchName;
-use crate::diagnostics::{EngineError, EngineErrorClass, EngineResult};
+use crate::diagnostics::{EngineError, EngineErrorClass};
 use crate::persistence::{
     branch_catalog_key, branch_default_key, branch_index_key, branch_pending_index_key,
     branch_pending_key, capability_registry_key, database_identity_key,
@@ -34,7 +34,7 @@ pub(crate) struct ControlPlane {
 }
 
 impl ControlPlane {
-    pub(crate) fn require_healthy(&self) -> EngineResult<()> {
+    pub(crate) fn require_healthy(&self) -> Result<(), EngineError> {
         match &self.terminal_error {
             Some(error) => Err(error.clone()),
             None => Ok(()),
@@ -166,7 +166,7 @@ impl ControlPlane {
         persistence: &mut StoragePersistence,
         record: &BranchCatalogRecord,
         kind: BranchOperationKind,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let names = [record.name().clone()];
         let mutations = vec![
             RowMutation::put(
@@ -188,7 +188,7 @@ impl ControlPlane {
     pub(crate) fn clear_pending_branch_operation(
         persistence: &mut StoragePersistence,
         record: &BranchCatalogRecord,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let mutations = vec![
             RowMutation::put(
                 control_address(RowClass::BranchControl, branch_pending_index_key()),
@@ -207,7 +207,7 @@ impl ControlPlane {
         &mut self,
         persistence: &mut StoragePersistence,
         record: BranchCatalogRecord,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         if record.is_active() {
             super::space::seed_required_space_rows(persistence, &record)?;
         }
@@ -247,7 +247,7 @@ impl ControlPlane {
         persistence: &StoragePersistence,
         record: &BranchCatalogRecord,
         space: &crate::data::kv::ProductSpace,
-    ) -> EngineResult<Vec<RowMutation>> {
+    ) -> Result<Vec<RowMutation>, EngineError> {
         super::space::registration_mutations(persistence, record, space)
     }
 }
@@ -256,7 +256,7 @@ pub(crate) fn bootstrap_or_load(
     persistence: &mut StoragePersistence,
     created: bool,
     requested_default: Option<BranchName>,
-) -> EngineResult<ControlPlane> {
+) -> Result<ControlPlane, EngineError> {
     if created {
         bootstrap_new_database(
             persistence,
@@ -270,7 +270,7 @@ pub(crate) fn bootstrap_or_load(
 fn bootstrap_new_database(
     persistence: &mut StoragePersistence,
     default_branch: BranchName,
-) -> EngineResult<ControlPlane> {
+) -> Result<ControlPlane, EngineError> {
     persistence.create_system_branch_for_new_database()?;
 
     let default_record = if default_branch == BranchName::default_branch() {
@@ -337,7 +337,7 @@ fn bootstrap_new_database(
 fn load_existing_database(
     persistence: &mut StoragePersistence,
     requested_default: Option<&BranchName>,
-) -> EngineResult<ControlPlane> {
+) -> Result<ControlPlane, EngineError> {
     let identity = read_required(
         persistence,
         RowClass::DatasetIdentity,
@@ -442,7 +442,7 @@ fn read_required(
     persistence: &mut StoragePersistence,
     row_class: RowClass,
     key: Vec<u8>,
-) -> EngineResult<Vec<u8>> {
+) -> Result<Vec<u8>, EngineError> {
     match persistence.read(control_address(row_class, key), ReadSelector::Latest) {
         Ok(Some(value)) => Ok(value),
         Ok(None) => Err(EngineError::corruption(
@@ -475,7 +475,7 @@ fn control_address(row_class: RowClass, key: Vec<u8>) -> RowAddress {
 fn recover_pending_branch_operations(
     persistence: &mut StoragePersistence,
     pending_names: &[BranchName],
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let branch_index = read_required(persistence, RowClass::BranchControl, branch_index_key())?;
     let published: BTreeSet<BranchName> = decode_branch_index(&branch_index)?.into_iter().collect();
 
@@ -498,7 +498,7 @@ fn recover_one_pending_branch_operation(
     kind: BranchOperationKind,
     pending: &BranchCatalogRecord,
     published: &BTreeSet<BranchName>,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     // A promotion mutates an already-published, existing target branch, so the
     // create/fork/delete inference below (which keys on published-membership and
     // storage existence) cannot recognise it — it must be routed by its kind.
@@ -549,7 +549,7 @@ fn recover_one_pending_branch_operation(
 fn recover_pending_promotion(
     persistence: &mut StoragePersistence,
     pending: &BranchCatalogRecord,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let Some(intent) = pending.merge_parent() else {
         // A promotion intent must carry its source lineage; without it there is
         // nothing to finalize. Clear the marker rather than fail recovery.
@@ -581,7 +581,7 @@ fn clear_pending_branch_marker(
     persistence: &mut StoragePersistence,
     name: &BranchName,
     catalog_record: Option<&BranchCatalogRecord>,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let mut mutations = vec![
         RowMutation::put(
             control_address(RowClass::BranchControl, branch_pending_index_key()),

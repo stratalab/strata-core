@@ -1,4 +1,4 @@
-use super::super::{BatchKvEntry, Bytes, Command, Executor, ExecutorResult, Output};
+use super::super::{BatchKvEntry, Bytes, Command, Executor, ExecutorError, Output};
 
 impl Executor {
     /// Executes a default-branch put command.
@@ -6,7 +6,7 @@ impl Executor {
         &mut self,
         key: impl Into<Bytes>,
         value: impl Into<Bytes>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::KvPut {
             branch: None,
             space: None,
@@ -16,7 +16,7 @@ impl Executor {
     }
 
     /// Executes a default-branch get command.
-    pub fn kv_get(&mut self, key: impl Into<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_get(&mut self, key: impl Into<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvGet {
             branch: None,
             space: None,
@@ -27,7 +27,7 @@ impl Executor {
     }
 
     /// Executes a default-branch delete command.
-    pub fn kv_delete(&mut self, key: impl Into<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_delete(&mut self, key: impl Into<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvDelete {
             branch: None,
             space: None,
@@ -36,7 +36,7 @@ impl Executor {
     }
 
     /// Executes a default-branch list command.
-    pub fn kv_list(&mut self, prefix: Option<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_list(&mut self, prefix: Option<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvList {
             branch: None,
             space: None,
@@ -49,7 +49,11 @@ impl Executor {
     }
 
     /// Executes a default-branch scan command.
-    pub fn kv_scan(&mut self, start: Option<Bytes>, limit: Option<u64>) -> ExecutorResult<Output> {
+    pub fn kv_scan(
+        &mut self,
+        start: Option<Bytes>,
+        limit: Option<u64>,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::KvScan {
             branch: None,
             space: None,
@@ -59,7 +63,7 @@ impl Executor {
     }
 
     /// Executes a default-branch batch put command.
-    pub fn kv_batch_put(&mut self, entries: Vec<BatchKvEntry>) -> ExecutorResult<Output> {
+    pub fn kv_batch_put(&mut self, entries: Vec<BatchKvEntry>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvBatchPut {
             branch: None,
             space: None,
@@ -68,7 +72,7 @@ impl Executor {
     }
 
     /// Executes a default-branch batch get command.
-    pub fn kv_batch_get(&mut self, keys: Vec<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_batch_get(&mut self, keys: Vec<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvBatchGet {
             branch: None,
             space: None,
@@ -77,7 +81,7 @@ impl Executor {
     }
 
     /// Executes a default-branch batch delete command.
-    pub fn kv_batch_delete(&mut self, keys: Vec<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_batch_delete(&mut self, keys: Vec<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvBatchDelete {
             branch: None,
             space: None,
@@ -86,7 +90,7 @@ impl Executor {
     }
 
     /// Executes a default-branch batch exists command.
-    pub fn kv_batch_exists(&mut self, keys: Vec<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_batch_exists(&mut self, keys: Vec<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvBatchExists {
             branch: None,
             space: None,
@@ -95,7 +99,7 @@ impl Executor {
     }
 
     /// Executes a default-branch exists command.
-    pub fn kv_exists(&mut self, key: impl Into<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_exists(&mut self, key: impl Into<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvExists {
             branch: None,
             space: None,
@@ -104,7 +108,7 @@ impl Executor {
     }
 
     /// Executes a default-branch version-history command.
-    pub fn kv_history(&mut self, key: impl Into<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_history(&mut self, key: impl Into<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvHistory {
             branch: None,
             space: None,
@@ -113,7 +117,7 @@ impl Executor {
     }
 
     /// Executes a default-branch count command.
-    pub fn kv_count(&mut self, prefix: Option<Bytes>) -> ExecutorResult<Output> {
+    pub fn kv_count(&mut self, prefix: Option<Bytes>) -> Result<Output, ExecutorError> {
         self.execute(Command::KvCount {
             branch: None,
             space: None,
@@ -128,7 +132,7 @@ impl Executor {
         &mut self,
         prefix: Option<Bytes>,
         count: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::KvSample {
             branch: None,
             space: None,

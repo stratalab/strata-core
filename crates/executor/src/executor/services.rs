@@ -1,6 +1,5 @@
 use super::{
-    branch_name, product_space, EventService, Executor, ExecutorResult, GraphService, JsonService,
-    VectorService,
+    branch_name, product_space, EventService, Executor, GraphService, JsonService, VectorService,
 };
 use crate::ExecutorError;
 use strata_core::Timestamp;
@@ -28,7 +27,7 @@ impl Executor {
         branch: Option<&str>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Option<Timestamp>> {
+    ) -> Result<Option<Timestamp>, ExecutorError> {
         match (as_of, as_of_time) {
             (Some(_), Some(_)) => Err(as_of_conflict()),
             (Some(as_of), None) => Ok(Some(Timestamp::from_micros(as_of))),
@@ -47,7 +46,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: Option<&str>,
-    ) -> ExecutorResult<strata_engine::KvService<'_>> {
+    ) -> Result<strata_engine::KvService<'_>, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let space = product_space(space, &self.default_space)?;
         Ok(self.database.kv(branch, space)?)
@@ -57,7 +56,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: Option<&str>,
-    ) -> ExecutorResult<JsonService<'_>> {
+    ) -> Result<JsonService<'_>, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let space = product_space(space, &self.default_space)?;
         Ok(self.database.json(branch, space)?)
@@ -67,7 +66,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: Option<&str>,
-    ) -> ExecutorResult<VectorService<'_>> {
+    ) -> Result<VectorService<'_>, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let space = product_space(space, &self.default_space)?;
         Ok(self.database.vector(branch, space)?)
@@ -77,7 +76,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: Option<&str>,
-    ) -> ExecutorResult<EventService<'_>> {
+    ) -> Result<EventService<'_>, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let space = product_space(space, &self.default_space)?;
         Ok(self.database.event(branch, space)?)
@@ -87,7 +86,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: Option<&str>,
-    ) -> ExecutorResult<GraphService<'_>> {
+    ) -> Result<GraphService<'_>, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let space = product_space(space, &self.default_space)?;
         Ok(self.database.graph(branch, space)?)

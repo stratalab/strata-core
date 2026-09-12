@@ -21,7 +21,7 @@ impl Executor {
         _branch: Option<&str>,
         _dest: &str,
         _hub_url: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         Err(hub_feature_disabled())
     }
 
@@ -38,12 +38,15 @@ impl Executor {
         _dest: &str,
         _hub_url: Option<String>,
         _progress: &mut dyn FnMut(Output),
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         Err(hub_feature_disabled())
     }
 
     #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
-    pub(super) fn execute_hub_info(&mut self, _hub_url: Option<String>) -> ExecutorResult<Output> {
+    pub(super) fn execute_hub_info(
+        &mut self,
+        _hub_url: Option<String>,
+    ) -> Result<Output, ExecutorError> {
         Err(hub_feature_disabled())
     }
 
@@ -60,7 +63,7 @@ impl Executor {
         _sort: Option<crate::types::HubDatasetSort>,
         _limit: Option<u32>,
         _offset: Option<u32>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         Err(hub_feature_disabled())
     }
 
@@ -69,7 +72,7 @@ impl Executor {
         &mut self,
         _name: &str,
         _hub_url: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         Err(hub_feature_disabled())
     }
 
@@ -78,7 +81,7 @@ impl Executor {
         &mut self,
         _dataset: &str,
         _hub_url: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         Err(hub_feature_disabled())
     }
 
@@ -87,7 +90,7 @@ impl Executor {
         &mut self,
         _since: Option<&str>,
         _hub_url: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         Err(hub_feature_disabled())
     }
 }

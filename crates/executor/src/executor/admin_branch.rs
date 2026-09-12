@@ -3,11 +3,11 @@ use super::{
     branch_promotion, delete_effect, engine_promotion_strategy, output_admin_config,
     output_admin_describe, output_admin_health, output_admin_info, output_admin_metrics,
     output_space_create, output_space_delete, product_space, BranchStateSelector, CommitVersion,
-    Executor, ExecutorResult, Output, PageInfo, PromotionStrategy, Timestamp, DEFAULT_BRANCH,
+    Executor, ExecutorError, Output, PageInfo, PromotionStrategy, Timestamp, DEFAULT_BRANCH,
 };
 
 impl Executor {
-    pub(super) fn execute_ping(&mut self) -> ExecutorResult<Output> {
+    pub(super) fn execute_ping(&mut self) -> Result<Output, ExecutorError> {
         let summary = self.database.admin()?.ping();
         Ok(Output::Pong(crate::types::AdminPing {
             version: summary.version,
@@ -62,7 +62,7 @@ impl Executor {
         })
     }
 
-    pub(super) fn execute_remote_get(&mut self) -> ExecutorResult<Output> {
+    pub(super) fn execute_remote_get(&mut self) -> Result<Output, ExecutorError> {
         let origin = self.database.remote_origin()?;
         Ok(Output::RemoteOriginResult {
             origin: origin.map(|origin| crate::RemoteOriginInfo {
@@ -84,45 +84,54 @@ impl Executor {
         })
     }
 
-    pub(super) fn execute_info(&mut self, branch: Option<&str>) -> ExecutorResult<Output> {
+    pub(super) fn execute_info(&mut self, branch: Option<&str>) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let mut admin = self.database.admin()?;
         let summary = admin.info(Some(&branch))?;
         Ok(Output::DatabaseInfo(output_admin_info(&summary)))
     }
 
-    pub(super) fn execute_health(&mut self, branch: Option<&str>) -> ExecutorResult<Output> {
+    pub(super) fn execute_health(&mut self, branch: Option<&str>) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let mut admin = self.database.admin()?;
         let summary = admin.health(Some(&branch));
         Ok(Output::Health(output_admin_health(&summary)))
     }
 
-    pub(super) fn execute_metrics(&mut self, branch: Option<&str>) -> ExecutorResult<Output> {
+    pub(super) fn execute_metrics(
+        &mut self,
+        branch: Option<&str>,
+    ) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let mut admin = self.database.admin()?;
         let summary = admin.metrics(Some(&branch))?;
         Ok(Output::Metrics(output_admin_metrics(&summary)))
     }
 
-    pub(super) fn execute_describe(&mut self, branch: Option<&str>) -> ExecutorResult<Output> {
+    pub(super) fn execute_describe(
+        &mut self,
+        branch: Option<&str>,
+    ) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let mut admin = self.database.admin()?;
         let summary = admin.describe(Some(&branch))?;
         Ok(Output::Described(output_admin_describe(&summary)))
     }
 
-    pub(super) fn execute_config_get(&mut self) -> ExecutorResult<Output> {
+    pub(super) fn execute_config_get(&mut self) -> Result<Output, ExecutorError> {
         let admin = self.database.admin()?;
         Ok(Output::Config(output_admin_config(&admin.config())))
     }
 
-    pub(super) fn execute_configure_get_key(&mut self, key: &str) -> ExecutorResult<Output> {
+    pub(super) fn execute_configure_get_key(&mut self, key: &str) -> Result<Output, ExecutorError> {
         let admin = self.database.admin()?;
         Ok(Output::ConfigValue(admin.config_value(key)?))
     }
 
-    pub(super) fn execute_space_list(&mut self, branch: Option<&str>) -> ExecutorResult<Output> {
+    pub(super) fn execute_space_list(
+        &mut self,
+        branch: Option<&str>,
+    ) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let mut spaces = self.database.spaces(branch)?;
         Ok(Output::SpaceList {
@@ -139,7 +148,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: &str,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let space = product_space(Some(space), &self.default_space)?;
         let mut spaces = self.database.spaces(branch)?;
@@ -151,7 +160,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: &str,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let space = product_space(Some(space), &self.default_space)?;
         let mut spaces = self.database.spaces(branch)?;
@@ -163,7 +172,7 @@ impl Executor {
         branch: Option<&str>,
         space: &str,
         force: bool,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
         let space = product_space(Some(space), &self.default_space)?;
         let mut spaces = self.database.spaces(branch)?;
@@ -171,7 +180,7 @@ impl Executor {
         Ok(output_space_delete(&outcome))
     }
 
-    pub(super) fn execute_branch_list(&mut self) -> ExecutorResult<Output> {
+    pub(super) fn execute_branch_list(&mut self) -> Result<Output, ExecutorError> {
         let branches = self
             .database
             .branches()?
@@ -185,7 +194,7 @@ impl Executor {
         })
     }
 
-    pub(super) fn execute_branch_get(&mut self, branch: &str) -> ExecutorResult<Output> {
+    pub(super) fn execute_branch_get(&mut self, branch: &str) -> Result<Output, ExecutorError> {
         let branch = branch_name(Some(branch), DEFAULT_BRANCH)?;
         let summary = self.database.branches()?.get(&branch)?;
         Ok(Output::Branch(branch_item(&summary)))
@@ -196,7 +205,7 @@ impl Executor {
         branch_a: &str,
         branch_b: &str,
         at_timestamp: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let branch_a = branch_name(Some(branch_a), DEFAULT_BRANCH)?;
         let branch_b = branch_name(Some(branch_b), DEFAULT_BRANCH)?;
         let selector = match at_timestamp {
@@ -215,7 +224,7 @@ impl Executor {
         source: &str,
         target: &str,
         strategy: PromotionStrategy,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let source = branch_name(Some(source), DEFAULT_BRANCH)?;
         let target = branch_name(Some(target), DEFAULT_BRANCH)?;
         let outcome = self.database.branches()?.promote(
@@ -231,7 +240,7 @@ impl Executor {
         source: &str,
         target: &str,
         strategy: PromotionStrategy,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let source = branch_name(Some(source), DEFAULT_BRANCH)?;
         let target = branch_name(Some(target), DEFAULT_BRANCH)?;
         let preview = self.database.branches()?.preview(
@@ -242,7 +251,7 @@ impl Executor {
         Ok(Output::BranchPreview(branch_preview(&preview)))
     }
 
-    pub(super) fn execute_branch_create(&mut self, branch: &str) -> ExecutorResult<Output> {
+    pub(super) fn execute_branch_create(&mut self, branch: &str) -> Result<Output, ExecutorError> {
         let branch = branch_name(Some(branch), DEFAULT_BRANCH)?;
         let outcome = self.database.branches()?.create(branch)?;
         Ok(Output::Branch(branch_item(outcome.branch())))
@@ -252,7 +261,7 @@ impl Executor {
         &mut self,
         source: &str,
         branch: &str,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let source = branch_name(Some(source), DEFAULT_BRANCH)?;
         let branch = branch_name(Some(branch), DEFAULT_BRANCH)?;
         let outcome = self.database.branches()?.fork_current(&source, branch)?;
@@ -264,7 +273,7 @@ impl Executor {
         source: &str,
         branch: &str,
         version: u64,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let source = branch_name(Some(source), DEFAULT_BRANCH)?;
         let branch = branch_name(Some(branch), DEFAULT_BRANCH)?;
         let outcome = self.database.branches()?.fork_at_version(
@@ -280,7 +289,7 @@ impl Executor {
         source: &str,
         branch: &str,
         timestamp: u64,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let source = branch_name(Some(source), DEFAULT_BRANCH)?;
         let branch = branch_name(Some(branch), DEFAULT_BRANCH)?;
         let outcome = self.database.branches()?.fork_at_timestamp(
@@ -291,7 +300,7 @@ impl Executor {
         Ok(Output::Branch(branch_item(outcome.branch())))
     }
 
-    pub(super) fn execute_branch_delete(&mut self, branch: &str) -> ExecutorResult<Output> {
+    pub(super) fn execute_branch_delete(&mut self, branch: &str) -> Result<Output, ExecutorError> {
         let branch = branch_name(Some(branch), DEFAULT_BRANCH)?;
         let outcome = self.database.branches()?.delete(&branch)?;
         Ok(Output::BranchDeleteResult {

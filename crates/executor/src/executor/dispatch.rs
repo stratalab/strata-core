@@ -1,10 +1,10 @@
-use super::{Command, Executor, ExecutorResult, Output};
+use super::{Command, Executor, ExecutorError, Output};
 #[cfg(feature = "inference")]
-use crate::{ExecutorError, PageInfo};
+use crate::PageInfo;
 
 impl Executor {
     /// Executes one serialized command.
-    pub fn execute(&mut self, command: Command) -> ExecutorResult<Output> {
+    pub fn execute(&mut self, command: Command) -> Result<Output, ExecutorError> {
         let is_write = command.is_write();
         let result = self.dispatch_command(command);
         if is_write {
@@ -19,7 +19,7 @@ impl Executor {
         result
     }
 
-    fn dispatch_command(&mut self, command: Command) -> ExecutorResult<Output> {
+    fn dispatch_command(&mut self, command: Command) -> Result<Output, ExecutorError> {
         match command {
             Command::Ping {} => self.execute_ping(),
             Command::Info { branch } => self.execute_info(branch.as_deref()),

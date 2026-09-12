@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::{GraphAdjacencyIndex, GraphDirection, GraphNodeId};
 
@@ -99,7 +99,7 @@ impl GraphPageRankOptions {
     /// Refuses with `invalid_argument.engine.graph_pagerank_options`
     /// when `damping` is outside `[0, 1]` or `tolerance` is negative or
     /// not finite — either would silently poison every rank downstream.
-    pub fn new(damping: f64, max_iterations: usize, tolerance: f64) -> EngineResult<Self> {
+    pub fn new(damping: f64, max_iterations: usize, tolerance: f64) -> Result<Self, EngineError> {
         if !damping.is_finite() || !(0.0..=1.0).contains(&damping) {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.graph_pagerank_options",
@@ -283,7 +283,7 @@ impl GraphAdjacencyIndex {
         &self,
         options: &GraphPageRankOptions,
         personalization: &HashMap<GraphNodeId, f64>,
-    ) -> EngineResult<GraphPageRankResult> {
+    ) -> Result<GraphPageRankResult, EngineError> {
         if personalization.is_empty() {
             return Err(personalization_error("personalization is empty"));
         }

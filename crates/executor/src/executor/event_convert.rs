@@ -4,20 +4,22 @@ use super::{
     EngineEventChainVerification, EngineEventPayload, EngineEventRangeDirection,
     EngineEventRangePage, EngineEventSequence, EngineEventType, EngineEventVersionedRecord,
     EventBatchAppendItemResult, EventData, EventRangeDirection, EventVersionedData, ExecutorError,
-    ExecutorResult, MutationEffect, Output, OutputEventChainVerification, PageInfo,
+    MutationEffect, Output, OutputEventChainVerification, PageInfo,
 };
 
-pub(super) fn engine_event_type(event_type: String) -> ExecutorResult<EngineEventType> {
+pub(super) fn engine_event_type(event_type: String) -> Result<EngineEventType, ExecutorError> {
     EngineEventType::new(event_type).map_err(ExecutorError::from)
 }
 
 pub(super) fn optional_engine_event_type(
     event_type: Option<String>,
-) -> ExecutorResult<Option<EngineEventType>> {
+) -> Result<Option<EngineEventType>, ExecutorError> {
     event_type.map(engine_event_type).transpose()
 }
 
-pub(super) fn event_payload(payload: serde_json::Value) -> ExecutorResult<EngineEventPayload> {
+pub(super) fn event_payload(
+    payload: serde_json::Value,
+) -> Result<EngineEventPayload, ExecutorError> {
     EngineEventPayload::new(payload).map_err(ExecutorError::from)
 }
 

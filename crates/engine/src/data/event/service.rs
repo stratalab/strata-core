@@ -56,7 +56,7 @@ impl<'a> EventService<'a> {
         &mut self,
         event_type: EventType,
         payload: super::EventPayload,
-    ) -> EngineResult<EventAppendOutcome> {
+    ) -> Result<EventAppendOutcome, EngineError> {
         let outcome =
             self.batch_append([EventBatchAppendEntry::new(event_type.clone(), payload)])?;
         let item = outcome.items().first().expect("one append item");
@@ -75,7 +75,7 @@ impl<'a> EventService<'a> {
     }
 
     /// Appends multiple events in one commit.
-    pub fn batch_append<I>(&mut self, entries: I) -> EngineResult<EventBatchAppendOutcome>
+    pub fn batch_append<I>(&mut self, entries: I) -> Result<EventBatchAppendOutcome, EngineError>
     where
         I: IntoIterator<Item = EventBatchAppendEntry>,
     {
@@ -165,7 +165,7 @@ impl<'a> EventService<'a> {
     pub(crate) fn replay_append(
         &mut self,
         entries: Vec<(EventType, super::EventPayload, Timestamp)>,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let record = self.branch_record()?;
         if entries.is_empty() {
             return Ok(());
@@ -218,7 +218,10 @@ impl<'a> EventService<'a> {
     }
 
     /// Reads one latest event by sequence.
-    pub fn get(&mut self, sequence: EventSequence) -> EngineResult<Option<EventVersionedRecord>> {
+    pub fn get(
+        &mut self,
+        sequence: EventSequence,
+    ) -> Result<Option<EventVersionedRecord>, EngineError> {
         self.get_with_selector(sequence, ReadSelector::Latest)
     }
 
@@ -232,23 +235,23 @@ impl<'a> EventService<'a> {
         &mut self,
         sequence: EventSequence,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<EventVersionedRecord>> {
+    ) -> Result<Option<EventVersionedRecord>, EngineError> {
         self.get_with_selector(sequence, ReadSelector::AtTimestamp(timestamp))
     }
 
     /// Returns true if an event sequence exists.
-    pub fn exists(&mut self, sequence: EventSequence) -> EngineResult<bool> {
+    pub fn exists(&mut self, sequence: EventSequence) -> Result<bool, EngineError> {
         Ok(self.get(sequence)?.is_some())
     }
 
     /// Returns latest log length.
-    pub fn len(&mut self) -> EngineResult<EventLength> {
+    pub fn len(&mut self) -> Result<EventLength, EngineError> {
         let record = self.branch_record()?;
         Ok(EventLength::new(self.latest_event_count(&record)?))
     }
 
     /// Returns log length visible at a commit timestamp.
-    pub fn len_at(&mut self, timestamp: Timestamp) -> EngineResult<EventLength> {
+    pub fn len_at(&mut self, timestamp: Timestamp) -> Result<EventLength, EngineError> {
         let record = self.branch_record()?;
         let rows = self
             .event_rows(&record, ReadSelector::AtTimestamp(timestamp), None)?
@@ -262,7 +265,7 @@ impl<'a> EventService<'a> {
         event_type: &EventType,
         after_sequence: Option<EventSequence>,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<EventVersionedRecord>> {
+    ) -> Result<Vec<EventVersionedRecord>, EngineError> {
         self.get_by_type_with_selector(event_type, after_sequence, limit, ReadSelector::Latest)
     }
 
@@ -273,7 +276,7 @@ impl<'a> EventService<'a> {
         timestamp: Timestamp,
         after_sequence: Option<EventSequence>,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<EventVersionedRecord>> {
+    ) -> Result<Vec<EventVersionedRecord>, EngineError> {
         self.get_by_type_with_selector(
             event_type,
             after_sequence,
@@ -303,7 +306,7 @@ impl<'a> EventService<'a> {
         limit: Option<usize>,
         direction: EventRangeDirection,
         event_type: Option<&EventType>,
-    ) -> EngineResult<EventRangePage> {
+    ) -> Result<EventRangePage, EngineError> {
         if limit == Some(0) {
             return Ok(EventRangePage::new(Vec::new(), false, None));
         }
@@ -361,7 +364,7 @@ impl<'a> EventService<'a> {
         limit: Option<usize>,
         direction: EventRangeDirection,
         event_type: Option<&EventType>,
-    ) -> EngineResult<EventRangePage> {
+    ) -> Result<EventRangePage, EngineError> {
         if limit == Some(0) {
             return Ok(EventRangePage::new(Vec::new(), false, None));
         }
@@ -382,7 +385,7 @@ impl<'a> EventService<'a> {
     }
 
     /// Lists latest event types.
-    pub fn list_types(&mut self) -> EngineResult<EventTypeList> {
+    pub fn list_types(&mut self) -> Result<EventTypeList, EngineError> {
         let record = self.branch_record()?;
         let metadata = self.read_metadata(&record, ReadSelector::Latest)?;
         let event_types = metadata
@@ -393,7 +396,7 @@ impl<'a> EventService<'a> {
     }
 
     /// Lists event types visible at a commit timestamp.
-    pub fn list_types_at(&mut self, timestamp: Timestamp) -> EngineResult<EventTypeList> {
+    pub fn list_types_at(&mut self, timestamp: Timestamp) -> Result<EventTypeList, EngineError> {
         let record = self.branch_record()?;
         let events = self.event_rows(&record, ReadSelector::AtTimestamp(timestamp), None)?;
         let event_types = events
@@ -411,7 +414,7 @@ impl<'a> EventService<'a> {
         event_type: Option<&EventType>,
         limit: Option<usize>,
         as_of: Option<Timestamp>,
-    ) -> EngineResult<Vec<EventVersionedRecord>> {
+    ) -> Result<Vec<EventVersionedRecord>, EngineError> {
         Ok(self
             .list_page(event_type, None, limit, as_of)?
             .events()
@@ -425,7 +428,7 @@ impl<'a> EventService<'a> {
         after_sequence: Option<EventSequence>,
         limit: Option<usize>,
         as_of: Option<Timestamp>,
-    ) -> EngineResult<EventRangePage> {
+    ) -> Result<EventRangePage, EngineError> {
         if limit == Some(0) {
             return Ok(EventRangePage::new(Vec::new(), false, None));
         }
@@ -440,7 +443,7 @@ impl<'a> EventService<'a> {
     }
 
     /// Verifies visible event density and hash linkage.
-    pub fn verify_chain(&mut self) -> EngineResult<EventChainVerification> {
+    pub fn verify_chain(&mut self) -> Result<EventChainVerification, EngineError> {
         let record = self.branch_record()?;
         let metadata = self.read_metadata(&record, ReadSelector::Latest)?;
         let rows = self
@@ -455,7 +458,7 @@ impl<'a> EventService<'a> {
         &mut self,
         sequence: EventSequence,
         selector: ReadSelector,
-    ) -> EngineResult<Option<EventVersionedRecord>> {
+    ) -> Result<Option<EventVersionedRecord>, EngineError> {
         let record = self.branch_record()?;
         let address = self.event_address(&record, sequence);
         let Some(row) = self.persistence.read_row(address, selector)? else {
@@ -477,7 +480,7 @@ impl<'a> EventService<'a> {
         after_sequence: Option<EventSequence>,
         limit: Option<usize>,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<EventVersionedRecord>> {
+    ) -> Result<Vec<EventVersionedRecord>, EngineError> {
         if limit == Some(0) {
             return Ok(Vec::new());
         }
@@ -498,7 +501,7 @@ impl<'a> EventService<'a> {
         record: &BranchCatalogRecord,
         selector: ReadSelector,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<EventVersionedRecord>> {
+    ) -> Result<Vec<EventVersionedRecord>, EngineError> {
         self.event_raw_rows(record, selector, limit)?
             .into_iter()
             .filter(|row| !row.is_tombstone())
@@ -511,7 +514,7 @@ impl<'a> EventService<'a> {
         record: &BranchCatalogRecord,
         selector: ReadSelector,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.persistence.scan_prefix(
             record.storage_branch_id(),
             RowClass::Event,
@@ -528,7 +531,7 @@ impl<'a> EventService<'a> {
         end: u64,
         selector: ReadSelector,
         event_type: Option<&EventType>,
-    ) -> EngineResult<Vec<EventVersionedRecord>> {
+    ) -> Result<Vec<EventVersionedRecord>, EngineError> {
         let mut current = encode_event_key(&self.space, EventSequence::new(start));
         let upper = encode_event_key(&self.space, EventSequence::new(end));
         let mut events = Vec::new();
@@ -559,7 +562,7 @@ impl<'a> EventService<'a> {
         Ok(events)
     }
 
-    fn latest_event_count(&mut self, record: &BranchCatalogRecord) -> EngineResult<u64> {
+    fn latest_event_count(&mut self, record: &BranchCatalogRecord) -> Result<u64, EngineError> {
         Ok(self
             .read_metadata(record, ReadSelector::Latest)?
             .next_sequence())
@@ -569,7 +572,7 @@ impl<'a> EventService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         selector: ReadSelector,
-    ) -> EngineResult<EventLogMetadata> {
+    ) -> Result<EventLogMetadata, EngineError> {
         let address = self.metadata_address(record);
         let Some(row) = self.persistence.read_row(address, selector)? else {
             return Ok(EventLogMetadata::default());
@@ -586,7 +589,7 @@ impl<'a> EventService<'a> {
         decode_event_metadata(value)
     }
 
-    fn branch_record(&self) -> EngineResult<BranchCatalogRecord> {
+    fn branch_record(&self) -> Result<BranchCatalogRecord, EngineError> {
         self.control.require_healthy()?;
         self.control
             .lookup_branch(&self.branch)
@@ -632,7 +635,7 @@ impl<'a> EventService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
-    ) -> EngineResult<CommitOutcome> {
+    ) -> Result<CommitOutcome, EngineError> {
         let mut mutations = mutations;
         if mutations.is_empty() {
             return Err(EngineError::invalid_input(
@@ -669,7 +672,7 @@ impl<'a> EventService<'a> {
 fn event_from_row(
     space: &ProductSpace,
     row: &PersistenceReadRow,
-) -> EngineResult<EventVersionedRecord> {
+) -> Result<EventVersionedRecord, EngineError> {
     let sequence = decode_event_key_sequence(space, row.key())?;
     let value = row.value().ok_or_else(|| {
         EngineError::corruption(

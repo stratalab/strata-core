@@ -7,7 +7,7 @@ use crate::data::graph::{
 use crate::data::json::{JsonDocumentId, JsonIndexName};
 use crate::data::kv::{KvKey, ProductSpace};
 use crate::data::vector::{VectorCollectionName, VectorKey};
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 const KEY_VERSION: u8 = 1;
 const KV_DISCRIMINATOR: u8 = b'k';
@@ -46,7 +46,7 @@ pub(crate) fn encode_json_space_prefix(space: &ProductSpace) -> Vec<u8> {
 pub(crate) fn decode_json_document_id(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<JsonDocumentId> {
+) -> Result<JsonDocumentId, EngineError> {
     let id_bytes = decode_user_key(
         space,
         encoded,
@@ -79,7 +79,7 @@ pub(crate) fn encode_json_index_meta_prefix(space: &ProductSpace) -> Vec<u8> {
 pub(crate) fn decode_json_index_name(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<JsonIndexName> {
+) -> Result<JsonIndexName, EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -160,7 +160,7 @@ pub(crate) fn encode_vector_collection_prefix(space: &ProductSpace) -> Vec<u8> {
 pub(crate) fn decode_vector_collection_name(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<VectorCollectionName> {
+) -> Result<VectorCollectionName, EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -210,7 +210,7 @@ pub(crate) fn encode_vector_collection_entry_prefix(
 pub(crate) fn decode_vector_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<(VectorCollectionName, VectorKey)> {
+) -> Result<(VectorCollectionName, VectorKey), EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -255,7 +255,7 @@ pub(crate) fn encode_event_key(space: &ProductSpace, sequence: EventSequence) ->
 pub(crate) fn decode_event_key_sequence(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<EventSequence> {
+) -> Result<EventSequence, EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -349,7 +349,7 @@ pub(crate) fn encode_graph_type_index_space_prefix(space: &ProductSpace) -> Vec<
 pub(crate) fn decode_graph_type_index_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<(GraphName, GraphTypeName, GraphNodeId)> {
+) -> Result<(GraphName, GraphTypeName, GraphNodeId), EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -407,7 +407,7 @@ pub(crate) fn encode_graph_metadata_prefix(space: &ProductSpace) -> Vec<u8> {
 pub(crate) fn decode_graph_metadata_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<GraphName> {
+) -> Result<GraphName, EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -437,7 +437,7 @@ pub(crate) fn decode_graph_metadata_key(
 pub(crate) fn decode_graph_ontology_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<GraphName> {
+) -> Result<GraphName, EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -488,7 +488,7 @@ pub(crate) fn encode_graph_node_space_prefix(space: &ProductSpace) -> Vec<u8> {
 pub(crate) fn decode_graph_node_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<(GraphName, GraphNodeId)> {
+) -> Result<(GraphName, GraphNodeId), EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -562,7 +562,7 @@ pub(crate) fn encode_graph_outgoing_edge_prefix(
 pub(crate) fn decode_graph_edge_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<(GraphName, GraphNodeId, GraphEdgeType, GraphNodeId)> {
+) -> Result<(GraphName, GraphNodeId, GraphEdgeType, GraphNodeId), EngineError> {
     decode_graph_edge_like_key(
         space,
         encoded,
@@ -613,7 +613,7 @@ pub(crate) fn encode_graph_incoming_edge_prefix(
 pub(crate) fn decode_graph_reverse_edge_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<(GraphName, GraphNodeId, GraphEdgeType, GraphNodeId)> {
+) -> Result<(GraphName, GraphNodeId, GraphEdgeType, GraphNodeId), EngineError> {
     decode_graph_edge_like_key(
         space,
         encoded,
@@ -652,7 +652,7 @@ pub(crate) fn encode_graph_binding_key(
 pub(crate) fn decode_graph_binding_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<(GraphBindingTarget, GraphName, GraphNodeId)> {
+) -> Result<(GraphBindingTarget, GraphName, GraphNodeId), EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -702,7 +702,10 @@ fn encode_event_type_index_prefix(space: &ProductSpace, event_type: &EventType) 
 }
 
 #[cfg(test)]
-fn decode_event_sequence(space: &ProductSpace, encoded: &[u8]) -> EngineResult<EventSequence> {
+fn decode_event_sequence(
+    space: &ProductSpace,
+    encoded: &[u8],
+) -> Result<EventSequence, EngineError> {
     decode_event_type_index_key(space, encoded).map(|(_, sequence)| sequence)
 }
 
@@ -710,7 +713,7 @@ fn decode_event_sequence(space: &ProductSpace, encoded: &[u8]) -> EngineResult<E
 fn decode_event_type_index_key(
     space: &ProductSpace,
     encoded: &[u8],
-) -> EngineResult<(EventType, EventSequence)> {
+) -> Result<(EventType, EventSequence), EngineError> {
     let bytes = decode_user_key(
         space,
         encoded,
@@ -739,7 +742,10 @@ fn decode_event_type_index_key(
     Ok((event_type, sequence))
 }
 
-fn decode_event_sequence_suffix(bytes: &[u8], code: &'static str) -> EngineResult<EventSequence> {
+fn decode_event_sequence_suffix(
+    bytes: &[u8],
+    code: &'static str,
+) -> Result<EventSequence, EngineError> {
     if bytes.len() != 8 {
         return Err(EngineError::corruption(
             code,
@@ -789,7 +795,7 @@ fn decode_graph_edge_like_key(
     discriminator: u8,
     code: &'static str,
     message: &'static str,
-) -> EngineResult<(GraphName, GraphNodeId, GraphEdgeType, GraphNodeId)> {
+) -> Result<(GraphName, GraphNodeId, GraphEdgeType, GraphNodeId), EngineError> {
     let bytes = decode_user_key(space, encoded, discriminator, code, message)?;
     let (graph, rest) =
         decode_length_prefixed_text(bytes, code, "stored graph edge row key is missing a graph")?;
@@ -831,7 +837,9 @@ fn encode_graph_binding_target_suffix(output: &mut Vec<u8>, target: &GraphBindin
     encode_length_prefixed_text(output, target.key());
 }
 
-fn decode_graph_binding_target_suffix(bytes: &[u8]) -> EngineResult<(GraphBindingTarget, &[u8])> {
+fn decode_graph_binding_target_suffix(
+    bytes: &[u8],
+) -> Result<(GraphBindingTarget, &[u8]), EngineError> {
     let (primitive, rest) = decode_length_prefixed_text(
         bytes,
         "data_loss.engine.graph_binding_key",
@@ -901,7 +909,7 @@ fn decode_length_prefixed_text<'a>(
     bytes: &'a [u8],
     code: &'static str,
     message: &'static str,
-) -> EngineResult<(&'a str, &'a [u8])> {
+) -> Result<(&'a str, &'a [u8]), EngineError> {
     if bytes.len() < 2 {
         return Err(EngineError::corruption(code, message));
     }
@@ -939,7 +947,7 @@ pub(crate) fn encode_vector_space_prefix(space: &ProductSpace) -> Vec<u8> {
     encode_user_key(VECTOR_ENTRY_DISCRIMINATOR, space, &[])
 }
 
-pub(crate) fn decode_kv_key(space: &ProductSpace, encoded: &[u8]) -> EngineResult<KvKey> {
+pub(crate) fn decode_kv_key(space: &ProductSpace, encoded: &[u8]) -> Result<KvKey, EngineError> {
     let key_bytes = decode_user_key(
         space,
         encoded,
@@ -956,7 +964,7 @@ fn decode_user_key<'a>(
     discriminator: u8,
     code: &'static str,
     message: &'static str,
-) -> EngineResult<&'a [u8]> {
+) -> Result<&'a [u8], EngineError> {
     let corruption = || EngineError::corruption(code, message);
     if encoded.len() < 4 {
         return Err(corruption());
@@ -1077,7 +1085,7 @@ pub(crate) fn vector_index_manifest_prefix() -> Vec<u8> {
 
 pub(crate) fn decode_vector_index_manifest_key(
     encoded: &[u8],
-) -> EngineResult<(ProductSpace, VectorCollectionName)> {
+) -> Result<(ProductSpace, VectorCollectionName), EngineError> {
     let prefix = vector_index_manifest_prefix();
     if !encoded.starts_with(&prefix) {
         return Err(EngineError::corruption(

@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 use base64::Engine;
 use serde_json::Value;
 
-use crate::error::ExecutorResult;
+use crate::error::ExecutorError;
 use crate::output::Output;
 use crate::types::{
     ArrowExportPrimitive, ArrowExportResult, ArrowFileFormat, Bytes, EventRangeDirection,
@@ -38,7 +38,7 @@ pub(crate) fn export_file(
     collection: Option<String>,
     graph: Option<String>,
     event_type: Option<String>,
-) -> ExecutorResult<Output> {
+) -> Result<Output, ExecutorError> {
     let branch = branch.map(str::to_owned);
     let space = space.map(str::to_owned);
     let path = PathBuf::from(path);
@@ -133,7 +133,7 @@ fn export_kv(
     space: Option<&str>,
     prefix: Option<&str>,
     limit: Option<u64>,
-) -> ExecutorResult<RecordBatch> {
+) -> Result<RecordBatch, ExecutorError> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new("key_encoding", DataType::Utf8, false),
@@ -225,7 +225,7 @@ fn export_json(
     space: Option<&str>,
     prefix: Option<&str>,
     limit: Option<u64>,
-) -> ExecutorResult<RecordBatch> {
+) -> Result<RecordBatch, ExecutorError> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new("document", DataType::Utf8, false),
@@ -310,7 +310,7 @@ fn export_events(
     space: Option<String>,
     event_type: Option<String>,
     limit: Option<u64>,
-) -> ExecutorResult<RecordBatch> {
+) -> Result<RecordBatch, ExecutorError> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("sequence", DataType::UInt64, false),
         Field::new("event_type", DataType::Utf8, false),
@@ -374,7 +374,7 @@ fn export_vector(
     collection: &str,
     prefix: Option<&str>,
     limit: Option<u64>,
-) -> ExecutorResult<RecordBatch> {
+) -> Result<RecordBatch, ExecutorError> {
     let info = vector_collection_info(executor, branch, space, collection)?;
     let dimension = i32::try_from(info.dimension()).map_err(|_| {
         invalid_input(
@@ -489,7 +489,7 @@ fn export_graph_nodes(
     graph: &str,
     prefix: Option<&str>,
     limit: Option<u64>,
-) -> ExecutorResult<RecordBatch> {
+) -> Result<RecordBatch, ExecutorError> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("graph", DataType::Utf8, false),
         Field::new("node_id", DataType::Utf8, false),
@@ -565,7 +565,7 @@ fn export_graph_edges(
     space: Option<&str>,
     graph: &str,
     limit: Option<u64>,
-) -> ExecutorResult<RecordBatch> {
+) -> Result<RecordBatch, ExecutorError> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("graph", DataType::Utf8, false),
         Field::new("src", DataType::Utf8, false),
@@ -673,7 +673,7 @@ fn vector_collection_info(
     branch: Option<&str>,
     space: Option<&str>,
     collection: &str,
-) -> ExecutorResult<VectorCollectionInfo> {
+) -> Result<VectorCollectionInfo, ExecutorError> {
     let output = executor.execute(Command::VectorCollectionStats {
         branch: branch.map(str::to_owned),
         space: space.map(str::to_owned),
@@ -699,7 +699,7 @@ fn graph_node_ids(
     branch: Option<&str>,
     space: Option<&str>,
     graph: &str,
-) -> ExecutorResult<Vec<String>> {
+) -> Result<Vec<String>, ExecutorError> {
     let mut node_ids = Vec::new();
     let mut cursor = None;
     loop {
@@ -739,7 +739,7 @@ fn append_graph_node(
     binding_builder: &mut StringBuilder,
     version_builder: &mut UInt64Builder,
     timestamp_builder: &mut UInt64Builder,
-) -> ExecutorResult<()> {
+) -> Result<(), ExecutorError> {
     graph_builder.append_value(node.graph());
     node_builder.append_value(node.node_id());
     if let Some(properties) = node.properties() {
@@ -770,7 +770,7 @@ fn append_graph_edge(
     properties_builder: &mut StringBuilder,
     version_builder: &mut UInt64Builder,
     timestamp_builder: &mut UInt64Builder,
-) -> ExecutorResult<()> {
+) -> Result<(), ExecutorError> {
     graph_builder.append_value(edge.graph());
     src_builder.append_value(edge.src());
     edge_type_builder.append_value(edge.edge_type());
@@ -790,7 +790,7 @@ fn record_batch(
     schema: Arc<Schema>,
     columns: Vec<Arc<dyn arrow::array::Array>>,
     label: &str,
-) -> ExecutorResult<RecordBatch> {
+) -> Result<RecordBatch, ExecutorError> {
     RecordBatch::try_new(schema, columns)
         .map_err(|error| internal_error(format!("failed to build {label} RecordBatch: {error}")))
 }
@@ -813,7 +813,7 @@ fn encode_bytes(bytes: &[u8]) -> (String, &'static str) {
     }
 }
 
-fn json_to_string(value: &Value) -> ExecutorResult<String> {
+fn json_to_string(value: &Value) -> Result<String, ExecutorError> {
     serde_json::to_string(value)
         .map_err(|error| internal_error(format!("failed to serialize JSON value: {error}")))
 }

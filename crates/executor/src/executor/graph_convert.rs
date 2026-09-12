@@ -25,44 +25,48 @@ use super::{
     MutationEffect, MutationEffectKind, Output, PageInfo, DEFAULT_BRANCH, DEFAULT_SPACE,
 };
 
-pub(super) fn graph_name(name: String) -> ExecutorResult<EngineGraphName> {
+pub(super) fn graph_name(name: String) -> Result<EngineGraphName, ExecutorError> {
     EngineGraphName::new(name).map_err(ExecutorError::from)
 }
 
-pub(super) fn optional_graph_name(name: Option<String>) -> ExecutorResult<Option<EngineGraphName>> {
+pub(super) fn optional_graph_name(
+    name: Option<String>,
+) -> Result<Option<EngineGraphName>, ExecutorError> {
     name.map(graph_name).transpose()
 }
 
-pub(super) fn graph_node_id(node_id: String) -> ExecutorResult<EngineGraphNodeId> {
+pub(super) fn graph_node_id(node_id: String) -> Result<EngineGraphNodeId, ExecutorError> {
     EngineGraphNodeId::new(node_id).map_err(ExecutorError::from)
 }
 
 pub(super) fn optional_graph_node_id(
     node_id: Option<String>,
-) -> ExecutorResult<Option<EngineGraphNodeId>> {
+) -> Result<Option<EngineGraphNodeId>, ExecutorError> {
     node_id.map(graph_node_id).transpose()
 }
 
-pub(super) fn graph_edge_type(edge_type: String) -> ExecutorResult<EngineGraphEdgeType> {
+pub(super) fn graph_edge_type(edge_type: String) -> Result<EngineGraphEdgeType, ExecutorError> {
     EngineGraphEdgeType::new(edge_type).map_err(ExecutorError::from)
 }
 
 pub(super) fn optional_graph_edge_type(
     edge_type: Option<String>,
-) -> ExecutorResult<Option<EngineGraphEdgeType>> {
+) -> Result<Option<EngineGraphEdgeType>, ExecutorError> {
     edge_type.map(graph_edge_type).transpose()
 }
 
 pub(super) fn engine_graph_properties(
     properties: Option<serde_json::Value>,
-) -> ExecutorResult<Option<EngineGraphProperties>> {
+) -> Result<Option<EngineGraphProperties>, ExecutorError> {
     properties
         .map(EngineGraphProperties::new)
         .transpose()
         .map_err(ExecutorError::from)
 }
 
-pub(super) fn engine_graph_node_data(data: GraphNodeData) -> ExecutorResult<EngineGraphNodeData> {
+pub(super) fn engine_graph_node_data(
+    data: GraphNodeData,
+) -> Result<EngineGraphNodeData, ExecutorError> {
     let (properties, binding, object_type) = data.into_parts();
     let mut data = EngineGraphNodeData::new(
         engine_graph_properties(properties)?,
@@ -74,11 +78,13 @@ pub(super) fn engine_graph_node_data(data: GraphNodeData) -> ExecutorResult<Engi
     Ok(data)
 }
 
-pub(super) fn graph_type_name(name: String) -> ExecutorResult<EngineGraphTypeName> {
+pub(super) fn graph_type_name(name: String) -> Result<EngineGraphTypeName, ExecutorError> {
     EngineGraphTypeName::new(name).map_err(ExecutorError::from)
 }
 
-pub(super) fn engine_graph_edge_data(data: GraphEdgeData) -> ExecutorResult<EngineGraphEdgeData> {
+pub(super) fn engine_graph_edge_data(
+    data: GraphEdgeData,
+) -> Result<EngineGraphEdgeData, ExecutorError> {
     let (weight, properties) = data.into_parts();
     let properties = engine_graph_properties(properties)?;
     if let Some(weight) = weight {
@@ -129,7 +135,7 @@ pub(super) const fn output_graph_binding_primitive(
 
 pub(super) fn engine_graph_binding_target(
     target: GraphBindingTarget,
-) -> ExecutorResult<EngineGraphBindingTarget> {
+) -> Result<EngineGraphBindingTarget, ExecutorError> {
     let (primitive, branch, space, key) = target.into_parts();
     let branch = branch
         .as_deref()
@@ -147,7 +153,7 @@ pub(super) fn engine_graph_binding_target(
 
 pub(super) fn engine_graph_entity_binding(
     binding: GraphEntityBinding,
-) -> ExecutorResult<EngineGraphEntityBinding> {
+) -> Result<EngineGraphEntityBinding, ExecutorError> {
     Ok(EngineGraphEntityBinding::new(engine_graph_binding_target(
         binding.into_target(),
     )?))
@@ -155,7 +161,7 @@ pub(super) fn engine_graph_entity_binding(
 
 pub(super) fn engine_graph_batch_operation(
     operation: GraphBatchOperation,
-) -> ExecutorResult<EngineGraphBatchOperation> {
+) -> Result<EngineGraphBatchOperation, ExecutorError> {
     match operation {
         GraphBatchOperation::UpsertNode { node_id, data } => {
             Ok(EngineGraphBatchOperation::UpsertNode {
@@ -277,7 +283,7 @@ pub(super) fn graph_neighbor_hit(neighbor: &EngineGraphNeighbor) -> GraphNeighbo
 
 pub(super) fn engine_graph_bulk_nodes(
     nodes: Vec<GraphBulkNode>,
-) -> ExecutorResult<Vec<(EngineGraphNodeId, EngineGraphNodeData)>> {
+) -> Result<Vec<(EngineGraphNodeId, EngineGraphNodeData)>, ExecutorError> {
     nodes
         .into_iter()
         .map(|node| {
@@ -293,13 +299,14 @@ pub(super) fn engine_graph_bulk_nodes(
 
 pub(super) fn engine_graph_bulk_edges(
     edges: Vec<GraphBulkEdge>,
-) -> ExecutorResult<
+) -> Result<
     Vec<(
         EngineGraphNodeId,
         EngineGraphEdgeType,
         EngineGraphNodeId,
         EngineGraphEdgeData,
     )>,
+    ExecutorError,
 > {
     edges
         .into_iter()
@@ -512,7 +519,7 @@ pub(super) fn graph_batch_item_effect(item: &EngineGraphBatchOpOutcome) -> Mutat
 
 pub(super) fn engine_graph_property_defs(
     properties: std::collections::BTreeMap<String, GraphPropertyDef>,
-) -> ExecutorResult<Vec<(String, EngineGraphPropertyDef)>> {
+) -> Result<Vec<(String, EngineGraphPropertyDef)>, ExecutorError> {
     properties
         .into_iter()
         .map(|(name, def)| {
@@ -649,14 +656,14 @@ pub(super) fn graph_ontology_freeze_output(outcome: &EngineGraphOntologyFreezeOu
     }
 }
 
-fn analytics_bound(value: u64, field: &'static str) -> ExecutorResult<usize> {
+fn analytics_bound(value: u64, field: &'static str) -> Result<usize, ExecutorError> {
     usize::try_from(value)
         .map_err(|_| ExecutorError::new("invalid_argument.executor.graph_analytics_budget", field))
 }
 
 pub(super) fn engine_graph_budget(
     budget: Option<GraphAnalyticsBudget>,
-) -> ExecutorResult<EngineGraphAnalyticsBudget> {
+) -> Result<EngineGraphAnalyticsBudget, ExecutorError> {
     let defaults = EngineGraphAnalyticsBudget::default();
     let budget = budget.unwrap_or_default();
     Ok(EngineGraphAnalyticsBudget::new(
@@ -677,7 +684,7 @@ pub(super) fn engine_graph_pagerank_options(
     damping: Option<f64>,
     max_iterations: Option<u64>,
     tolerance: Option<f64>,
-) -> ExecutorResult<EngineGraphPageRankOptions> {
+) -> Result<EngineGraphPageRankOptions, ExecutorError> {
     let defaults = EngineGraphPageRankOptions::default();
     let max_iterations = max_iterations
         .map(|value| analytics_bound(value, "max_iterations does not fit this platform"))
@@ -694,7 +701,7 @@ pub(super) fn engine_graph_pagerank_options(
 pub(super) fn engine_graph_cdlp_options(
     max_iterations: Option<u64>,
     direction: Option<GraphDirection>,
-) -> ExecutorResult<EngineGraphCdlpOptions> {
+) -> Result<EngineGraphCdlpOptions, ExecutorError> {
     let defaults = EngineGraphCdlpOptions::default();
     Ok(EngineGraphCdlpOptions::new(
         max_iterations
@@ -710,7 +717,7 @@ pub(super) fn engine_graph_bfs_options(
     max_nodes: Option<u64>,
     edge_types: Option<Vec<String>>,
     direction: Option<GraphDirection>,
-) -> ExecutorResult<EngineGraphBfsOptions> {
+) -> Result<EngineGraphBfsOptions, ExecutorError> {
     let defaults = EngineGraphBfsOptions::default();
     let max_depth = max_depth
         .map(|value| analytics_bound(value, "max_depth does not fit this platform"))
@@ -738,7 +745,7 @@ pub(super) fn engine_graph_bfs_options(
 
 pub(super) fn engine_graph_personalization(
     personalization: std::collections::BTreeMap<String, f64>,
-) -> ExecutorResult<std::collections::HashMap<EngineGraphNodeId, f64>> {
+) -> Result<std::collections::HashMap<EngineGraphNodeId, f64>, ExecutorError> {
     personalization
         .into_iter()
         .map(|(node_id, weight)| Ok((graph_node_id(node_id)?, weight)))

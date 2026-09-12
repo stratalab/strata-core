@@ -15,7 +15,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::{GraphAdjacencyIndex, GraphDirection, GraphNodeId};
 
@@ -235,7 +235,7 @@ impl GraphAdjacencyIndex {
         &self,
         source: &GraphNodeId,
         direction: GraphDirection,
-    ) -> EngineResult<GraphSsspResult> {
+    ) -> Result<GraphSsspResult, EngineError> {
         let Some(source_index) = self.node_index(source) else {
             return Err(EngineError::not_found(
                 "not_found.engine.graph_node",

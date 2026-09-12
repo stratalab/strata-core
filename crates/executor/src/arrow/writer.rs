@@ -5,7 +5,7 @@ use std::path::Path;
 
 use arrow::record_batch::RecordBatch;
 
-use crate::error::ExecutorResult;
+use crate::error::ExecutorError;
 use crate::types::ArrowFileFormat;
 
 use super::{internal_error, invalid_input, io_error};
@@ -14,7 +14,7 @@ pub(crate) fn write_file(
     path: &Path,
     format: ArrowFileFormat,
     batches: &[RecordBatch],
-) -> ExecutorResult<u64> {
+) -> Result<u64, ExecutorError> {
     if batches.is_empty() {
         return Err(invalid_input(
             "invalid_argument.executor.arrow_empty_export",
@@ -42,7 +42,7 @@ pub(crate) fn write_file(
     Ok(metadata.len())
 }
 
-fn write_parquet(path: &Path, batches: &[RecordBatch]) -> ExecutorResult<()> {
+fn write_parquet(path: &Path, batches: &[RecordBatch]) -> Result<(), ExecutorError> {
     let file = create_file(path)?;
     let properties = parquet::file::properties::WriterProperties::builder()
         .set_compression(parquet::basic::Compression::SNAPPY)
@@ -61,7 +61,7 @@ fn write_parquet(path: &Path, batches: &[RecordBatch]) -> ExecutorResult<()> {
     Ok(())
 }
 
-fn write_csv(path: &Path, batches: &[RecordBatch]) -> ExecutorResult<()> {
+fn write_csv(path: &Path, batches: &[RecordBatch]) -> Result<(), ExecutorError> {
     let file = create_file(path)?;
     let mut writer = arrow::csv::WriterBuilder::new()
         .with_header(true)
@@ -74,7 +74,7 @@ fn write_csv(path: &Path, batches: &[RecordBatch]) -> ExecutorResult<()> {
     Ok(())
 }
 
-fn write_jsonl(path: &Path, batches: &[RecordBatch]) -> ExecutorResult<()> {
+fn write_jsonl(path: &Path, batches: &[RecordBatch]) -> Result<(), ExecutorError> {
     let file = create_file(path)?;
     let mut writer = arrow::json::LineDelimitedWriter::new(file);
     for batch in batches {
@@ -88,7 +88,7 @@ fn write_jsonl(path: &Path, batches: &[RecordBatch]) -> ExecutorResult<()> {
     Ok(())
 }
 
-fn create_file(path: &Path) -> ExecutorResult<File> {
+fn create_file(path: &Path) -> Result<File, ExecutorError> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

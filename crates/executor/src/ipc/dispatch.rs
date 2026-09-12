@@ -8,7 +8,7 @@
 
 use serde_json::json;
 
-use crate::{guard_json_integers, Command, Executor, ExecutorError, ExecutorResult, Output};
+use crate::{guard_json_integers, Command, Executor, ExecutorError, Output};
 
 use super::protocol::SessionAccess;
 
@@ -42,7 +42,7 @@ fn decode_and_execute(
     executor: &mut Executor,
     request_json: &str,
     access: SessionAccess,
-) -> ExecutorResult<Output> {
+) -> Result<Output, ExecutorError> {
     guard_json_integers(request_json)?;
     let command: Command = serde_json::from_str(request_json).map_err(|error| {
         ExecutorError::new(

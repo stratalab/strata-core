@@ -3,7 +3,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::branch::SYSTEM_BRANCH;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 const MAX_PRODUCT_SPACE_BYTES: usize = u16::MAX as usize;
 
@@ -14,7 +14,7 @@ pub struct ProductSpace(String);
 
 impl ProductSpace {
     /// Creates a product space after rejecting internal names.
-    pub fn new(space: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(space: impl Into<String>) -> Result<Self, EngineError> {
         let space = space.into();
         if space.is_empty() {
             return Err(EngineError::invalid_input(
@@ -73,7 +73,7 @@ pub struct KvKey(Vec<u8>);
 
 impl KvKey {
     /// Creates a KV key.
-    pub fn new(bytes: impl Into<Vec<u8>>) -> EngineResult<Self> {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Result<Self, EngineError> {
         let bytes = bytes.into();
         if bytes.is_empty() {
             return Err(EngineError::invalid_input(

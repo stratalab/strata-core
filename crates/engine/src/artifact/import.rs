@@ -82,7 +82,7 @@ enum Action {
 pub fn import_branch(
     db: &mut Database,
     artifact: &BranchArtifact,
-) -> EngineResult<BranchImportSummary> {
+) -> Result<BranchImportSummary, EngineError> {
     let mut summaries = import_branches(db, std::slice::from_ref(artifact))?;
     Ok(summaries.pop().expect("one artifact yields one summary"))
 }
@@ -105,7 +105,7 @@ pub fn import_branch(
 pub fn import_branches(
     db: &mut Database,
     artifacts: &[BranchArtifact],
-) -> EngineResult<Vec<BranchImportSummary>> {
+) -> Result<Vec<BranchImportSummary>, EngineError> {
     let schedules = artifacts
         .iter()
         .map(build_schedule)
@@ -165,7 +165,7 @@ fn import_structure(
     db: &mut Database,
     artifacts: &[BranchArtifact],
     global_min: Option<Timestamp>,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     for artifact in artifacts {
         ensure_empty_target_branch(db, artifact.branch())?;
     }
@@ -175,7 +175,7 @@ fn import_structure(
     Ok(())
 }
 
-fn ensure_empty_target_branch(db: &mut Database, branch: &BranchName) -> EngineResult<()> {
+fn ensure_empty_target_branch(db: &mut Database, branch: &BranchName) -> Result<(), EngineError> {
     let exists = db
         .branches()?
         .list()?
@@ -201,7 +201,7 @@ fn create_spaces(
     branch: &BranchName,
     artifact: &BranchArtifact,
     min_timestamp: Option<Timestamp>,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     for space in artifact.spaces() {
         if let Some(timestamp) = min_timestamp {
             db.arm_replay_commit_timestamp(timestamp);
@@ -214,7 +214,7 @@ fn create_spaces(
 /// Decodes every section into replay steps sorted by
 /// `(timestamp, section index, record index)` — the order that keeps
 /// explicit commit timestamps non-decreasing.
-fn build_schedule(artifact: &BranchArtifact) -> EngineResult<Vec<WorkItem>> {
+fn build_schedule(artifact: &BranchArtifact) -> Result<Vec<WorkItem>, EngineError> {
     let mut items = Vec::new();
     for (section_index, section) in artifact.sections().iter().enumerate() {
         schedule_section(section, section_index, &mut items)?;
@@ -232,7 +232,7 @@ fn schedule_section(
     section: &super::ArtifactSection,
     section_index: usize,
     items: &mut Vec<WorkItem>,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let space = section.space().clone();
     {
         let qualifier = section.qualifier().unwrap_or_default().to_owned();
@@ -391,7 +391,7 @@ fn flush_kv_run(run: &mut KvRun, space: &ProductSpace, section: usize, items: &m
     }
 }
 
-fn replay_item(db: &mut Database, branch: &BranchName, item: WorkItem) -> EngineResult<()> {
+fn replay_item(db: &mut Database, branch: &BranchName, item: WorkItem) -> Result<(), EngineError> {
     db.arm_replay_commit_timestamp(item.timestamp);
     match item.action {
         Action::KvRows(space, rows) => {
@@ -475,7 +475,7 @@ fn replay_create_collection(
     space: ProductSpace,
     name: String,
     config: &[u8],
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let config: Value = serde_json::from_slice(config).map_err(|error| payload_error(&error))?;
     let dimension = usize::try_from(config["dimension"].as_u64().unwrap_or(0))
         .map_err(|_| payload_corruption("vector dimension out of range"))?;
@@ -506,7 +506,7 @@ fn replay_graph_edge(
     edge_type: String,
     dst: String,
     data: &[u8],
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let data: Value = serde_json::from_slice(data).map_err(|error| payload_error(&error))?;
     let weight = data["weight"].as_f64().unwrap_or(1.0);
     let properties = match data.get("properties") {
@@ -534,7 +534,7 @@ fn replay_ontology(
     graph: &GraphName,
     timestamp: Timestamp,
     ontology: &[u8],
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let ontology: Value =
         serde_json::from_slice(ontology).map_err(|error| payload_error(&error))?;
     for def in ontology["object_types"].as_array().into_iter().flatten() {
@@ -566,7 +566,7 @@ fn replay_ontology(
     Ok(())
 }
 
-fn parse_property_defs(value: &Value) -> EngineResult<Vec<(String, GraphPropertyDef)>> {
+fn parse_property_defs(value: &Value) -> Result<Vec<(String, GraphPropertyDef)>, EngineError> {
     let mut defs = Vec::new();
     if let Some(map) = value.as_object() {
         for (name, def) in map {

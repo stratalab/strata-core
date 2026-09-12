@@ -12,7 +12,7 @@
 use crate::branch::adapter::{
     CapabilityBranchAdapter, ComparableEntity, DerivedDisposition, EntitySummary,
 };
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{decode_kv_key, encode_kv_space_prefix, PersistenceReadRow, RowClass};
 
 use super::ProductSpace;
@@ -37,7 +37,7 @@ impl CapabilityBranchAdapter for KvBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         let key = decode_kv_key(space, row.key())?;
         let summary = if row.is_tombstone() {
             EntitySummary::Absent

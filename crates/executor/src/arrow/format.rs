@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use crate::error::ExecutorResult;
+use crate::error::ExecutorError;
 use crate::types::ArrowFileFormat;
 
 use super::invalid_input;
 
-pub(crate) fn detect_format(path: &Path) -> ExecutorResult<ArrowFileFormat> {
+pub(crate) fn detect_format(path: &Path) -> Result<ArrowFileFormat, ExecutorError> {
     match path
         .extension()
         .and_then(|extension| extension.to_str())

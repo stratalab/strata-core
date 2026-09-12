@@ -855,6 +855,36 @@ fn open_options_remain_explicit() {
 /// cargo toolchain with no undeclared prerequisites, per the crate-shape /
 /// test-harness contract ("harnesses should be reusable, deterministic, and
 /// explicitly invoked").
+/// #3337: a return type written with the crate's `Result` alias is invisible to
+/// the mutation gate.
+///
+/// cargo-mutants reads signatures as text and resolves no type aliases, so
+/// `-> EngineResult<T>` looks like an unknown one-parameter container: every
+/// body-replacement mutant it writes (`EngineResult::new()`,
+/// `EngineResult::from(None)`) fails to compile, is scored *unviable*, and the
+/// lane passes having tested nothing. Spelled out, the same function yields
+/// `Ok(None)` / `Ok(true)` — the mutants that catch a result nothing observes.
+///
+/// The alias stays: it is public API, and every other position keeps using it.
+/// Only the return position has to say `Result<T, EngineError>`.
+#[test]
+fn return_types_spell_the_result_out_for_the_mutation_gate() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let offenders: Vec<_> = rust_files(&root)
+        .into_iter()
+        .filter_map(|path| {
+            let text = fs::read_to_string(&path).expect("read source file");
+            // The qualified spelling hides just as well.
+            (text.contains("-> EngineResult<") || text.contains("::EngineResult<")).then_some(path)
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a return type hides behind the alias, so the mutation gate cannot \
+         replace it: write `-> Result<T, EngineError>` in {offenders:?}"
+    );
+}
+
 fn rust_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_rust_files(root, &mut files);

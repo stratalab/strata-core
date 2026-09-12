@@ -26,7 +26,7 @@ use crate::branch::preview::base_point_for;
 use crate::control::space::read_space_index_at;
 use crate::data::kv::ProductSpace;
 use crate::data::vector::{decode_collection_config, VectorCollectionName};
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{
     decode_vector_collection_name, decode_vector_key, encode_vector_collection_entry_prefix,
     encode_vector_collection_prefix, encode_vector_space_prefix, PersistenceReadRow, ReadSelector,
@@ -53,7 +53,7 @@ impl CapabilityBranchAdapter for VectorBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         // Validate the row is a well-formed vector key in this space, rejecting
         // foreign-space and malformed keys with the vector capability's
         // structured diagnostic.
@@ -118,7 +118,7 @@ impl CapabilityBranchAdapter for VectorCollectionBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         // Validate the row is a well-formed collection key in this space.
         decode_vector_collection_name(space, row.key())?;
         let identity = row
@@ -184,7 +184,7 @@ pub(crate) fn plan_collection_promotion(
     target: &BranchCatalogRecord,
     spaces: &[ProductSpace],
     strategy_result: ConflictStrategyResult,
-) -> EngineResult<(Vec<RowMutation>, Vec<PreviewConflict>)> {
+) -> Result<(Vec<RowMutation>, Vec<PreviewConflict>), EngineError> {
     let (base_branch, base_selector) = base_point_for(source, target)?;
     // Also consider spaces the source deleted entirely (present in the base but
     // absent from the caller's source-space set): their collection configs must be
@@ -367,7 +367,7 @@ fn vectors_survive_config_change(
     key: &[u8],
     held: Option<&Vec<u8>>,
     incoming: Option<&Vec<u8>>,
-) -> EngineResult<bool> {
+) -> Result<bool, EngineError> {
     let (Some(held), Some(incoming)) = (held, incoming) else {
         return Ok(false);
     };
@@ -402,7 +402,7 @@ fn target_retains_vectors(
     target: &BranchCatalogRecord,
     space: &ProductSpace,
     collection: &VectorCollectionName,
-) -> EngineResult<bool> {
+) -> Result<bool, EngineError> {
     let entry_prefix = encode_vector_collection_entry_prefix(space, collection);
     let target_live = live_vector_keys(
         persistence,
@@ -434,7 +434,7 @@ fn live_vector_keys(
     storage_branch: BranchId,
     entry_prefix: &[u8],
     selector: ReadSelector,
-) -> EngineResult<BTreeSet<Vec<u8>>> {
+) -> Result<BTreeSet<Vec<u8>>, EngineError> {
     Ok(persistence
         .scan_prefix(
             storage_branch,
@@ -460,7 +460,7 @@ fn source_carries_vectors(
     source: &BranchCatalogRecord,
     space: &ProductSpace,
     collection: &VectorCollectionName,
-) -> EngineResult<bool> {
+) -> Result<bool, EngineError> {
     let entry_prefix = encode_vector_collection_entry_prefix(space, collection);
     let base_values: BTreeMap<Vec<u8>, Vec<u8>> = persistence
         .scan_prefix(
@@ -505,7 +505,7 @@ fn collection_config_rows(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
     prefix: &[u8],
-) -> EngineResult<BTreeMap<Vec<u8>, Vec<u8>>> {
+) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, EngineError> {
     collection_config_rows_at(
         persistence,
         record.storage_branch_id(),
@@ -523,7 +523,7 @@ fn collection_config_rows_at(
     storage_branch: BranchId,
     prefix: &[u8],
     selector: ReadSelector,
-) -> EngineResult<BTreeMap<Vec<u8>, Vec<u8>>> {
+) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, EngineError> {
     let rows = persistence.scan_prefix(
         storage_branch,
         RowClass::VectorCollection,

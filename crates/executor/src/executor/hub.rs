@@ -18,7 +18,7 @@ use time::format_description::well_known::Rfc3339;
 #[cfg(feature = "hub")]
 use time::OffsetDateTime;
 
-use super::{Executor, ExecutorResult, Output};
+use super::{Executor, Output};
 #[cfg(feature = "hub")]
 use crate::types::{HubCloneProgress, HubCloneProgressStage, HubDatasetSort};
 use crate::ExecutorError;
@@ -35,7 +35,7 @@ impl Executor {
         branch: Option<&str>,
         dest: &str,
         hub_url: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute_hub_clone_inner(dataset, branch, dest, hub_url, &mut |_progress| {})
     }
 
@@ -48,7 +48,7 @@ impl Executor {
         dest: &str,
         hub_url: Option<String>,
         progress: &mut dyn FnMut(Output),
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute_hub_clone_inner(dataset, branch, dest, hub_url, progress)
     }
 
@@ -60,7 +60,7 @@ impl Executor {
         dest: &str,
         hub_url: Option<String>,
         progress: &mut dyn FnMut(Output),
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let transport = hub_transport(hub_url)?;
         let dataset = DatasetName::parse(dataset).map_err(|error| {
             ExecutorError::new(
@@ -99,7 +99,10 @@ impl Executor {
 
     /// Reads the hub capability advertisement.
     #[allow(clippy::unused_self)]
-    pub(super) fn execute_hub_info(&mut self, hub_url: Option<String>) -> ExecutorResult<Output> {
+    pub(super) fn execute_hub_info(
+        &mut self,
+        hub_url: Option<String>,
+    ) -> Result<Output, ExecutorError> {
         let transport = hub_transport(hub_url)?;
         transport
             .info()
@@ -122,7 +125,7 @@ impl Executor {
         sort: Option<HubDatasetSort>,
         limit: Option<u32>,
         offset: Option<u32>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         validate_dataset_list_query(size_min_bytes, size_max_bytes, limit)?;
         let transport = hub_transport(hub_url)?;
         let filter = DatasetFilter {
@@ -148,7 +151,7 @@ impl Executor {
         &mut self,
         name: &str,
         hub_url: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let dataset = parse_dataset(name)?;
         let transport = hub_transport(hub_url)?;
         transport
@@ -170,7 +173,7 @@ impl Executor {
         &mut self,
         dataset: &str,
         hub_url: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let dataset = parse_dataset(dataset)?;
         let transport = hub_transport(hub_url)?;
         transport
@@ -192,7 +195,7 @@ impl Executor {
         &mut self,
         since: Option<&str>,
         hub_url: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let since = since.map(parse_since).transpose()?;
         let transport = hub_transport(hub_url)?;
         transport
@@ -204,14 +207,14 @@ impl Executor {
 }
 
 #[cfg(feature = "hub")]
-fn hub_transport(hub_url: Option<String>) -> ExecutorResult<ClientTransport> {
+fn hub_transport(hub_url: Option<String>) -> Result<ClientTransport, ExecutorError> {
     let resolved = resolve_hub_url(&HubUrlInputs::from_process(hub_url))
         .map_err(|error| hub_url_error(&error))?;
     ClientTransport::new(resolved.url).map_err(|error| clone_error(&error))
 }
 
 #[cfg(feature = "hub")]
-fn parse_dataset(dataset: &str) -> ExecutorResult<DatasetName> {
+fn parse_dataset(dataset: &str) -> Result<DatasetName, ExecutorError> {
     DatasetName::parse(dataset).map_err(|error| {
         ExecutorError::new(
             "invalid_argument.executor.hub_dataset",
@@ -221,7 +224,7 @@ fn parse_dataset(dataset: &str) -> ExecutorResult<DatasetName> {
 }
 
 #[cfg(feature = "hub")]
-fn parse_since(since: &str) -> ExecutorResult<OffsetDateTime> {
+fn parse_since(since: &str) -> Result<OffsetDateTime, ExecutorError> {
     OffsetDateTime::parse(since, &Rfc3339).map_err(|error| {
         ExecutorError::new(
             "invalid_argument.executor.hub_since",
@@ -235,7 +238,7 @@ fn validate_dataset_list_query(
     size_min_bytes: Option<u64>,
     size_max_bytes: Option<u64>,
     limit: Option<u32>,
-) -> ExecutorResult<()> {
+) -> Result<(), ExecutorError> {
     if matches!(limit, Some(0 | 201..)) {
         return Err(ExecutorError::new(
             "invalid_argument.executor.hub_filter",

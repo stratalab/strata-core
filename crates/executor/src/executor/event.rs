@@ -3,7 +3,7 @@ use super::{
     event_batch_entry, event_batch_result, event_chain_verification, event_payload,
     event_range_output, event_records, event_sequence, event_versioned_data,
     optional_engine_event_type, optional_limit, usize_to_u64, BatchEventEntry, EventRangeDirection,
-    Executor, ExecutorResult, Maybe, Output, PageInfo, Timestamp,
+    Executor, ExecutorError, Maybe, Output, PageInfo, Timestamp,
 };
 
 impl Executor {
@@ -12,7 +12,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         entries: Vec<BatchEventEntry>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let entries = entries
             .into_iter()
             .map(event_batch_entry)
@@ -38,7 +38,7 @@ impl Executor {
         space: Option<&str>,
         event_type: String,
         payload: serde_json::Value,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let event_type = engine_event_type(event_type)?;
         let payload = event_payload(payload)?;
         let mut service = self.event_service(branch, space)?;
@@ -52,7 +52,7 @@ impl Executor {
         sequence: u64,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let sequence = event_sequence(sequence);
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
@@ -73,7 +73,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         sequence: u64,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let sequence = event_sequence(sequence);
         let mut service = self.event_service(branch, space)?;
         Ok(Output::Bool(service.exists(sequence)?))
@@ -85,7 +85,7 @@ impl Executor {
         space: Option<&str>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
@@ -108,7 +108,7 @@ impl Executor {
         limit: Option<u64>,
         direction: EventRangeDirection,
         event_type: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let end_seq = end_seq.map(event_sequence);
         let limit = optional_limit(limit)?;
         let direction = engine_event_direction(direction);
@@ -134,7 +134,7 @@ impl Executor {
         limit: Option<u64>,
         direction: EventRangeDirection,
         event_type: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let end_ts = end_ts.map(Timestamp::from_micros);
         let limit = optional_limit(limit)?;
         let direction = engine_event_direction(direction);
@@ -156,7 +156,7 @@ impl Executor {
         space: Option<&str>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
@@ -185,7 +185,7 @@ impl Executor {
         after_sequence: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let event_type = optional_engine_event_type(event_type)?;
         let limit = optional_limit(limit)?;
         let after_sequence = after_sequence.map(event_sequence);
@@ -207,7 +207,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: Option<&str>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.event_service(branch, space)?;
         Ok(Output::EventChainVerification(event_chain_verification(
             &service.verify_chain()?,

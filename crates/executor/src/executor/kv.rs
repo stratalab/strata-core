@@ -5,7 +5,7 @@ use super::{
     finish_batch_get_results, finish_batch_results, history_result, kv_batch_exists_result,
     kv_batch_get_result, kv_batch_result, kv_key, kv_value, optional_key, optional_limit,
     reject_duplicate_valid_keys, sample_output, scan_item, upsert_effect, usize_to_u64,
-    versioned_value, write_output, BatchKvEntry, Bytes, Executor, ExecutorResult, Maybe, Output,
+    versioned_value, write_output, BatchKvEntry, Bytes, Executor, ExecutorError, Maybe, Output,
     PageInfo,
 };
 
@@ -16,7 +16,7 @@ impl Executor {
         space: Option<&str>,
         key: Bytes,
         value: Bytes,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let output_key = key.clone();
         let key = kv_key(key)?;
         let mut service = self.kv_service(branch, space)?;
@@ -35,7 +35,7 @@ impl Executor {
         key: Bytes,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let key = kv_key(key)?;
         // #3112 S3a: a wall-clock instant is resolved to a logical timestamp
         // BEFORE the read, so both forms run the identical as-of path below.
@@ -59,7 +59,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         key: Bytes,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let output_key = key.clone();
         let key = kv_key(key)?;
         let mut service = self.kv_service(branch, space)?;
@@ -80,7 +80,7 @@ impl Executor {
         limit: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let prefix = optional_key(prefix)?;
         let cursor = optional_key(cursor)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
@@ -117,7 +117,7 @@ impl Executor {
         space: Option<&str>,
         start: Option<Bytes>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let start = optional_key(start)?;
         let limit = optional_limit(limit)?;
         let mut service = self.kv_service(branch, space)?;
@@ -145,7 +145,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         entries: Vec<BatchKvEntry>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.kv_service(branch, space)?;
         if entries.is_empty() {
             return Ok(Output::BatchResults(kv_batch_result(Vec::new())));
@@ -191,7 +191,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         keys: Vec<Bytes>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.kv_service(branch, space)?;
         if keys.is_empty() {
             return Ok(Output::BatchGetResults(kv_batch_get_result(Vec::new())));
@@ -226,7 +226,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         keys: Vec<Bytes>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.kv_service(branch, space)?;
         if keys.is_empty() {
             return Ok(Output::BatchResults(kv_batch_result(Vec::new())));
@@ -272,7 +272,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         keys: Vec<Bytes>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.kv_service(branch, space)?;
         if keys.is_empty() {
             return Ok(Output::BatchExistsResults(kv_batch_exists_result(
@@ -314,7 +314,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         key: Bytes,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let key = kv_key(key)?;
         let mut service = self.kv_service(branch, space)?;
         Ok(Output::Bool(service.exists(&key)?))
@@ -325,7 +325,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         key: Bytes,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let key = kv_key(key)?;
         let mut service = self.kv_service(branch, space)?;
         Ok(Output::VersionHistory(
@@ -340,7 +340,7 @@ impl Executor {
         prefix: Option<Bytes>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let prefix = optional_key(prefix)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
@@ -360,7 +360,7 @@ impl Executor {
         space: Option<&str>,
         prefix: Option<Bytes>,
         count: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let prefix = optional_key(prefix)?;
         let count = optional_limit(count)?.unwrap_or(10);
         let mut service = self.kv_service(branch, space)?;

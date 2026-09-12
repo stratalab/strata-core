@@ -8,7 +8,7 @@ use super::{
     json_sample_output, json_value, json_versioned_value, json_write_output,
     optional_json_document_id, optional_json_prefix, optional_limit, presence_exists_failed,
     presence_exists_item, presence_exists_result, reject_duplicate_json_targets, upsert_effect,
-    usize_to_u64, BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry, Executor,
+    usize_to_u64, BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry, Executor, ExecutorError,
     ExecutorResult, JsonIndexType, JsonSetEntry, MaybeJsonVersionedValue, Output, PageInfo,
     DEFAULT_JSON_LIST_LIMIT,
 };
@@ -21,7 +21,7 @@ impl Executor {
         key: &str,
         path: &str,
         value: serde_json::Value,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let id = json_document_id(key)?;
         let path = json_path(path)?;
         let value = json_value(value)?;
@@ -42,7 +42,7 @@ impl Executor {
         path: &str,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let id = json_document_id(key)?;
         let path = json_path(path)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
@@ -67,7 +67,7 @@ impl Executor {
         space: Option<&str>,
         key: &str,
         path: &str,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let id = json_document_id(key)?;
         let path = json_path(path)?;
         let mut service = self.json_service(branch, space)?;
@@ -80,7 +80,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         key: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let id = json_document_id(key)?;
         let mut service = self.json_service(branch, space)?;
         Ok(Output::JsonVersionHistory(
@@ -93,7 +93,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         key: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let id = json_document_id(key)?;
         let mut service = self.json_service(branch, space)?;
         Ok(Output::Bool(service.exists(&id)?))
@@ -104,7 +104,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         keys: Vec<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.json_service(branch, space)?;
         if keys.is_empty() {
             return Ok(Output::JsonBatchExistsResults(presence_exists_result(
@@ -144,7 +144,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         entries: Vec<BatchJsonEntry>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.json_service(branch, space)?;
         if entries.is_empty() {
             return Ok(Output::JsonBatchResults(json_batch_result(Vec::new())));
@@ -199,7 +199,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         entries: Vec<BatchJsonGetEntry>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.json_service(branch, space)?;
         if entries.is_empty() {
             return Ok(Output::JsonBatchGetResults(json_batch_get_batch_result(
@@ -240,7 +240,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         entries: Vec<BatchJsonDeleteEntry>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.json_service(branch, space)?;
         if entries.is_empty() {
             return Ok(Output::JsonBatchResults(json_batch_result(Vec::new())));
@@ -293,7 +293,7 @@ impl Executor {
         limit: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let prefix = optional_json_prefix(prefix)?;
         let cursor = optional_json_document_id(cursor)?;
         let limit = optional_limit(limit)?.unwrap_or(DEFAULT_JSON_LIST_LIMIT);
@@ -315,7 +315,7 @@ impl Executor {
         space: Option<&str>,
         start: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let start = optional_json_document_id(start)?;
         let limit = optional_limit(limit)?;
         let mut service = self.json_service(branch, space)?;
@@ -344,7 +344,7 @@ impl Executor {
         prefix: Option<String>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let prefix = optional_json_prefix(prefix)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
@@ -364,7 +364,7 @@ impl Executor {
         space: Option<&str>,
         prefix: Option<String>,
         count: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let prefix = optional_json_prefix(prefix)?;
         let count = optional_limit(count)?.unwrap_or(10);
         let mut service = self.json_service(branch, space)?;
@@ -378,7 +378,7 @@ impl Executor {
         name: String,
         field_path: &str,
         index_type: JsonIndexType,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let name = json_index_name(name)?;
         let field_path = json_path(field_path)?;
         let index_type = engine_json_index_type(index_type);
@@ -394,7 +394,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         name: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let name = json_index_name(name)?;
         let mut service = self.json_service(branch, space)?;
         Ok(Output::Bool(service.drop_index(&name)?))
@@ -404,7 +404,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: Option<&str>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.json_service(branch, space)?;
         Ok(Output::JsonIndexList {
             items: service

@@ -16,7 +16,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::{GraphAdjacencyIndex, GraphDirection, GraphEdgeType, GraphNodeId};
 
@@ -227,7 +227,7 @@ impl GraphAdjacencyIndex {
         &self,
         start: &GraphNodeId,
         options: &GraphBfsOptions,
-    ) -> EngineResult<GraphBfsResult> {
+    ) -> Result<GraphBfsResult, EngineError> {
         let Some(start_index) = self.node_index(start) else {
             return Err(EngineError::not_found(
                 "not_found.engine.graph_node",

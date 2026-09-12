@@ -14,7 +14,7 @@ use crate::branch::adapter::{
     CapabilityBranchAdapter, ComparableEntity, DerivedDisposition, EntitySummary,
 };
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{
     decode_event_key_sequence, encode_event_space_prefix, PersistenceReadRow, RowClass,
 };
@@ -43,7 +43,7 @@ impl CapabilityBranchAdapter for EventBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         // Validate the row is a well-formed event key in this space, rejecting
         // foreign-space and malformed keys with the event capability's diagnostic.
         decode_event_key_sequence(space, row.key())?;

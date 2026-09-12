@@ -11,8 +11,8 @@ use super::{
     vector_index_diagnostics, vector_key, vector_key_page_output, vector_match,
     vector_metadata_patch, vector_upsert_entry, vector_versioned_data, vector_write_output,
     BatchVectorEntry, EngineEmbeddingModelId, EngineVectorCollectionName, EngineVectorConfig,
-    Executor, ExecutorError, ExecutorResult, Maybe, Output, PageInfo, VectorDistanceMetric,
-    VectorIndexQueryResult, VectorMetadataFilter, DEFAULT_VECTOR_LIST_LIMIT,
+    Executor, ExecutorError, Maybe, Output, PageInfo, VectorDistanceMetric, VectorIndexQueryResult,
+    VectorMetadataFilter, DEFAULT_VECTOR_LIST_LIMIT,
 };
 use strata_core::Timestamp;
 
@@ -54,7 +54,7 @@ impl Executor {
         dimension: u64,
         metric: VectorDistanceMetric,
         embedding_model: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let config = EngineVectorConfig::new(
             required_usize(
@@ -84,7 +84,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         collection: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
         Ok(Output::Bool(service.delete_collection(&collection)?))
@@ -94,7 +94,7 @@ impl Executor {
         &mut self,
         branch: Option<&str>,
         space: Option<&str>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let mut service = self.vector_service(branch, space)?;
         Ok(Output::VectorCollectionList {
             items: service
@@ -111,7 +111,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         collection: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
         let Some(info) = service.collection_info(&collection)? else {
@@ -132,7 +132,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         model: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let model = EngineEmbeddingModelId::new(model)?;
         let mut service = self.vector_service(branch, space)?;
@@ -151,7 +151,7 @@ impl Executor {
         collection: String,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
@@ -171,7 +171,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         count: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let count = optional_limit(count)?.unwrap_or(10);
         let mut service = self.vector_service(branch, space)?;
@@ -212,7 +212,7 @@ impl Executor {
         text: String,
         purpose: EmbedPurpose,
         as_of: Option<Timestamp>,
-    ) -> ExecutorResult<Vec<f64>> {
+    ) -> Result<Vec<f64>, ExecutorError> {
         // What a missing model means is the engine's call
         // (`failed_precondition.engine.embedding_model_missing`, naming the
         // command that declares one); this only carries the answer to the
@@ -242,7 +242,7 @@ impl Executor {
         model: &str,
         text: String,
         purpose: EmbedPurpose,
-    ) -> ExecutorResult<Vec<f64>> {
+    ) -> Result<Vec<f64>, ExecutorError> {
         #[cfg(feature = "inference")]
         {
             use strata_inference::{EmbedInput, EmbeddingsRequest};
@@ -299,7 +299,7 @@ impl Executor {
         vector: Vec<f64>,
         text: Option<String>,
         metadata: Option<serde_json::Value>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let key = vector_key(key)?;
         let vector = resolve_vector_or_text(vector, text, |text| {
@@ -335,7 +335,7 @@ impl Executor {
         key: String,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let key = vector_key(key)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
@@ -358,7 +358,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         key: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let key = vector_key(key)?;
         let mut service = self.vector_service(branch, space)?;
@@ -376,7 +376,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         key: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let key = vector_key(key)?;
         let mut service = self.vector_service(branch, space)?;
@@ -389,7 +389,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         keys: Vec<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
         // The `?` validates the collection exists (surfacing not-found) before
@@ -435,7 +435,7 @@ impl Executor {
         limit: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let prefix = optional_vector_key(prefix)?;
         let cursor = optional_vector_key(cursor)?;
@@ -459,7 +459,7 @@ impl Executor {
         collection: String,
         start: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let start = optional_vector_key(start)?;
         let limit = optional_limit(limit)?;
@@ -495,7 +495,7 @@ impl Executor {
         collection: String,
         key: String,
         patch: serde_json::Value,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let key = vector_key(key)?;
         let patch = vector_metadata_patch(patch)?;
@@ -516,7 +516,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         key: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let key = vector_key(key)?;
         let mut service = self.vector_service(branch, space)?;
@@ -535,7 +535,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         filter: VectorMetadataFilter,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let filter = vector_filter(filter)?;
         let mut service = self.vector_service(branch, space)?;
@@ -548,7 +548,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         collection: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
         let outcome = service.delete_all(&collection)?;
@@ -567,7 +567,7 @@ impl Executor {
         filter: Option<VectorMetadataFilter>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
@@ -617,7 +617,7 @@ impl Executor {
         filter: Option<VectorMetadataFilter>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let query = query_embedding(query)?;
         let k = required_usize(
@@ -653,7 +653,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         entries: Vec<BatchVectorEntry>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
         let info = require_vector_collection_info(&mut service, &collection)?;
@@ -719,7 +719,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         keys: Vec<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
         // The `?` validates the collection exists (surfacing not-found); the
@@ -762,7 +762,7 @@ impl Executor {
         space: Option<&str>,
         collection: String,
         keys: Vec<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
         // The `?` validates the collection exists (surfacing not-found); the

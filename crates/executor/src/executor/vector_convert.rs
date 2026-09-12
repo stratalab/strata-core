@@ -6,22 +6,24 @@ use super::{
     EngineVectorHistory, EngineVectorHistoryRow, EngineVectorIndexDiagnostics, EngineVectorKey,
     EngineVectorKeyPage, EngineVectorMetadata, EngineVectorMetadataPatch, EngineVectorScalar,
     EngineVectorSearchMatch, EngineVectorUpsertEntry, EngineVectorVersionedEntry, ExecutorError,
-    ExecutorResult, MutationEffect, Output, OutputVectorCollectionInfo,
-    OutputVectorIndexArtifactSource, OutputVectorIndexDiagnostics, PageInfo, Timestamp,
-    VectorBatchGetItemResult, VectorBatchItemResult, VectorData, VectorDistanceMetric,
-    VectorFilterOp, VectorHistoryItem, VectorHistoryResult, VectorMatch, VectorMetadataFilter,
-    VectorScalar, VectorService, VectorVersionedData,
+    MutationEffect, Output, OutputVectorCollectionInfo, OutputVectorIndexArtifactSource,
+    OutputVectorIndexDiagnostics, PageInfo, Timestamp, VectorBatchGetItemResult,
+    VectorBatchItemResult, VectorData, VectorDistanceMetric, VectorFilterOp, VectorHistoryItem,
+    VectorHistoryResult, VectorMatch, VectorMetadataFilter, VectorScalar, VectorService,
+    VectorVersionedData,
 };
 
-pub(super) fn vector_collection(name: String) -> ExecutorResult<EngineVectorCollectionName> {
+pub(super) fn vector_collection(name: String) -> Result<EngineVectorCollectionName, ExecutorError> {
     EngineVectorCollectionName::new(name).map_err(ExecutorError::from)
 }
 
-pub(super) fn vector_key(key: String) -> ExecutorResult<EngineVectorKey> {
+pub(super) fn vector_key(key: String) -> Result<EngineVectorKey, ExecutorError> {
     EngineVectorKey::new(key).map_err(ExecutorError::from)
 }
 
-pub(super) fn optional_vector_key(key: Option<String>) -> ExecutorResult<Option<EngineVectorKey>> {
+pub(super) fn optional_vector_key(
+    key: Option<String>,
+) -> Result<Option<EngineVectorKey>, ExecutorError> {
     key.map(vector_key).transpose()
 }
 
@@ -33,8 +35,8 @@ pub(super) fn optional_vector_key(key: Option<String>) -> ExecutorResult<Option<
 pub(super) fn resolve_vector_or_text(
     vector: Vec<f64>,
     text: Option<String>,
-    embed: impl FnOnce(String) -> ExecutorResult<Vec<f64>>,
-) -> ExecutorResult<Vec<f64>> {
+    embed: impl FnOnce(String) -> Result<Vec<f64>, ExecutorError>,
+) -> Result<Vec<f64>, ExecutorError> {
     match (vector.is_empty(), text) {
         (true, Some(text)) => embed(text),
         (false, None) => Ok(vector),
@@ -49,7 +51,7 @@ pub(super) fn resolve_vector_or_text(
     }
 }
 
-pub(super) fn vector_embedding(vector: Vec<f64>) -> ExecutorResult<EngineVectorEmbedding> {
+pub(super) fn vector_embedding(vector: Vec<f64>) -> Result<EngineVectorEmbedding, ExecutorError> {
     EngineVectorEmbedding::from_wire(vector).map_err(ExecutorError::from)
 }
 
@@ -57,13 +59,13 @@ pub(super) fn vector_embedding(vector: Vec<f64>) -> ExecutorResult<EngineVectorE
 /// is accepted at wire (f64) precision and validated before narrowing, so a
 /// query component that underflows or overflows f32 is rejected rather than
 /// silently searching against the zero vector.
-pub(super) fn query_embedding(query: Vec<f64>) -> ExecutorResult<EngineVectorEmbedding> {
+pub(super) fn query_embedding(query: Vec<f64>) -> Result<EngineVectorEmbedding, ExecutorError> {
     EngineVectorEmbedding::from_wire(query).map_err(ExecutorError::from)
 }
 
 pub(super) fn optional_vector_metadata(
     metadata: Option<serde_json::Value>,
-) -> ExecutorResult<Option<EngineVectorMetadata>> {
+) -> Result<Option<EngineVectorMetadata>, ExecutorError> {
     metadata
         .map(EngineVectorMetadata::new)
         .transpose()
@@ -72,7 +74,7 @@ pub(super) fn optional_vector_metadata(
 
 pub(super) fn vector_metadata_patch(
     value: serde_json::Value,
-) -> ExecutorResult<EngineVectorMetadataPatch> {
+) -> Result<EngineVectorMetadataPatch, ExecutorError> {
     EngineVectorMetadataPatch::new(value).map_err(ExecutorError::from)
 }
 
@@ -111,7 +113,9 @@ pub(super) const fn engine_vector_filter_op(op: VectorFilterOp) -> EngineVectorF
     }
 }
 
-pub(super) fn vector_filter(filter: VectorMetadataFilter) -> ExecutorResult<EngineVectorFilter> {
+pub(super) fn vector_filter(
+    filter: VectorMetadataFilter,
+) -> Result<EngineVectorFilter, ExecutorError> {
     let conditions = filter
         .into_conditions()
         .into_iter()
@@ -129,7 +133,7 @@ pub(super) fn vector_filter(filter: VectorMetadataFilter) -> ExecutorResult<Engi
 
 pub(super) fn vector_upsert_entry(
     entry: BatchVectorEntry,
-) -> ExecutorResult<EngineVectorUpsertEntry> {
+) -> Result<EngineVectorUpsertEntry, ExecutorError> {
     let (key, vector, metadata) = entry.into_parts();
     Ok(EngineVectorUpsertEntry::new(
         vector_key(key)?,
@@ -157,7 +161,7 @@ pub(super) fn vector_collection_info(
 pub(super) fn require_vector_collection_info(
     service: &mut VectorService,
     collection: &EngineVectorCollectionName,
-) -> ExecutorResult<EngineVectorCollectionInfo> {
+) -> Result<EngineVectorCollectionInfo, ExecutorError> {
     service.collection_info(collection)?.ok_or_else(|| {
         ExecutorError::new(
             "not_found.engine.vector_collection",

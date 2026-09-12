@@ -8,7 +8,7 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use crate::error::ExecutorResult;
+use crate::error::ExecutorError;
 use crate::types::ArrowFileFormat;
 
 use super::{invalid_input, io_error};
@@ -66,7 +66,7 @@ fn force_text_columns(schema: &Schema) -> Schema {
 pub(crate) fn read_file(
     path: &Path,
     format: ArrowFileFormat,
-) -> ExecutorResult<(Schema, Vec<RecordBatch>)> {
+) -> Result<(Schema, Vec<RecordBatch>), ExecutorError> {
     if !path.exists() {
         return Err(invalid_input(
             "invalid_argument.executor.arrow_input_missing",
@@ -81,7 +81,7 @@ pub(crate) fn read_file(
     }
 }
 
-fn read_parquet(path: &Path) -> ExecutorResult<(Schema, Vec<RecordBatch>)> {
+fn read_parquet(path: &Path) -> Result<(Schema, Vec<RecordBatch>), ExecutorError> {
     let file = open_file(path)?;
     let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|error| io_error(format!("failed to open Parquet file: {error}")))?;
@@ -95,7 +95,7 @@ fn read_parquet(path: &Path) -> ExecutorResult<(Schema, Vec<RecordBatch>)> {
     Ok((schema, batches))
 }
 
-fn read_csv(path: &Path) -> ExecutorResult<(Schema, Vec<RecordBatch>)> {
+fn read_csv(path: &Path) -> Result<(Schema, Vec<RecordBatch>), ExecutorError> {
     let schema = arrow::csv::reader::infer_schema_from_files(
         &[path.to_string_lossy().into_owned()],
         b',',
@@ -117,7 +117,7 @@ fn read_csv(path: &Path) -> ExecutorResult<(Schema, Vec<RecordBatch>)> {
     Ok((schema.as_ref().clone(), batches))
 }
 
-fn read_jsonl(path: &Path) -> ExecutorResult<(Schema, Vec<RecordBatch>)> {
+fn read_jsonl(path: &Path) -> Result<(Schema, Vec<RecordBatch>), ExecutorError> {
     let file = open_file(path)?;
     let mut reader = BufReader::new(file);
     // Infer over the whole file, not a 100-row prefix: a field first appearing
@@ -137,7 +137,7 @@ fn read_jsonl(path: &Path) -> ExecutorResult<(Schema, Vec<RecordBatch>)> {
     Ok((schema.as_ref().clone(), batches))
 }
 
-fn open_file(path: &Path) -> ExecutorResult<File> {
+fn open_file(path: &Path) -> Result<File, ExecutorError> {
     File::open(path)
         .map_err(|error| io_error(format!("failed to open file '{}': {error}", path.display())))
 }

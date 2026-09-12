@@ -135,7 +135,7 @@ pub(crate) fn encode_remote_origin(origin: &RemoteOrigin) -> Vec<u8> {
     serde_json::to_vec(origin).expect("remote origin record serializes")
 }
 
-pub(crate) fn decode_remote_origin(bytes: &[u8]) -> crate::api::EngineResult<RemoteOrigin> {
+pub(crate) fn decode_remote_origin(bytes: &[u8]) -> Result<RemoteOrigin, crate::api::EngineError> {
     let origin: RemoteOrigin = serde_json::from_slice(bytes).map_err(|error| {
         crate::api::EngineError::corruption(
             "data_loss.engine.control_plane",

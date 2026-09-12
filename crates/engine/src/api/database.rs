@@ -11,7 +11,7 @@ use crate::data::json::JsonIndexName;
 use crate::data::json::JsonService;
 use crate::data::kv::{KvService, ProductSpace};
 use crate::data::vector::{VectorArtifactStore, VectorService};
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 pub use crate::persistence::MemoryBudgetSource;
 use crate::persistence::{
     close_summary_is_durable, PersistenceOpenSummary, PersistenceOpenTarget, StoragePersistence,
@@ -158,7 +158,7 @@ pub struct Database {
 
 impl Database {
     /// Opens an explicit cache database.
-    pub fn open_cache(options: CacheOpenOptions) -> EngineResult<DatabaseOpenOutcome> {
+    pub fn open_cache(options: CacheOpenOptions) -> Result<DatabaseOpenOutcome, EngineError> {
         let memory_budget_bytes = options.memory_budget_bytes();
         Self::open(
             PersistenceOpenTarget::Cache,
@@ -174,7 +174,7 @@ impl Database {
     pub fn open_local(
         path: impl Into<PathBuf>,
         options: DurableLocalOpenOptions,
-    ) -> EngineResult<DatabaseOpenOutcome> {
+    ) -> Result<DatabaseOpenOutcome, EngineError> {
         let memory_budget_bytes = options.memory_budget_bytes();
         let data_block_bytes = options.data_block_bytes();
         let cache_preheat = options.cache_preheat();
@@ -198,7 +198,7 @@ impl Database {
     pub fn export_branch_artifact(
         &mut self,
         branch: &BranchName,
-    ) -> EngineResult<crate::artifact::BranchArtifact> {
+    ) -> Result<crate::artifact::BranchArtifact, EngineError> {
         crate::artifact::export_branch(self, branch)
     }
 
@@ -211,7 +211,7 @@ impl Database {
     pub fn import_branch_artifact(
         &mut self,
         artifact: &crate::artifact::BranchArtifact,
-    ) -> EngineResult<crate::artifact::BranchImportSummary> {
+    ) -> Result<crate::artifact::BranchImportSummary, EngineError> {
         crate::artifact::import_branch(self, artifact)
     }
 
@@ -226,7 +226,7 @@ impl Database {
     pub fn import_branch_artifacts(
         &mut self,
         artifacts: &[crate::artifact::BranchArtifact],
-    ) -> EngineResult<Vec<crate::artifact::BranchImportSummary>> {
+    ) -> Result<Vec<crate::artifact::BranchImportSummary>, EngineError> {
         crate::artifact::import_branches(self, artifacts)
     }
 
@@ -248,7 +248,7 @@ impl Database {
     pub fn set_remote_origin(
         &mut self,
         origin: &crate::artifact::RemoteOrigin,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         let mutation = crate::persistence::RowMutation::put(
@@ -269,7 +269,7 @@ impl Database {
     }
 
     /// Reads this database's remote origin, when one was recorded.
-    pub fn remote_origin(&mut self) -> EngineResult<Option<crate::artifact::RemoteOrigin>> {
+    pub fn remote_origin(&mut self) -> Result<Option<crate::artifact::RemoteOrigin>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         let bytes = self.persistence.read(
@@ -286,14 +286,18 @@ impl Database {
     }
 
     /// Returns a branch service for this database.
-    pub fn branches(&mut self) -> EngineResult<BranchService<'_>> {
+    pub fn branches(&mut self) -> Result<BranchService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         Ok(BranchService::new(&mut self.persistence, &mut self.control))
     }
 
     /// Returns a byte-oriented KV service for the selected branch and space.
-    pub fn kv(&self, branch: BranchName, space: ProductSpace) -> EngineResult<KvService<'_>> {
+    pub fn kv(
+        &self,
+        branch: BranchName,
+        space: ProductSpace,
+    ) -> Result<KvService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         self.require_branch(&branch)?;
@@ -323,7 +327,7 @@ impl Database {
         &mut self,
         branch: &BranchName,
         instant: Timestamp,
-    ) -> EngineResult<Timestamp> {
+    ) -> Result<Timestamp, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         let record = self.control.lookup_branch(branch).cloned().ok_or_else(|| {
@@ -337,7 +341,11 @@ impl Database {
     }
 
     /// Returns a JSON document service for the selected branch and space.
-    pub fn json(&self, branch: BranchName, space: ProductSpace) -> EngineResult<JsonService<'_>> {
+    pub fn json(
+        &self,
+        branch: BranchName,
+        space: ProductSpace,
+    ) -> Result<JsonService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         self.require_branch(&branch)?;
@@ -360,7 +368,7 @@ impl Database {
         &mut self,
         branch: BranchName,
         space: ProductSpace,
-    ) -> EngineResult<VectorService<'_>> {
+    ) -> Result<VectorService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         self.require_branch(&branch)?;
@@ -374,7 +382,11 @@ impl Database {
     }
 
     /// Returns an event log service for the selected branch and space.
-    pub fn event(&self, branch: BranchName, space: ProductSpace) -> EngineResult<EventService<'_>> {
+    pub fn event(
+        &self,
+        branch: BranchName,
+        space: ProductSpace,
+    ) -> Result<EventService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         self.require_branch(&branch)?;
@@ -387,7 +399,11 @@ impl Database {
     }
 
     /// Returns a graph core service for the selected branch and space.
-    pub fn graph(&self, branch: BranchName, space: ProductSpace) -> EngineResult<GraphService<'_>> {
+    pub fn graph(
+        &self,
+        branch: BranchName,
+        space: ProductSpace,
+    ) -> Result<GraphService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         self.require_branch(&branch)?;
@@ -400,7 +416,7 @@ impl Database {
     }
 
     /// Returns a product space service for the selected branch.
-    pub fn spaces(&mut self, branch: BranchName) -> EngineResult<SpaceService<'_>> {
+    pub fn spaces(&mut self, branch: BranchName) -> Result<SpaceService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         Ok(SpaceService::new(
@@ -411,7 +427,7 @@ impl Database {
     }
 
     /// Returns a safe administration and introspection service.
-    pub fn admin(&mut self) -> EngineResult<AdminService<'_>> {
+    pub fn admin(&mut self) -> Result<AdminService<'_>, EngineError> {
         self.require_open()?;
         Ok(AdminService::new(
             &mut self.persistence,
@@ -426,7 +442,7 @@ impl Database {
     pub fn control_diagnostics(
         &mut self,
         branch: Option<&BranchName>,
-    ) -> EngineResult<ControlDiagnostics> {
+    ) -> Result<ControlDiagnostics, EngineError> {
         self.require_open()?;
         Ok(self.control.diagnostics(&mut self.persistence, branch))
     }
@@ -438,7 +454,7 @@ impl Database {
         branch: &BranchName,
         space: &ProductSpace,
         index: &JsonIndexName,
-    ) -> EngineResult<u64> {
+    ) -> Result<u64, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         let record = self.control.lookup_branch(branch).cloned().ok_or_else(|| {
@@ -464,7 +480,10 @@ impl Database {
 
     /// Flushes a branch into immutable storage sources for tests.
     #[cfg(any(test, feature = "testkit"))]
-    pub fn flush_storage_branch_for_test(&mut self, branch: &BranchName) -> EngineResult<usize> {
+    pub fn flush_storage_branch_for_test(
+        &mut self,
+        branch: &BranchName,
+    ) -> Result<usize, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
         let record = self.control.lookup_branch(branch).cloned().ok_or_else(|| {
@@ -537,7 +556,7 @@ impl Database {
     }
 
     /// Closes the database handle.
-    pub fn close(&mut self) -> EngineResult<CloseOutcome> {
+    pub fn close(&mut self) -> Result<CloseOutcome, EngineError> {
         if let Some(close) = self.last_close {
             return Ok(CloseOutcome::new(
                 close.durable(),
@@ -573,7 +592,7 @@ impl Database {
         memory_budget_bytes: Option<u64>,
         data_block_bytes: Option<u32>,
         cache_preheat: CachePreheat,
-    ) -> EngineResult<DatabaseOpenOutcome> {
+    ) -> Result<DatabaseOpenOutcome, EngineError> {
         let vector_artifacts = vector_artifact_store_for_target(&target);
         // Captured before the open consumes the target: the dataset dir gets
         // its advisory README after a successful durable open (#3004).
@@ -618,7 +637,7 @@ impl Database {
         ))
     }
 
-    fn require_open(&self) -> EngineResult<()> {
+    fn require_open(&self) -> Result<(), EngineError> {
         if self.open {
             Ok(())
         } else {
@@ -634,7 +653,7 @@ impl Database {
     /// operations that short-circuit before touching a branch record (an
     /// empty batch) — and removes the per-op validation the executor used to
     /// duplicate across every capability.
-    fn require_branch(&self, branch: &BranchName) -> EngineResult<()> {
+    fn require_branch(&self, branch: &BranchName) -> Result<(), EngineError> {
         if self.control.lookup_branch(branch).is_some() {
             Ok(())
         } else {

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::EmbeddingModelId;
 use super::{
@@ -86,7 +86,7 @@ struct StoredVectorRecord {
 pub(crate) fn encode_collection_config(
     collection: &VectorCollectionName,
     config: &VectorConfig,
-) -> EngineResult<Vec<u8>> {
+) -> Result<Vec<u8>, EngineError> {
     let stored = StoredCollectionConfig {
         collection: collection.as_str().to_owned(),
         dimension: config.dimension(),
@@ -106,7 +106,7 @@ pub(crate) fn encode_collection_config(
 pub(crate) fn decode_collection_config(
     expected_collection: &VectorCollectionName,
     bytes: &[u8],
-) -> EngineResult<VectorConfig> {
+) -> Result<VectorConfig, EngineError> {
     if bytes.first().copied() != Some(COLLECTION_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.vector_collection",
@@ -144,7 +144,7 @@ pub(crate) fn decode_collection_config(
     })
 }
 
-pub(crate) fn encode_vector_record(record: &VectorRecord) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_vector_record(record: &VectorRecord) -> Result<Vec<u8>, EngineError> {
     let stored = StoredVectorRecord {
         collection: record.collection().as_str().to_owned(),
         key: record.key().as_str().to_owned(),
@@ -166,7 +166,7 @@ pub(crate) fn decode_vector_record(
     expected_collection: &VectorCollectionName,
     expected_key: &VectorKey,
     bytes: &[u8],
-) -> EngineResult<VectorRecord> {
+) -> Result<VectorRecord, EngineError> {
     if bytes.first().copied() != Some(VECTOR_RECORD_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.vector_record",

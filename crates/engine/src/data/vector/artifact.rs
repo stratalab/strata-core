@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use strata_core::{BranchId, CommitVersion, Timestamp};
 
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::PersistenceReadRow;
 
 use super::index::CachedHnswArtifact;
@@ -44,7 +44,7 @@ pub(crate) const DEFAULT_HNSW_SEED: u64 = 0x5354_5241_5441_484e;
 pub(crate) struct VectorArtifactId(String);
 
 impl VectorArtifactId {
-    pub(crate) fn new(value: impl Into<String>) -> EngineResult<Self> {
+    pub(crate) fn new(value: impl Into<String>) -> Result<Self, EngineError> {
         let value = value.into();
         validate_artifact_text(&value, "artifact id")?;
         Ok(Self(value))
@@ -59,7 +59,7 @@ impl VectorArtifactId {
 pub(crate) struct VectorSourceId(String);
 
 impl VectorSourceId {
-    pub(crate) fn new(value: impl Into<String>) -> EngineResult<Self> {
+    pub(crate) fn new(value: impl Into<String>) -> Result<Self, EngineError> {
         let value = value.into();
         validate_artifact_text(&value, "artifact source id")?;
         Ok(Self(value))
@@ -97,7 +97,7 @@ impl VectorFlatArtifactIdentity {
         source_generation: u64,
         vector_dimension: usize,
         metric: VectorDistanceMetric,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         if vector_dimension == 0 || vector_dimension > MAX_VECTOR_DIMENSION {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_artifact",
@@ -124,7 +124,7 @@ impl VectorFlatArtifactIdentity {
         collection: VectorCollectionName,
         collection_generation: u64,
         artifact_ref: &VectorArtifactRef,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         Self::from_manifest_ref_with_kind(
             space,
             collection,
@@ -141,7 +141,7 @@ impl VectorFlatArtifactIdentity {
         collection: VectorCollectionName,
         collection_generation: u64,
         artifact_ref: &VectorArtifactRef,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         Self::from_manifest_ref_with_kind(
             space,
             collection,
@@ -159,7 +159,7 @@ impl VectorFlatArtifactIdentity {
         artifact_ref: &VectorArtifactRef,
         expected_kind: VectorArtifactKind,
         message: &'static str,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         if artifact_ref.index_kind() != expected_kind {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_artifact",
@@ -267,7 +267,7 @@ impl FlatVectorArtifact {
     pub(crate) fn new(
         identity: VectorFlatArtifactIdentity,
         mut rows: Vec<FlatVectorArtifactRow>,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         rows.sort_by(|left, right| left.key().cmp(right.key()));
         for row in &rows {
             if row.embedding.dimension() != identity.vector_dimension {
@@ -283,7 +283,7 @@ impl FlatVectorArtifact {
     pub(crate) fn from_visible_entries(
         identity: VectorFlatArtifactIdentity,
         entries: &[(PersistenceReadRow, VectorEntry)],
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         let rows = entries
             .iter()
             .map(|(row, entry)| FlatVectorArtifactRow::from_visible_entry(row, entry))
@@ -295,7 +295,7 @@ impl FlatVectorArtifact {
         identity: VectorFlatArtifactIdentity,
         entries: &[(PersistenceReadRow, VectorEntry)],
         max_bytes: usize,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         check_artifact_build_budget(
             "flat",
             estimate_flat_vector_artifact_entries_encoded_bytes(&identity, entries)?,
@@ -331,7 +331,7 @@ impl HnswArtifactConfig {
         }
     }
 
-    fn validate(self) -> EngineResult<()> {
+    fn validate(self) -> Result<(), EngineError> {
         if self.m < 2 || self.ef_construction < self.m || self.ef_search == 0 {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_artifact",
@@ -370,7 +370,7 @@ impl HnswVectorArtifact {
         identity: VectorFlatArtifactIdentity,
         config: HnswArtifactConfig,
         mut rows: Vec<FlatVectorArtifactRow>,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         config.validate()?;
         rows.sort_by(|left, right| left.key().cmp(right.key()));
         for row in &rows {
@@ -392,7 +392,7 @@ impl HnswVectorArtifact {
         identity: VectorFlatArtifactIdentity,
         config: HnswArtifactConfig,
         entries: &[(PersistenceReadRow, VectorEntry)],
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         let rows = entries
             .iter()
             .map(|(row, entry)| FlatVectorArtifactRow::from_visible_entry(row, entry))
@@ -405,7 +405,7 @@ impl HnswVectorArtifact {
         config: HnswArtifactConfig,
         entries: &[(PersistenceReadRow, VectorEntry)],
         max_bytes: usize,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         check_artifact_build_budget(
             "HNSW",
             estimate_hnsw_vector_artifact_entries_encoded_bytes(&identity, config, entries)?,
@@ -744,7 +744,7 @@ impl VectorArtifactStore {
     pub(crate) fn store_flat(
         &mut self,
         artifact: &FlatVectorArtifact,
-    ) -> EngineResult<VectorArtifactHandle> {
+    ) -> Result<VectorArtifactHandle, EngineError> {
         self.store_flat_with_budget(artifact, DEFAULT_FLAT_ARTIFACT_BUILD_BUDGET_BYTES)
     }
 
@@ -752,7 +752,7 @@ impl VectorArtifactStore {
         &mut self,
         artifact: &FlatVectorArtifact,
         max_bytes: usize,
-    ) -> EngineResult<VectorArtifactHandle> {
+    ) -> Result<VectorArtifactHandle, EngineError> {
         check_artifact_build_budget(
             "flat",
             estimate_flat_vector_artifact_encoded_bytes(artifact)?,
@@ -780,7 +780,7 @@ impl VectorArtifactStore {
     pub(crate) fn store_hnsw(
         &mut self,
         artifact: &HnswVectorArtifact,
-    ) -> EngineResult<VectorArtifactHandle> {
+    ) -> Result<VectorArtifactHandle, EngineError> {
         self.store_hnsw_with_budget(artifact, DEFAULT_HNSW_ARTIFACT_BUILD_BUDGET_BYTES)
     }
 
@@ -788,7 +788,7 @@ impl VectorArtifactStore {
         &mut self,
         artifact: &HnswVectorArtifact,
         max_bytes: usize,
-    ) -> EngineResult<VectorArtifactHandle> {
+    ) -> Result<VectorArtifactHandle, EngineError> {
         check_artifact_build_budget(
             "HNSW",
             estimate_hnsw_vector_artifact_encoded_bytes(artifact)?,
@@ -936,14 +936,17 @@ impl VectorArtifactStore {
         &mut self,
         artifact_id: VectorArtifactId,
         bytes: Vec<u8>,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         self.persist_raw_flat_payload(&artifact_id, &bytes)?;
         self.cache_payload(VectorArtifactPayloadKind::Flat, artifact_id, bytes);
         Ok(())
     }
 
     #[cfg(any(test, feature = "testkit"))]
-    pub(crate) fn remove_for_test(&mut self, artifact_id: &VectorArtifactId) -> EngineResult<()> {
+    pub(crate) fn remove_for_test(
+        &mut self,
+        artifact_id: &VectorArtifactId,
+    ) -> Result<(), EngineError> {
         self.remove_memory_payload(VectorArtifactPayloadKind::Flat, artifact_id);
         let Some(path) = self.flat_payload_path(artifact_id) else {
             return Ok(());
@@ -963,7 +966,7 @@ impl VectorArtifactStore {
         &mut self,
         artifact_id: VectorArtifactId,
         bytes: Vec<u8>,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         self.persist_raw_hnsw_payload(&artifact_id, &bytes)?;
         self.cache_payload(VectorArtifactPayloadKind::Hnsw, artifact_id, bytes);
         Ok(())
@@ -973,7 +976,7 @@ impl VectorArtifactStore {
     pub(crate) fn remove_hnsw_for_test(
         &mut self,
         artifact_id: &VectorArtifactId,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         self.remove_memory_payload(VectorArtifactPayloadKind::Hnsw, artifact_id);
         let Some(path) = self.hnsw_payload_path(artifact_id) else {
             return Ok(());
@@ -994,7 +997,7 @@ impl VectorArtifactStore {
         &mut self,
         artifact: &FlatVectorArtifact,
         max_bytes: usize,
-    ) -> EngineResult<VectorArtifactHandle> {
+    ) -> Result<VectorArtifactHandle, EngineError> {
         self.store_flat_with_budget(artifact, max_bytes)
     }
 
@@ -1004,7 +1007,7 @@ impl VectorArtifactStore {
         &mut self,
         artifact: &HnswVectorArtifact,
         max_bytes: usize,
-    ) -> EngineResult<VectorArtifactHandle> {
+    ) -> Result<VectorArtifactHandle, EngineError> {
         self.store_hnsw_with_budget(artifact, max_bytes)
     }
 
@@ -1025,7 +1028,7 @@ impl VectorArtifactStore {
         &self,
         artifact_id: &VectorArtifactId,
         bytes: &[u8],
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let Some(path) = self.flat_payload_path(artifact_id) else {
             return Ok(());
         };
@@ -1036,7 +1039,7 @@ impl VectorArtifactStore {
         &self,
         artifact_id: &VectorArtifactId,
         bytes: &[u8],
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let Some(path) = self.hnsw_payload_path(artifact_id) else {
             return Ok(());
         };
@@ -1177,7 +1180,7 @@ fn estimate_flat_artifact_memory_bytes(artifact: &FlatVectorArtifact) -> usize {
     artifact.rows().len().saturating_mul(per_vector_bytes)
 }
 
-fn persist_raw_flat_payload_at(path: &Path, bytes: &[u8]) -> EngineResult<()> {
+fn persist_raw_flat_payload_at(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
     let Some(parent) = path.parent() else {
         return Err(EngineError::corruption(
             "data_loss.engine.vector_artifacts",
@@ -1244,7 +1247,7 @@ pub(crate) const fn default_hnsw_artifact_build_budget_bytes() -> usize {
 
 fn estimate_flat_vector_artifact_encoded_bytes(
     artifact: &FlatVectorArtifact,
-) -> EngineResult<usize> {
+) -> Result<usize, EngineError> {
     estimate_artifact_encoded_bytes(
         FLAT_ARTIFACT_MAGIC
             .len()
@@ -1259,7 +1262,7 @@ fn estimate_flat_vector_artifact_encoded_bytes(
 fn estimate_flat_vector_artifact_entries_encoded_bytes(
     identity: &VectorFlatArtifactIdentity,
     entries: &[(PersistenceReadRow, VectorEntry)],
-) -> EngineResult<usize> {
+) -> Result<usize, EngineError> {
     estimate_artifact_entries_encoded_bytes(
         FLAT_ARTIFACT_MAGIC
             .len()
@@ -1273,7 +1276,7 @@ fn estimate_flat_vector_artifact_entries_encoded_bytes(
 
 fn estimate_hnsw_vector_artifact_encoded_bytes(
     artifact: &HnswVectorArtifact,
-) -> EngineResult<usize> {
+) -> Result<usize, EngineError> {
     estimate_artifact_encoded_bytes(
         HNSW_ARTIFACT_MAGIC
             .len()
@@ -1293,7 +1296,7 @@ fn estimate_hnsw_vector_artifact_entries_encoded_bytes(
     identity: &VectorFlatArtifactIdentity,
     _config: HnswArtifactConfig,
     entries: &[(PersistenceReadRow, VectorEntry)],
-) -> EngineResult<usize> {
+) -> Result<usize, EngineError> {
     estimate_artifact_entries_encoded_bytes(
         HNSW_ARTIFACT_MAGIC
             .len()
@@ -1313,7 +1316,7 @@ fn estimate_artifact_encoded_bytes(
     fixed_bytes: usize,
     rows: &[FlatVectorArtifactRow],
     artifact_kind: &'static str,
-) -> EngineResult<usize> {
+) -> Result<usize, EngineError> {
     let mut total = fixed_bytes;
     for row in rows {
         total = total
@@ -1341,7 +1344,7 @@ fn estimate_artifact_entries_encoded_bytes(
     fixed_bytes: usize,
     entries: &[(PersistenceReadRow, VectorEntry)],
     artifact_kind: &'static str,
-) -> EngineResult<usize> {
+) -> Result<usize, EngineError> {
     let mut total = fixed_bytes;
     for (_, entry) in entries {
         total = total
@@ -1386,7 +1389,7 @@ fn check_artifact_build_budget(
     artifact_kind: &'static str,
     estimated_bytes: usize,
     max_bytes: usize,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     if estimated_bytes > max_bytes {
         return Err(EngineError::invalid_input(
             "invalid_argument.engine.vector_artifact_budget",
@@ -1398,7 +1401,9 @@ fn check_artifact_build_budget(
     Ok(())
 }
 
-pub(crate) fn encode_flat_vector_artifact(artifact: &FlatVectorArtifact) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_flat_vector_artifact(
+    artifact: &FlatVectorArtifact,
+) -> Result<Vec<u8>, EngineError> {
     let mut body = Vec::new();
     body.extend_from_slice(FLAT_ARTIFACT_MAGIC);
     body.push(FLAT_ARTIFACT_FORMAT_VERSION);
@@ -1409,7 +1414,9 @@ pub(crate) fn encode_flat_vector_artifact(artifact: &FlatVectorArtifact) -> Engi
     Ok(body)
 }
 
-pub(crate) fn encode_hnsw_vector_artifact(artifact: &HnswVectorArtifact) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_hnsw_vector_artifact(
+    artifact: &HnswVectorArtifact,
+) -> Result<Vec<u8>, EngineError> {
     let mut body = Vec::new();
     body.extend_from_slice(HNSW_ARTIFACT_MAGIC);
     body.push(HNSW_ARTIFACT_FORMAT_VERSION);
@@ -1428,7 +1435,7 @@ fn encode_rows(
     body: &mut Vec<u8>,
     rows: &[FlatVectorArtifactRow],
     artifact_kind: &'static str,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     write_u64(body, u64::try_from(rows.len()).unwrap_or(u64::MAX));
     for row in rows {
         write_text(body, row.key.as_str())?;
@@ -1469,7 +1476,7 @@ fn encode_rows(
 pub(crate) fn decode_flat_vector_artifact(
     bytes: &[u8],
     max_bytes: usize,
-) -> EngineResult<FlatVectorArtifact> {
+) -> Result<FlatVectorArtifact, EngineError> {
     if bytes.len() > max_bytes {
         return Err(EngineError::corruption(
             "data_loss.engine.vector_artifact",
@@ -1519,7 +1526,7 @@ pub(crate) fn decode_flat_vector_artifact(
 pub(crate) fn decode_hnsw_vector_artifact(
     bytes: &[u8],
     max_bytes: usize,
-) -> EngineResult<HnswVectorArtifact> {
+) -> Result<HnswVectorArtifact, EngineError> {
     if bytes.len() > max_bytes {
         return Err(EngineError::corruption(
             "data_loss.engine.vector_artifact",
@@ -1593,7 +1600,10 @@ pub(crate) fn decode_hnsw_vector_artifact(
     HnswVectorArtifact::new(identity, config, rows)
 }
 
-fn encode_identity(out: &mut Vec<u8>, identity: &VectorFlatArtifactIdentity) -> EngineResult<()> {
+fn encode_identity(
+    out: &mut Vec<u8>,
+    identity: &VectorFlatArtifactIdentity,
+) -> Result<(), EngineError> {
     write_text(out, identity.artifact_id.as_str())?;
     out.extend_from_slice(identity.branch_id.as_bytes());
     write_text(out, identity.space.as_str())?;
@@ -1615,7 +1625,7 @@ fn encode_identity(out: &mut Vec<u8>, identity: &VectorFlatArtifactIdentity) -> 
     Ok(())
 }
 
-fn decode_identity(cursor: &mut Cursor<'_>) -> EngineResult<VectorFlatArtifactIdentity> {
+fn decode_identity(cursor: &mut Cursor<'_>) -> Result<VectorFlatArtifactIdentity, EngineError> {
     let artifact_id = VectorArtifactId::new(cursor.text("artifact id")?)?;
     let branch_id = cursor.branch_id("branch id")?;
     let space = ProductSpace::new(cursor.text("space")?)?;
@@ -1648,7 +1658,7 @@ fn decode_identity(cursor: &mut Cursor<'_>) -> EngineResult<VectorFlatArtifactId
 fn decode_row(
     cursor: &mut Cursor<'_>,
     expected_dimension: usize,
-) -> EngineResult<FlatVectorArtifactRow> {
+) -> Result<FlatVectorArtifactRow, EngineError> {
     let key = VectorKey::new(cursor.text("key")?)?;
     let commit_version = CommitVersion::new(cursor.u64("commit version")?);
     let timestamp = Timestamp::from_micros(cursor.u64("timestamp")?);
@@ -1709,7 +1719,7 @@ fn decode_row(
     })
 }
 
-fn payload_body(bytes: &[u8]) -> EngineResult<&[u8]> {
+fn payload_body(bytes: &[u8]) -> Result<&[u8], EngineError> {
     bytes
         .get(
             ..bytes.len().checked_sub(8).ok_or_else(|| {
@@ -1727,7 +1737,7 @@ fn payload_body(bytes: &[u8]) -> EngineResult<&[u8]> {
         })
 }
 
-fn read_trailing_checksum(bytes: &[u8]) -> EngineResult<u64> {
+fn read_trailing_checksum(bytes: &[u8]) -> Result<u64, EngineError> {
     let checksum = bytes
         .get(
             bytes.len().checked_sub(8).ok_or_else(|| {
@@ -1764,7 +1774,7 @@ fn artifact_payload_checksum(bytes: &[u8]) -> u64 {
     )
 }
 
-fn validate_artifact_text(value: &str, label: &'static str) -> EngineResult<()> {
+fn validate_artifact_text(value: &str, label: &'static str) -> Result<(), EngineError> {
     if value.is_empty() || value.len() > MAX_ID_BYTES || value.bytes().any(|byte| byte == 0) {
         return Err(EngineError::invalid_input(
             "invalid_argument.engine.vector_artifact",
@@ -1782,7 +1792,7 @@ fn metric_code(metric: VectorDistanceMetric) -> u8 {
     }
 }
 
-fn decode_metric(code: u8) -> EngineResult<VectorDistanceMetric> {
+fn decode_metric(code: u8) -> Result<VectorDistanceMetric, EngineError> {
     match code {
         1 => Ok(VectorDistanceMetric::Cosine),
         2 => Ok(VectorDistanceMetric::Euclidean),
@@ -1802,11 +1812,11 @@ fn write_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn write_text(out: &mut Vec<u8>, text: &str) -> EngineResult<()> {
+fn write_text(out: &mut Vec<u8>, text: &str) -> Result<(), EngineError> {
     write_bytes(out, text.as_bytes())
 }
 
-fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> EngineResult<()> {
+fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), EngineError> {
     let len = u32::try_from(bytes.len()).map_err(|_| {
         EngineError::invalid_input(
             "invalid_argument.engine.vector_artifact",
@@ -1828,7 +1838,7 @@ impl<'a> Cursor<'a> {
         Self { bytes, pos: 0 }
     }
 
-    fn expect_bytes(&mut self, expected: &[u8], field: &'static str) -> EngineResult<()> {
+    fn expect_bytes(&mut self, expected: &[u8], field: &'static str) -> Result<(), EngineError> {
         if self.take(expected.len(), field)? != expected {
             return Err(EngineError::corruption(
                 "data_loss.engine.vector_artifact",
@@ -1838,21 +1848,21 @@ impl<'a> Cursor<'a> {
         Ok(())
     }
 
-    fn u8(&mut self, field: &'static str) -> EngineResult<u8> {
+    fn u8(&mut self, field: &'static str) -> Result<u8, EngineError> {
         Ok(*self.take(1, field)?.first().expect("one byte"))
     }
 
-    fn u32(&mut self, field: &'static str) -> EngineResult<u32> {
+    fn u32(&mut self, field: &'static str) -> Result<u32, EngineError> {
         let bytes = self.take(4, field)?;
         Ok(u32::from_le_bytes(bytes.try_into().expect("four bytes")))
     }
 
-    fn u64(&mut self, field: &'static str) -> EngineResult<u64> {
+    fn u64(&mut self, field: &'static str) -> Result<u64, EngineError> {
         let bytes = self.take(8, field)?;
         Ok(u64::from_le_bytes(bytes.try_into().expect("eight bytes")))
     }
 
-    fn branch_id(&mut self, field: &'static str) -> EngineResult<BranchId> {
+    fn branch_id(&mut self, field: &'static str) -> Result<BranchId, EngineError> {
         let bytes = self.take(BranchId::BYTE_LEN, field)?;
         Ok(BranchId::from_bytes(bytes.try_into().map_err(|_| {
             EngineError::corruption(
@@ -1862,7 +1872,7 @@ impl<'a> Cursor<'a> {
         })?))
     }
 
-    fn text(&mut self, field: &'static str) -> EngineResult<String> {
+    fn text(&mut self, field: &'static str) -> Result<String, EngineError> {
         let bytes = self.bytes(field)?;
         std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| {
             EngineError::corruption(
@@ -1872,7 +1882,7 @@ impl<'a> Cursor<'a> {
         })
     }
 
-    fn bytes(&mut self, field: &'static str) -> EngineResult<&'a [u8]> {
+    fn bytes(&mut self, field: &'static str) -> Result<&'a [u8], EngineError> {
         let len = usize::try_from(self.u32(field)?).map_err(|_| {
             EngineError::corruption(
                 "data_loss.engine.vector_artifact",
@@ -1882,7 +1892,7 @@ impl<'a> Cursor<'a> {
         self.take(len, field)
     }
 
-    fn take(&mut self, len: usize, field: &'static str) -> EngineResult<&'a [u8]> {
+    fn take(&mut self, len: usize, field: &'static str) -> Result<&'a [u8], EngineError> {
         let end = self.pos.checked_add(len).ok_or_else(|| {
             EngineError::corruption(
                 "data_loss.engine.vector_artifact",
@@ -1899,7 +1909,7 @@ impl<'a> Cursor<'a> {
         Ok(slice)
     }
 
-    fn finish(&self) -> EngineResult<()> {
+    fn finish(&self) -> Result<(), EngineError> {
         if self.pos != self.bytes.len() {
             return Err(EngineError::corruption(
                 "data_loss.engine.vector_artifact",

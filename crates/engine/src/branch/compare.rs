@@ -15,7 +15,7 @@ use crate::branch::catalog::BranchCatalogRecord;
 use crate::branch::preview::capability_adapters;
 use crate::control::space::registered_spaces;
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::EngineResult;
+use crate::diagnostics::EngineError;
 use crate::persistence::{ReadSelector, StoragePersistence};
 
 /// Maps the public branch-state selector to the internal storage read selector.
@@ -34,7 +34,7 @@ fn present_entities(
     adapter: &dyn CapabilityBranchAdapter,
     space: &ProductSpace,
     selector: ReadSelector,
-) -> EngineResult<BTreeMap<Vec<u8>, ComparableEntity>> {
+) -> Result<BTreeMap<Vec<u8>, ComparableEntity>, EngineError> {
     let rows = persistence.scan_prefix(
         record.storage_branch_id(),
         adapter.row_class(),
@@ -61,7 +61,7 @@ pub(crate) fn compare_records(
     record_a: &BranchCatalogRecord,
     record_b: &BranchCatalogRecord,
     selector: BranchStateSelector,
-) -> EngineResult<BranchComparison> {
+) -> Result<BranchComparison, EngineError> {
     let read = read_selector(selector);
     let mut spaces = registered_spaces(persistence, record_a)?;
     for space in registered_spaces(persistence, record_b)? {

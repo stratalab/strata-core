@@ -171,7 +171,7 @@ impl VectorArtifactRef {
         vector_count: u64,
         derived_bytes: u64,
         checksum: u64,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         let reference = Self {
             artifact_id: artifact_id.into(),
             source_id: source_id.into(),
@@ -282,7 +282,7 @@ impl VectorArtifactRef {
         self.checksum
     }
 
-    fn validate_identity(&self) -> EngineResult<()> {
+    fn validate_identity(&self) -> Result<(), EngineError> {
         if self.artifact_id.is_empty() || self.source_id.is_empty() {
             return Err(EngineError::corruption(
                 "data_loss.engine.vector_index_manifest",
@@ -342,7 +342,7 @@ impl StoredArtifactRef {
         }
     }
 
-    fn into_artifact_ref(self) -> EngineResult<VectorArtifactRef> {
+    fn into_artifact_ref(self) -> Result<VectorArtifactRef, EngineError> {
         VectorArtifactRef::new(
             self.artifact_id,
             self.source_id,
@@ -406,7 +406,7 @@ struct StoredArtifactRef {
 #[cfg_attr(not(any(test, feature = "testkit")), allow(dead_code))]
 pub(crate) fn encode_vector_index_manifest(
     manifest: &VectorIndexManifest,
-) -> EngineResult<Vec<u8>> {
+) -> Result<Vec<u8>, EngineError> {
     let body = StoredManifestBody::from_manifest(manifest);
     let body_bytes = serde_json::to_vec(&body).map_err(|error| {
         EngineError::invalid_input(
@@ -434,7 +434,9 @@ pub(crate) fn encode_vector_index_manifest(
     Ok(bytes)
 }
 
-pub(crate) fn decode_vector_index_manifest(bytes: &[u8]) -> EngineResult<VectorIndexManifest> {
+pub(crate) fn decode_vector_index_manifest(
+    bytes: &[u8],
+) -> Result<VectorIndexManifest, EngineError> {
     if bytes.len() > MANIFEST_MAX_BYTES {
         return Err(EngineError::corruption(
             "data_loss.engine.vector_index_manifest",
@@ -488,7 +490,7 @@ impl StoredManifestBody {
         }
     }
 
-    fn into_manifest(self) -> EngineResult<VectorIndexManifest> {
+    fn into_manifest(self) -> Result<VectorIndexManifest, EngineError> {
         if self.policy_version != MANIFEST_POLICY_VERSION {
             return Err(EngineError::incompatible_layout(
                 "failed_precondition.engine.vector_index_manifest",
@@ -515,7 +517,7 @@ impl StoredManifestBody {
     }
 }
 
-fn reject_duplicate_artifact_ids(artifact_refs: &[VectorArtifactRef]) -> EngineResult<()> {
+fn reject_duplicate_artifact_ids(artifact_refs: &[VectorArtifactRef]) -> Result<(), EngineError> {
     let mut ids = BTreeSet::new();
     for artifact_ref in artifact_refs {
         if !ids.insert(artifact_ref.artifact_id.as_str()) {

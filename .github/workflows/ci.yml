@@ -255,19 +255,41 @@ jobs:
         # Exit 3 (timeout-only, no missed mutants) passes: a mutant whose test
         # run never completes was killed by hang — the behavior change was
         # detected, just not by an assertion. Exit 2 (missed) still fails.
+        #
+        # A lane that builds mutants and finds none of them viable tested
+        # NOTHING, and cargo-mutants exits 0 for it — the failure mode #3337
+        # was filed for, where eight green shards meant eight shards that
+        # judged nothing. cargo-mutants says so itself ("No mutants were
+        # viable"), and a lane with no mutants at all never says it, so that
+        # line is the signal. Loud beats silent: a gate that proved nothing
+        # must not read the same as one that proved everything.
         run: |
+          set +e
           git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
           common=(--in-diff pr.diff --timeout-multiplier 2.5 --minimum-test-timeout 60
                   --shard ${{ matrix.shard }}/8 --sharding round-robin)
-          cargo mutants "${common[@]}" || [ $? -eq 3 ]
+          check() {
+            cat "mutants-$1.log"
+            if [ "$2" -ne 0 ] && [ "$2" -ne 3 ]; then
+              exit "$2"
+            fi
+            if grep -q "No mutants were viable" "mutants-$1.log"; then
+              echo "::error::lane $1 built mutants and none of them compiled, so this shard judged nothing (#3337). Spell the return type out as Result<T, E> rather than a crate alias, or add a reasoned exclusion to that lane's config."
+              exit 1
+            fi
+          }
+          cargo mutants "${common[@]}" > mutants-a.log 2>&1
+          check a $?
           cargo mutants "${common[@]}" \
             --config .cargo/mutants-executor.toml \
             --package strata-executor \
-            --features idl-tooling,inference,testkit || [ $? -eq 3 ]
+            --features idl-tooling,inference,testkit > mutants-b.log 2>&1
+          check b $?
           cargo mutants "${common[@]}" \
             --config .cargo/mutants-inference.toml \
             --package strata-inference \
-            --features download,testkit || [ $? -eq 3 ]
+            --features download,testkit > mutants-c.log 2>&1
+          check c $?
       - name: Upload mutants report
         if: failure()
         uses: actions/upload-artifact@v4

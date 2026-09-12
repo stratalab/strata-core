@@ -1,5 +1,5 @@
 use super::super::{
-    BatchVectorEntry, Command, Executor, ExecutorResult, Output, VectorDistanceMetric,
+    BatchVectorEntry, Command, Executor, ExecutorError, Output, VectorDistanceMetric,
     VectorMetadataFilter,
 };
 
@@ -10,7 +10,7 @@ impl Executor {
         collection: impl Into<String>,
         dimension: u64,
         metric: VectorDistanceMetric,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorCreateCollection {
             branch: None,
             space: None,
@@ -25,7 +25,7 @@ impl Executor {
     pub fn vector_delete_collection(
         &mut self,
         collection: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorDeleteCollection {
             branch: None,
             space: None,
@@ -34,7 +34,7 @@ impl Executor {
     }
 
     /// Executes a default-branch vector collection-list command.
-    pub fn vector_list_collections(&mut self) -> ExecutorResult<Output> {
+    pub fn vector_list_collections(&mut self) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorListCollections {
             branch: None,
             space: None,
@@ -45,7 +45,7 @@ impl Executor {
     pub fn vector_collection_stats(
         &mut self,
         collection: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorCollectionStats {
             branch: None,
             space: None,
@@ -58,7 +58,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         model: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorSetEmbeddingModel {
             branch: None,
             space: None,
@@ -68,7 +68,7 @@ impl Executor {
     }
 
     /// Executes a default-branch vector count command.
-    pub fn vector_count(&mut self, collection: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn vector_count(&mut self, collection: impl Into<String>) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorCount {
             branch: None,
             space: None,
@@ -85,7 +85,7 @@ impl Executor {
         key: impl Into<String>,
         vector: Vec<f32>,
         metadata: Option<serde_json::Value>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorUpsert {
             branch: None,
             space: None,
@@ -102,7 +102,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         key: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorGet {
             branch: None,
             space: None,
@@ -118,7 +118,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         key: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorHistory {
             branch: None,
             space: None,
@@ -132,7 +132,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         key: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorExists {
             branch: None,
             space: None,
@@ -148,7 +148,7 @@ impl Executor {
         prefix: Option<String>,
         cursor: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorListKeys {
             branch: None,
             space: None,
@@ -167,7 +167,7 @@ impl Executor {
         collection: impl Into<String>,
         key: impl Into<String>,
         patch: serde_json::Value,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorUpdateMetadata {
             branch: None,
             space: None,
@@ -182,7 +182,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         key: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorDelete {
             branch: None,
             space: None,
@@ -196,7 +196,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         filter: VectorMetadataFilter,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorDeleteByFilter {
             branch: None,
             space: None,
@@ -206,7 +206,10 @@ impl Executor {
     }
 
     /// Executes a default-branch vector delete-all command.
-    pub fn vector_delete_all(&mut self, collection: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn vector_delete_all(
+        &mut self,
+        collection: impl Into<String>,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorDeleteAll {
             branch: None,
             space: None,
@@ -221,7 +224,7 @@ impl Executor {
         query: Vec<f32>,
         k: u64,
         filter: Option<VectorMetadataFilter>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorQuery {
             branch: None,
             space: None,
@@ -242,7 +245,7 @@ impl Executor {
         query: Vec<f32>,
         k: u64,
         filter: Option<VectorMetadataFilter>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorIndexQuery {
             branch: None,
             space: None,
@@ -260,7 +263,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         entries: Vec<BatchVectorEntry>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorBatchUpsert {
             branch: None,
             space: None,
@@ -274,7 +277,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         keys: Vec<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorBatchGet {
             branch: None,
             space: None,
@@ -288,7 +291,7 @@ impl Executor {
         &mut self,
         collection: impl Into<String>,
         keys: Vec<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorBatchDelete {
             branch: None,
             space: None,

@@ -966,6 +966,36 @@ fn excluded_admin_command_names() -> &'static [&'static str] {
     ]
 }
 
+/// #3337: a return type written with the crate's `Result` alias is invisible to
+/// the mutation gate.
+///
+/// cargo-mutants reads signatures as text and resolves no type aliases, so
+/// `-> ExecutorResult<T>` looks like an unknown one-parameter container: every
+/// body-replacement mutant it writes (`ExecutorResult::new()`,
+/// `ExecutorResult::from(None)`) fails to compile, is scored *unviable*, and the
+/// lane passes having tested nothing. Spelled out, the same function yields
+/// `Ok(None)` / `Ok(true)` — the mutants that catch a result nothing observes.
+///
+/// The alias stays: it is public API, and every other position keeps using it.
+/// Only the return position has to say `Result<T, ExecutorError>`.
+#[test]
+fn return_types_spell_the_result_out_for_the_mutation_gate() {
+    let offenders: Vec<_> = source_files(&crate_root().join("src"))
+        .into_iter()
+        .filter_map(|path| {
+            let text = fs::read_to_string(&path).expect("read source file");
+            // The qualified spelling hides just as well.
+            (text.contains("-> ExecutorResult<") || text.contains("::ExecutorResult<"))
+                .then_some(path)
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a return type hides behind the alias, so the mutation gate cannot \
+         replace it: write `-> Result<T, ExecutorError>` in {offenders:?}"
+    );
+}
+
 fn source_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_source_files(root, &mut files);

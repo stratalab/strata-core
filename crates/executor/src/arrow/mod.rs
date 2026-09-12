@@ -7,7 +7,7 @@ pub(crate) mod reader;
 pub(crate) mod schema;
 pub(crate) mod writer;
 
-use crate::error::{ExecutorError, ExecutorResult};
+use crate::error::ExecutorError;
 
 fn invalid_input(code: &'static str, message: impl Into<String>) -> ExecutorError {
     ExecutorError::new(code, message)
@@ -33,6 +33,6 @@ fn required_option<T>(
     value: Option<T>,
     code: &'static str,
     message: &'static str,
-) -> ExecutorResult<T> {
+) -> Result<T, ExecutorError> {
     value.ok_or_else(|| invalid_input(code, message))
 }

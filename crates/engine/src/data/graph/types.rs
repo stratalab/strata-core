@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::branch::BranchName;
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 const MAX_GRAPH_NAME_BYTES: usize = 256;
 const MAX_NODE_ID_BYTES: usize = 1024;
@@ -22,7 +22,7 @@ pub struct GraphName(String);
 
 impl GraphName {
     /// Creates a validated graph name.
-    pub fn new(name: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(name: impl Into<String>) -> Result<Self, EngineError> {
         let name = name.into();
         validate_text_component(
             &name,
@@ -82,7 +82,7 @@ pub struct GraphNodeId(String);
 
 impl GraphNodeId {
     /// Creates a validated node id.
-    pub fn new(node_id: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(node_id: impl Into<String>) -> Result<Self, EngineError> {
         let node_id = node_id.into();
         validate_text_component(
             &node_id,
@@ -130,7 +130,7 @@ pub struct GraphEdgeType(String);
 
 impl GraphEdgeType {
     /// Creates a validated edge type.
-    pub fn new(edge_type: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(edge_type: impl Into<String>) -> Result<Self, EngineError> {
         let edge_type = edge_type.into();
         validate_text_component(
             &edge_type,
@@ -249,7 +249,7 @@ impl GraphBindingTarget {
         branch: Option<BranchName>,
         space: ProductSpace,
         key: impl Into<String>,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         let key = key.into();
         validate_text_component(
             &key,
@@ -337,7 +337,7 @@ pub struct GraphProperties(Value);
 
 impl GraphProperties {
     /// Creates validated graph properties.
-    pub fn new(value: Value) -> EngineResult<Self> {
+    pub fn new(value: Value) -> Result<Self, EngineError> {
         if !value.is_object() {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.graph_properties",
@@ -465,7 +465,7 @@ pub struct GraphEdgeData {
 
 impl GraphEdgeData {
     /// Creates graph edge data.
-    pub fn new(weight: f64, properties: Option<GraphProperties>) -> EngineResult<Self> {
+    pub fn new(weight: f64, properties: Option<GraphProperties>) -> Result<Self, EngineError> {
         if !weight.is_finite() {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.graph_edge_weight",
@@ -589,7 +589,7 @@ pub(super) fn validate_text_component(
     max_bytes: usize,
     code: &'static str,
     label: &'static str,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     if value.is_empty() || value.trim().is_empty() {
         return Err(EngineError::invalid_input(
             code,

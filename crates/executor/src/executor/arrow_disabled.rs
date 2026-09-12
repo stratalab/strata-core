@@ -32,7 +32,7 @@ impl Executor {
         _value_column: Option<&str>,
         _collection: Option<&str>,
         _graph: Option<&str>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         if !std::path::Path::new(&file_path).exists() {
             return Err(ExecutorError::new(
                 "invalid_argument.executor.arrow_input_missing",
@@ -60,7 +60,7 @@ impl Executor {
         _collection: Option<String>,
         _graph: Option<String>,
         _event_type: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         Err(arrow_feature_disabled())
     }
 }

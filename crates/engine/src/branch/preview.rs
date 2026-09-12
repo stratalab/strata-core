@@ -32,7 +32,7 @@ use crate::data::kv::{KvBranchAdapter, ProductSpace};
 use crate::data::vector::{
     plan_collection_promotion, VectorBranchAdapter, VectorCollectionBranchAdapter,
 };
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{ReadSelector, StoragePersistence};
 
 /// The authored capabilities a branch workflow enumerates, in report order.
@@ -122,7 +122,7 @@ pub(crate) fn branch_workflow_coverage(
     source: &BranchCatalogRecord,
     target: &BranchCatalogRecord,
     promoted: &[ComparedCapability],
-) -> EngineResult<BranchWorkflowCoverage> {
+) -> Result<BranchWorkflowCoverage, EngineError> {
     let (capabilities_covered, capabilities_unsupported) = capability_coverage();
     let mut spaces_covered = registered_spaces(persistence, source)?;
     for space in registered_spaces(persistence, target)? {
@@ -153,7 +153,7 @@ struct BasePoint {
 fn resolve_base_point(
     source: &BranchCatalogRecord,
     target: &BranchCatalogRecord,
-) -> EngineResult<BasePoint> {
+) -> Result<BasePoint, EngineError> {
     // A prior promotion of `source` into `target` advances the branch point past
     // the fork: the target's post-merge state already incorporates the source, so
     // a repeated promotion diffed against the fork would re-surface already-merged
@@ -205,7 +205,7 @@ fn resolve_base_point(
 pub(crate) fn base_point_for(
     source: &BranchCatalogRecord,
     target: &BranchCatalogRecord,
-) -> EngineResult<(BranchId, ReadSelector)> {
+) -> Result<(BranchId, ReadSelector), EngineError> {
     let base = resolve_base_point(source, target)?;
     Ok((base.storage_branch_id, base.selector))
 }
@@ -218,7 +218,7 @@ pub(crate) fn base_registered_spaces(
     persistence: &mut StoragePersistence,
     source: &BranchCatalogRecord,
     target: &BranchCatalogRecord,
-) -> EngineResult<Vec<ProductSpace>> {
+) -> Result<Vec<ProductSpace>, EngineError> {
     let base = resolve_base_point(source, target)?;
     read_space_index_at(persistence, base.storage_branch_id, base.selector)
 }
@@ -248,7 +248,7 @@ fn entity_states(
     adapter: &dyn CapabilityBranchAdapter,
     space: &ProductSpace,
     selector: ReadSelector,
-) -> EngineResult<BTreeMap<Vec<u8>, EntitySummary>> {
+) -> Result<BTreeMap<Vec<u8>, EntitySummary>, EngineError> {
     let rows = persistence.scan_prefix(
         storage_branch_id,
         adapter.row_class(),
@@ -305,7 +305,7 @@ pub(crate) fn three_way(
     persistence: &mut StoragePersistence,
     source: &BranchCatalogRecord,
     target: &BranchCatalogRecord,
-) -> EngineResult<(CommitVersion, Vec<ThreeWayEntity>)> {
+) -> Result<(CommitVersion, Vec<ThreeWayEntity>), EngineError> {
     let base = resolve_base_point(source, target)?;
 
     let mut spaces = registered_spaces(persistence, source)?;
@@ -387,7 +387,7 @@ pub(crate) fn preview_branches(
     source: &BranchCatalogRecord,
     target: &BranchCatalogRecord,
     strategy: PromotionStrategy,
-) -> EngineResult<BranchPreview> {
+) -> Result<BranchPreview, EngineError> {
     let strategy_result = match strategy {
         PromotionStrategy::Strict => ConflictStrategyResult::Refused,
         PromotionStrategy::SourceWins => ConflictStrategyResult::SourceWins,

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::{
     GraphBindingPrimitive, GraphBindingTarget, GraphEdgeData, GraphEdgeType, GraphEntityBinding,
@@ -187,7 +187,7 @@ struct StoredGraphTypeIndex {
 
 pub(crate) fn encode_graph_type_index_record(
     record: &GraphTypeIndexRecord,
-) -> EngineResult<Vec<u8>> {
+) -> Result<Vec<u8>, EngineError> {
     let stored = StoredGraphTypeIndex {
         graph: record.graph().as_str().to_owned(),
         object_type: record.object_type().as_str().to_owned(),
@@ -206,7 +206,7 @@ pub(crate) fn decode_graph_type_index_record(
     expected_object_type: &GraphTypeName,
     expected_node_id: &GraphNodeId,
     bytes: &[u8],
-) -> EngineResult<GraphTypeIndexRecord> {
+) -> Result<GraphTypeIndexRecord, EngineError> {
     let corruption = |detail: &str| {
         EngineError::corruption(
             "data_loss.engine.graph_type_index_record",
@@ -271,7 +271,9 @@ struct StoredGraphBindingTarget {
     key: String,
 }
 
-pub(crate) fn encode_graph_metadata_record(record: &GraphMetadataRecord) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_graph_metadata_record(
+    record: &GraphMetadataRecord,
+) -> Result<Vec<u8>, EngineError> {
     let stored = StoredGraphMetadata {
         graph: record.graph().as_str().to_owned(),
     };
@@ -286,7 +288,7 @@ pub(crate) fn encode_graph_metadata_record(record: &GraphMetadataRecord) -> Engi
 pub(crate) fn decode_graph_metadata_record(
     expected_graph: &GraphName,
     bytes: &[u8],
-) -> EngineResult<GraphMetadataRecord> {
+) -> Result<GraphMetadataRecord, EngineError> {
     if bytes.first().copied() != Some(GRAPH_METADATA_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.graph_metadata",
@@ -314,7 +316,7 @@ pub(crate) fn decode_graph_metadata_record(
     Ok(GraphMetadataRecord::new(graph))
 }
 
-pub(crate) fn encode_graph_node_record(record: &GraphNodeRecord) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_graph_node_record(record: &GraphNodeRecord) -> Result<Vec<u8>, EngineError> {
     let stored = StoredGraphNode {
         graph: record.graph().as_str().to_owned(),
         node_id: record.node_id().as_str().to_owned(),
@@ -337,7 +339,7 @@ pub(crate) fn decode_graph_node_record(
     expected_graph: &GraphName,
     expected_node_id: &GraphNodeId,
     bytes: &[u8],
-) -> EngineResult<GraphNodeRecord> {
+) -> Result<GraphNodeRecord, EngineError> {
     if bytes.first().copied() != Some(GRAPH_NODE_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.graph_node_record",
@@ -402,7 +404,7 @@ pub(crate) fn decode_graph_node_record(
     Ok(GraphNodeRecord::new(graph, node_id, data))
 }
 
-pub(crate) fn encode_graph_edge_record(record: &GraphEdgeRecord) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_graph_edge_record(record: &GraphEdgeRecord) -> Result<Vec<u8>, EngineError> {
     let stored = StoredGraphEdge {
         graph: record.graph().as_str().to_owned(),
         src: record.src().as_str().to_owned(),
@@ -425,7 +427,7 @@ pub(crate) fn decode_graph_edge_record(
     expected_edge_type: &GraphEdgeType,
     expected_dst: &GraphNodeId,
     bytes: &[u8],
-) -> EngineResult<GraphEdgeRecord> {
+) -> Result<GraphEdgeRecord, EngineError> {
     if bytes.first().copied() != Some(GRAPH_EDGE_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.graph_edge_record",
@@ -491,7 +493,9 @@ pub(crate) fn decode_graph_edge_record(
     Ok(GraphEdgeRecord::new(graph, src, edge_type, dst, data))
 }
 
-pub(crate) fn encode_graph_binding_record(record: &GraphBindingRecord) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_graph_binding_record(
+    record: &GraphBindingRecord,
+) -> Result<Vec<u8>, EngineError> {
     let stored = StoredGraphNode {
         graph: record.graph().as_str().to_owned(),
         node_id: record.node_id().as_str().to_owned(),
@@ -511,7 +515,7 @@ pub(crate) fn decode_graph_binding_record(
     expected_graph: &GraphName,
     expected_node_id: &GraphNodeId,
     bytes: &[u8],
-) -> EngineResult<GraphBindingRecord> {
+) -> Result<GraphBindingRecord, EngineError> {
     if bytes.first().copied() != Some(GRAPH_BINDING_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.graph_binding_record",
@@ -560,7 +564,7 @@ fn encode_json_record<T: Serialize>(
     value: &T,
     code: &'static str,
     message: &'static str,
-) -> EngineResult<Vec<u8>> {
+) -> Result<Vec<u8>, EngineError> {
     let mut bytes = vec![version];
     bytes.extend(
         serde_json::to_vec(value)
@@ -581,7 +585,7 @@ fn binding_to_stored(binding: &GraphEntityBinding) -> StoredGraphBinding {
     }
 }
 
-fn binding_from_stored(stored: StoredGraphBinding) -> EngineResult<GraphEntityBinding> {
+fn binding_from_stored(stored: StoredGraphBinding) -> Result<GraphEntityBinding, EngineError> {
     let branch = stored
         .target
         .branch
