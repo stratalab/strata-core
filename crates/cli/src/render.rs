@@ -47,6 +47,12 @@ impl Rendered {
         }
     }
 
+    /// Both channels at once, for a renderer that writes feedback beside its
+    /// answer (a report's `-- N issues`, a page's continuation hint).
+    pub(crate) const fn new(stdout: String, stderr: String) -> Self {
+        Self { stdout, stderr }
+    }
+
     /// Both channels in the order a terminal shows them for one command —
     /// the playground's single-string transcript.
     pub fn stdout_then_stderr(self) -> String {
@@ -914,7 +920,7 @@ fn value_line(value: &Value, as_: Option<CliDisplayAs>, format: Format) -> Strin
 }
 
 /// Two spaces per level, so a nested block reads as inside its label.
-const INDENT: usize = 2;
+pub(crate) const INDENT: usize = 2;
 
 /// One `fields:` block for a reader: labels padded to the widest in this
 /// block, nested records and tables indented under their label. A field with
@@ -1022,18 +1028,18 @@ fn rows_table(rows: &[Value], columns: &[Column], format: Format) -> Table {
 }
 
 /// A label alone on its line: what follows is indented under it.
-fn push_label(out: &mut String, indent: usize, label: &str) {
+pub(crate) fn push_label(out: &mut String, indent: usize, label: &str) {
     line!(out, "{:indent$}{label}", "");
 }
 
 /// One `label  value` line, padded and never trailing whitespace.
-fn push_field(out: &mut String, indent: usize, label: &str, width: usize, text: &str) {
+pub(crate) fn push_field(out: &mut String, indent: usize, label: &str, width: usize, text: &str) {
     let line = format!("{:indent$}{label:<width$}  {text}", "");
     line!(out, "{}", line.trim_end());
 }
 
 /// A rendered block, one level in.
-fn push_indented(out: &mut String, text: &str, indent: usize) {
+pub(crate) fn push_indented(out: &mut String, text: &str, indent: usize) {
     for line in text.lines() {
         line!(out, "{:indent$}{line}", "");
     }
@@ -1051,7 +1057,7 @@ fn value_order(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// One cell of a declared table (output contract R1-table, R4): the value
 /// under its declared presentation, or the format's null cell (`-` human,
 /// empty raw) when it is null or absent.
-fn cell(value: Option<&Value>, as_: Option<CliDisplayAs>, format: Format) -> Cell {
+pub(crate) fn cell(value: Option<&Value>, as_: Option<CliDisplayAs>, format: Format) -> Cell {
     let value = match value {
         None | Some(Value::Null) => {
             return Cell::null(if format == Format::Human { "-" } else { "" });
@@ -1143,7 +1149,7 @@ fn float_text(float: f64) -> String {
 
 /// A cell holds one line: a newline or tab inside a value is spelled out
 /// (`\n`, `\t`) so the row stays one row in both layouts (R4).
-fn escape_cell(text: &str) -> String {
+pub(crate) fn escape_cell(text: &str) -> String {
     text.replace('\n', "\\n")
         .replace('\t', "\\t")
         .replace('\r', "\\r")
@@ -1324,24 +1330,22 @@ pub fn value_to_string(value: &Value, format: Format) -> Result<String, CliError
     Ok(match format {
         Format::Json => serde_json::to_string(value)?,
         Format::Pretty => serde_json::to_string_pretty(value)?,
-        Format::Human | Format::Raw => {
-            // A report names itself the way an output does; the name is for a
-            // machine reading `--json`, so the lines show the payload.
-            let data = tagged_output(value).map_or(value, |(_, data)| data);
-            let mut out = match (data, format) {
-                (Value::Null, Format::Human) => "(nil)".to_owned(),
-                (Value::Null, _) => return Ok(String::new()),
-                (Value::Bool(_) | Value::Number(_) | Value::String(_), Format::Human) => {
-                    scalar_summary(data)
-                }
-                (Value::Bool(_) | Value::Number(_) | Value::String(_), _) => raw_scalar(data),
-                (_, Format::Human) => serde_json::to_string_pretty(data)?,
-                (_, _) => serde_json::to_string(data)?,
-            };
-            out.push('\n');
-            out
-        }
+        Format::Human | Format::Raw => crate::report::render_report(value, format).stdout,
     })
+}
+
+/// Prints a report the way the binary does: the answer on stdout, whatever
+/// deserves attention on stderr (#3339).
+#[cfg(feature = "native")]
+pub(crate) fn print_report(value: &Value, format: Format) -> Result<(), CliError> {
+    if matches!(format, Format::Json | Format::Pretty) {
+        print!("{}", terminated(value_to_string(value, format)?, format));
+        return Ok(());
+    }
+    let rendered = crate::report::render_report(value, format);
+    print!("{}", rendered.stdout);
+    eprint!("{}", rendered.stderr);
+    Ok(())
 }
 
 /// Renders an executor error status to its display string for `format`, without
@@ -1396,8 +1400,7 @@ pub(crate) fn print_output(
 
 #[cfg(feature = "native")]
 pub(crate) fn render_value(value: &Value, format: Format) -> Result<(), CliError> {
-    print!("{}", terminated(value_to_string(value, format)?, format));
-    Ok(())
+    print_report(value, format)
 }
 
 #[cfg(feature = "native")]
@@ -4085,32 +4088,22 @@ mod tests {
     }
 
     #[test]
-    fn a_cli_report_shows_its_payload_not_its_envelope() {
+    fn a_report_renders_through_the_report_path_not_a_command_one() {
         // `doctor`, `init`, `ipc start`, the REPL's context line: the CLI's own
-        // JSON, which no declaration describes. The name is for `--json`; the
-        // lines show what it carries.
+        // JSON, which no declaration describes. `value_to_string` hands them to
+        // `report`, which owns their shapes and tests them (#3339).
         let report = json!({ "type": "doctor", "data": { "binary": "1.2.1" } });
+        for format in [Format::Human, Format::Raw] {
+            assert_eq!(
+                super::value_to_string(&report, format).expect("renders"),
+                crate::report::render_report(&report, format).stdout,
+                "{format:?}"
+            );
+        }
+        // The envelope formats stay the envelope, whatever the report is.
         assert_eq!(
-            super::value_to_string(&report, Format::Human).expect("renders"),
-            "{\n  \"binary\": \"1.2.1\"\n}\n"
-        );
-        assert_eq!(
-            super::value_to_string(&report, Format::Raw).expect("renders"),
-            "{\"binary\":\"1.2.1\"}\n"
-        );
-        // A scalar payload reads as itself, and an absent one says so.
-        let scalar = json!({ "type": "ipc_stopped", "data": true });
-        assert_eq!(
-            super::value_to_string(&scalar, Format::Human).expect("renders"),
-            "true\n"
-        );
-        assert_eq!(
-            super::value_to_string(&json!(null), Format::Human).expect("renders"),
-            "(nil)\n"
-        );
-        assert_eq!(
-            super::value_to_string(&json!(null), Format::Raw).expect("renders"),
-            ""
+            super::value_to_string(&report, Format::Json).expect("renders"),
+            r#"{"data":{"binary":"1.2.1"},"type":"doctor"}"#
         );
     }
 }
