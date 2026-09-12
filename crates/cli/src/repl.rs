@@ -257,7 +257,13 @@ fn run_parsed_line(
         }
         ReplLine::Command(line) => {
             let scope = context.scope_with_overrides(line.branch, line.space);
-            execute_parsed_command(connection, line.command, &scope, format)?;
+            execute_parsed_command(
+                connection,
+                line.command,
+                &scope,
+                format,
+                crate::render::Channel::Transcript,
+            )?;
             Ok(LineOutcome::Continue)
         }
     }

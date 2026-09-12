@@ -33,16 +33,79 @@ macro_rules! line {
 pub struct Rendered {
     /// The answer, exactly as the binary writes it: JSON/pretty envelopes and
     /// human/raw lines are newline-terminated; a missed write prints nothing.
-    pub stdout: String,
+    pub stdout: Answer,
     /// Feedback, newline-terminated when present. Always empty in `--json`
     /// and `--pretty`, whose envelope already carries the same fact.
     pub stderr: String,
 }
 
+/// What a command writes to stdout: characters in every case but one — a
+/// `--raw` read of a value that is not text, which is the stored bytes and
+/// nothing else (#3116, output contract R4).
+///
+/// A terminal, a pipe and a file all take bytes; only a reader needs them to
+/// be characters. So the binary writes `Bytes` verbatim, with no trailing
+/// newline, and `strata --raw kv get k > payload.bin` gives back exactly what
+/// `kv put --file` stored. Where bytes cannot travel — a transcript in the
+/// browser, a snapshot cell in a UTF-8 file — `text()` escapes them instead,
+/// so what is shown can never be mistaken for what is stored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Answer {
+    /// Rendered characters, newline-terminated where a line was written.
+    Text(String),
+    /// A stored value, byte for byte.
+    Bytes(Vec<u8>),
+}
+
+impl Default for Answer {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl Answer {
+    /// The bytes the binary writes.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Text(text) => text.as_bytes(),
+            Self::Bytes(bytes) => bytes,
+        }
+    }
+
+    /// The answer as characters, for the places bytes cannot reach: the
+    /// playground's transcript and the contract's snapshot cells. Bytes that
+    /// are text read as themselves; bytes that are not read as
+    /// `<bytes:0001ff>`, which is an escape and looks like one.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Bytes(bytes) => {
+                if let Ok(text) = std::str::from_utf8(bytes) {
+                    return text.to_owned();
+                }
+                let mut escape = String::from("<bytes:");
+                for byte in bytes {
+                    let _ = std::fmt::Write::write_fmt(&mut escape, format_args!("{byte:02x}"));
+                }
+                escape.push('>');
+                escape
+            }
+        }
+    }
+}
+
 impl Rendered {
     fn stdout(text: String) -> Self {
         Self {
-            stdout: text,
+            stdout: Answer::Text(text),
+            stderr: String::new(),
+        }
+    }
+
+    /// A value that is not characters: the bytes as stored (#3116).
+    fn bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            stdout: Answer::Bytes(bytes),
             stderr: String::new(),
         }
     }
@@ -50,13 +113,16 @@ impl Rendered {
     /// Both channels at once, for a renderer that writes feedback beside its
     /// answer (a report's `-- N issues`, a page's continuation hint).
     pub(crate) const fn new(stdout: String, stderr: String) -> Self {
-        Self { stdout, stderr }
+        Self {
+            stdout: Answer::Text(stdout),
+            stderr,
+        }
     }
 
     /// Both channels in the order a terminal shows them for one command —
     /// the playground's single-string transcript.
     pub fn stdout_then_stderr(self) -> String {
-        let mut text = self.stdout;
+        let mut text = self.stdout.text();
         text.push_str(&self.stderr);
         text
     }
@@ -234,7 +300,7 @@ impl Invocation {
         format: Format,
         request: impl FnOnce() -> Result<Value, serde_json::Error>,
     ) -> Result<Self, CliError> {
-        if matches!(format, Format::Json | Format::Pretty) {
+        if matches!(format, Format::Json) {
             return Ok(Self::none());
         }
         let Some(entry) = catalog::embedded()?.command_by_wire(wire) else {
@@ -605,7 +671,7 @@ pub fn render_output(
     format: Format,
 ) -> Result<Rendered, CliError> {
     let value = serde_json::to_value(output)?;
-    if matches!(format, Format::Json | Format::Pretty) {
+    if matches!(format, Format::Json) {
         return Ok(Rendered::stdout(terminated(
             value_to_string(&value, format)?,
             format,
@@ -667,7 +733,7 @@ fn render_rows(envelope: &Value, decl: &RowsDecl, format: Format) -> Rendered {
             let table = rows_table(rows, &decl.columns, format);
             stdout = match format {
                 Format::Human => table.human(),
-                Format::Raw | Format::Json | Format::Pretty => table.raw(),
+                Format::Raw | Format::Json => table.raw(),
             };
         }
     }
@@ -687,7 +753,10 @@ fn render_rows(envelope: &Value, decl: &RowsDecl, format: Format) -> Rendered {
             .unwrap_or(&Value::Null);
         page_notices(facts, rows.map_or(0, Vec::len), page, &mut stderr);
     }
-    Rendered { stdout, stderr }
+    Rendered {
+        stdout: Answer::Text(stdout),
+        stderr,
+    }
 }
 
 /// What a reader is told about a page beyond its rows: that it is a sample
@@ -770,7 +839,7 @@ fn render_batch(envelope: &Value, decl: &BatchDecl, format: Format) -> Rendered 
             }
             stdout = match format {
                 Format::Human => table.human(),
-                Format::Raw | Format::Json | Format::Pretty => table.raw(),
+                Format::Raw | Format::Json => table.raw(),
             };
         }
     }
@@ -778,7 +847,10 @@ fn render_batch(envelope: &Value, decl: &BatchDecl, format: Format) -> Rendered 
     if format == Format::Human {
         batch_summary(envelope, items, &mut stderr);
     }
-    Rendered { stdout, stderr }
+    Rendered {
+        stdout: Answer::Text(stdout),
+        stderr,
+    }
 }
 
 /// The error code of an item that failed, when it carries one.
@@ -860,7 +932,7 @@ fn render_map(envelope: &Value, decl: &MapDecl, format: Format) -> Rendered {
             }
             stdout = match format {
                 Format::Human => table.human(),
-                Format::Raw | Format::Json | Format::Pretty => table.raw(),
+                Format::Raw | Format::Json => table.raw(),
             };
         }
     }
@@ -880,13 +952,20 @@ fn render_record(envelope: &Value, decl: &RecordDecl, format: Format) -> Rendere
     let mut stdout = String::new();
     match &decl.body {
         RecordBody::Value { pointer, as_ } => match envelope.pointer(pointer) {
+            // #3116: a script that asks for a stored value gets the stored
+            // bytes — not a rendering of them, and not a newline of ours, so
+            // `strata --raw kv get k > payload.bin` is the file that was put.
+            Some(value) if *as_ == Some(CliDisplayAs::Bytes) && format == Format::Raw => {
+                return stored_bytes(value)
+                    .map_or_else(|| Rendered::stdout(miss_line(format)), Rendered::bytes)
+            }
             Some(value) => stdout.push_str(&value_line(value, *as_, format)),
             None => return Rendered::stdout(miss_line(format)),
         },
         RecordBody::Fields(fields) => match format {
             Format::Human => render_fields_human(envelope, fields, 0, &mut stdout),
             Format::Raw => render_fields_raw(envelope, fields, &mut stdout),
-            Format::Json | Format::Pretty => {}
+            Format::Json => {}
         },
     }
     Rendered::stdout(stdout)
@@ -896,7 +975,7 @@ fn render_record(envelope: &Value, decl: &RecordDecl, format: Format) -> Rendere
 fn miss_line(format: Format) -> String {
     match format {
         Format::Human => "(nil)\n".to_owned(),
-        Format::Raw | Format::Json | Format::Pretty => String::new(),
+        Format::Raw | Format::Json => String::new(),
     }
 }
 
@@ -1008,7 +1087,7 @@ fn render_receipt(envelope: &Value, decl: &ReceiptDecl, format: Format) -> Rende
                 }
             }
         }
-        Format::Json | Format::Pretty => {}
+        Format::Json => {}
     }
     Rendered::stdout(stdout)
 }
@@ -1170,7 +1249,7 @@ fn render_mutation_ack(envelope: &Value, ack: &MutationAck, format: Format) -> R
             .collect::<Vec<_>>()
             .join(" ");
         return Rendered {
-            stdout: String::new(),
+            stdout: Answer::default(),
             stderr: format!("no such {noun}: {identity}\n"),
         };
     }
@@ -1186,7 +1265,7 @@ fn render_mutation_ack(envelope: &Value, ack: &MutationAck, format: Format) -> R
             out.push_str(&identity.join("\t"));
         }
         // A declaration is never consulted for the envelope formats.
-        Format::Json | Format::Pretty => {}
+        Format::Json => {}
     }
     out.push('\n');
     Rendered::stdout(out)
@@ -1239,7 +1318,7 @@ fn render_placeholder(
 ) -> String {
     let absent = || match format {
         Format::Human => "(nil)".to_owned(),
-        Format::Raw | Format::Json | Format::Pretty => String::new(),
+        Format::Raw | Format::Json => String::new(),
     };
     let ReceiptPlaceholder::Value(ReceiptValue { pointer, filter }) = placeholder else {
         return envelope
@@ -1258,7 +1337,7 @@ fn render_placeholder(
     match filter {
         None => match format {
             Format::Human => scalar_summary(value),
-            Format::Raw | Format::Json | Format::Pretty => raw_scalar(value),
+            Format::Raw | Format::Json => raw_scalar(value),
         },
         Some(ReceiptFilter::Bytes) => bytes_text(value, format),
         Some(ReceiptFilter::Size) => value.as_u64().map_or_else(absent, size_text),
@@ -1269,6 +1348,14 @@ fn render_placeholder(
             .as_u64()
             .map_or_else(absent, |count| plural_text(count, noun)),
     }
+}
+
+/// The bytes a `Bytes` field carries. The wire spells them base64 (DSGN-5);
+/// this is what was stored.
+fn stored_bytes(value: &Value) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value.as_str()?)
+        .ok()
 }
 
 /// `|bytes`: a base64 wire string as the text it encodes. Non-UTF-8 bytes
@@ -1329,8 +1416,7 @@ fn size_text(bytes: u64) -> String {
 pub fn value_to_string(value: &Value, format: Format) -> Result<String, CliError> {
     Ok(match format {
         Format::Json => serde_json::to_string(value)?,
-        Format::Pretty => serde_json::to_string_pretty(value)?,
-        Format::Human | Format::Raw => crate::report::render_report(value, format).stdout,
+        Format::Human | Format::Raw => crate::report::render_report(value, format).stdout.text(),
     })
 }
 
@@ -1338,12 +1424,12 @@ pub fn value_to_string(value: &Value, format: Format) -> Result<String, CliError
 /// deserves attention on stderr (#3339).
 #[cfg(feature = "native")]
 pub(crate) fn print_report(value: &Value, format: Format) -> Result<(), CliError> {
-    if matches!(format, Format::Json | Format::Pretty) {
+    if matches!(format, Format::Json) {
         print!("{}", terminated(value_to_string(value, format)?, format));
         return Ok(());
     }
     let rendered = crate::report::render_report(value, format);
-    print!("{}", rendered.stdout);
+    print!("{}", rendered.stdout.text());
     eprint!("{}", rendered.stderr);
     Ok(())
 }
@@ -1361,7 +1447,6 @@ pub fn error_to_string(status: &impl Serialize, format: Format) -> String {
         |error: serde_json::Error| format!("error: failed to render executor error: {error}");
     match format {
         Format::Json => serde_json::to_string(&envelope).unwrap_or_else(serialize_failed),
-        Format::Pretty => serde_json::to_string_pretty(&envelope).unwrap_or_else(serialize_failed),
         Format::Human | Format::Raw => match serde_json::to_value(status) {
             Ok(value) => human_error_line(&value),
             Err(error) => serialize_failed(error),
@@ -1378,10 +1463,24 @@ pub(crate) fn error_line(status: &impl Serialize, format: Format) -> String {
 }
 
 fn terminated(mut rendered: String, format: Format) -> String {
-    if matches!(format, Format::Json | Format::Pretty) {
+    if matches!(format, Format::Json) {
         rendered.push('\n');
     }
     rendered
+}
+
+/// Where an answer is being written: one command's answer to a pipe or a
+/// file, or one line of a transcript (the REPL, a piped stream, the
+/// playground).
+///
+/// It decides one thing: whether an answer that carries no newline of its own
+/// — a `--raw` read of stored bytes (#3116) — gets a separator. A file must
+/// hold the bytes and nothing else; a transcript must not run two answers
+/// together.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Channel {
+    OneShot,
+    Transcript,
 }
 
 /// Prints an `Output` the way the binary does: the answer on stdout, the
@@ -1391,9 +1490,18 @@ pub(crate) fn print_output(
     output: &Output,
     invocation: &Invocation,
     format: Format,
+    channel: Channel,
 ) -> Result<(), CliError> {
     let rendered = render_output(output, invocation, format)?;
-    print!("{}", rendered.stdout);
+    // Bytes go to the file descriptor, not through a formatter: a `--raw`
+    // read of a stored value writes what was stored (#3116), and a terminal,
+    // a pipe and a file all take bytes.
+    let mut stdout = std::io::stdout().lock();
+    let answer = rendered.stdout.as_bytes();
+    std::io::Write::write_all(&mut stdout, answer)?;
+    if channel == Channel::Transcript && !answer.is_empty() && !answer.ends_with(b"\n") {
+        std::io::Write::write_all(&mut stdout, b"\n")?;
+    }
     eprint!("{}", rendered.stderr);
     Ok(())
 }
@@ -1535,7 +1643,7 @@ fn print_branch_comparison(data: &Value, format: Format, out: &mut String) {
             out.push('\n');
             table.human()
         }
-        Format::Raw | Format::Json | Format::Pretty => table.raw(),
+        Format::Raw | Format::Json => table.raw(),
     };
     out.push_str(&rows);
 }
@@ -2041,7 +2149,7 @@ mod tests {
     use strata_executor::{AdminPing, Command, MutationEffectKind};
 
     use super::{
-        cell, float_text, is_miss, render_map, render_mutation_ack, render_output, Format,
+        cell, float_text, is_miss, render_map, render_mutation_ack, render_output, Answer, Format,
         Invocation, MapDecl, MutationAck, Rendered, RowsDecl,
     };
     use crate::table::Cell;
@@ -2077,22 +2185,25 @@ mod tests {
 
     fn both(text: &str, feedback: &str) -> Rendered {
         Rendered {
-            stdout: text.to_owned(),
+            stdout: Answer::Text(text.to_owned()),
             stderr: feedback.to_owned(),
         }
     }
 
     fn only_stdout(text: &str) -> Rendered {
-        Rendered {
-            stdout: text.to_owned(),
-            stderr: String::new(),
-        }
+        both(text, "")
     }
 
     fn only_stderr(text: &str) -> Rendered {
+        both("", text)
+    }
+
+    /// The answer a `--raw` read of a stored value gives: bytes, not
+    /// characters, and no newline of the renderer's own (#3116).
+    fn only_bytes(bytes: &[u8]) -> Rendered {
         Rendered {
-            stdout: String::new(),
-            stderr: text.to_owned(),
+            stdout: Answer::Bytes(bytes.to_vec()),
+            stderr: String::new(),
         }
     }
 
@@ -2108,11 +2219,9 @@ mod tests {
             "an envelope format never writes to stderr: {:?}",
             rendered.stderr
         );
-        assert!(
-            rendered.stdout.ends_with('\n'),
-            "envelopes are newline-terminated"
-        );
-        serde_json::from_str(&rendered.stdout).expect("one JSON envelope")
+        let stdout = rendered.stdout.text();
+        assert!(stdout.ends_with('\n'), "envelopes are newline-terminated");
+        serde_json::from_str(&stdout).expect("one JSON envelope")
     }
 
     fn kv_put(key: Bytes) -> Command {
@@ -2155,8 +2264,6 @@ mod tests {
         assert_eq!(json["type"], "write_result");
         assert_eq!(json["data"]["effect"]["kind"], "created");
         assert_eq!(json["data"]["commit"]["version"], 1);
-        let pretty = envelope(&render_for(&command, &created, Format::Pretty));
-        assert_eq!(pretty, json, "pretty is the same record, reflowed");
     }
 
     #[test]
@@ -2182,7 +2289,6 @@ mod tests {
         assert_eq!(json["type"], "delete_result");
         assert_eq!(json["data"]["effect"]["kind"], "not_found");
         assert_eq!(json["data"]["effect"]["applied"], false);
-        envelope(&render_for(&command, &missed, Format::Pretty));
 
         let deleted = Output::DeleteResult {
             key: bytes("nope"),
@@ -2256,7 +2362,8 @@ mod tests {
     #[test]
     fn invocation_reads_no_declaration_for_envelope_formats_or_undeclared_commands() {
         let command = kv_put(bytes("k"));
-        for format in [Format::Json, Format::Pretty] {
+        {
+            let format = Format::Json;
             let invocation = Invocation::of(&command, format).expect("no catalog lookup");
             assert!(
                 !invocation.is_declared(),
@@ -2296,7 +2403,7 @@ mod tests {
             assert_eq!(declared, render(&output, format), "{format:?}");
             assert!(declared.stderr.is_empty());
             assert!(
-                declared.stdout.contains("1.2.1"),
+                declared.stdout.text().contains("1.2.1"),
                 "{format:?}: {declared:?}"
             );
         }
@@ -3391,12 +3498,16 @@ mod tests {
         assert!(
             render(&output, Format::Human)
                 .stdout
+                .text()
                 .contains("base64://4="),
             "{:?}",
             render(&output, Format::Human).stdout
         );
         assert!(
-            render(&output, Format::Raw).stdout.contains("\t//4=\t"),
+            render(&output, Format::Raw)
+                .stdout
+                .text()
+                .contains("\t//4=\t"),
             "{:?}",
             render(&output, Format::Raw).stdout
         );
@@ -3410,12 +3521,12 @@ mod tests {
             bytes("meta:survival_rate"),
             41,
         )]);
-        let human = render(&output, super::Format::Human).stdout;
+        let human = render(&output, super::Format::Human).stdout.text();
         assert!(
             human.contains("meta:survival_rate"),
             "human output decodes the identity: {human}"
         );
-        let json = render(&output, super::Format::Json).stdout;
+        let json = render(&output, super::Format::Json).stdout.text();
         assert!(
             json.contains("bWV0YTpzdXJ2aXZhbF9yYXRl") && !json.contains("meta:survival_rate"),
             "json output stays base64: {json}"
@@ -3568,7 +3679,9 @@ mod tests {
                 "target": "default"
             }
         }));
-        let human = render_wire("branch_preview", &preview, Format::Human).stdout;
+        let human = render_wire("branch_preview", &preview, Format::Human)
+            .stdout
+            .text();
         assert!(
             human.contains(concat!(
                 "conflicts\n",
@@ -3584,7 +3697,9 @@ mod tests {
                 && human.contains("derived_state             -\n"),
             "{human}"
         );
-        let raw = render_wire("branch_preview", &preview, Format::Raw).stdout;
+        let raw = render_wire("branch_preview", &preview, Format::Raw)
+            .stdout
+            .text();
         assert!(
             raw.contains("derived_state\t[]\n") && raw.contains("capabilities_covered\t[\"kv\"]\n"),
             "a script gets the wire array, compact: {raw}"
@@ -3628,6 +3743,64 @@ mod tests {
         assert_eq!(
             render_wire("kv_exists", &exists, Format::Raw),
             only_stdout("false\n")
+        );
+    }
+
+    #[test]
+    fn a_raw_read_of_a_stored_value_answers_with_the_bytes_it_stored() {
+        // #3116: `strata --raw kv get k > payload.bin` has to be the file that
+        // `kv put --file` stored — so the answer is bytes, and carries no
+        // newline of the renderer's own.
+        let stored = |value: &str| {
+            output(json!({
+                "type": "kv_versioned_value",
+                "data": { "found": true, "value": { "value": value, "version": 1, "timestamp": 10 } }
+            }))
+        };
+        assert_eq!(
+            render_wire("kv_get", &stored("aGVsbG8="), Format::Raw),
+            only_bytes(b"hello")
+        );
+        // Bytes that are not text travel intact, where the old base64 rendering
+        // left a caller no way to tell them from the four characters `/w==`.
+        assert_eq!(
+            render_wire("kv_get", &stored("/w=="), Format::Raw),
+            only_bytes(&[0xff])
+        );
+        // A reader still gets a labelled rendering, and still gets a line.
+        assert_eq!(
+            render_wire("kv_get", &stored("/w=="), Format::Human),
+            only_stdout("base64:/w==\n")
+        );
+        // A miss writes nothing at all, as it always did (Q9).
+        let missing = output(json!({
+            "type": "kv_versioned_value",
+            "data": { "found": false, "value": null }
+        }));
+        assert_eq!(
+            render_wire("kv_get", &missing, Format::Raw),
+            only_stdout("")
+        );
+    }
+
+    #[test]
+    fn an_answer_reaches_a_transcript_as_characters_and_a_pipe_as_bytes() {
+        // The playground and the snapshot corpus are text; a pipe is not.
+        let text = Answer::Text("hello\n".to_owned());
+        assert_eq!(text.as_bytes(), b"hello\n");
+        assert_eq!(text.text(), "hello\n");
+        // Bytes that spell text read as that text, wherever they land.
+        let readable = Answer::Bytes(b"hello".to_vec());
+        assert_eq!(readable.as_bytes(), b"hello");
+        assert_eq!(readable.text(), "hello");
+        // Bytes that spell nothing are escaped, and the escape looks like one:
+        // no caller can mistake it for the value.
+        let binary = Answer::Bytes(vec![0x00, 0x01, 0xff]);
+        assert_eq!(binary.as_bytes(), &[0x00, 0x01, 0xff]);
+        assert_eq!(binary.text(), "<bytes:0001ff>");
+        assert!(
+            Answer::default().as_bytes().is_empty(),
+            "no answer is no bytes"
         );
     }
 
@@ -3786,7 +3959,9 @@ mod tests {
                 }
             }
         }));
-        let human = render_wire("vector_index_query", &found, Format::Human).stdout;
+        let human = render_wire("vector_index_query", &found, Format::Human)
+            .stdout
+            .text();
         assert!(
             human.starts_with("KEY    SCORE  METADATA\ndoc-a    1.0  -\n\ndiagnostics\n"),
             "the block follows the table after a blank line: {human}"
@@ -4096,7 +4271,7 @@ mod tests {
         for format in [Format::Human, Format::Raw] {
             assert_eq!(
                 super::value_to_string(&report, format).expect("renders"),
-                crate::report::render_report(&report, format).stdout,
+                crate::report::render_report(&report, format).stdout.text(),
                 "{format:?}"
             );
         }

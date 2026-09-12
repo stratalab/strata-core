@@ -70,7 +70,6 @@ impl SessionLine {
             space,
             json: _,
             raw: _,
-            format: _,
             command,
         } = cli;
         let Some(command) = command else {
@@ -128,15 +127,10 @@ mod tests {
         assert_eq!(format("--json kv get k"), Some(Format::Json));
         assert_eq!(format("kv get k --json"), Some(Format::Json));
         assert_eq!(format("--raw kv get k"), Some(Format::Raw));
-        assert_eq!(
-            format("--output-format pretty kv get k"),
-            Some(Format::Pretty)
-        );
-        assert_eq!(
-            format("--output-format human kv get k"),
-            Some(Format::Human),
-            "an explicit human is a choice, not the absence of one"
-        );
+        // Q5 (#3314 S4): the hidden `--output-format` is gone, and with it
+        // the second way to ask for a format. A line that still uses it is a
+        // parse error, like any unknown flag.
+        assert!(parse("--output-format pretty kv get k").is_err());
         // Conflicting flags are a parse error, as on the command line.
         assert!(parse("--json --raw kv get k").is_err());
     }

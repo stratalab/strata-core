@@ -273,7 +273,7 @@ fn render_list(items: &Value, columns: &[(&str, &str)], format: Format, out: &mu
     }
     out.push_str(&match format {
         Format::Human => table.human(),
-        Format::Raw | Format::Json | Format::Pretty => table.raw(),
+        Format::Raw | Format::Json => table.raw(),
     });
 }
 
@@ -324,11 +324,11 @@ mod tests {
     use crate::options::Format;
 
     fn human(value: &serde_json::Value) -> String {
-        render_report(value, Format::Human).stdout
+        render_report(value, Format::Human).stdout.text()
     }
 
     fn raw(value: &serde_json::Value) -> String {
-        render_report(value, Format::Raw).stdout
+        render_report(value, Format::Raw).stdout.text()
     }
 
     /// Every report this CLI composes, and the shape it answers in. A report

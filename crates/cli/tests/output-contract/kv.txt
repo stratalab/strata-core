@@ -118,8 +118,7 @@ true
 base64:/w==
 ∎
 ### kv.get · edge:value=non-utf8 · raw
-/w==
-∎
+<bytes:ff>∎
 ### kv.get · responses/v1/errors/kv/get_unretained_version.json · human
 history_unavailable.engine.persistence_history: command failed∎
 ### kv.get · responses/v1/errors/kv/get_unretained_version.json · raw
@@ -128,8 +127,7 @@ history_unavailable.engine.persistence_history: command failed∎
 one
 ∎
 ### kv.get · responses/v1/kv/get_found.json · raw
-one
-∎
+one∎
 ### kv.history · edge:committed_at=fixed · human
 VERSION  COMMITTED_AT                    VALUE
       4  2026-09-10 20:19:44.000000 UTC  two

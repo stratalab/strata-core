@@ -211,10 +211,10 @@ fn execute_cli_honours_json() {
 fn execute_cli_honours_raw() {
     let mut session = StrataSession::new().expect("session opens");
     execute_cli(&mut session, "kv put greeting hello");
-    assert_eq!(
-        execute_cli(&mut session, "--raw kv get greeting"),
-        "hello\n"
-    );
+    // #3116: a raw read answers with the stored value and nothing else, in
+    // the browser as in the binary — the host renders each answer, so the
+    // separator a shared stream needs is not ours to add.
+    assert_eq!(execute_cli(&mut session, "--raw kv get greeting"), "hello");
     assert_eq!(execute_cli(&mut session, "--raw kv get missing"), "");
 }
 
@@ -243,7 +243,7 @@ fn execute_cli_refuses_session_arguments_on_a_line() {
     assert!(refused.contains("`--read-only`"), "{refused}");
     assert_eq!(
         execute_cli(&mut session, "--raw kv get greeting"),
-        "hello\n",
+        "hello",
         "the refused write must not have happened"
     );
 }

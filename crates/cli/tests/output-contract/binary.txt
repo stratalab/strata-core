@@ -36,8 +36,7 @@ hello3
 ### 04 strata --raw kv get greeting · stderr
 ∎
 ### 04 strata --raw kv get greeting · stdout
-hello3
-∎
+hello3∎
 ### 05 strata --json kv get greeting · exit
 0
 ∎
