@@ -7,7 +7,7 @@ license                  CC0
 primitives               kv
 tags                     tabular
 tasks                    classification
-size                     1024 bytes
+size                     1 kB
 downloads                7
 default_branch           main
 created                  2026-09-01T00:00:00Z
@@ -38,7 +38,7 @@ server_version                  0.1.0
 protocol_version                v1
 hash_algorithm                  blake3
 max_dataset_size                5.4 GB
-max_object_size                 537 MB
+max_object_size                 536.9 MB
 max_manifest_size               1 MB
 supported_object_content_types  application/octet-stream
 telemetry_endpoint_enabled      false
@@ -64,8 +64,8 @@ invalid_argument.executor.hub_filter: command failed∎
 ### hub.list_datasets · responses/v1/errors/hub/list_datasets_bad_limit.json · raw
 invalid_argument.executor.hub_filter: command failed∎
 ### hub.list_datasets · responses/v1/hub/datasets.json · human
-NAME     BADGE     LICENSE  PRIMITIVES  SIZE        DOWNLOADS  LAST_UPDATED
-titanic  official  CC0      kv          1024 bytes          7  2026-09-02T00:00:00Z
+NAME     BADGE     LICENSE  PRIMITIVES  SIZE  DOWNLOADS  LAST_UPDATED
+titanic  official  CC0      kv          1 kB          7  2026-09-02T00:00:00Z
 ∎
 ### hub.list_datasets · responses/v1/hub/datasets.json · raw
 titanic	official	CC0	["kv"]	1024	7	2026-09-02T00:00:00Z

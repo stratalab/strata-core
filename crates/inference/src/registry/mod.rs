@@ -407,22 +407,31 @@ impl Default for ModelRegistry {
     }
 }
 
-/// Format a model size as a human-readable string (e.g., "4.7 GB").
+/// Format a byte count as a human-readable size (e.g., "4.7 GB").
 ///
-/// The one formatter for model sizes: the download offer's refusal and the
-/// CLI's `models list` table both read it, so a size is the same text
-/// wherever it is quoted (#3235).
+/// The one formatter for sizes: the download offer's refusal and the CLI's
+/// `models list` table both read it (#3235), and the CLI restates it for its
+/// own `|size` cells because inference imports nothing from the workspace
+/// (Rule 3) — `size_text_matches_the_inference_registry` keeps the two in
+/// step, so a size reads the same wherever the product quotes one (#3335).
 pub fn format_size(bytes: u64) -> String {
-    const GB: u64 = 1_000_000_000;
-    const MB: u64 = 1_000_000;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.0} MB", bytes as f64 / MB as f64)
-    } else {
-        format!("{} bytes", bytes)
+    // Decimal units, because a byte count a reader is shown is about scale,
+    // not about memory pages: 1 kB is 1000 bytes, as every disk and download
+    // says. One decimal, trimmed when it adds nothing (`1 kB`, not `1.0 kB`),
+    // and whole bytes below a kilobyte.
+    const UNITS: [(u64, &str); 3] = [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "kB")];
+    for (scale, unit) in UNITS {
+        #[allow(clippy::cast_precision_loss)] // A byte count shown to one decimal.
+        let scaled = bytes as f64 / scale as f64;
+        // Rounding decides the unit, so a count that reads as `1000 MB` after
+        // rounding is shown as `1 GB` instead.
+        let rounded = (scaled * 10.0).round() / 10.0;
+        if rounded >= 1.0 {
+            let text = format!("{rounded:.1}");
+            return format!("{} {unit}", text.strip_suffix(".0").unwrap_or(&text));
+        }
     }
+    format!("{bytes} B")
 }
 
 /// Default models directory: `~/.strata/models/`
@@ -970,25 +979,37 @@ mod tests {
     // ===== format_size() tests =====
 
     #[test]
-    fn format_size_bytes() {
-        assert_eq!(format_size(0), "0 bytes");
-        assert_eq!(format_size(1), "1 bytes");
-        assert_eq!(format_size(500), "500 bytes");
-        assert_eq!(format_size(999_999), "999999 bytes");
+    fn format_size_below_a_kilobyte_counts_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1), "1 B");
+        assert_eq!(format_size(500), "500 B");
     }
 
     #[test]
-    fn format_size_megabytes() {
+    fn format_size_scales_by_decimal_units() {
+        assert_eq!(format_size(1_000), "1 kB");
+        assert_eq!(format_size(1_024), "1 kB");
+        assert_eq!(format_size(40_960), "41 kB");
         assert_eq!(format_size(1_000_000), "1 MB");
+        assert_eq!(format_size(1_048_576), "1 MB");
         assert_eq!(format_size(45_000_000), "45 MB");
-        assert_eq!(format_size(999_999_999), "1000 MB");
-    }
-
-    #[test]
-    fn format_size_gigabytes() {
-        assert_eq!(format_size(1_000_000_000), "1.0 GB");
+        assert_eq!(format_size(67_108_864), "67.1 MB");
+        assert_eq!(format_size(536_870_912), "536.9 MB");
         assert_eq!(format_size(4_700_000_000), "4.7 GB");
         assert_eq!(format_size(10_500_000_000), "10.5 GB");
+    }
+
+    /// A count that rounds up to a thousand of its unit is shown in the next
+    /// one: `1000 MB` is a size no reader should have to convert.
+    #[test]
+    fn format_size_promotes_a_unit_when_rounding_fills_it() {
+        assert_eq!(format_size(999), "1 kB");
+        assert_eq!(format_size(999_999), "1 MB");
+        assert_eq!(format_size(999_999_999), "1 GB");
+        assert_eq!(format_size(1_000_000_000), "1 GB");
+        // Direction control: just below the rounding boundary keeps its unit.
+        assert_eq!(format_size(949), "949 B");
+        assert_eq!(format_size(949_999), "950 kB");
     }
 
     // ===== ModelTask tests =====

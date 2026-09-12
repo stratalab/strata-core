@@ -297,13 +297,13 @@ diagnostics
   artifact_sources              -
   collection                    docs
   collection_exact_threshold    64
-  derived                       0 bytes
+  derived                       0 B
   exact_fallback_count          0
   exact_source_count            1
   filtered_underfill_fallback   true
   flat_source_count             0
   hnsw_graph_builds             0
-  hnsw_memory_budget            67 MB
+  hnsw_memory_budget            67.1 MB
   hnsw_source_count             0
   indexed_source_count          0
   indexed_vector_count          0
