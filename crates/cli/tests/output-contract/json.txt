@@ -110,20 +110,22 @@ true
 {"name":"Ada"}
 ∎
 ### json.history · edge:committed_at=fixed · human
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","document_version":2,"timestamp":4,"tombstone":false,"value":{"age":36,"name":"Ada"},"version":4}
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","document_version":1,"timestamp":3,"tombstone":false,"value":{"name":"Ada"},"version":3}
+VERSION  DOCUMENT_VERSION  COMMITTED_AT                    VALUE
+      4                 2  2026-09-10 20:19:44.000000 UTC  {"age":36,"name":"Ada"}
+      3                 1  2026-09-10 20:19:44.000000 UTC  {"name":"Ada"}
 ∎
 ### json.history · edge:committed_at=fixed · raw
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","document_version":2,"timestamp":4,"tombstone":false,"value":{"age":36,"name":"Ada"},"version":4}
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","document_version":1,"timestamp":3,"tombstone":false,"value":{"name":"Ada"},"version":3}
+4	2	1789071584000000	{"age":36,"name":"Ada"}
+3	1	1789071584000000	{"name":"Ada"}
 ∎
 ### json.history · responses/v1/json/history_found.json · human
-{"document_version":2,"timestamp":4,"tombstone":false,"value":{"age":36,"name":"Ada"},"version":4}
-{"document_version":1,"timestamp":3,"tombstone":false,"value":{"name":"Ada"},"version":3}
+VERSION  DOCUMENT_VERSION  COMMITTED_AT  VALUE
+      4                 2  -             {"age":36,"name":"Ada"}
+      3                 1  -             {"name":"Ada"}
 ∎
 ### json.history · responses/v1/json/history_found.json · raw
-{"document_version":2,"timestamp":4,"tombstone":false,"value":{"age":36,"name":"Ada"},"version":4}
-{"document_version":1,"timestamp":3,"tombstone":false,"value":{"name":"Ada"},"version":3}
+4	2		{"age":36,"name":"Ada"}
+3	1		{"name":"Ada"}
 ∎
 ### json.index.create · responses/v1/json/index_definition.json · human
 created index by_name on name (tag)
@@ -138,82 +140,104 @@ dropped index by_name
 by_name
 ∎
 ### json.index.list · edge:has_more=true · human
-{"created_timestamp":3,"created_version":3,"field_path":"name","index_type":"tag","name":"by_name","space":"default"}
+NAME     FIELD_PATH  INDEX_TYPE  SPACE    CREATED_VERSION
+by_name  name        tag         default                3
+∎
+### json.index.list · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### json.index.list · edge:has_more=true · raw
-{"created_timestamp":3,"created_version":3,"field_path":"name","index_type":"tag","name":"by_name","space":"default"}
+by_name	name	tag	default	3
 ∎
 ### json.index.list · edge:items=[] · human
 (empty)
 ∎
 ### json.index.list · edge:items=[] · raw
-(empty)
 ∎
 ### json.index.list · responses/v1/json/index_list.json · human
-{"created_timestamp":3,"created_version":3,"field_path":"name","index_type":"tag","name":"by_name","space":"default"}
+NAME     FIELD_PATH  INDEX_TYPE  SPACE    CREATED_VERSION
+by_name  name        tag         default                3
 ∎
 ### json.index.list · responses/v1/json/index_list.json · raw
-{"created_timestamp":3,"created_version":3,"field_path":"name","index_type":"tag","name":"by_name","space":"default"}
+by_name	name	tag	default	3
 ∎
 ### json.list · edge:items=[] · human
 (empty)
 ∎
 ### json.list · edge:items=[] · raw
-(empty)
 ∎
 ### json.list · responses/v1/json/list_page.json · human
 user:ada
+∎
+### json.list · responses/v1/json/list_page.json · human · stderr
 -- more: add --cursor user:ada to the same command
 ∎
 ### json.list · responses/v1/json/list_page.json · raw
 user:ada
 ∎
 ### json.sample · edge:has_more=true · human
-{"document_version":1,"key":"user:ada","timestamp":3,"value":{"name":"Ada"},"version":3}
-{"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
+KEY         VERSION  VALUE
+user:ada          3  {"name":"Ada"}
+user:grace        3  {"name":"Grace"}
+∎
+### json.sample · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### json.sample · edge:has_more=true · raw
-{"document_version":1,"key":"user:ada","timestamp":3,"value":{"name":"Ada"},"version":3}
-{"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
+user:ada	3	{"name":"Ada"}
+user:grace	3	{"name":"Grace"}
 ∎
 ### json.sample · edge:items=[] · human
 (empty)
 ∎
 ### json.sample · edge:items=[] · raw
-(empty)
+∎
+### json.sample · edge:total_count=more · human
+KEY         VERSION  VALUE
+user:ada          3  {"name":"Ada"}
+user:grace        3  {"name":"Grace"}
+∎
+### json.sample · edge:total_count=more · human · stderr
+-- sampled 2 of 10
+∎
+### json.sample · edge:total_count=more · raw
+user:ada	3	{"name":"Ada"}
+user:grace	3	{"name":"Grace"}
 ∎
 ### json.sample · responses/v1/json/sample_page.json · human
-{"document_version":1,"key":"user:ada","timestamp":3,"value":{"name":"Ada"},"version":3}
-{"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
+KEY         VERSION  VALUE
+user:ada          3  {"name":"Ada"}
+user:grace        3  {"name":"Grace"}
 ∎
 ### json.sample · responses/v1/json/sample_page.json · raw
-{"document_version":1,"key":"user:ada","timestamp":3,"value":{"name":"Ada"},"version":3}
-{"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
+user:ada	3	{"name":"Ada"}
+user:grace	3	{"name":"Grace"}
 ∎
 ### json.scan · edge:has_more=true · human
-{"document_version":1,"key":"user:ada","timestamp":3,"value":{"name":"Ada"},"version":3}
-{"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
+KEY         VERSION  VALUE
+user:ada          3  {"name":"Ada"}
+user:grace        3  {"name":"Grace"}
+∎
+### json.scan · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### json.scan · edge:has_more=true · raw
-{"document_version":1,"key":"user:ada","timestamp":3,"value":{"name":"Ada"},"version":3}
-{"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
+user:ada	3	{"name":"Ada"}
+user:grace	3	{"name":"Grace"}
 ∎
 ### json.scan · edge:items=[] · human
 (empty)
 ∎
 ### json.scan · edge:items=[] · raw
-(empty)
 ∎
 ### json.scan · responses/v1/json/scan_page.json · human
-{"document_version":1,"key":"user:ada","timestamp":3,"value":{"name":"Ada"},"version":3}
-{"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
+KEY         VERSION  VALUE
+user:ada          3  {"name":"Ada"}
+user:grace        3  {"name":"Grace"}
 ∎
 ### json.scan · responses/v1/json/scan_page.json · raw
-{"document_version":1,"key":"user:ada","timestamp":3,"value":{"name":"Ada"},"version":3}
-{"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
+user:ada	3	{"name":"Ada"}
+user:grace	3	{"name":"Grace"}
 ∎
 ### json.set · edge:applied=false · human
 ∎

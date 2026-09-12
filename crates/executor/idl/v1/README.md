@@ -92,7 +92,9 @@ Notes:
   cursor?}`, `StatusValue<_>` ⇔ a bare scalar, `Maybe<_>` ⇔ `{found, value}` or
   a nullable `data`, and so on). A `Maybe`/`Maybe<Vec<_>>` spelling is an
   accepted *encoding*, resolved into `cli-command-index.json` as `encoding`
-  (`found_value` / `nullable` / `items` / `array`), never a divergence. When the
+  (`found_value` / `nullable` / `items` / `array`), never a divergence; a
+  `Page<_>` resolves to `page` or `sample_page` (the latter carries
+  `total_count`), which is how the CLI knows to report a sample. When the
   declaration is what is wrong, correct it; when the wire is what is wrong,
   list the command in `response-model-divergences.yaml` with its issue and mark
   it `wire_status: transitional` — the reference page then says which shape the

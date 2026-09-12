@@ -294,8 +294,9 @@ pub struct CliCommandEntry {
     /// The command's display declaration (`display:`), validated against
     /// `render` and, at authoring time, against the generated schema.
     pub display: CliDisplayDecl,
-    /// How an `optional`/`history` value is spelled on the wire, resolved from
-    /// the generated schema; `null` under every other rule.
+    /// How an `optional`/`history`/`page` value is spelled on the wire,
+    /// resolved from the generated schema; `null` under every other rule and
+    /// for a transitional wire, which diverges from its family.
     pub encoding: Option<CliWireEncoding>,
 }
 

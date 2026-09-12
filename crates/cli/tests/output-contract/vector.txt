@@ -99,23 +99,26 @@ deleted collection docs
 docs
 ∎
 ### vector.collection.list · edge:has_more=true · human
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+NAME  DIMENSION  METRIC  COUNT  EMBEDDING_MODEL
+docs          2  cosine      0  -
+∎
+### vector.collection.list · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### vector.collection.list · edge:has_more=true · raw
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+docs	2	cosine	0	
 ∎
 ### vector.collection.list · edge:items=[] · human
 (empty)
 ∎
 ### vector.collection.list · edge:items=[] · raw
-(empty)
 ∎
 ### vector.collection.list · responses/v1/vector/collection_list.json · human
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+NAME  DIMENSION  METRIC  COUNT  EMBEDDING_MODEL
+docs          2  cosine      0  -
 ∎
 ### vector.collection.list · responses/v1/vector/collection_list.json · raw
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+docs	2	cosine	0	
 ∎
 ### vector.collection.set_embedding_model · edge:has_more=true · human
 updated collection docs: embedding model miniLM
@@ -149,7 +152,6 @@ docs
 ∎
 ### vector.collection.stats · edge:has_more=true · human
 {"count":0,"dimension":2,"metric":"cosine","name":"docs"}
--- more: add --cursor bmV4dA== to the same command
 ∎
 ### vector.collection.stats · edge:has_more=true · raw
 {"count":0,"dimension":2,"metric":"cosine","name":"docs"}
@@ -266,32 +268,36 @@ not_found.engine.vector_collection: command failed∎
 {"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
 ∎
 ### vector.history · edge:committed_at=fixed · human
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"tombstone":false,"vector_revision":1,"version":4}
+VERSION  VECTOR_REVISION  COMMITTED_AT                    EMBEDDING  METADATA
+      4                1  2026-09-10 20:19:44.000000 UTC  [1.0,0.0]  {"kind":"doc"}
 ∎
 ### vector.history · edge:committed_at=fixed · raw
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"tombstone":false,"vector_revision":1,"version":4}
+4	1	1789071584000000	[1.0,0.0]	{"kind":"doc"}
 ∎
 ### vector.history · edge:items=[] · human
 (empty)
 ∎
 ### vector.history · edge:items=[] · raw
-(empty)
 ∎
 ### vector.history · responses/v1/vector/history_found.json · human
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"tombstone":false,"vector_revision":1,"version":4}
+VERSION  VECTOR_REVISION  COMMITTED_AT  EMBEDDING  METADATA
+      4                1  -             [1.0,0.0]  {"kind":"doc"}
 ∎
 ### vector.history · responses/v1/vector/history_found.json · raw
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"tombstone":false,"vector_revision":1,"version":4}
+4	1		[1.0,0.0]	{"kind":"doc"}
 ∎
 ### vector.index.query · responses/v1/vector/index_query_exact.json · human
-doc-a	1.0
+KEY    SCORE  METADATA
+doc-a    1.0  {"kind":"doc"}
 ∎
 ### vector.index.query · responses/v1/vector/index_query_exact.json · raw
-doc-a	1.0
+doc-a	1.0	{"kind":"doc"}
 ∎
 ### vector.keys · edge:has_more=true · human
 doc-a
 doc-b
+∎
+### vector.keys · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### vector.keys · edge:has_more=true · raw
@@ -302,7 +308,6 @@ doc-b
 (empty)
 ∎
 ### vector.keys · edge:items=[] · raw
-(empty)
 ∎
 ### vector.keys · responses/v1/vector/key_page.json · human
 doc-a
@@ -347,56 +352,75 @@ invalid_argument.executor.vector_input: command failed∎
 ### vector.query · responses/v1/errors/vector/vector_input.json · raw
 invalid_argument.executor.vector_input: command failed∎
 ### vector.query · responses/v1/vector/search.json · human
-doc-a	1.0
+KEY    SCORE  METADATA
+doc-a    1.0  {"kind":"doc"}
 ∎
 ### vector.query · responses/v1/vector/search.json · raw
-doc-a	1.0
+doc-a	1.0	{"kind":"doc"}
 ∎
 ### vector.sample · edge:has_more=true · human
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
-{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+KEY    VERSION  VECTOR_REVISION  EMBEDDING  METADATA
+doc-a        4                1  [1.0,0.0]  {"kind":"doc"}
+doc-b        5                1  [0.0,1.0]  {"kind":"note"}
+∎
+### vector.sample · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### vector.sample · edge:has_more=true · raw
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
-{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+doc-a	4	1	[1.0,0.0]	{"kind":"doc"}
+doc-b	5	1	[0.0,1.0]	{"kind":"note"}
 ∎
 ### vector.sample · edge:items=[] · human
 (empty)
 ∎
 ### vector.sample · edge:items=[] · raw
-(empty)
+∎
+### vector.sample · edge:total_count=more · human
+KEY    VERSION  VECTOR_REVISION  EMBEDDING  METADATA
+doc-a        4                1  [1.0,0.0]  {"kind":"doc"}
+doc-b        5                1  [0.0,1.0]  {"kind":"note"}
+∎
+### vector.sample · edge:total_count=more · human · stderr
+-- sampled 2 of 10
+∎
+### vector.sample · edge:total_count=more · raw
+doc-a	4	1	[1.0,0.0]	{"kind":"doc"}
+doc-b	5	1	[0.0,1.0]	{"kind":"note"}
 ∎
 ### vector.sample · responses/v1/vector/sample_page.json · human
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
-{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+KEY    VERSION  VECTOR_REVISION  EMBEDDING  METADATA
+doc-a        4                1  [1.0,0.0]  {"kind":"doc"}
+doc-b        5                1  [0.0,1.0]  {"kind":"note"}
 ∎
 ### vector.sample · responses/v1/vector/sample_page.json · raw
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
-{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+doc-a	4	1	[1.0,0.0]	{"kind":"doc"}
+doc-b	5	1	[0.0,1.0]	{"kind":"note"}
 ∎
 ### vector.scan · edge:has_more=true · human
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
-{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+KEY    VERSION  VECTOR_REVISION  EMBEDDING  METADATA
+doc-a        4                1  [1.0,0.0]  {"kind":"doc"}
+doc-b        5                1  [0.0,1.0]  {"kind":"note"}
+∎
+### vector.scan · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### vector.scan · edge:has_more=true · raw
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
-{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+doc-a	4	1	[1.0,0.0]	{"kind":"doc"}
+doc-b	5	1	[0.0,1.0]	{"kind":"note"}
 ∎
 ### vector.scan · edge:items=[] · human
 (empty)
 ∎
 ### vector.scan · edge:items=[] · raw
-(empty)
 ∎
 ### vector.scan · responses/v1/vector/scan_page.json · human
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
-{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+KEY    VERSION  VECTOR_REVISION  EMBEDDING  METADATA
+doc-a        4                1  [1.0,0.0]  {"kind":"doc"}
+doc-b        5                1  [0.0,1.0]  {"kind":"note"}
 ∎
 ### vector.scan · responses/v1/vector/scan_page.json · raw
-{"data":{"embedding":[1.0,0.0],"metadata":{"kind":"doc"}},"key":"doc-a","timestamp":4,"vector_revision":1,"version":4}
-{"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
+doc-a	4	1	[1.0,0.0]	{"kind":"doc"}
+doc-b	5	1	[0.0,1.0]	{"kind":"note"}
 ∎
 ### vector.upsert · edge:applied=false · human
 ∎

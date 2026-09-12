@@ -53,6 +53,7 @@ mod options;
 mod render;
 #[cfg(feature = "native")]
 mod repl;
+mod table;
 #[cfg(feature = "native")]
 mod uninstall;
 #[cfg(feature = "native")]

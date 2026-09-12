@@ -49,6 +49,8 @@ const NAIVE_FORMATS: &[&str] = &[
 ///
 /// Accepts, in order of preference:
 /// - an offset-bearing timestamp (`2026-09-05T15:00:00Z`, `...+05:30`)
+/// - a bare date-time labelled `UTC` (`2026-09-05 15:00:00.000000 UTC`, the
+///   form table cells print), read as UTC
 /// - a bare date-time (`2026-09-05 15:00`), read as local time
 /// - a bare date (`2026-09-05`), read as local midnight
 /// - raw epoch microseconds, for scripts that already hold the number
@@ -74,6 +76,17 @@ pub(crate) fn parse_instant(input: &str) -> Result<u64, String> {
     for format in OFFSET_FORMATS {
         if let Ok(fixed) = DateTime::parse_from_str(text, format) {
             return micros_from_utc(fixed.timestamp_micros(), input);
+        }
+    }
+
+    // The spelling a table cell prints (`format_utc_instant`): a bare reading
+    // labelled `UTC` is read as UTC, not local — the label is exactly what
+    // removes the ambiguity a bare reading has.
+    if let Some(bare) = text.strip_suffix(" UTC") {
+        for format in NAIVE_FORMATS {
+            if let Ok(naive) = NaiveDateTime::parse_from_str(bare, format) {
+                return micros_from_utc(naive.and_utc().timestamp_micros(), input);
+            }
         }
     }
 
@@ -151,6 +164,25 @@ pub(crate) fn format_instant(micros: u64) -> String {
                     .format("%Y-%m-%d %H:%M:%S%.6f %:z")
                     .to_string()
             },
+        )
+}
+
+/// Renders an instant as a UTC date to the microsecond, for a table cell
+/// (output contract Q3: `2026-09-10 20:19:44.123456 UTC`).
+///
+/// UTC, so the cell is the same on every machine and in the browser; labelled,
+/// so the reader knows which zone it is in; to the microsecond, because a cell
+/// is fed back — read history, hand a date off a row to `--as-of-time` — and a
+/// truncated date resolves to the commit BEFORE the one it came from. What the
+/// tool shows, `parse_instant` accepts. An instant past what a date can hold
+/// prints its digits.
+pub(crate) fn format_utc_instant(micros: u64) -> String {
+    i64::try_from(micros)
+        .ok()
+        .and_then(DateTime::from_timestamp_micros)
+        .map_or_else(
+            || micros.to_string(),
+            |utc| utc.format("%Y-%m-%d %H:%M:%S%.6f UTC").to_string(),
         )
 }
 
@@ -289,6 +321,60 @@ mod tests {
             reparsed, original,
             "rendered {rendered} must name the SAME instant, to the microsecond — \
              a truncated round trip resolves to the previous commit"
+        );
+    }
+
+    /// A table cell is the same UTC instant on every machine, to the
+    /// microsecond, labelled so the zone is never in question.
+    #[test]
+    fn a_table_cell_is_a_labelled_utc_instant() {
+        assert_eq!(
+            format_utc_instant(1_789_071_584_000_000),
+            "2026-09-10 20:19:44.000000 UTC"
+        );
+        assert_eq!(
+            format_utc_instant(1_789_071_584_999_999),
+            "2026-09-10 20:19:44.999999 UTC",
+            "every microsecond is shown"
+        );
+        assert_eq!(format_utc_instant(0), "1970-01-01 00:00:00.000000 UTC");
+        assert_eq!(
+            format_utc_instant(u64::MAX),
+            u64::MAX.to_string(),
+            "an instant no date can hold prints its digits"
+        );
+    }
+
+    /// The spelling a cell prints is accepted back and names the SAME instant,
+    /// so a date read off a history row is a read bound for that very commit.
+    #[test]
+    fn a_table_cell_parses_back_to_the_same_microsecond() {
+        let original = 1_788_732_596_132_961;
+        let rendered = format_utc_instant(original);
+        assert_eq!(
+            parse_instant(&rendered).expect("a printed cell is accepted input"),
+            original,
+            "{rendered} must round-trip to the microsecond"
+        );
+    }
+
+    /// The `UTC` label is read as UTC, not as the machine's local zone — it
+    /// means the same instant as the `Z` spelling of the same reading, on every
+    /// machine, whatever a bare reading would have meant there.
+    #[test]
+    fn a_utc_labelled_reading_is_utc_not_local() {
+        assert_eq!(
+            parse_instant("2026-09-05 15:00:00.000000 UTC").expect("parses"),
+            parse_instant("2026-09-05T15:00:00Z").expect("parses")
+        );
+        assert_eq!(
+            parse_instant("2026-09-05 15:00 UTC").expect("parses"),
+            parse_instant("2026-09-05T15:00:00Z").expect("parses"),
+            "the label works with every accepted bare spelling"
+        );
+        assert!(
+            parse_instant("2026-09-05 15:00:00 PDT").is_err(),
+            "only the label the tool prints is a label the tool reads"
         );
     }
 }

@@ -26,7 +26,7 @@
 
 #![cfg(all(feature = "idl-tooling", feature = "inference"))]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use strata_executor::cli_metadata::{CliRenderRule, CliWireEncoding};
@@ -595,6 +595,7 @@ fn encodings_are_resolved_into_the_cli_index() {
     let resolved: BTreeMap<&str, CliWireEncoding> = index
         .commands
         .iter()
+        .filter(|command| command.render != CliRenderRule::Page)
         .filter_map(|command| {
             command
                 .encoding
@@ -603,12 +604,47 @@ fn encodings_are_resolved_into_the_cli_index() {
         .collect();
     assert_eq!(resolved, expected);
 
-    // Every `optional`/`history` command carries an encoding, except the one
-    // whose wire is a bare record and is ledgered as transitional for it.
+    // Every `page` command carries `page` or `sample_page`, and the sampled
+    // ones are exactly the `*.sample` commands: the renderer's
+    // `-- sampled N of M` notice follows this encoding, never `total_count`.
+    let sampled: BTreeSet<&str> = index
+        .commands
+        .iter()
+        .filter(|command| command.encoding == Some(CliWireEncoding::SamplePage))
+        .map(|command| command.id.as_str())
+        .collect();
+    let sample_commands: BTreeSet<&str> = index
+        .commands
+        .iter()
+        .map(|command| command.id.as_str())
+        .filter(|id| id.ends_with(".sample"))
+        .collect();
+    assert!(
+        !sample_commands.is_empty(),
+        "the catalog has sample commands"
+    );
+    assert_eq!(sampled, sample_commands);
+    for command in &index.commands {
+        if command.render == CliRenderRule::Page {
+            assert!(
+                matches!(
+                    command.encoding,
+                    Some(CliWireEncoding::Page | CliWireEncoding::SamplePage)
+                ),
+                "`{}` resolved {:?}",
+                command.id,
+                command.encoding
+            );
+        }
+    }
+
+    // Every `optional`/`history`/`page` command carries an encoding, except
+    // the one whose wire is a bare record and is ledgered as transitional for
+    // it.
     for command in &index.commands {
         let reads_one = matches!(
             command.render,
-            CliRenderRule::Optional | CliRenderRule::History
+            CliRenderRule::Optional | CliRenderRule::History | CliRenderRule::Page
         );
         match (command.id.as_str(), reads_one) {
             ("admin.remote", true) => {

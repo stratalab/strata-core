@@ -893,15 +893,28 @@ fn a_date_printed_by_history_reads_back_the_value_from_that_commit() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     assert!(strata(&[db, "kv", "put", "k", "two"]).status.success());
 
+    // History is a table (output contract S2): `VERSION  COMMITTED_AT  VALUE`,
+    // newest first. Take the date cell off the oldest row, as a reader would.
     let history = stdout(&strata(&[db, "kv", "history", "k"]));
-    let oldest = history
-        .lines()
-        .rfind(|line| !line.trim().is_empty())
-        .expect("history has an oldest row");
-    let row: serde_json::Value = serde_json::from_str(oldest).expect("history row is JSON");
-    let printed = row["committed_at"]
-        .as_str()
-        .expect("human output renders committed_at as a date string");
+    let mut lines = history.lines().filter(|line| !line.trim().is_empty());
+    let header: Vec<&str> = lines
+        .next()
+        .expect("history has a header")
+        .split("  ")
+        .filter(|cell| !cell.is_empty())
+        .collect();
+    let date_column = header
+        .iter()
+        .position(|name| *name == "COMMITTED_AT")
+        .expect("history declares a COMMITTED_AT column");
+    let oldest: Vec<&str> = lines
+        .next_back()
+        .expect("history has an oldest row")
+        .split("  ")
+        .map(str::trim)
+        .filter(|cell| !cell.is_empty())
+        .collect();
+    let printed = oldest[date_column];
 
     // It reads as a date, not as a raw number.
     assert!(

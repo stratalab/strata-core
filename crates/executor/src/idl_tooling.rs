@@ -1123,7 +1123,15 @@ fn cli_index_from_command_index(
     for command in command_index.commands {
         let document = display::read_schema_document(repo_root, &command.id)?;
         let (render, decl) = display_for_command(layer, &command, &document)?;
-        let encoding = response_model::encoding_for(&command.id, &document)?;
+        // An encoding is a spelling of the declared family. A ledgered
+        // divergence ships a wire outside its family, so whatever shape that
+        // wire has (`vector.collection.create` answers with a page), it is
+        // not an encoding of the rule the command renders under.
+        let encoding = if command.wire_status == "transitional" {
+            None
+        } else {
+            response_model::encoding_for(&command.id, &document)?
+        };
         let entry = cli_entry_from_resolved(command, render, decl, encoding)?;
         if !seen_ids.insert(entry.id.clone()) {
             return Err(invalid(format!(

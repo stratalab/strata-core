@@ -3,8 +3,10 @@
 **Status:** accepted 2026-09-11 after three review rounds; S0 complete
 (S0a landed the §5 matrix, S0b the declarations and their guard, S0c the
 family ⇔ schema check), #3312 and #3327 landed, S1 landed (the renderer
-reads `mutation_ack`), #3326 + #3328 landed (one line reader). Tracking
-issue **#3314** (slices S0–S5). Every
+reads `mutation_ack`), #3326 + #3328 landed (one line reader), S2 landed
+2026-09-12 (the renderer reads `columns` and `map`: one table for `page`,
+`history`, `search` and `analytics`). Tracking issue **#3314** (slices
+S0–S5). Every
 file:line below was read on `main` at `60db96ac`. Follows the shape of `inference-model-resolution.md`: name the
 mechanism, replace it, leave an executable contract behind.
 
@@ -328,7 +330,10 @@ byte-identical before and after every slice; the matrix pins that.
 *Amended 2026-09-11 by S0b (#3314) to the vocabulary as built; the original
 proposal is in the history of this file. S1 (2026-09-11) made the renderer
 read `mutation_ack` declarations (`Invocation` in `crates/cli/src/render.rs`);
-the other rules still render through the family arms until S2/S3.*
+S2 (2026-09-12) made it read `columns` under `page`, `history` and `search`
+and `map` under `analytics`, laid out by one `Table` (`crates/cli/src/table.rs`);
+`optional`, `status_value`, `status_sections` and `batch` still render
+through the family arms until S3.*
 
 Two additions to the authored IDL, both validated when the CLI index is
 generated (`strata-idl generate-cli`, gated by `check-cli`):
@@ -473,12 +478,15 @@ without a special case in the renderer, and both are S0c/S1 work — S0b
 declares, it does not resolve encodings:
 
 - *Encoding* — whether a `Maybe` is `{found, value}` or a nullable `data`,
-  whether a history is `{items}` or a bare array — is read from the schema
-  at generation time and resolved into the index as a flat `encoding`
-  (`found_value` / `nullable` for `optional`, `items` / `array` for
-  `history`, `null` under every other rule; amended from
-  `optional.encoding` / `history.encoding` in S0c, where the field landed
-  beside `render` rather than nested under it). An encoding is an accepted
+  whether a history is `{items}` or a bare array, whether a page carries
+  a `total_count` — is read from the schema at generation time and resolved
+  into the index as a flat `encoding` (`found_value` / `nullable` for
+  `optional`, `items` / `array` for `history`, `page` / `sample_page` for
+  `page` — the latter the four `*.sample` commands, whose `-- sampled N of
+  M` notice needs the population; `null` under every other rule; amended
+  from `optional.encoding` / `history.encoding` in S0c, where the field
+  landed beside `render` rather than nested under it; `page` added in S2).
+  An encoding is an accepted
   spelling of the declared family, never a divergence, so it earns no row in
   the ledger below and no `transitional` mark. The renderer never sniffs it.
 - *Verb* — `mutation_ack` reads `effect.kind` through `{verb}` when the
@@ -512,7 +520,11 @@ whole difference between a declaration and a restatement.
 `humanize_committed_at` is deleted. The `page`, `history`, `mutation_ack`
 and `status_sections` rules format a field declared `as: date` at the point
 of printing it. `--json` / `--pretty` keep epoch micros; `--raw` prints
-epoch micros too (a script wants a number). Logical clocks (`timestamp`,
+epoch micros too (a script wants a number). *S2 (2026-09-12) renders `as:
+date` in every declared table cell — `2026-09-10 20:19:44.123456 UTC`
+human, the micros raw — and a declared command never reaches the pre-pass;
+the pre-pass itself stays for the undeclared families until S4 deletes it.* Logical
+clocks (`timestamp`,
 `version`, `created_at` on a branch record — #3112) are never dates; a
 declaration marking one `as: date` is a `check` error because the schema
 type for a logical clock is not the wall-clock newtype (a guard the S0
@@ -673,7 +685,7 @@ Grouped by the slice that closes them; counts from the §2.1 table.
 | Slice | Cells | What changes |
 |---|---|---|
 | S1 (landed) | 36 `MutationAck` × human, × raw; the binary cells for a missed delete | `applied=` gone; miss → stderr line, exit stays 0, nothing on stdout; raw echoes identity |
-| S2 | 21 `Page` + 4 `SamplePage` + 3 history + 6 analytics + 2 search × human, × raw | tables with declared columns; hint to stderr (sample notice only when partial); dates in cells; raw = declared columns as TSV |
+| S2 (landed) | 21 `Page` + 4 `SamplePage` + 3 history + 6 analytics + 2 search × human, × raw | tables with declared columns; hint to stderr (sample notice only when partial); dates in cells; raw = declared columns as TSV |
 | S3 | 20 `StatusResponse` (minus the 3 bespoke) + 4 record `Maybe` + 14 `BatchResult` × human, × raw | key-value lines / sections; batch summary |
 | S4 | KV `Maybe` × raw, every `committed_at` cell | raw bytes verbatim (#3116); `humanize_committed_at` deleted (R3 lands with S2's tables, so S4 is the deletion of the pre-pass and the raw-bytes change) |
 | — | every `json` and `pretty` cell | **none** — pinned unchanged through every slice |
@@ -694,7 +706,7 @@ a visible CLI change and carries release notes in the PR body.
 | **#3327** (its own small PR, before S1) | session arguments on a REPL/playground line are refused by name from one shared `Cli::line_refusal`; a typo'd lone verb is "not a strata command" instead of silently ignored | none (CLI text; a refused pipe line exits 1 as any pipe error does; release note) | #3327 |
 | **#3326 + #3328** (one small PR, after S1) | one line reader, `SessionLine::parse`, for the REPL, the pipe and the playground; a line's `--json` / `--raw` / `--output-format` wins over the session's format for its answer and its error alike; a line of flags with no command is refused, not dropped; the REPL's `handle_line` is the one place a line is run and reported, so a failed pipe line reports once and in the same shape as an interactive one (code-led line or JSON envelope, not a bare `error: <message>`) | none (CLI text; exit codes unchanged; release note) | #3326, #3328 |
 | **S1** (landed 2026-09-11) | R1 `mutation_ack` rule from the declaration; R5 stderr line for a `not_found` miss (exit stays 0; `unchanged` is a hit); R4 raw identity for writes and the `--raw` help text rewritten to "shell-composable"; `mutation_summary` deleted; the harness snapshots stderr as its own cell | none (CLI text; exit codes unchanged; release note) | #3306 (writes, `--raw` writes) |
-| **S2** | R1-table; `page`, `history`, `search`, `analytics` rules from `display.columns`; R3 dates in cells; hint to stderr; raw identities | none (release note) | #3306 (lists, dates), #3205 §3/§5 |
+| **S2** (landed 2026-09-12) | R1-table (`crates/cli/src/table.rs`); `page`, `history`, `search`, `analytics` rules from `display.columns` / `display.map` through `Invocation`; R3 dates in cells; `-- more` / `-- sampled` to stderr, human only; raw = declared columns as TSV; the `page` / `sample_page` encodings; the harness's `edge:total_count=more` cell | none (release note) | #3306 (lists, dates), #3205 §3/§5 |
 | **S3** | `status_sections` for `StatusResponse` and record `Maybe`; `batch` rule; `render_human_data` and the JSON fallback **deleted**; `check` refuses an undeclared shape | none (release note) | #3306 (admin), #3205 §1/§2/§4 |
 | **S4** | R4 raw bytes verbatim for KV reads and `base64:` labelling in human mode; `humanize_committed_at` deleted; Q5 (`--output-format` / `pretty`) | hidden flag removal if Q5 says so (release note) | #3116 |
 | **S5** | R7: `generate-docs` human transcript block; README / agents-skill / docs output-fence guard; site hero + `verify-transcripts.mjs` regenerated in the release PR; `command-examples.json` `reproducible: false` count asserted ≤ the post-S3 number (shrink-only) | none | #3205 acceptance criteria |
@@ -735,10 +747,10 @@ Verified against `main` at `60db96ac`.
 |---|---|---|
 | Shape declaration | IDL resolves `kind` and `response_model` for all 137 commands; `dto-inventory.yaml` registers 100+ models | nothing renders from them; no `display` declaration exists |
 | Declaration ⇔ wire | `kind` is right everywhere; `response_model` is checked against nothing | nominal for ~14 stable + 6 transitional commands (#3313); three phantom result names; `Maybe`/history have two encodings each. *Since #3322: the family is checked against the schema and the payload is derived from it (84 models in use, inventory checked both ways).* |
-| Human renderer | 23 designed tag arms over 114 `Output` variants; structural sniff with a JSON fallback for the other 91. *Since S1: the 36 `mutation_ack` commands render from their `display:` declaration through `Invocation` (receipt, identity, noun); the family arms remain for every other rule* | example lines that are JSON dumps shrink by the writes; nine families still sniffed |
-| `--raw` | its own sniff; base64 for non-UTF-8 reads. *Since S1: a write prints its declared identity, tab-separated; the help text says "shell-composable"* | #3116 (reads) |
-| Dates | one wall-clock field (`committed_at`), humanized as a pre-pass to local time with offset | lands inside JSON; time zone of the machine; logical clocks distinguishable only by name |
-| Channels / exit | data + status lines on stdout; errors on stderr; exit 0/1/2. *Since S1: a missed write is `no such <noun>: <identity>` on stderr, nothing on stdout, exit 0, in human and `--raw`; `--json` keeps the envelope on stdout and stderr silent* | the pagination hint and batch summary still land on stdout (S2/S3) |
+| Human renderer | 23 designed tag arms over 114 `Output` variants; structural sniff with a JSON fallback for the other 91. *Since S1: the 36 `mutation_ack` commands render from their `display:` declaration through `Invocation` (receipt, identity, noun); the family arms remain for every other rule. Since S2: the 25 `page`, 3 `history`, 2 `search` and 6 `analytics` commands render their declared columns / map as one table; the `json_version_history` and `vector_matches` arms, the page tail, the `matches`/`items` page sniffs and the page/history byte pre-pass are deleted* | example lines that are JSON dumps shrink by the writes and the lists; `optional`, the status rules and `batch` still sniffed (S3) |
+| `--raw` | its own sniff; base64 for non-UTF-8 reads. *Since S1: a write prints its declared identity, tab-separated; the help text says "shell-composable". Since S2: a table prints its declared columns tab-separated, no header, no hint, an empty cell for null, full float precision, bare base64 for bytes* | #3116 (reads) |
+| Dates | one wall-clock field (`committed_at`), humanized as a pre-pass to local time with offset. *Since S2: every declared `as: date` cell prints `2026-09-10 20:19:44.123456 UTC` (raw: the micros), and `--as-of-time` accepts that spelling back; the pre-pass no longer reaches a declared command* | the pre-pass still runs for the undeclared families (S4 deletes it) |
+| Channels / exit | data + status lines on stdout; errors on stderr; exit 0/1/2. *Since S1: a missed write is `no such <noun>: <identity>` on stderr, nothing on stdout, exit 0, in human and `--raw`; `--json` keeps the envelope on stdout and stderr silent. Since S2: `-- more: add --cursor <c> to the same command` and `-- sampled N of M` (only when N < M) are stderr, human mode only* | the batch summary still lands on stdout (S3); the tombstone `(deleted)` and bfs `-- truncated` notices are not yet declarable (#3332) |
 | Playground | real clap grammar, real renderer | format flags dropped (#3312); one stream |
 | Pins | `command-examples.json` (human, 124 commands, drift only); 23 literal asserts in `render.rs`, ~10 in `cli_execution.rs`; site transcript gate (23 exchanges) at release | no raw pin, no channel/exit pin, no playground≡binary pin, no per-fixture matrix |
 | Prose | inputs clap-parse-guarded (resolver S4a) | outputs hand-typed in README / skill / docs / site |
@@ -767,7 +779,7 @@ Verified against `main` at `60db96ac`.
 |---|---|---|
 | Q1 | `kv get`: the bare value (#3306: "already right, do not change") or a receipt with version/commit lines (#3205 §2)? | **bare value.** `redis-cli GET`, `cat` and every shell idiom expect the value alone; version and commit facts are one `kv history` or `--json` away, and a receipt would break `strata kv get k > file`. Applies to `json get` too |
 | Q2 | A write with `applied: false` (delete of a missing key): what does a person and a script see? Three options: **(a)** stderr `no such key: k`, exit **1**, every format — #3306's ask; `rm`, `git branch -d`, `kubectl delete` do this. **(b)** stderr `no such key: k`, exit **0** — the idempotent-delete peers: `redis DEL` → `(integer) 0`, `DELETE` in SQLite/DuckDB → 0 rows, `kubectl delete --ignore-not-found`; the shell then agrees with the wire (`Ok`, `applied: false`) and `strata kv delete k` in a retry loop stays safe. **(c)** today: stdout `not_found k applied=false`, exit 0. | **(b) — decided 2026-09-11 on review**, reversing the round-1 pick of (a). Strata's peers (SQLite/DuckDB/Redis) are idempotent, and a `--json` caller seeing `Ok` on the wire with exit 1 in the shell was the asymmetry judged worse than #3306's ask. So: human and `--raw` → stderr `no such key: k`, nothing on stdout, exit **0**; `--json` → the `applied: false` envelope on stdout, exit 0, nothing on stderr. If users ever need assertive deletion, add an opt-in `--require-existing` (exit 1 on a miss) then — not now. (c) is not on the table |
-| Q3 | Human date form | **`2026-09-10 20:19:44 UTC`** — UTC, second precision, labelled. Deterministic across machines and the browser (where "local" is whatever the visitor's `wasm` clock says), diffs cleanly in transcripts, and matches what the docs will show. Alternatives: RFC 3339 `2026-09-10T20:19:44Z` (what AWS/kubectl/gh put in *machine* output — but `--json` keeps epoch micros and is out of scope, and the `T` reads worse in a table); local-with-offset (today's `2026-09-10 13:19:44.123456 -07:00`, what `git log` does — non-deterministic across machines and the site gate) |
+| Q3 | Human date form | **`2026-09-10 20:19:44.123456 UTC`** — UTC, microsecond precision, labelled. *Amended at S2 (2026-09-12): the original choice was second precision, which #3112 S5 forbids — a date the CLI prints must read back through `--as-of-time` to the SAME commit, and a truncated date resolves to the commit before it (`crates/cli/tests/cli_execution.rs`, `a_date_printed_by_history_reads_back_the_value_from_that_commit`). The parser reads the `UTC` label as UTC.* Deterministic across machines and the browser (where "local" is whatever the visitor's `wasm` clock says), diffs cleanly in transcripts, and matches what the docs will show. Alternatives: RFC 3339 `2026-09-10T20:19:44Z` (what AWS/kubectl/gh put in *machine* output — but `--json` keeps epoch micros and is out of scope, and the `T` reads worse in a table); local-with-offset (today's `2026-09-10 13:19:44.123456 -07:00`, what `git log` does — non-deterministic across machines and the site gate) |
 | Q4 | TTY sniffing | none (R6) |
 | Q5 | `Pretty` and the hidden `--output-format` flag (`options.rs:56-59`, "transitional") | **delete both in S4**: `--json \| jq .` is pretty; a hidden second way to choose the format is Rule 8's smell. Release note |
 | Q6 | Table style | kubectl/gh: upper-case header, two-space gutters, left-aligned text, right-aligned numbers, no borders |
