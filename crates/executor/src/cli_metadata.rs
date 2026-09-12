@@ -11,6 +11,7 @@ mod display;
 pub use display::{
     validate_display_shape, validate_encoding_shape, CliDisplay, CliDisplayAs, CliDisplayDecl,
     CliDisplayField, CliDisplayShape, CliDisplaySort, CliRenderRule, CliWireEncoding,
+    ReceiptFilter, ReceiptPlaceholder, ReceiptSegment, ReceiptTemplate, ReceiptValue,
 };
 
 /// Embedded generated CLI command metadata JSON.
@@ -107,6 +108,17 @@ impl CliCommandCatalog {
             .by_path
             .get(normalize_space(path).as_str())
             .and_then(|id| self.command_by_id(id))
+    }
+
+    /// Finds a command by its executable wire name (`Command::name()`), the
+    /// one handle a renderer holds once a command has run. Wire names are
+    /// unique across the index (`validate_commands`); a linear scan keeps the
+    /// serialized lookup tables as they are.
+    pub fn command_by_wire(&self, wire: &str) -> Option<&CliCommandEntry> {
+        self.index
+            .commands
+            .iter()
+            .find(|command| command.wire == wire)
     }
 
     /// Finds a command by stable id or CLI path display.
@@ -398,6 +410,7 @@ fn validate_source(source: &CliIndexSourceInfo) -> CliMetadataResult<()> {
 fn validate_commands(index: &CliCommandIndex) -> CliMetadataResult<()> {
     let mut seen_ids = BTreeSet::new();
     let mut seen_paths = BTreeSet::new();
+    let mut seen_wires = BTreeSet::new();
     let mut previous_path: Option<&[String]> = None;
     for command in &index.commands {
         validate_command(command)?;
@@ -409,6 +422,11 @@ fn validate_commands(index: &CliCommandIndex) -> CliMetadataResult<()> {
                 "duplicate CLI path `{}`",
                 command.path_display
             )));
+        }
+        // `command_by_wire` answers from the wire alone, so one wire must
+        // name one command.
+        if !seen_wires.insert(command.wire.as_str()) {
+            return Err(invalid(format!("duplicate wire name `{}`", command.wire)));
         }
         if let Some(previous) = previous_path {
             if previous > command.path.as_slice() {

@@ -27,6 +27,7 @@ use strata_executor::IpcMode;
 mod agents;
 #[cfg(test)]
 mod arg_spec;
+mod catalog;
 #[cfg(test)]
 mod catalog_guard;
 mod changelog;
@@ -68,7 +69,7 @@ use options::{
     SpaceCommand, VectorCollectionCommand, VectorCommand,
 };
 #[cfg(feature = "native")]
-use render::{render_error, render_output, render_value};
+use render::{print_output, render_error, render_value};
 
 // The wasm-safe CLI surface, re-exported for embedded consumers (the browser
 // playground): render an Output or error to the CLI's own display string with
@@ -76,7 +77,7 @@ use render::{render_error, render_output, render_value};
 // plus the output format its flags chose; `run_line` runs one against an
 // embedded executor and returns what the binary would have printed.
 pub use options::Format;
-pub use render::{error_to_string, output_to_string, value_to_string};
+pub use render::{error_to_string, render_output, value_to_string, Invocation, Rendered};
 
 /// Runs the CLI and returns a process exit code.
 #[cfg(feature = "native")]
@@ -367,7 +368,7 @@ fn run_clone(args: options::CloneArgs, format: options::Format) -> Result<i32, C
         .dest
         .unwrap_or_else(|| PathBuf::from(format!("{dataset}.strata")));
     let dest = dest.display().to_string();
-    let output = match args.progress {
+    let (invocation, output) = match args.progress {
         Some(CloneProgressFormat::Jsonl) => {
             if format != options::Format::Json {
                 return Err(CliError::usage("`--progress jsonl` requires `--json`"));
@@ -375,7 +376,8 @@ fn run_clone(args: options::CloneArgs, format: options::Format) -> Result<i32, C
             let mut progress_error = None;
             let mut on_progress = |event| {
                 if progress_error.is_none() {
-                    progress_error = render::render_output(&event, options::Format::Json).err();
+                    progress_error =
+                        print_output(&event, &Invocation::none(), options::Format::Json).err();
                 }
             };
             let output = executor.execute_hub_clone_with_progress(
@@ -388,16 +390,21 @@ fn run_clone(args: options::CloneArgs, format: options::Format) -> Result<i32, C
             if let Some(error) = progress_error {
                 return Err(error);
             }
-            output
+            // `--progress jsonl` requires `--json`, which reads no declaration.
+            (Invocation::none(), output)
         }
-        None => executor.execute(Command::HubClone {
-            dataset,
-            branch: args.branch,
-            dest,
-            hub_url: args.hub,
-        })?,
+        None => {
+            let command = Command::HubClone {
+                dataset,
+                branch: args.branch,
+                dest,
+                hub_url: args.hub,
+            };
+            let invocation = Invocation::of(&command, format)?;
+            (invocation, executor.execute(command)?)
+        }
     };
-    render::render_output(&output, format)?;
+    print_output(&output, &invocation, format)?;
     executor.close()?;
     Ok(0)
 }
@@ -407,9 +414,9 @@ fn run_clone(args: options::CloneArgs, format: options::Format) -> Result<i32, C
 #[cfg(feature = "native")]
 fn run_hub(args: options::HubArgs, format: options::Format) -> Result<i32, CliError> {
     let mut executor = Executor::open_cache()?;
-    let output = match args.command {
-        HubCommand::Info { hub } => executor.execute(Command::HubInfo { hub_url: hub })?,
-        HubCommand::ListDatasets(args) => executor.execute(Command::HubListDatasets {
+    let command = match args.command {
+        HubCommand::Info { hub } => Command::HubInfo { hub_url: hub },
+        HubCommand::ListDatasets(args) => Command::HubListDatasets {
             hub_url: args.hub,
             tasks: args.tasks,
             tags: args.tags,
@@ -420,20 +427,20 @@ fn run_hub(args: options::HubArgs, format: options::Format) -> Result<i32, CliEr
             sort: args.sort.map(Into::into),
             limit: args.limit,
             offset: args.offset,
-        })?,
-        HubCommand::GetDataset { name, hub } => {
-            executor.execute(Command::HubGetDataset { name, hub_url: hub })?
-        }
-        HubCommand::ListRefs { dataset, hub } => executor.execute(Command::HubListRefs {
+        },
+        HubCommand::GetDataset { name, hub } => Command::HubGetDataset { name, hub_url: hub },
+        HubCommand::ListRefs { dataset, hub } => Command::HubListRefs {
             dataset,
             hub_url: hub,
-        })?,
-        HubCommand::ListYanked { since, hub } => executor.execute(Command::HubListYanked {
+        },
+        HubCommand::ListYanked { since, hub } => Command::HubListYanked {
             since,
             hub_url: hub,
-        })?,
+        },
     };
-    render::render_output(&output, format)?;
+    let invocation = Invocation::of(&command, format)?;
+    let output = executor.execute(command)?;
+    print_output(&output, &invocation, format)?;
     executor.close()?;
     Ok(0)
 }
@@ -540,8 +547,10 @@ fn run_ipc_stop(
         IpcMode::Client,
         SessionAccess::ReadWrite,
     )?;
-    let output = connection.execute(Command::IpcStop {})?;
-    render_output(&output, format)?;
+    let command = Command::IpcStop {};
+    let invocation = Invocation::of(&command, format)?;
+    let output = connection.execute(command)?;
+    print_output(&output, &invocation, format)?;
     connection.close()?;
     Ok(0)
 }
@@ -619,9 +628,25 @@ pub(crate) fn execute_parsed_command(
         .clone()
         .unwrap_or_else(|| strata_executor::DEFAULT_SPACE.to_owned());
     connection.set_default_space(space);
-    let output = match command {
-        options::TopCommand::Ping => connection.execute(Command::Ping {})?,
-        options::TopCommand::Remote => connection.execute(Command::RemoteGet {})?,
+    // Every command's declaration is read before it runs, so the render never
+    // touches the executor again; the two closures differ only in whether a
+    // model-availability refusal gets the download offer.
+    let run = |command: Command| -> Result<(Invocation, strata_executor::Output), CliError> {
+        let invocation = Invocation::of(&command, format)?;
+        Ok((invocation, connection.execute(command)?))
+    };
+    let run_offering_download =
+        |command: Command| -> Result<(Invocation, strata_executor::Output), CliError> {
+            let invocation = Invocation::of(&command, format)?;
+            #[cfg(feature = "inference")]
+            let output = execute_with_download_offer(connection, command, format)?;
+            #[cfg(not(feature = "inference"))]
+            let output = connection.execute(command)?;
+            Ok((invocation, output))
+        };
+    let (invocation, output) = match command {
+        options::TopCommand::Ping => run(Command::Ping {})?,
+        options::TopCommand::Remote => run(Command::RemoteGet {})?,
         options::TopCommand::Clone(_) | options::TopCommand::Hub(_) => {
             unreachable!("host-only hub commands are dispatched before a session database opens")
         }
@@ -660,58 +685,40 @@ pub(crate) fn execute_parsed_command(
                 "`mcp serve` runs as a one-shot command (it owns stdio), not inside a session",
             ));
         }
-        options::TopCommand::Info => connection.execute(Command::Info {
+        options::TopCommand::Info => run(Command::Info {
             branch: scope.branch.clone(),
         })?,
-        options::TopCommand::Health => connection.execute(Command::Health {
+        options::TopCommand::Health => run(Command::Health {
             branch: scope.branch.clone(),
         })?,
-        options::TopCommand::Metrics => connection.execute(Command::Metrics {
+        options::TopCommand::Metrics => run(Command::Metrics {
             branch: scope.branch.clone(),
         })?,
-        options::TopCommand::Describe => connection.execute(Command::Describe {
+        options::TopCommand::Describe => run(Command::Describe {
             branch: scope.branch.clone(),
         })?,
-        options::TopCommand::Config(args) => connection.execute(config_command(args.command))?,
+        options::TopCommand::Config(args) => run(config_command(args.command))?,
         options::TopCommand::Ipc(args) => match args.command {
-            options::IpcSubcommand::Status => connection.execute(Command::IpcStatus {})?,
-            options::IpcSubcommand::Stop => connection.execute(Command::IpcStop {})?,
+            options::IpcSubcommand::Status => run(Command::IpcStatus {})?,
+            options::IpcSubcommand::Stop => run(Command::IpcStop {})?,
         },
-        options::TopCommand::Branch(args) => connection.execute(branch_command(args.command)?)?,
-        options::TopCommand::Space(args) => {
-            connection.execute(space_command(args.command, scope))?
-        }
-        options::TopCommand::Kv(args) => connection.execute(kv_command(args.command, scope)?)?,
-        options::TopCommand::Json(args) => {
-            connection.execute(json_command(args.command, scope)?)?
-        }
+        options::TopCommand::Branch(args) => run(branch_command(args.command)?)?,
+        options::TopCommand::Space(args) => run(space_command(args.command, scope))?,
+        options::TopCommand::Kv(args) => run(kv_command(args.command, scope)?)?,
+        options::TopCommand::Json(args) => run(json_command(args.command, scope)?)?,
+        // `--text` loads the collection's recorded model, so it meets the
+        // same refusal `inference embed` meets and gets the same offer.
         options::TopCommand::Vector(command) => {
-            let command = vector_command(command.command, scope)?;
-            // `--text` loads the collection's recorded model, so it meets the
-            // same refusal `inference embed` meets and gets the same offer.
-            #[cfg(feature = "inference")]
-            {
-                execute_with_download_offer(connection, command, format)?
-            }
-            #[cfg(not(feature = "inference"))]
-            {
-                connection.execute(command)?
-            }
+            run_offering_download(vector_command(command.command, scope)?)?
         }
-        options::TopCommand::Event(args) => {
-            connection.execute(event_command(args.command, scope)?)?
-        }
-        options::TopCommand::Graph(args) => {
-            connection.execute(graph_command(args.command, scope)?)?
-        }
-        options::TopCommand::Arrow(args) => {
-            connection.execute(arrow_command(args.command, scope))?
-        }
+        options::TopCommand::Event(args) => run(event_command(args.command, scope)?)?,
+        options::TopCommand::Graph(args) => run(graph_command(args.command, scope)?)?,
+        options::TopCommand::Arrow(args) => run(arrow_command(args.command, scope))?,
         #[cfg(feature = "inference")]
         options::TopCommand::Inference(args) => {
-            execute_with_download_offer(connection, inference_command(args.command)?, format)?
+            run_offering_download(inference_command(args.command)?)?
         }
-        options::TopCommand::Command(args) => connection.execute(raw_command(args.command)?)?,
+        options::TopCommand::Command(args) => run(raw_command(args.command)?)?,
         options::TopCommand::Search(_)
         | options::TopCommand::Recipe(_)
         | options::TopCommand::Txn(_)
@@ -727,7 +734,7 @@ pub(crate) fn execute_parsed_command(
         }
     };
 
-    render_output(&output, format)?;
+    print_output(&output, &invocation, format)?;
     Ok(())
 }
 
@@ -2893,8 +2900,9 @@ pub fn run_line(executor: &mut Executor, line: &str) -> Result<String, CliError>
         Ok(parsed) => parsed,
         Err(message) => return Ok(message),
     };
+    let invocation = Invocation::of(&command, format)?;
     match executor.execute(command) {
-        Ok(output) => render::output_line(&output, format),
+        Ok(output) => Ok(render_output(&output, &invocation, format)?.stdout_then_stderr()),
         Err(error) => Ok(render::error_line(error.status(), format)),
     }
 }
@@ -3442,7 +3450,7 @@ mod tests {
         let run = |executor: &mut Executor, line: &str| run_line(executor, line).expect(line);
         assert_eq!(
             run(&mut executor, "kv put greeting hello"),
-            "created greeting applied=true\n"
+            "created greeting\n"
         );
         let refused = run(&mut executor, "--db /elsewhere kv get greeting");
         assert!(refused.contains("`--db`"), "{refused}");
@@ -3465,9 +3473,19 @@ mod tests {
         let run = |executor: &mut Executor, line: &str| run_line(executor, line).expect(line);
         assert_eq!(
             run(&mut executor, "kv put greeting hello"),
-            "created greeting applied=true\n"
+            "created greeting\n"
         );
         assert_eq!(run(&mut executor, "--raw kv get greeting"), "hello\n");
+        // A missed write is its stderr feedback line after an empty stdout,
+        // in human and raw alike; `--json` keeps the envelope on stdout.
+        assert_eq!(run(&mut executor, "kv delete nope"), "no such key: nope\n");
+        assert_eq!(
+            run(&mut executor, "--raw kv delete nope"),
+            "no such key: nope\n"
+        );
+        let json = run(&mut executor, "--json kv delete nope");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("compact JSON");
+        assert_eq!(envelope["data"]["effect"]["kind"], "not_found");
         let json = run(&mut executor, "--json kv get greeting");
         assert!(json.ends_with('\n'), "JSON is newline-terminated: {json:?}");
         let envelope: serde_json::Value = serde_json::from_str(&json).expect("compact JSON");

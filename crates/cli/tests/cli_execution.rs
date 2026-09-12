@@ -427,7 +427,7 @@ fn piped_repl_refuses_session_arguments_on_a_line() {
     let err = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_eq!(
         out.lines().collect::<Vec<_>>(),
-        ["created a applied=true", "1"],
+        ["created a", "1"],
         "only the plain lines ran, and the refused write did not: {out}\n{err}"
     );
     let refusals: Vec<&str> = err

@@ -1,36 +1,46 @@
 ### space.create · edge:applied=false · human
-not_found tenant_a applied=false
+not found space tenant_a
 ∎
 ### space.create · edge:applied=false · raw
+tenant_a
 ∎
 ### space.create · edge:committed_at=fixed · human
-created tenant_a applied=true
+created space tenant_a
 ∎
 ### space.create · edge:committed_at=fixed · raw
+tenant_a
 ∎
 ### space.create · responses/v1/spaces/create.json · human
-created tenant_a applied=true
+created space tenant_a
 ∎
 ### space.create · responses/v1/spaces/create.json · raw
+tenant_a
 ∎
 ### space.delete · edge:applied=false · human
-not_found tenant_a applied=false
+∎
+### space.delete · edge:applied=false · human · stderr
+no such space: tenant_a
 ∎
 ### space.delete · edge:applied=false · raw
 ∎
+### space.delete · edge:applied=false · raw · stderr
+no such space: tenant_a
+∎
 ### space.delete · edge:committed_at=fixed · human
-deleted tenant_a applied=true
+deleted space tenant_a (0 rows)
 ∎
 ### space.delete · edge:committed_at=fixed · raw
+tenant_a
 ∎
 ### space.delete · responses/v1/errors/spaces/delete_default.json · human
 invalid_argument.engine.space_delete_default: command failed∎
 ### space.delete · responses/v1/errors/spaces/delete_default.json · raw
 invalid_argument.engine.space_delete_default: command failed∎
 ### space.delete · responses/v1/spaces/delete.json · human
-deleted tenant_a applied=true
+deleted space tenant_a (0 rows)
 ∎
 ### space.delete · responses/v1/spaces/delete.json · raw
+tenant_a
 ∎
 ### space.exists · responses/v1/spaces/exists_true.json · human
 true

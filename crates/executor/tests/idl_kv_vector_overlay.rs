@@ -599,6 +599,14 @@ fn captured_example_runs_cover_every_example() {
                 run.command_id,
                 step.wire_output
             );
+            // The wire name is the request's own tag — the one handle the CLI
+            // renderer uses to find the step's `display:` declaration.
+            assert_eq!(
+                step.request["type"].as_str(),
+                Some(step.wire.as_str()),
+                "{}: a captured step names the wire its request is tagged with",
+                run.command_id
+            );
         }
     }
 }

@@ -180,9 +180,15 @@ fn execute_cli_renders_the_human_default() {
     let mut session = StrataSession::new().expect("session opens");
     assert_eq!(
         execute_cli(&mut session, "kv put greeting hello"),
-        "created greeting applied=true\n"
+        "created greeting\n"
     );
     assert_eq!(execute_cli(&mut session, "kv get greeting"), "hello\n");
+    // A missed write is its feedback line, the way the binary's stderr
+    // shows it after an empty stdout.
+    assert_eq!(
+        execute_cli(&mut session, "kv delete nope"),
+        "no such key: nope\n"
+    );
 }
 
 #[wasm_bindgen_test]

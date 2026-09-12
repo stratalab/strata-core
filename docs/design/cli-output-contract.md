@@ -1,7 +1,9 @@
 # CLI output: one human mode, derived from the IDL
 
-**Status:** accepted 2026-09-11 after three review rounds; S0 in progress
-(S0a landed the §5 matrix, S0b the declarations and their guard). Tracking issue **#3314** (slices S0–S5). Every
+**Status:** accepted 2026-09-11 after three review rounds; S0 complete
+(S0a landed the §5 matrix, S0b the declarations and their guard, S0c the
+family ⇔ schema check), #3312 and #3327 landed, S1 landed (the renderer
+reads `mutation_ack`). Tracking issue **#3314** (slices S0–S5). Every
 file:line below was read on `main` at `60db96ac`. Follows the shape of `inference-model-resolution.md`: name the
 mechanism, replace it, leave an executable contract behind.
 
@@ -284,7 +286,7 @@ the human contract; the last two columns are what changes for a reader.
 
 | Family | Human (stdout unless noted) | Raw | Today → after (example) |
 |---|---|---|---|
-| `MutationAck<T>` | one line: `<verb> <identity>` — verb from `effect.kind` (`created` / `updated` / `deleted` / `merged` / …), identity from the command's declared identity field (`key`, `collection`, `space`, `graph`, branch `name`). Bulk: `deleted 12 vectors` (zero matches is not a miss, Q14). `applied: false` on a named target: `no such key: greeting` to **stderr** as feedback, nothing on stdout, exit **0** — a delete of nothing is idempotent (Q2) | the identity, one line; on `applied: false` nothing on stdout, same stderr, exit 0 | `updated greeting applied=true` → `updated greeting`; `not_found x applied=false` → stderr `no such key: x` |
+| `MutationAck<T>` | one line: `<verb> <identity>` — verb from `effect.kind` (`created` / `updated` / `deleted` / `merged` / …), identity from the command's declared identity field (`key`, `collection`, `space`, `graph`, branch `name`). Bulk: `deleted 12 vectors` (zero matches is not a miss, Q14). `applied: false` with effect kind `not_found` (or a bare `false` wire) on a named target: `no such key: greeting` to **stderr** as feedback, nothing on stdout, exit **0** — a delete of nothing is idempotent (Q2). `applied: false` with kind `unchanged` (a create that met an existing target) is a hit whose verb says so: `unchanged space staging` | the identity, one line; on a miss nothing on stdout, same stderr, exit 0 | `updated greeting applied=true` → `updated greeting`; `not_found x applied=false` → stderr `no such key: x` |
 | `Maybe<T>` | found: the value as a reader wants it — KV text unchanged (#3306); `json get` the JSON leaf unchanged; a record (vector, event, graph node/edge, graph meta, ontology) as **key-value lines** of its declared `fields` (`key  n1`, `dimension  4`, …), never a JSON dump. Miss: `(nil)` on stdout, exit 0 (a read miss is an answer) | one rule from the declaration: a command that declares a **value** prints it verbatim — the stored bytes for KV (#3116), the JSON leaf for JSON, the scalar for `config <key>`; a command that declares **fields** prints `key<TAB>value` lines of the same fields, exactly as a status object does (Q16). No per-command raw projection (review round 3). Miss: nothing | `vector get` pretty JSON → key-value lines; `--raw kv get` on `00 01 ff` → three raw bytes; `--raw graph get-edge` → `src<TAB>alice` … lines |
 | `Maybe<Vec<T>>` (history) | a table (R1-table), oldest last, columns declared per DTO (`VERSION`, `COMMITTED`, `VALUE`); miss `(nil)` | one row per line, tab-separated declared columns, no header | JSON-with-a-date lines → a table whose `COMMITTED` cell is the date |
 | `Page<T, C>` | scalar items (`Page<Bytes>`, `Page<String>`): one per line, no header (unchanged). Record items: a table with a header row and the declared columns. Empty: `(empty)`. `has_more`: the `-- more: add --cursor …` hint moves to **stderr** (Q8) so `strata kv list \| wc -l` counts keys | one item per line, the declared columns tab-separated (R4); no header, no hint, nothing when empty | `branch list` NDJSON → `NAME  PARENT  STATUS  …` |
@@ -309,8 +311,9 @@ byte-identical before and after every slice; the matrix pins that.
 ### R2 — the declaration lives in the IDL, the renderer interprets it
 
 *Amended 2026-09-11 by S0b (#3314) to the vocabulary as built; the original
-proposal is in the history of this file. Nothing below renders yet — S1 turns
-the renderer into the interpreter.*
+proposal is in the history of this file. S1 (2026-09-11) made the renderer
+read `mutation_ack` declarations (`Invocation` in `crates/cli/src/render.rs`);
+the other rules still render through the family arms until S2/S3.*
 
 Two additions to the authored IDL, both validated when the CLI index is
 generated (`strata-idl generate-cli`, gated by `check-cli`):
@@ -365,7 +368,14 @@ string). `identity` lists the pointers `--raw` prints for a write (R4), with
 the same filter grammar, no `verb`, no repeats. `noun` is the word in the
 idempotent miss line (`no such key: greeting`, Q2) and needs an applied
 signal on the wire (`/data/effect/applied`, or a bare boolean `/data`) —
-without one a miss cannot be told from a hit, so the guard refuses it.
+without one a miss cannot be told from a hit, so the guard refuses it. A
+miss is the applied signal `false` **and** an effect kind of `not_found`
+(or no kind at all, the bare-boolean wires): an `unchanged` effect that did
+not apply — `space create` on an existing space, the only producer today —
+is a hit, rendered through the receipt with its own verb, never a false
+`no such space` (S1). A miss line renders the identity placeholders in
+human form, space-joined, in every format; an absent or null placeholder
+value renders as `(nil)` in human mode and as an empty cell in `--raw`.
 The identity law is keyed by rule: under `mutation_ack` a receipt **must**
 declare `identity`, because `--raw` for a write is its identity; under
 `status_sections` (action receipts: `arrow export`, `arrow import`, `hub
@@ -647,7 +657,7 @@ Grouped by the slice that closes them; counts from the §2.1 table.
 
 | Slice | Cells | What changes |
 |---|---|---|
-| S1 | 36 `MutationAck` × human, × raw; the binary cells for a missed delete | `applied=` gone; miss → stderr line, exit stays 0, nothing on stdout; raw echoes identity |
+| S1 (landed) | 36 `MutationAck` × human, × raw; the binary cells for a missed delete | `applied=` gone; miss → stderr line, exit stays 0, nothing on stdout; raw echoes identity |
 | S2 | 21 `Page` + 4 `SamplePage` + 3 history + 6 analytics + 2 search × human, × raw | tables with declared columns; hint to stderr (sample notice only when partial); dates in cells; raw = declared columns as TSV |
 | S3 | 20 `StatusResponse` (minus the 3 bespoke) + 4 record `Maybe` + 14 `BatchResult` × human, × raw | key-value lines / sections; batch summary |
 | S4 | KV `Maybe` × raw, every `committed_at` cell | raw bytes verbatim (#3116); `humanize_committed_at` deleted (R3 lands with S2's tables, so S4 is the deletion of the pre-pass and the raw-bytes change) |
@@ -667,7 +677,7 @@ a visible CLI change and carries release notes in the PR body.
 | **S0** (three PRs under the ≤1,500-LOC rule) | **S0a** — the matrix (§5.2: in-process, binary, examples cross-check; playground cells come with #3312), blessed on today's output; the three plants; both design documents committed. **S0b** — `render:` per kind in `kinds.yaml` and `display:` per command in `commands/*.yaml` (R2 as amended: `receipt`/`identity`/`noun`, `value`, `fields`, `columns`, `map`, `header`, `as`, `sort`, or `bespoke`), resolved into `cli-command-index.json` and **declared and guarded but not yet read** by the renderer (so the declaration review happens on a PR that changes no output), with the guard that `command-index.json` never carries it (the SDK boundary). **S0c** — the #3313 `check` guard (family ⇔ schema) with its shrink-only `response-model-divergences.yaml`, `wire_status: transitional` on the divergent rows, and the declarations that are simply wrong corrected (Q13) — a docs-only change to `Returns:` | none (docs `Returns:` lines change in S0c) | #3313 asks 1–2 |
 | **#3312** (its own small PR, before S1) | `command_from_line` returns the format with the command; `execute_cli` renders with it; playground cells added | none | #3312 |
 | **#3327** (its own small PR, before S1) | session arguments on a REPL/playground line are refused by name from one shared `Cli::line_refusal`; a typo'd lone verb is "not a strata command" instead of silently ignored | none (CLI text; a refused pipe line exits 1 as any pipe error does; release note) | #3327 |
-| **S1** | R1 `mutation_ack` rule from the declaration; R5 stderr line for `applied: false` (exit stays 0); R4 raw identity for writes and the `--raw` help text rewritten to "shell-composable"; `mutation_summary` deleted | none (CLI text; exit codes unchanged; release note) | #3306 (writes, `--raw` writes) |
+| **S1** (landed 2026-09-11) | R1 `mutation_ack` rule from the declaration; R5 stderr line for a `not_found` miss (exit stays 0; `unchanged` is a hit); R4 raw identity for writes and the `--raw` help text rewritten to "shell-composable"; `mutation_summary` deleted; the harness snapshots stderr as its own cell | none (CLI text; exit codes unchanged; release note) | #3306 (writes, `--raw` writes) |
 | **S2** | R1-table; `page`, `history`, `search`, `analytics` rules from `display.columns`; R3 dates in cells; hint to stderr; raw identities | none (release note) | #3306 (lists, dates), #3205 §3/§5 |
 | **S3** | `status_sections` for `StatusResponse` and record `Maybe`; `batch` rule; `render_human_data` and the JSON fallback **deleted**; `check` refuses an undeclared shape | none (release note) | #3306 (admin), #3205 §1/§2/§4 |
 | **S4** | R4 raw bytes verbatim for KV reads and `base64:` labelling in human mode; `humanize_committed_at` deleted; Q5 (`--output-format` / `pretty`) | hidden flag removal if Q5 says so (release note) | #3116 |
@@ -709,10 +719,10 @@ Verified against `main` at `60db96ac`.
 |---|---|---|
 | Shape declaration | IDL resolves `kind` and `response_model` for all 137 commands; `dto-inventory.yaml` registers 100+ models | nothing renders from them; no `display` declaration exists |
 | Declaration ⇔ wire | `kind` is right everywhere; `response_model` is checked against nothing | nominal for ~14 stable + 6 transitional commands (#3313); three phantom result names; `Maybe`/history have two encodings each. *Since #3322: the family is checked against the schema and the payload is derived from it (84 models in use, inventory checked both ways).* |
-| Human renderer | 23 designed tag arms over 114 `Output` variants; structural sniff with a JSON fallback for the other 91 | 72 of 389 example lines are JSON dumps; ten families, one designed |
-| `--raw` | its own sniff; nothing for writes; base64 for non-UTF-8 reads | #3116; #3306 |
+| Human renderer | 23 designed tag arms over 114 `Output` variants; structural sniff with a JSON fallback for the other 91. *Since S1: the 36 `mutation_ack` commands render from their `display:` declaration through `Invocation` (receipt, identity, noun); the family arms remain for every other rule* | example lines that are JSON dumps shrink by the writes; nine families still sniffed |
+| `--raw` | its own sniff; base64 for non-UTF-8 reads. *Since S1: a write prints its declared identity, tab-separated; the help text says "shell-composable"* | #3116 (reads) |
 | Dates | one wall-clock field (`committed_at`), humanized as a pre-pass to local time with offset | lands inside JSON; time zone of the machine; logical clocks distinguishable only by name |
-| Channels / exit | data + status lines on stdout; errors on stderr; exit 0/1/2 | `applied: false` is a stdout line (`not_found k applied=false`) instead of a stderr line; exit 0 is already right (Q2) |
+| Channels / exit | data + status lines on stdout; errors on stderr; exit 0/1/2. *Since S1: a missed write is `no such <noun>: <identity>` on stderr, nothing on stdout, exit 0, in human and `--raw`; `--json` keeps the envelope on stdout and stderr silent* | the pagination hint and batch summary still land on stdout (S2/S3) |
 | Playground | real clap grammar, real renderer | format flags dropped (#3312); one stream |
 | Pins | `command-examples.json` (human, 124 commands, drift only); 23 literal asserts in `render.rs`, ~10 in `cli_execution.rs`; site transcript gate (23 exchanges) at release | no raw pin, no channel/exit pin, no playground≡binary pin, no per-fixture matrix |
 | Prose | inputs clap-parse-guarded (resolver S4a) | outputs hand-typed in README / skill / docs / site |

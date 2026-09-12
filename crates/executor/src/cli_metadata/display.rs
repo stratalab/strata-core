@@ -268,6 +268,161 @@ pub enum CliDisplaySort {
     Key,
 }
 
+/// A parsed `receipt:` template (contract §4 R2): literal text and
+/// placeholders in authored order. The grammar lives here, once — the
+/// authoring guard resolves each placeholder against the generated schema
+/// and the CLI renderer resolves it against the response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiptTemplate {
+    segments: Vec<ReceiptSegment>,
+}
+
+/// One piece of a receipt template.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReceiptSegment {
+    /// Text between placeholders, copied through verbatim.
+    Literal(String),
+    /// A `{…}` placeholder.
+    Placeholder(ReceiptPlaceholder),
+}
+
+/// The body of a `{…}` placeholder, or one `identity` entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReceiptPlaceholder {
+    /// `{verb}`: the effect kind (`/data/effect/kind`) as a past-tense word.
+    Verb,
+    /// `{/pointer}` or `{/pointer|filter}`: one value from the response
+    /// (`/data/…`) or the request (`/request/…`).
+    Value(ReceiptValue),
+}
+
+/// A pointer placeholder: where the value lives and how it is shown.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiptValue {
+    /// JSON pointer into the envelope (`/data/…`) or the request (`/request/…`).
+    pub pointer: String,
+    /// The one optional filter after `|`.
+    pub filter: Option<ReceiptFilter>,
+}
+
+/// A placeholder filter; each one names the schema type it needs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReceiptFilter {
+    /// A base64 string shown as text when it decodes cleanly.
+    Bytes,
+    /// An integer byte count shown with a unit.
+    Size,
+    /// An array shown as its length.
+    Len,
+    /// An integer count shown with its noun, pluralised.
+    Plural(String),
+}
+
+impl ReceiptTemplate {
+    /// Parses a receipt template. Grammar only: placeholders must be
+    /// non-empty and balanced, a pointer names one value (no `*`), and a
+    /// filter is one of the four the contract defines.
+    pub fn parse(template: &str) -> Result<Self, String> {
+        let mut segments = Vec::new();
+        let mut literal = String::new();
+        let mut open: Option<usize> = None;
+        for (index, ch) in template.char_indices() {
+            match (ch, open) {
+                ('{', None) => open = Some(index + 1),
+                ('}', Some(start)) => {
+                    let body = &template[start..index];
+                    if body.is_empty() {
+                        return Err(format!("receipt `{template}` has an empty placeholder"));
+                    }
+                    if !literal.is_empty() {
+                        segments.push(ReceiptSegment::Literal(std::mem::take(&mut literal)));
+                    }
+                    segments.push(ReceiptSegment::Placeholder(ReceiptPlaceholder::parse(
+                        body,
+                    )?));
+                    open = None;
+                }
+                ('{' | '}', _) => {
+                    return Err(format!("receipt `{template}` has unbalanced braces"));
+                }
+                (_, None) => literal.push(ch),
+                (_, Some(_)) => {}
+            }
+        }
+        if open.is_some() {
+            return Err(format!("receipt `{template}` has unbalanced braces"));
+        }
+        if !literal.is_empty() {
+            segments.push(ReceiptSegment::Literal(literal));
+        }
+        Ok(Self { segments })
+    }
+
+    /// The template's pieces in authored order.
+    pub fn segments(&self) -> &[ReceiptSegment] {
+        &self.segments
+    }
+
+    /// The template's placeholders in authored order.
+    pub fn placeholders(&self) -> impl Iterator<Item = &ReceiptPlaceholder> {
+        self.segments.iter().filter_map(|segment| match segment {
+            ReceiptSegment::Placeholder(placeholder) => Some(placeholder),
+            ReceiptSegment::Literal(_) => None,
+        })
+    }
+}
+
+impl ReceiptPlaceholder {
+    /// Parses one placeholder body: `verb`, or a pointer with at most one
+    /// `|filter`.
+    pub fn parse(body: &str) -> Result<Self, String> {
+        if body == "verb" {
+            return Ok(Self::Verb);
+        }
+        let (pointer, filter) = body
+            .split_once('|')
+            .map_or((body, None), |(pointer, filter)| (pointer, Some(filter)));
+        if pointer.contains('*') {
+            return Err(format!(
+                "placeholder `{{{body}}}` steps into every item with `*`; a receipt names one value (use an index)"
+            ));
+        }
+        Ok(Self::Value(ReceiptValue {
+            pointer: pointer.to_owned(),
+            filter: filter.map(ReceiptFilter::parse).transpose()?,
+        }))
+    }
+}
+
+impl ReceiptFilter {
+    /// Parses the text after a placeholder's `|`.
+    pub fn parse(filter: &str) -> Result<Self, String> {
+        let (name, argument) = filter
+            .split_once(':')
+            .map_or((filter, None), |(name, argument)| (name, Some(argument)));
+        match (name, argument) {
+            ("plural", Some(noun)) if !noun.trim().is_empty() => Ok(Self::Plural(noun.to_owned())),
+            ("plural", _) => Err("`|plural` needs a noun: `|plural:row`".to_owned()),
+            ("size", None) => Ok(Self::Size),
+            ("bytes", None) => Ok(Self::Bytes),
+            ("len", None) => Ok(Self::Len),
+            _ => Err(format!(
+                "unknown filter `|{filter}`; filters are `|plural:<noun>`, `|size`, `|bytes`, `|len`"
+            )),
+        }
+    }
+
+    /// The filter's name as authored (`plural`, `size`, `bytes`, `len`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Bytes => "bytes",
+            Self::Size => "size",
+            Self::Len => "len",
+            Self::Plural(_) => "plural",
+        }
+    }
+}
+
 /// The shape a `CliDisplay` takes, derived from which keys it sets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CliDisplayShape {
@@ -412,6 +567,16 @@ pub fn validate_display_shape(
                 "command `{command_id}` declares `identity` under `status_sections`, where `--raw` is the record's key/value lines"
             ));
         }
+        // The renderer reads the template straight off the embedded index, so
+        // the index it accepts must already parse; the authoring guard adds
+        // schema resolution on top of this grammar.
+        let grammar = |reason: String| format!("command `{command_id}` display {reason}");
+        if let Some(receipt) = display.receipt.as_deref() {
+            ReceiptTemplate::parse(receipt).map_err(grammar)?;
+        }
+        for entry in &display.identity {
+            ReceiptPlaceholder::parse(entry).map_err(grammar)?;
+        }
     }
     Ok(())
 }
@@ -458,8 +623,156 @@ pub fn validate_encoding_shape(
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_encoding_shape, CliDisplayAs, CliDisplayDecl, CliRenderRule, CliWireEncoding,
+        validate_display_shape, validate_encoding_shape, CliDisplay, CliDisplayAs, CliDisplayDecl,
+        CliRenderRule, CliWireEncoding, ReceiptFilter, ReceiptPlaceholder, ReceiptSegment,
+        ReceiptTemplate, ReceiptValue,
     };
+
+    fn value(pointer: &str, filter: Option<ReceiptFilter>) -> ReceiptSegment {
+        ReceiptSegment::Placeholder(ReceiptPlaceholder::Value(ReceiptValue {
+            pointer: pointer.to_owned(),
+            filter,
+        }))
+    }
+
+    fn literal(text: &str) -> ReceiptSegment {
+        ReceiptSegment::Literal(text.to_owned())
+    }
+
+    #[test]
+    fn receipt_template_splits_literals_and_placeholders_in_order() {
+        let template = ReceiptTemplate::parse(
+            "{verb} {/data/key|bytes} ({/data/rows|plural:row}, {/data/n|len} of {/data/b|size})",
+        )
+        .expect("parses");
+        assert_eq!(
+            template.segments(),
+            [
+                ReceiptSegment::Placeholder(ReceiptPlaceholder::Verb),
+                literal(" "),
+                value("/data/key", Some(ReceiptFilter::Bytes)),
+                literal(" ("),
+                value("/data/rows", Some(ReceiptFilter::Plural("row".to_owned()))),
+                literal(", "),
+                value("/data/n", Some(ReceiptFilter::Len)),
+                literal(" of "),
+                value("/data/b", Some(ReceiptFilter::Size)),
+                literal(")"),
+            ]
+        );
+        assert_eq!(template.placeholders().count(), 5);
+        // No placeholders at all is a legal (if pointless) receipt; an
+        // adjacent pair yields no empty literal between them.
+        assert_eq!(
+            ReceiptTemplate::parse("done").expect("parses").segments(),
+            [literal("done")]
+        );
+        assert_eq!(
+            ReceiptTemplate::parse("{/data/a}{/data/b}")
+                .expect("parses")
+                .segments(),
+            [value("/data/a", None), value("/data/b", None)]
+        );
+        assert_eq!(ReceiptTemplate::parse("").expect("parses").segments(), []);
+    }
+
+    #[test]
+    fn receipt_template_rejects_bad_braces_and_filters() {
+        let reject = |template: &str| ReceiptTemplate::parse(template).expect_err("rejected");
+        assert_eq!(reject("{}"), "receipt `{}` has an empty placeholder");
+        assert_eq!(
+            reject("{/data/a"),
+            "receipt `{/data/a` has unbalanced braces"
+        );
+        assert_eq!(
+            reject("/data/a}"),
+            "receipt `/data/a}` has unbalanced braces"
+        );
+        assert_eq!(
+            reject("{{/data/a}}"),
+            "receipt `{{/data/a}}` has unbalanced braces"
+        );
+        assert_eq!(
+            reject("{/data/items/*/name}"),
+            "placeholder `{/data/items/*/name}` steps into every item with `*`; a receipt names one value (use an index)"
+        );
+        assert_eq!(
+            reject("{/data/a|hex}"),
+            "unknown filter `|hex`; filters are `|plural:<noun>`, `|size`, `|bytes`, `|len`"
+        );
+        assert_eq!(
+            reject("{/data/a|plural}"),
+            "`|plural` needs a noun: `|plural:row`"
+        );
+        assert_eq!(
+            reject("{/data/a|plural: }"),
+            "`|plural` needs a noun: `|plural:row`"
+        );
+        assert_eq!(
+            reject("{/data/a|size:kb}"),
+            "unknown filter `|size:kb`; filters are `|plural:<noun>`, `|size`, `|bytes`, `|len`"
+        );
+        // Only the first `|` splits; the rest is the filter's text.
+        assert_eq!(
+            reject("{/data/a|bytes|len}"),
+            "unknown filter `|bytes|len`; filters are `|plural:<noun>`, `|size`, `|bytes`, `|len`"
+        );
+    }
+
+    #[test]
+    fn placeholder_and_filter_names_round_trip() {
+        assert_eq!(
+            ReceiptPlaceholder::parse("verb").expect("parses"),
+            ReceiptPlaceholder::Verb
+        );
+        // `verb` with a filter is a pointer named `verb`, left for the guard
+        // to resolve (and refuse).
+        assert_eq!(
+            ReceiptPlaceholder::parse("verb|len").expect("parses"),
+            ReceiptPlaceholder::Value(ReceiptValue {
+                pointer: "verb".to_owned(),
+                filter: Some(ReceiptFilter::Len),
+            })
+        );
+        for (text, filter) in [
+            ("bytes", ReceiptFilter::Bytes),
+            ("size", ReceiptFilter::Size),
+            ("len", ReceiptFilter::Len),
+            ("plural:vector", ReceiptFilter::Plural("vector".to_owned())),
+        ] {
+            let parsed = ReceiptFilter::parse(text).expect("parses");
+            assert_eq!(parsed, filter);
+            let name = text.split(':').next().expect("a filter has a name");
+            assert_eq!(parsed.name(), name);
+        }
+    }
+
+    #[test]
+    fn a_receipt_shape_must_parse_to_be_accepted() {
+        let display = |receipt: &str, identity: &[&str]| {
+            CliDisplayDecl::Declared(CliDisplay {
+                receipt: Some(receipt.to_owned()),
+                identity: identity.iter().map(|entry| (*entry).to_owned()).collect(),
+                ..CliDisplay::default()
+            })
+        };
+        let rule = CliRenderRule::MutationAck;
+        validate_display_shape("t.c", rule, &display("{verb} {/data/key}", &["/data/key"]))
+            .expect("a well-formed receipt is accepted");
+        let error =
+            validate_display_shape("t.c", rule, &display("{verb} {/data/key", &["/data/key"]))
+                .expect_err("an unbalanced receipt is refused");
+        assert_eq!(
+            error,
+            "command `t.c` display receipt `{verb} {/data/key` has unbalanced braces"
+        );
+        let error = validate_display_shape("t.c", rule, &display("{verb}", &["/data/key|hex"]))
+            .expect_err("an identity entry with an unknown filter is refused");
+        assert_eq!(
+            error,
+            "command `t.c` display unknown filter `|hex`; filters are `|plural:<noun>`, `|size`, `|bytes`, `|len`"
+        );
+    }
 
     #[test]
     fn wire_encoding_names_match_serde() {

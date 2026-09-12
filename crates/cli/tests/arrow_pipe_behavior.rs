@@ -99,8 +99,17 @@ fn pipe_mode_runs_a_command_stream_and_skips_comments() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // Only the two reads emit raw output; puts are silent, the comment is skipped.
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "A\nB");
+    // Every command answers on stdout: a raw put prints the identity it wrote,
+    // a raw get prints the value; the comment is skipped.
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "pipe-a\npipe-b\nA\nB"
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

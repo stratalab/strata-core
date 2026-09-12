@@ -51,7 +51,8 @@ pub(crate) struct Cli {
     /// Emit compact JSON.
     #[arg(long, global = true, conflicts_with_all = ["raw", "format"])]
     pub(crate) json: bool,
-    /// Emit script-friendly raw output where possible.
+    /// Shell-composable output: bare values, one per line, tab-separated
+    /// fields; no header, hint or summary (a write prints its identity).
     #[arg(long, global = true, conflicts_with_all = ["json", "format"])]
     pub(crate) raw: bool,
     /// Transitional output format flag.

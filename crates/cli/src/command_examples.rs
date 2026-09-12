@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use strata_executor::idl_tooling::CapturedStep;
+
 use crate::options::Format;
+use crate::render::Invocation;
 
 /// Wire-output field names whose value is context-dependent (a version, a
 /// timestamp, an id, a host-specific number, a per-run path). Masking them and
@@ -98,16 +101,21 @@ fn spec_path() -> PathBuf {
     repo_root().join("crates/executor/idl/v1/generated/command-examples.json")
 }
 
-/// Renders a wire output envelope to the CLI text a reader sees — the `Human`
-/// format, through the typed `Output` so KV bytes are decoded to text (a `get`
-/// prints `v2`, not `djI=`) and writes print their summary (`created setting
-/// applied=true`), which the terse `--raw` format suppresses. Trimmed of the
-/// trailing newline; a miss renders to empty (nothing printed).
-fn render_output(wire: &Value) -> String {
+/// Renders a step's wire output to the CLI text a reader sees — the `Human`
+/// format, through the typed `Output` and the command's `display:`
+/// declaration, so KV bytes are decoded to text (a `get` prints `v2`, not
+/// `djI=`) and a write prints its receipt (`created setting`). Stdout then
+/// stderr, as a terminal shows them (a missed write is its `no such key: k`
+/// feedback line), trimmed of the trailing newline; a read miss renders to
+/// empty (nothing printed).
+fn render_output(step: &CapturedStep, wire_output: &Value) -> String {
     let output: strata_executor::Output =
-        serde_json::from_value(wire.clone()).expect("wire output deserializes into Output");
-    crate::render::output_to_string(&output, Format::Human)
+        serde_json::from_value(wire_output.clone()).expect("wire output deserializes into Output");
+    let invocation = Invocation::for_wire(&step.wire, Format::Human, || Ok(step.request.clone()))
+        .expect("declaration resolves");
+    crate::render::render_output(&output, &invocation, Format::Human)
         .expect("output renders")
+        .stdout_then_stderr()
         .trim_end_matches('\n')
         .to_owned()
 }
@@ -168,13 +176,13 @@ fn mask_leaf(value: &mut Value, variant: u8) {
 /// differ, the output exposes a version/timestamp/id/host value: it is flagged
 /// non-reproducible, and the stored text is the first masked render — a
 /// deterministic shape whose varying leaves a consumer must not treat as exact.
-fn render_step(wire: &Value) -> (String, bool) {
-    let mut variant_a = wire.clone();
+fn render_step(step: &CapturedStep) -> (String, bool) {
+    let mut variant_a = step.wire_output.clone();
     mask_volatile(&mut variant_a, 0);
-    let mut variant_b = wire.clone();
+    let mut variant_b = step.wire_output.clone();
     mask_volatile(&mut variant_b, 1);
-    let render_a = render_output(&variant_a);
-    let reproducible = render_a == render_output(&variant_b);
+    let render_a = render_output(step, &variant_a);
+    let reproducible = render_a == render_output(step, &variant_b);
     (render_a, reproducible)
 }
 
@@ -187,7 +195,7 @@ fn build() -> CommandExamples {
             .steps
             .into_iter()
             .map(|step| {
-                let (out, reproducible) = render_step(&step.wire_output);
+                let (out, reproducible) = render_step(&step);
                 ExampleLine {
                     input: step.cli_input,
                     out,

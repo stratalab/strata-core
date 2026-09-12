@@ -73,7 +73,7 @@
     "arrow.export": [
       {
         "in": "strata kv put greeting hello",
-        "out": "created greeting applied=true",
+        "out": "created greeting",
         "reproducible": true
       },
       {
@@ -84,7 +84,7 @@
       },
       {
         "in": "strata kv delete greeting",
-        "out": "deleted greeting applied=true",
+        "out": "deleted greeting",
         "reproducible": true
       },
       {
@@ -101,7 +101,7 @@
     "arrow.import": [
       {
         "in": "strata kv put greeting hello",
-        "out": "created greeting applied=true",
+        "out": "created greeting",
         "reproducible": true
       },
       {
@@ -111,7 +111,7 @@
       },
       {
         "in": "strata kv delete greeting",
-        "out": "deleted greeting applied=true",
+        "out": "deleted greeting",
         "reproducible": true
       },
       {
@@ -129,8 +129,8 @@
     "branch.create": [
       {
         "in": "strata branch create feature",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"feature\",\n  \"parent\": null,\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false
+        "out": "created branch feature",
+        "reproducible": true
       },
       {
         "in": "strata branch list",
@@ -141,12 +141,12 @@
     "branch.delete": [
       {
         "in": "strata branch create temp",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"temp\",\n  \"parent\": null,\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false
+        "out": "created branch temp",
+        "reproducible": true
       },
       {
         "in": "strata branch delete temp",
-        "out": "deleted applied=true",
+        "out": "deleted branch temp",
         "reproducible": true
       },
       {
@@ -158,28 +158,28 @@
     "branch.diff": [
       {
         "in": "strata vector collection create notes 2 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":2,\"metric\":\"cosine\",\"name\":\"notes\"}",
+        "out": "created collection notes (2 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata kv put config base",
-        "out": "created config applied=true",
+        "out": "created config",
         "reproducible": true
       },
       {
         "in": "strata branch fork default experiment",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"experiment\",\n  \"parent\": {\n    \"branch_id\": \"masked\",\n    \"fork_timestamp\": null,\n    \"fork_version\": 0,\n    \"generation\": 0,\n    \"name\": \"default\"\n  },\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false
+        "out": "forked experiment from default",
+        "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"branch\":\"experiment\",\"key\":\"Y29uZmln\",\"type\":\"kv_put\",\"value\":\"dHVuZWQ=\"}'",
-        "out": "updated config applied=true",
+        "out": "updated config",
         "reproducible": true,
         "note": "diverge the key-value entry on the fork"
       },
       {
         "in": "strata command run --command-json '{\"branch\":\"experiment\",\"collection\":\"notes\",\"key\":\"n1\",\"type\":\"vector_upsert\",\"vector\":[0.1,0.2]}'",
-        "out": "created n1 applied=true",
+        "out": "created n1 in notes",
         "reproducible": true,
         "note": "add a vector on the fork"
       },
@@ -193,8 +193,8 @@
     "branch.fork": [
       {
         "in": "strata branch fork default experiment",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"experiment\",\n  \"parent\": {\n    \"branch_id\": \"masked\",\n    \"fork_timestamp\": null,\n    \"fork_version\": 0,\n    \"generation\": 0,\n    \"name\": \"default\"\n  },\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false
+        "out": "forked experiment from default",
+        "reproducible": true
       },
       {
         "in": "strata branch list",
@@ -205,19 +205,19 @@
     "branch.fork_at_timestamp": [
       {
         "in": "strata kv put greeting original",
-        "out": "created greeting applied=true",
+        "out": "created greeting",
         "reproducible": true,
         "note": "The receipt carries this commit's timestamp (microseconds)."
       },
       {
         "in": "strata kv put greeting updated",
-        "out": "updated greeting applied=true",
+        "out": "updated greeting",
         "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"branch\":\"snapshot\",\"source\":\"default\",\"timestamp\":3,\"type\":\"branch_fork_at_timestamp\"}'",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"snapshot\",\n  \"parent\": {\n    \"branch_id\": \"masked\",\n    \"fork_timestamp\": 3,\n    \"fork_version\": 0,\n    \"generation\": 0,\n    \"name\": \"default\"\n  },\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false,
+        "out": "forked snapshot from default at timestamp 3",
+        "reproducible": true,
         "note": "snapshot forks default's history as of that instant."
       },
       {
@@ -229,18 +229,18 @@
     "branch.fork_at_version": [
       {
         "in": "strata kv put greeting original",
-        "out": "created greeting applied=true",
+        "out": "created greeting",
         "reproducible": true,
         "note": "The receipt carries this commit's version."
       },
       {
         "in": "strata kv put greeting updated",
-        "out": "updated greeting applied=true",
+        "out": "updated greeting",
         "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"branch\":\"snapshot\",\"source\":\"default\",\"type\":\"branch_fork_at_version\",\"version\":3}'",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"snapshot\",\n  \"parent\": {\n    \"branch_id\": \"masked\",\n    \"fork_timestamp\": null,\n    \"fork_version\": 0,\n    \"generation\": 0,\n    \"name\": \"default\"\n  },\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
+        "out": "forked snapshot from default at version 0",
         "reproducible": false,
         "note": "snapshot forks default's history at that version."
       },
@@ -253,8 +253,8 @@
     "branch.get": [
       {
         "in": "strata branch create feature",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"feature\",\n  \"parent\": null,\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false
+        "out": "created branch feature",
+        "reproducible": true
       },
       {
         "in": "strata branch get feature",
@@ -265,8 +265,8 @@
     "branch.list": [
       {
         "in": "strata branch create feature",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"feature\",\n  \"parent\": null,\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false
+        "out": "created branch feature",
+        "reproducible": true
       },
       {
         "in": "strata branch list",
@@ -277,23 +277,23 @@
     "branch.merge": [
       {
         "in": "strata kv put config base",
-        "out": "created config applied=true",
+        "out": "created config",
         "reproducible": true
       },
       {
         "in": "strata branch fork default experiment",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"experiment\",\n  \"parent\": {\n    \"branch_id\": \"masked\",\n    \"fork_timestamp\": null,\n    \"fork_version\": 0,\n    \"generation\": 0,\n    \"name\": \"default\"\n  },\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false
+        "out": "forked experiment from default",
+        "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"branch\":\"experiment\",\"key\":\"Y29uZmln\",\"type\":\"kv_put\",\"value\":\"dHVuZWQ=\"}'",
-        "out": "updated config applied=true",
+        "out": "updated config",
         "reproducible": true,
         "note": "change on the fork"
       },
       {
         "in": "strata branch merge experiment default --strategy strict",
-        "out": "{\n  \"applied\": [\n    {\n      \"capability\": \"kv\",\n      \"identity\": \"config\",\n      \"space\": \"default\",\n      \"value\": \"tuned\"\n    }\n  ],\n  \"branch_point\": 3,\n  \"capabilities_covered\": [\n    \"kv\",\n    \"json\",\n    \"vector\"\n  ],\n  \"capabilities_unsupported\": [\n    \"vector_collection\",\n    \"event\",\n    \"graph_metadata\",\n    \"graph_node\",\n    \"graph_edge\",\n    \"graph_ontology\"\n  ],\n  \"conflicts\": [],\n  \"deleted\": [],\n  \"derived_state\": [],\n  \"source\": \"experiment\",\n  \"spaces_covered\": [\n    \"default\"\n  ],\n  \"strategy\": \"strict\",\n  \"target\": \"default\",\n  \"target_timestamp\": 9,\n  \"target_version\": 9\n}",
+        "out": "merged experiment into default: 1 applied, 0 deleted, 0 conflicts (version 9)",
         "reproducible": true,
         "note": "applies the fork's change onto default"
       }
@@ -301,17 +301,17 @@
     "branch.preview": [
       {
         "in": "strata kv put config base",
-        "out": "created config applied=true",
+        "out": "created config",
         "reproducible": true
       },
       {
         "in": "strata branch fork default experiment",
-        "out": "{\n  \"branch_id\": \"masked\",\n  \"created_at\": 0,\n  \"deleted_at\": null,\n  \"generation\": 0,\n  \"name\": \"experiment\",\n  \"parent\": {\n    \"branch_id\": \"masked\",\n    \"fork_timestamp\": null,\n    \"fork_version\": 0,\n    \"generation\": 0,\n    \"name\": \"default\"\n  },\n  \"state_revision\": 0,\n  \"status\": \"active\"\n}",
-        "reproducible": false
+        "out": "forked experiment from default",
+        "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"branch\":\"experiment\",\"key\":\"Y29uZmln\",\"type\":\"kv_put\",\"value\":\"dHVuZWQ=\"}'",
-        "out": "updated config applied=true",
+        "out": "updated config",
         "reproducible": true,
         "note": "change on the fork"
       },
@@ -325,7 +325,7 @@
     "event.append": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
@@ -349,12 +349,12 @@
     "event.count": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
         "in": "strata event append user.updated {\"id\":2}",
-        "out": "created applied=true",
+        "out": "appended user.updated #1",
         "reproducible": true
       },
       {
@@ -366,7 +366,7 @@
     "event.exists": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
@@ -383,7 +383,7 @@
     "event.get": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
@@ -400,12 +400,12 @@
     "event.list": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
         "in": "strata event append user.updated {\"id\":2}",
-        "out": "created applied=true",
+        "out": "appended user.updated #1",
         "reproducible": true
       },
       {
@@ -417,12 +417,12 @@
     "event.range": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
         "in": "strata event append user.updated {\"id\":2}",
-        "out": "created applied=true",
+        "out": "appended user.updated #1",
         "reproducible": true
       },
       {
@@ -434,12 +434,12 @@
     "event.range_time": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
         "in": "strata event append user.updated {\"id\":2}",
-        "out": "created applied=true",
+        "out": "appended user.updated #1",
         "reproducible": true
       },
       {
@@ -451,12 +451,12 @@
     "event.types": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
         "in": "strata event append user.updated {\"id\":2}",
-        "out": "created applied=true",
+        "out": "appended user.updated #1",
         "reproducible": true
       },
       {
@@ -468,7 +468,7 @@
     "event.verify_chain": [
       {
         "in": "strata event append user.created {\"id\":1}",
-        "out": "created applied=true",
+        "out": "appended user.created #0",
         "reproducible": true
       },
       {
@@ -480,32 +480,32 @@
     "graph.analytics.bfs": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g a",
-        "out": "created g applied=true",
+        "out": "created node a in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g b",
-        "out": "created g applied=true",
+        "out": "created node b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g c",
-        "out": "created g applied=true",
+        "out": "created node c in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g a knows b",
-        "out": "created g applied=true",
+        "out": "created edge a -[knows]-> b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g b knows c",
-        "out": "created g applied=true",
+        "out": "created edge b -[knows]-> c in g",
         "reproducible": true
       },
       {
@@ -517,32 +517,32 @@
     "graph.analytics.cdlp": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g a",
-        "out": "created g applied=true",
+        "out": "created node a in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g b",
-        "out": "created g applied=true",
+        "out": "created node b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g c",
-        "out": "created g applied=true",
+        "out": "created node c in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g a knows b",
-        "out": "created g applied=true",
+        "out": "created edge a -[knows]-> b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g b knows c",
-        "out": "created g applied=true",
+        "out": "created edge b -[knows]-> c in g",
         "reproducible": true
       },
       {
@@ -554,32 +554,32 @@
     "graph.analytics.lcc": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g a",
-        "out": "created g applied=true",
+        "out": "created node a in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g b",
-        "out": "created g applied=true",
+        "out": "created node b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g c",
-        "out": "created g applied=true",
+        "out": "created node c in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g a knows b",
-        "out": "created g applied=true",
+        "out": "created edge a -[knows]-> b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g b knows c",
-        "out": "created g applied=true",
+        "out": "created edge b -[knows]-> c in g",
         "reproducible": true
       },
       {
@@ -591,32 +591,32 @@
     "graph.analytics.pagerank": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g a",
-        "out": "created g applied=true",
+        "out": "created node a in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g b",
-        "out": "created g applied=true",
+        "out": "created node b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g c",
-        "out": "created g applied=true",
+        "out": "created node c in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g a knows b",
-        "out": "created g applied=true",
+        "out": "created edge a -[knows]-> b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g b knows c",
-        "out": "created g applied=true",
+        "out": "created edge b -[knows]-> c in g",
         "reproducible": true
       },
       {
@@ -628,32 +628,32 @@
     "graph.analytics.sssp": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g a",
-        "out": "created g applied=true",
+        "out": "created node a in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g b",
-        "out": "created g applied=true",
+        "out": "created node b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g c",
-        "out": "created g applied=true",
+        "out": "created node c in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g a knows b",
-        "out": "created g applied=true",
+        "out": "created edge a -[knows]-> b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g b knows c",
-        "out": "created g applied=true",
+        "out": "created edge b -[knows]-> c in g",
         "reproducible": true
       },
       {
@@ -665,32 +665,32 @@
     "graph.analytics.wcc": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g a",
-        "out": "created g applied=true",
+        "out": "created node a in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g b",
-        "out": "created g applied=true",
+        "out": "created node b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g c",
-        "out": "created g applied=true",
+        "out": "created node c in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g a knows b",
-        "out": "created g applied=true",
+        "out": "created edge a -[knows]-> b in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge g b knows c",
-        "out": "created g applied=true",
+        "out": "created edge b -[knows]-> c in g",
         "reproducible": true
       },
       {
@@ -702,17 +702,17 @@
     "graph.apply_delete_policy": [
       {
         "in": "strata graph create kb",
-        "out": "created applied=true",
+        "out": "created graph kb",
         "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"binding\":{\"target\":{\"key\":\"user:1\",\"primitive\":\"kv\",\"space\":\"default\"}},\"graph\":\"kb\",\"node_id\":\"ada\",\"type\":\"graph_add_node\"}'",
-        "out": "created kb applied=true",
+        "out": "created node ada in kb",
         "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"policy\":\"cascade\",\"target\":{\"key\":\"user:1\",\"primitive\":\"kv\",\"space\":\"default\"},\"type\":\"graph_apply_delete_policy\"}'",
-        "out": "deleted applied=true",
+        "out": "applied delete policy cascade (1 affected)",
         "reproducible": true,
         "note": "cascade removes the bound node and its incident edges."
       },
@@ -725,7 +725,7 @@
     "graph.batch_write": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
@@ -743,12 +743,12 @@
     "graph.bindings": [
       {
         "in": "strata graph create kb",
-        "out": "created applied=true",
+        "out": "created graph kb",
         "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"binding\":{\"target\":{\"key\":\"user:1\",\"primitive\":\"kv\",\"space\":\"default\"}},\"graph\":\"kb\",\"node_id\":\"ada\",\"type\":\"graph_add_node\"}'",
-        "out": "created kb applied=true",
+        "out": "created node ada in kb",
         "reproducible": true,
         "note": "Bind the node to a KV entity so retrieval can cross primitives."
       },
@@ -761,13 +761,13 @@
     "graph.bulk_insert": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata command run --command-json '{\"edges\":[{\"dst\":\"b\",\"edge_type\":\"knows\",\"src\":\"a\"}],\"graph\":\"g\",\"nodes\":[{\"node_id\":\"a\",\"object_type\":\"person\"},{\"node_id\":\"b\",\"object_type\":\"person\"}],\"type\":\"graph_bulk_insert\"}'",
-        "out": "{\n  \"commit\": {\n    \"committed_at\": null,\n    \"delete_count\": 0,\n    \"durability\": \"not_durable\",\n    \"put_count\": 1,\n    \"timestamp\": 0,\n    \"version\": 0\n  },\n  \"commits\": 2,\n  \"edges_inserted\": 1,\n  \"graph\": \"g\",\n  \"nodes_inserted\": 2\n}",
-        "reproducible": false
+        "out": "inserted 2 nodes, 1 edge into g",
+        "reproducible": true
       },
       {
         "in": "strata graph meta g",
@@ -778,7 +778,7 @@
     "graph.create": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
@@ -790,12 +790,12 @@
     "graph.delete": [
       {
         "in": "strata graph create temp",
-        "out": "created applied=true",
+        "out": "created graph temp",
         "reproducible": true
       },
       {
         "in": "strata graph delete temp",
-        "out": "deleted temp applied=true",
+        "out": "deleted graph temp",
         "reproducible": true
       },
       {
@@ -807,22 +807,22 @@
     "graph.edge.add": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social bob",
-        "out": "created social applied=true",
+        "out": "created node bob in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge social alice knows bob",
-        "out": "created social applied=true",
+        "out": "created edge alice -[knows]-> bob in social",
         "reproducible": true
       },
       {
@@ -834,22 +834,22 @@
     "graph.edge.get": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social bob",
-        "out": "created social applied=true",
+        "out": "created node bob in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge social alice knows bob",
-        "out": "created social applied=true",
+        "out": "created edge alice -[knows]-> bob in social",
         "reproducible": true
       },
       {
@@ -866,27 +866,27 @@
     "graph.edge.remove": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social bob",
-        "out": "created social applied=true",
+        "out": "created node bob in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge social alice knows bob",
-        "out": "created social applied=true",
+        "out": "created edge alice -[knows]-> bob in social",
         "reproducible": true
       },
       {
         "in": "strata graph remove-edge social alice knows bob",
-        "out": "deleted social applied=true",
+        "out": "deleted edge alice -[knows]-> bob in social",
         "reproducible": true
       },
       {
@@ -898,7 +898,7 @@
     "graph.list": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
@@ -910,17 +910,17 @@
     "graph.meta": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social bob",
-        "out": "created social applied=true",
+        "out": "created node bob in social",
         "reproducible": true
       },
       {
@@ -932,22 +932,22 @@
     "graph.neighbors": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social bob",
-        "out": "created social applied=true",
+        "out": "created node bob in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-edge social alice knows bob",
-        "out": "created social applied=true",
+        "out": "created edge alice -[knows]-> bob in social",
         "reproducible": true
       },
       {
@@ -959,12 +959,12 @@
     "graph.node.add": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice --type person --properties {\"age\":30}",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
@@ -976,12 +976,12 @@
     "graph.node.get": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice --type person --properties {\"age\":30}",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
@@ -998,17 +998,17 @@
     "graph.node.list": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social bob",
-        "out": "created social applied=true",
+        "out": "created node bob in social",
         "reproducible": true
       },
       {
@@ -1020,17 +1020,17 @@
     "graph.node.remove": [
       {
         "in": "strata graph create social",
-        "out": "created applied=true",
+        "out": "created graph social",
         "reproducible": true
       },
       {
         "in": "strata graph add-node social alice",
-        "out": "created social applied=true",
+        "out": "created node alice in social",
         "reproducible": true
       },
       {
         "in": "strata graph remove-node social alice",
-        "out": "deleted social applied=true",
+        "out": "deleted node alice in social",
         "reproducible": true
       },
       {
@@ -1042,17 +1042,17 @@
     "graph.nodes_by_type": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g a --type person",
-        "out": "created g applied=true",
+        "out": "created node a in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g b --type person",
-        "out": "created g applied=true",
+        "out": "created node b in g",
         "reproducible": true
       },
       {
@@ -1064,17 +1064,17 @@
     "graph.ontology.define_link_type": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-object-type g person",
-        "out": "created g applied=true",
+        "out": "created object type person in g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-link-type g knows person person",
-        "out": "created g applied=true",
+        "out": "created link type knows in g",
         "reproducible": true
       },
       {
@@ -1086,12 +1086,12 @@
     "graph.ontology.define_object_type": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-object-type g person",
-        "out": "created g applied=true",
+        "out": "created object type person in g",
         "reproducible": true
       },
       {
@@ -1103,44 +1103,44 @@
     "graph.ontology.delete_link_type": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-object-type g person",
-        "out": "created g applied=true",
+        "out": "created object type person in g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-link-type g knows person person",
-        "out": "created g applied=true",
+        "out": "created link type knows in g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology delete-link-type g knows",
-        "out": "deleted g applied=true",
+        "out": "deleted link type knows in g",
         "reproducible": true
       }
     ],
     "graph.ontology.delete_object_type": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-object-type g person",
-        "out": "created g applied=true",
+        "out": "created object type person in g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-object-type g company",
-        "out": "created g applied=true",
+        "out": "created object type company in g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology delete-object-type g company",
-        "out": "deleted g applied=true",
+        "out": "deleted object type company in g",
         "reproducible": true
       },
       {
@@ -1152,18 +1152,18 @@
     "graph.ontology.freeze": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-object-type g person",
-        "out": "created g applied=true",
+        "out": "created object type person in g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology freeze g",
-        "out": "{\n  \"commit\": {\n    \"committed_at\": null,\n    \"delete_count\": 0,\n    \"durability\": \"not_durable\",\n    \"put_count\": 1,\n    \"timestamp\": 0,\n    \"version\": 0\n  },\n  \"graph\": \"g\",\n  \"link_types\": 0,\n  \"object_types\": 1\n}",
-        "reproducible": false
+        "out": "froze ontology of g (1 object type, 0 link types)",
+        "reproducible": true
       },
       {
         "in": "strata graph ontology get g",
@@ -1174,12 +1174,12 @@
     "graph.ontology.get": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-object-type g person",
-        "out": "created g applied=true",
+        "out": "created object type person in g",
         "reproducible": true
       },
       {
@@ -1191,12 +1191,12 @@
     "graph.ontology.summary": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph ontology define-object-type g person",
-        "out": "created g applied=true",
+        "out": "created object type person in g",
         "reproducible": true
       },
       {
@@ -1208,17 +1208,17 @@
     "graph.sample": [
       {
         "in": "strata graph create g",
-        "out": "created applied=true",
+        "out": "created graph g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g a",
-        "out": "created g applied=true",
+        "out": "created node a in g",
         "reproducible": true
       },
       {
         "in": "strata graph add-node g b",
-        "out": "created g applied=true",
+        "out": "created node b in g",
         "reproducible": true
       },
       {
@@ -1320,12 +1320,12 @@
     "json.count": [
       {
         "in": "strata json set a $ {\"v\":1}",
-        "out": "created a applied=true",
+        "out": "created a",
         "reproducible": true
       },
       {
         "in": "strata json set b $ {\"v\":2}",
-        "out": "created b applied=true",
+        "out": "created b",
         "reproducible": true
       },
       {
@@ -1337,12 +1337,12 @@
     "json.delete": [
       {
         "in": "strata json set temp $ {\"x\":1}",
-        "out": "created temp applied=true",
+        "out": "created temp",
         "reproducible": true
       },
       {
         "in": "strata json delete temp $",
-        "out": "deleted temp applied=true",
+        "out": "deleted temp",
         "reproducible": true
       },
       {
@@ -1354,7 +1354,7 @@
     "json.exists": [
       {
         "in": "strata json set user $ {\"name\":\"alice\"}",
-        "out": "created user applied=true",
+        "out": "created user",
         "reproducible": true
       },
       {
@@ -1371,7 +1371,7 @@
     "json.get": [
       {
         "in": "strata json set user $ {\"age\":30,\"name\":\"alice\"}",
-        "out": "created user applied=true",
+        "out": "created user",
         "reproducible": true
       },
       {
@@ -1400,7 +1400,7 @@
     "json.index.create": [
       {
         "in": "strata json index create by_name $.name --index-type tag",
-        "out": "{\n  \"created_timestamp\": 3,\n  \"created_version\": 3,\n  \"field_path\": \"name\",\n  \"index_type\": \"tag\",\n  \"name\": \"by_name\",\n  \"space\": \"default\"\n}",
+        "out": "created index by_name on name (tag)",
         "reproducible": true
       },
       {
@@ -1412,12 +1412,12 @@
     "json.index.drop": [
       {
         "in": "strata json index create by_name $.name --index-type tag",
-        "out": "{\n  \"created_timestamp\": 3,\n  \"created_version\": 3,\n  \"field_path\": \"name\",\n  \"index_type\": \"tag\",\n  \"name\": \"by_name\",\n  \"space\": \"default\"\n}",
+        "out": "created index by_name on name (tag)",
         "reproducible": true
       },
       {
         "in": "strata json index drop by_name",
-        "out": "true",
+        "out": "dropped index by_name",
         "reproducible": true
       },
       {
@@ -1429,7 +1429,7 @@
     "json.index.list": [
       {
         "in": "strata json index create by_name $.name --index-type tag",
-        "out": "{\n  \"created_timestamp\": 3,\n  \"created_version\": 3,\n  \"field_path\": \"name\",\n  \"index_type\": \"tag\",\n  \"name\": \"by_name\",\n  \"space\": \"default\"\n}",
+        "out": "created index by_name on name (tag)",
         "reproducible": true
       },
       {
@@ -1441,17 +1441,17 @@
     "json.list": [
       {
         "in": "strata json set user:1 $ {\"v\":1}",
-        "out": "created user:1 applied=true",
+        "out": "created user:1",
         "reproducible": true
       },
       {
         "in": "strata json set user:2 $ {\"v\":2}",
-        "out": "created user:2 applied=true",
+        "out": "created user:2",
         "reproducible": true
       },
       {
         "in": "strata json set other $ {\"v\":3}",
-        "out": "created other applied=true",
+        "out": "created other",
         "reproducible": true
       },
       {
@@ -1463,17 +1463,17 @@
     "json.sample": [
       {
         "in": "strata json set a $ {\"v\":1}",
-        "out": "created a applied=true",
+        "out": "created a",
         "reproducible": true
       },
       {
         "in": "strata json set b $ {\"v\":2}",
-        "out": "created b applied=true",
+        "out": "created b",
         "reproducible": true
       },
       {
         "in": "strata json set c $ {\"v\":3}",
-        "out": "created c applied=true",
+        "out": "created c",
         "reproducible": true
       },
       {
@@ -1485,12 +1485,12 @@
     "json.scan": [
       {
         "in": "strata json set a $ {\"v\":1}",
-        "out": "created a applied=true",
+        "out": "created a",
         "reproducible": true
       },
       {
         "in": "strata json set b $ {\"v\":2}",
-        "out": "created b applied=true",
+        "out": "created b",
         "reproducible": true
       },
       {
@@ -1502,7 +1502,7 @@
     "json.set": [
       {
         "in": "strata json set user $ {\"age\":30,\"name\":\"alice\"}",
-        "out": "created user applied=true",
+        "out": "created user",
         "reproducible": true
       },
       {
@@ -1567,12 +1567,12 @@
     "kv.count": [
       {
         "in": "strata kv put a 1",
-        "out": "created a applied=true",
+        "out": "created a",
         "reproducible": true
       },
       {
         "in": "strata kv put b 2",
-        "out": "created b applied=true",
+        "out": "created b",
         "reproducible": true
       },
       {
@@ -1584,12 +1584,12 @@
     "kv.delete": [
       {
         "in": "strata kv put temp scratch",
-        "out": "created temp applied=true",
+        "out": "created temp",
         "reproducible": true
       },
       {
         "in": "strata kv delete temp",
-        "out": "deleted temp applied=true",
+        "out": "deleted temp",
         "reproducible": true
       },
       {
@@ -1601,7 +1601,7 @@
     "kv.exists": [
       {
         "in": "strata kv put k v",
-        "out": "created k applied=true",
+        "out": "created k",
         "reproducible": true
       },
       {
@@ -1618,7 +1618,7 @@
     "kv.get": [
       {
         "in": "strata kv put greeting hello",
-        "out": "created greeting applied=true",
+        "out": "created greeting",
         "reproducible": true
       },
       {
@@ -1642,17 +1642,17 @@
     "kv.list": [
       {
         "in": "strata kv put user:1 a",
-        "out": "created user:1 applied=true",
+        "out": "created user:1",
         "reproducible": true
       },
       {
         "in": "strata kv put user:2 b",
-        "out": "created user:2 applied=true",
+        "out": "created user:2",
         "reproducible": true
       },
       {
         "in": "strata kv put other c",
-        "out": "created other applied=true",
+        "out": "created other",
         "reproducible": true
       },
       {
@@ -1664,12 +1664,12 @@
     "kv.put": [
       {
         "in": "strata kv put setting v1",
-        "out": "created setting applied=true",
+        "out": "created setting",
         "reproducible": true
       },
       {
         "in": "strata kv put setting v2",
-        "out": "updated setting applied=true",
+        "out": "updated setting",
         "reproducible": true,
         "note": "replaces the visible value"
       },
@@ -1682,17 +1682,17 @@
     "kv.sample": [
       {
         "in": "strata kv put a 1",
-        "out": "created a applied=true",
+        "out": "created a",
         "reproducible": true
       },
       {
         "in": "strata kv put b 2",
-        "out": "created b applied=true",
+        "out": "created b",
         "reproducible": true
       },
       {
         "in": "strata kv put c 3",
-        "out": "created c applied=true",
+        "out": "created c",
         "reproducible": true
       },
       {
@@ -1704,12 +1704,12 @@
     "kv.scan": [
       {
         "in": "strata kv put a 1",
-        "out": "created a applied=true",
+        "out": "created a",
         "reproducible": true
       },
       {
         "in": "strata kv put b 2",
-        "out": "created b applied=true",
+        "out": "created b",
         "reproducible": true
       },
       {
@@ -1721,7 +1721,7 @@
     "space.create": [
       {
         "in": "strata space create app",
-        "out": "created app applied=true",
+        "out": "created space app",
         "reproducible": true
       },
       {
@@ -1733,12 +1733,12 @@
     "space.delete": [
       {
         "in": "strata space create temp",
-        "out": "created temp applied=true",
+        "out": "created space temp",
         "reproducible": true
       },
       {
         "in": "strata space delete temp",
-        "out": "deleted temp applied=true",
+        "out": "deleted space temp (0 rows)",
         "reproducible": true
       },
       {
@@ -1750,7 +1750,7 @@
     "space.exists": [
       {
         "in": "strata space create app",
-        "out": "created app applied=true",
+        "out": "created space app",
         "reproducible": true
       },
       {
@@ -1767,7 +1767,7 @@
     "space.list": [
       {
         "in": "strata space create app",
-        "out": "created app applied=true",
+        "out": "created space app",
         "reproducible": true
       },
       {
@@ -1779,7 +1779,7 @@
     "vector.batch_delete": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
@@ -1801,7 +1801,7 @@
     "vector.batch_exists": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
@@ -1818,7 +1818,7 @@
     "vector.batch_get": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
@@ -1835,7 +1835,7 @@
     "vector.batch_upsert": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
@@ -1852,7 +1852,7 @@
     "vector.collection.create": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
@@ -1864,12 +1864,12 @@
     "vector.collection.delete": [
       {
         "in": "strata vector collection create temp 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"temp\"}",
+        "out": "created collection temp (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector collection delete temp",
-        "out": "true",
+        "out": "deleted collection temp",
         "reproducible": true
       },
       {
@@ -1881,7 +1881,7 @@
     "vector.collection.list": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
@@ -1893,12 +1893,12 @@
     "vector.collection.set_embedding_model": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector collection set-embedding-model docs openai:text-embedding-3-small",
-        "out": "{\"count\":0,\"dimension\":3,\"embedding_model\":\"openai:text-embedding-3-small\",\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "updated collection docs: embedding model openai:text-embedding-3-small",
         "reproducible": true,
         "note": "Declared once; repeating it with the same model is a no-op."
       }
@@ -1906,7 +1906,7 @@
     "vector.collection.stats": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
@@ -1918,17 +1918,17 @@
     "vector.count": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs b [0.0,1.0,0.0]",
-        "out": "created b applied=true",
+        "out": "created b in docs",
         "reproducible": true
       },
       {
@@ -1940,17 +1940,17 @@
     "vector.delete": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector delete docs a",
-        "out": "deleted a applied=true",
+        "out": "deleted a in docs",
         "reproducible": true
       },
       {
@@ -1962,17 +1962,17 @@
     "vector.delete_all": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector delete-all docs",
-        "out": "deleted docs applied=true",
+        "out": "deleted 1 vector from docs",
         "reproducible": true
       },
       {
@@ -1984,22 +1984,22 @@
     "vector.delete_by_filter": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0] --metadata {\"tag\":\"keep\"}",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs b [0.0,1.0,0.0] --metadata {\"tag\":\"drop\"}",
-        "out": "created b applied=true",
+        "out": "created b in docs",
         "reproducible": true
       },
       {
         "in": "strata vector delete-by-filter docs --filter {\"conditions\":[{\"field\":\"tag\",\"op\":\"eq\",\"value\":{\"type\":\"string\",\"value\":\"drop\"}}]}",
-        "out": "deleted docs applied=true",
+        "out": "deleted 1 vector from docs",
         "reproducible": true
       },
       {
@@ -2011,12 +2011,12 @@
     "vector.exists": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
@@ -2033,12 +2033,12 @@
     "vector.get": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
@@ -2055,7 +2055,7 @@
     "vector.history": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
@@ -2067,17 +2067,17 @@
     "vector.index.query": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs b [0.0,1.0,0.0]",
-        "out": "created b applied=true",
+        "out": "created b in docs",
         "reproducible": true
       },
       {
@@ -2089,17 +2089,17 @@
     "vector.keys": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs b [0.0,1.0,0.0]",
-        "out": "created b applied=true",
+        "out": "created b in docs",
         "reproducible": true
       },
       {
@@ -2111,17 +2111,17 @@
     "vector.metadata.update": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0] --metadata {\"tag\":\"x\"}",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector update-metadata docs a {\"tag\":\"z\"}",
-        "out": "updated a applied=true",
+        "out": "updated a in docs",
         "reproducible": true
       },
       {
@@ -2133,17 +2133,17 @@
     "vector.query": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs b [0.0,1.0,0.0]",
-        "out": "created b applied=true",
+        "out": "created b in docs",
         "reproducible": true
       },
       {
@@ -2155,17 +2155,17 @@
     "vector.sample": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs b [0.0,1.0,0.0]",
-        "out": "created b applied=true",
+        "out": "created b in docs",
         "reproducible": true
       },
       {
@@ -2177,17 +2177,17 @@
     "vector.scan": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0]",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs b [0.0,1.0,0.0]",
-        "out": "created b applied=true",
+        "out": "created b in docs",
         "reproducible": true
       },
       {
@@ -2199,12 +2199,12 @@
     "vector.upsert": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "created collection docs (3 dimensions, cosine)",
         "reproducible": true
       },
       {
         "in": "strata vector upsert docs a [1.0,0.0,0.0] --metadata {\"tag\":\"x\"}",
-        "out": "created a applied=true",
+        "out": "created a in docs",
         "reproducible": true
       },
       {

@@ -106,19 +106,22 @@
 {"component_count":2,"components":{"alice":"alice","bob":"alice","carol":"alice","dave":"dave"},"graph":"social"}
 ∎
 ### graph.apply_delete_policy · edge:applied=false · human
-not_found applied=false
+applied delete policy detach (0 affected)
 ∎
 ### graph.apply_delete_policy · edge:applied=false · raw
+0
 ∎
 ### graph.apply_delete_policy · edge:committed_at=fixed · human
-updated applied=true
+applied delete policy detach (1 affected)
 ∎
 ### graph.apply_delete_policy · edge:committed_at=fixed · raw
+1
 ∎
 ### graph.apply_delete_policy · responses/v1/graph/apply_delete_policy_applied.json · human
-updated applied=true
+applied delete policy detach (1 affected)
 ∎
 ### graph.apply_delete_policy · responses/v1/graph/apply_delete_policy_applied.json · raw
+1
 ∎
 ### graph.batch_write · edge:committed_at=fixed · human
 {"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"created":true,"operation":"upsert_node","operation_index":0},"status":"ok"}
@@ -166,52 +169,28 @@ updated applied=true
 {"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
 ∎
 ### graph.bulk_insert · edge:committed_at=fixed · human
-{
-  "commit": {
-    "committed_at": "2026-09-10 20:19:44.000000 +00:00",
-    "delete_count": 0,
-    "durability": "not_durable",
-    "put_count": 2,
-    "timestamp": 5,
-    "version": 5
-  },
-  "commits": 2,
-  "edges_inserted": 2,
-  "graph": "social",
-  "nodes_inserted": 3
-}
+inserted 3 nodes, 2 edges into social
 ∎
 ### graph.bulk_insert · edge:committed_at=fixed · raw
-{"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":2,"timestamp":5,"version":5},"commits":2,"edges_inserted":2,"graph":"social","nodes_inserted":3}
+social
 ∎
 ### graph.bulk_insert · responses/v1/graph/bulk_insert_applied.json · human
-{
-  "commit": {
-    "committed_at": null,
-    "delete_count": 0,
-    "durability": "not_durable",
-    "put_count": 2,
-    "timestamp": 5,
-    "version": 5
-  },
-  "commits": 2,
-  "edges_inserted": 2,
-  "graph": "social",
-  "nodes_inserted": 3
-}
+inserted 3 nodes, 2 edges into social
 ∎
 ### graph.bulk_insert · responses/v1/graph/bulk_insert_applied.json · raw
-{"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":2,"timestamp":5,"version":5},"commits":2,"edges_inserted":2,"graph":"social","nodes_inserted":3}
+social
 ∎
 ### graph.create · edge:applied=false · human
-not_found applied=false
+not found graph social
 ∎
 ### graph.create · edge:applied=false · raw
+social
 ∎
 ### graph.create · edge:committed_at=fixed · human
-created applied=true
+created graph social
 ∎
 ### graph.create · edge:committed_at=fixed · raw
+social
 ∎
 ### graph.create · responses/v1/errors/graph/create_duplicate.json · human
 already_exists.engine.graph: command failed∎
@@ -222,39 +201,54 @@ invalid_argument.engine.graph_name: command failed∎
 ### graph.create · responses/v1/errors/graph/create_empty_name.json · raw
 invalid_argument.engine.graph_name: command failed∎
 ### graph.create · responses/v1/graph/create_applied.json · human
-created applied=true
+created graph social
 ∎
 ### graph.create · responses/v1/graph/create_applied.json · raw
+social
 ∎
 ### graph.delete · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.delete · edge:applied=false · human · stderr
+no such graph: social
 ∎
 ### graph.delete · edge:applied=false · raw
 ∎
+### graph.delete · edge:applied=false · raw · stderr
+no such graph: social
+∎
 ### graph.delete · edge:committed_at=fixed · human
-deleted social applied=true
+deleted graph social
 ∎
 ### graph.delete · edge:committed_at=fixed · raw
+social
 ∎
 ### graph.delete · responses/v1/graph/delete_applied.json · human
-deleted social applied=true
+deleted graph social
 ∎
 ### graph.delete · responses/v1/graph/delete_applied.json · raw
+social
 ∎
 ### graph.edge.add · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.edge.add · edge:applied=false · human · stderr
+no such edge: alice follows bob
 ∎
 ### graph.edge.add · edge:applied=false · raw
 ∎
+### graph.edge.add · edge:applied=false · raw · stderr
+no such edge: alice follows bob
+∎
 ### graph.edge.add · edge:committed_at=fixed · human
-created social applied=true
+created edge alice -[follows]-> bob in social
 ∎
 ### graph.edge.add · edge:committed_at=fixed · raw
+alice	follows	bob
 ∎
 ### graph.edge.add · responses/v1/graph/edge_add_applied.json · human
-created social applied=true
+created edge alice -[follows]-> bob in social
 ∎
 ### graph.edge.add · responses/v1/graph/edge_add_applied.json · raw
+alice	follows	bob
 ∎
 ### graph.edge.get · edge:found=false · human
 (nil)
@@ -279,19 +273,26 @@ created social applied=true
 {"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":6,"version":6,"weight":1.0}
 ∎
 ### graph.edge.remove · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.edge.remove · edge:applied=false · human · stderr
+no such edge: alice follows bob
 ∎
 ### graph.edge.remove · edge:applied=false · raw
 ∎
+### graph.edge.remove · edge:applied=false · raw · stderr
+no such edge: alice follows bob
+∎
 ### graph.edge.remove · edge:committed_at=fixed · human
-deleted social applied=true
+deleted edge alice -[follows]-> bob in social
 ∎
 ### graph.edge.remove · edge:committed_at=fixed · raw
+alice	follows	bob
 ∎
 ### graph.edge.remove · responses/v1/graph/edge_remove_applied.json · human
-deleted social applied=true
+deleted edge alice -[follows]-> bob in social
 ∎
 ### graph.edge.remove · responses/v1/graph/edge_remove_applied.json · raw
+alice	follows	bob
 ∎
 ### graph.list · edge:has_more=true · human
 social
@@ -350,19 +351,26 @@ social
 {"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
 ∎
 ### graph.node.add · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.node.add · edge:applied=false · human · stderr
+no such node: alice
 ∎
 ### graph.node.add · edge:applied=false · raw
 ∎
+### graph.node.add · edge:applied=false · raw · stderr
+no such node: alice
+∎
 ### graph.node.add · edge:committed_at=fixed · human
-created social applied=true
+created node alice in social
 ∎
 ### graph.node.add · edge:committed_at=fixed · raw
+alice
 ∎
 ### graph.node.add · responses/v1/graph/node_add_applied.json · human
-created social applied=true
+created node alice in social
 ∎
 ### graph.node.add · responses/v1/graph/node_add_applied.json · raw
+alice
 ∎
 ### graph.node.get · edge:found=false · human
 (nil)
@@ -401,19 +409,26 @@ created social applied=true
 {"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
 ∎
 ### graph.node.remove · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.node.remove · edge:applied=false · human · stderr
+no such node: alice
 ∎
 ### graph.node.remove · edge:applied=false · raw
 ∎
+### graph.node.remove · edge:applied=false · raw · stderr
+no such node: alice
+∎
 ### graph.node.remove · edge:committed_at=fixed · human
-deleted social applied=true
+deleted node alice in social
 ∎
 ### graph.node.remove · edge:committed_at=fixed · raw
+alice
 ∎
 ### graph.node.remove · responses/v1/graph/node_remove_applied.json · human
-deleted social applied=true
+deleted node alice in social
 ∎
 ### graph.node.remove · responses/v1/graph/node_remove_applied.json · raw
+alice
 ∎
 ### graph.nodes_by_type · edge:items=[] · human
 (empty)
@@ -431,100 +446,104 @@ deleted social applied=true
 {"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
 ∎
 ### graph.ontology.define_link_type · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.ontology.define_link_type · edge:applied=false · human · stderr
+no such link type: follows
 ∎
 ### graph.ontology.define_link_type · edge:applied=false · raw
 ∎
+### graph.ontology.define_link_type · edge:applied=false · raw · stderr
+no such link type: follows
+∎
 ### graph.ontology.define_link_type · edge:committed_at=fixed · human
-created social applied=true
+created link type follows in social
 ∎
 ### graph.ontology.define_link_type · edge:committed_at=fixed · raw
+follows
 ∎
 ### graph.ontology.define_link_type · responses/v1/graph/ontology_define_link_type_applied.json · human
-created social applied=true
+created link type follows in social
 ∎
 ### graph.ontology.define_link_type · responses/v1/graph/ontology_define_link_type_applied.json · raw
+follows
 ∎
 ### graph.ontology.define_object_type · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.ontology.define_object_type · edge:applied=false · human · stderr
+no such object type: Person
 ∎
 ### graph.ontology.define_object_type · edge:applied=false · raw
 ∎
+### graph.ontology.define_object_type · edge:applied=false · raw · stderr
+no such object type: Person
+∎
 ### graph.ontology.define_object_type · edge:committed_at=fixed · human
-created social applied=true
+created object type Person in social
 ∎
 ### graph.ontology.define_object_type · edge:committed_at=fixed · raw
+Person
 ∎
 ### graph.ontology.define_object_type · responses/v1/graph/ontology_define_object_type_applied.json · human
-created social applied=true
+created object type Person in social
 ∎
 ### graph.ontology.define_object_type · responses/v1/graph/ontology_define_object_type_applied.json · raw
+Person
 ∎
 ### graph.ontology.delete_link_type · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.ontology.delete_link_type · edge:applied=false · human · stderr
+no such link type: knows
 ∎
 ### graph.ontology.delete_link_type · edge:applied=false · raw
 ∎
+### graph.ontology.delete_link_type · edge:applied=false · raw · stderr
+no such link type: knows
+∎
 ### graph.ontology.delete_link_type · edge:committed_at=fixed · human
-deleted social applied=true
+deleted link type knows in social
 ∎
 ### graph.ontology.delete_link_type · edge:committed_at=fixed · raw
+knows
 ∎
 ### graph.ontology.delete_link_type · responses/v1/graph/ontology_delete_link_type_applied.json · human
-deleted social applied=true
+deleted link type knows in social
 ∎
 ### graph.ontology.delete_link_type · responses/v1/graph/ontology_delete_link_type_applied.json · raw
+knows
 ∎
 ### graph.ontology.delete_object_type · edge:applied=false · human
-not_found social applied=false
+∎
+### graph.ontology.delete_object_type · edge:applied=false · human · stderr
+no such object type: Robot
 ∎
 ### graph.ontology.delete_object_type · edge:applied=false · raw
 ∎
+### graph.ontology.delete_object_type · edge:applied=false · raw · stderr
+no such object type: Robot
+∎
 ### graph.ontology.delete_object_type · edge:committed_at=fixed · human
-deleted social applied=true
+deleted object type Robot in social
 ∎
 ### graph.ontology.delete_object_type · edge:committed_at=fixed · raw
+Robot
 ∎
 ### graph.ontology.delete_object_type · responses/v1/graph/ontology_delete_object_type_applied.json · human
-deleted social applied=true
+deleted object type Robot in social
 ∎
 ### graph.ontology.delete_object_type · responses/v1/graph/ontology_delete_object_type_applied.json · raw
+Robot
 ∎
 ### graph.ontology.freeze · edge:committed_at=fixed · human
-{
-  "commit": {
-    "committed_at": "2026-09-10 20:19:44.000000 +00:00",
-    "delete_count": 0,
-    "durability": "not_durable",
-    "put_count": 1,
-    "timestamp": 6,
-    "version": 6
-  },
-  "graph": "social",
-  "link_types": 1,
-  "object_types": 1
-}
+froze ontology of social (1 object type, 1 link type)
 ∎
 ### graph.ontology.freeze · edge:committed_at=fixed · raw
-{"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":1,"timestamp":6,"version":6},"graph":"social","link_types":1,"object_types":1}
+social
 ∎
 ### graph.ontology.freeze · responses/v1/graph/ontology_freeze_applied.json · human
-{
-  "commit": {
-    "committed_at": null,
-    "delete_count": 0,
-    "durability": "not_durable",
-    "put_count": 1,
-    "timestamp": 6,
-    "version": 6
-  },
-  "graph": "social",
-  "link_types": 1,
-  "object_types": 1
-}
+froze ontology of social (1 object type, 1 link type)
 ∎
 ### graph.ontology.freeze · responses/v1/graph/ontology_freeze_applied.json · raw
-{"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":1,"timestamp":6,"version":6},"graph":"social","link_types":1,"object_types":1}
+social
 ∎
 ### graph.ontology.get · responses/v1/graph/ontology_get_frozen.json · human
 {

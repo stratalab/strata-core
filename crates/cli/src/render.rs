@@ -3,8 +3,13 @@
 use base64::Engine as _;
 use serde::Serialize;
 use serde_json::Value;
-use strata_executor::Output;
+use strata_executor::cli_metadata::{
+    CliDisplay, CliDisplayDecl, CliRenderRule, ReceiptFilter, ReceiptPlaceholder, ReceiptSegment,
+    ReceiptTemplate, ReceiptValue,
+};
+use strata_executor::{Command, Output};
 
+use crate::catalog;
 use crate::options::Format;
 use crate::CliError;
 
@@ -16,23 +21,314 @@ macro_rules! line {
     }};
 }
 
-/// Renders an executor `Output` to its display string for `format`, without
-/// touching stdio. Wasm-safe: the native print path (`render_output`) wraps
-/// this, and embedded consumers (the browser playground) call it directly.
-pub fn output_to_string(output: &Output, format: Format) -> Result<String, CliError> {
+/// What one command prints, by channel (output contract R5): `stdout` carries
+/// the answer in the chosen format, `stderr` the feedback that needs a
+/// reader's attention — today, the miss line of a write (`no such key: k`).
+/// Wasm-safe: the binary prints the two streams (`print_output`), the
+/// playground joins them (`run_line`), the contract harness snapshots them as
+/// separate cells.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Rendered {
+    /// The answer, exactly as the binary writes it: JSON/pretty envelopes and
+    /// human/raw lines are newline-terminated; a missed write prints nothing.
+    pub stdout: String,
+    /// Feedback, newline-terminated when present. Always empty in `--json`
+    /// and `--pretty`, whose envelope already carries the same fact.
+    pub stderr: String,
+}
+
+impl Rendered {
+    fn stdout(text: String) -> Self {
+        Self {
+            stdout: text,
+            stderr: String::new(),
+        }
+    }
+
+    /// Both channels in the order a terminal shows them for one command —
+    /// the playground's single-string transcript.
+    pub fn stdout_then_stderr(self) -> String {
+        let mut text = self.stdout;
+        text.push_str(&self.stderr);
+        text
+    }
+}
+
+/// What a rendering knows about the command that produced its output: the
+/// command's `display:` declaration from the embedded catalog and, when the
+/// declared receipt quotes the request (`{/request/name}`), the request
+/// itself. `--json` and `--pretty` read no declaration — the envelope is the
+/// record — so they carry none. Wasm-safe.
+#[derive(Clone, Debug)]
+pub struct Invocation {
+    ack: Option<MutationAck>,
+}
+
+/// A parsed `mutation_ack` declaration (output contract R1/R2).
+#[derive(Clone, Debug)]
+struct MutationAck {
+    receipt: ReceiptTemplate,
+    identity: Vec<ReceiptPlaceholder>,
+    noun: Option<String>,
+    request: Option<Value>,
+}
+
+impl Invocation {
+    /// A rendering with no declaration: JSON/pretty output, progress events,
+    /// and every output the catalog does not describe.
+    pub const fn none() -> Self {
+        Self { ack: None }
+    }
+
+    /// The declaration `command` renders under in `format`. Human and raw
+    /// look the command up in the embedded catalog; JSON and pretty never
+    /// consult it.
+    pub fn of(command: &Command, format: Format) -> Result<Self, CliError> {
+        Self::for_wire(command.name(), format, || serde_json::to_value(command))
+    }
+
+    /// The declaration the command with wire name `wire` renders under in
+    /// `format`. `request` is asked for only when the declaration quotes the
+    /// request, so a caller that never needs it never serializes it.
+    pub fn for_wire(
+        wire: &str,
+        format: Format,
+        request: impl FnOnce() -> Result<Value, serde_json::Error>,
+    ) -> Result<Self, CliError> {
+        if matches!(format, Format::Json | Format::Pretty) {
+            return Ok(Self::none());
+        }
+        let Some(entry) = catalog::embedded()?.command_by_wire(wire) else {
+            return Ok(Self::none());
+        };
+        let CliDisplayDecl::Declared(display) = &entry.display else {
+            return Ok(Self::none());
+        };
+        if entry.render != CliRenderRule::MutationAck {
+            return Ok(Self::none());
+        }
+        let mut ack = MutationAck::parse(display).map_err(|reason| {
+            CliError::usage(format!(
+                "display declaration for `{wire}` is invalid: {reason}"
+            ))
+        })?;
+        if ack.quotes_request() {
+            ack.request = Some(request()?);
+        }
+        Ok(Self { ack: Some(ack) })
+    }
+}
+
+impl MutationAck {
+    /// Parses a `mutation_ack` display. The IDL guard has already accepted
+    /// every shipped declaration; an error here means the embedded catalog
+    /// and the guard disagree.
+    fn parse(display: &CliDisplay) -> Result<Self, String> {
+        let receipt = display
+            .receipt
+            .as_deref()
+            .ok_or_else(|| "a mutation_ack declares a receipt".to_owned())?;
+        Ok(Self {
+            receipt: ReceiptTemplate::parse(receipt)?,
+            identity: display
+                .identity
+                .iter()
+                .map(|entry| ReceiptPlaceholder::parse(entry))
+                .collect::<Result<_, _>>()?,
+            noun: display.noun.clone(),
+            request: None,
+        })
+    }
+
+    /// Whether any placeholder reads the request (`/request/…`) rather than
+    /// the response envelope.
+    fn quotes_request(&self) -> bool {
+        self.receipt
+            .placeholders()
+            .chain(&self.identity)
+            .any(|placeholder| match placeholder {
+                ReceiptPlaceholder::Value(value) => value.pointer.starts_with("/request/"),
+                ReceiptPlaceholder::Verb => false,
+            })
+    }
+}
+
+/// Renders an executor `Output` for `format`, without touching stdio. JSON
+/// and pretty print the envelope; human and raw render a declared write
+/// through its `display:` declaration (`invocation`) and everything else
+/// through the family renderers. Wasm-safe: the binary prints the result
+/// (`print_output`), the playground returns it (`run_line`).
+pub fn render_output(
+    output: &Output,
+    invocation: &Invocation,
+    format: Format,
+) -> Result<Rendered, CliError> {
     let mut value = serde_json::to_value(output)?;
+    if matches!(format, Format::Json | Format::Pretty) {
+        return Ok(Rendered::stdout(terminated(
+            value_to_string(&value, format)?,
+            format,
+        )));
+    }
+    if let Some(ack) = &invocation.ack {
+        return Ok(render_mutation_ack(&value, ack, format));
+    }
     // Human and raw formats show KV keys/values as text when possible. The
     // decode happens here — with the typed `Output` in hand — so only fields
     // the schema declares as `Bytes` are touched (see `humanize_kv_bytes`).
     // JSON and pretty formats stay wire-true (base64).
-    if matches!(format, Format::Human | Format::Raw) {
-        humanize_kv_bytes(output, &mut value);
-        // #3112 S5: a wall-clock instant is only useful to a reader as a date.
-        // JSON and pretty stay wire-true (raw epoch micros) so machine
-        // consumers keep an unambiguous number.
-        humanize_committed_at(&mut value);
+    humanize_kv_bytes(output, &mut value);
+    // #3112 S5: a wall-clock instant is only useful to a reader as a date.
+    // JSON and pretty stay wire-true (raw epoch micros) so machine
+    // consumers keep an unambiguous number.
+    humanize_committed_at(&mut value);
+    Ok(Rendered::stdout(value_to_string(&value, format)?))
+}
+
+/// Output contract R1 for a `MutationAck`: a hit prints the declared receipt
+/// (human) or the declared identity, tab-separated (raw), on stdout; a miss
+/// prints `no such <noun>: <identity>` on stderr and nothing on stdout, in
+/// both formats. A write with no `noun` names no target and cannot miss:
+/// `deleted 0 vectors` is an answer, not feedback (Q14).
+fn render_mutation_ack(envelope: &Value, ack: &MutationAck, format: Format) -> Rendered {
+    let request = ack.request.as_ref();
+    if let Some(noun) = ack.noun.as_deref().filter(|_| is_miss(envelope)) {
+        let identity = ack
+            .identity
+            .iter()
+            .map(|placeholder| render_placeholder(placeholder, envelope, request, Format::Human))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Rendered {
+            stdout: String::new(),
+            stderr: format!("no such {noun}: {identity}\n"),
+        };
     }
-    value_to_string(&value, format)
+    let mut out = String::new();
+    match format {
+        Format::Human => {
+            for segment in ack.receipt.segments() {
+                match segment {
+                    ReceiptSegment::Literal(text) => out.push_str(text),
+                    ReceiptSegment::Placeholder(placeholder) => {
+                        out.push_str(&render_placeholder(placeholder, envelope, request, format));
+                    }
+                }
+            }
+        }
+        Format::Raw => {
+            let identity = ack
+                .identity
+                .iter()
+                .map(|placeholder| render_placeholder(placeholder, envelope, request, format))
+                .collect::<Vec<_>>();
+            out.push_str(&identity.join("\t"));
+        }
+        // A declaration is never consulted for the envelope formats.
+        Format::Json | Format::Pretty => {}
+    }
+    out.push('\n');
+    Rendered::stdout(out)
+}
+
+/// A write that named a target and found nothing there: the applied signal
+/// is `false` and the effect kind, when the envelope carries one, is
+/// `not_found`. An `unchanged` write that did not apply (a create that met
+/// an existing target) is a hit whose verb says so, never a false miss.
+fn is_miss(envelope: &Value) -> bool {
+    let data = &envelope["data"];
+    let applied = match data {
+        Value::Bool(applied) => *applied,
+        // A write with no applied signal is a hit; the guard requires the
+        // signal wherever a `noun` is declared.
+        _ => data["effect"]["applied"].as_bool().unwrap_or(true),
+    };
+    !applied && matches!(data["effect"]["kind"].as_str(), None | Some("not_found"))
+}
+
+/// One placeholder's text. Missing or null values render as the format's
+/// empty value (`(nil)` for human, nothing for raw) rather than failing:
+/// the guard has already proven every pointer against the schema, so a hole
+/// here is an optional field that is absent on this response.
+fn render_placeholder(
+    placeholder: &ReceiptPlaceholder,
+    envelope: &Value,
+    request: Option<&Value>,
+    format: Format,
+) -> String {
+    let absent = || match format {
+        Format::Human => "(nil)".to_owned(),
+        Format::Raw | Format::Json | Format::Pretty => String::new(),
+    };
+    let ReceiptPlaceholder::Value(ReceiptValue { pointer, filter }) = placeholder else {
+        return envelope
+            .pointer("/data/effect/kind")
+            .and_then(Value::as_str)
+            .map_or_else(absent, |kind| kind.replace('_', " "));
+    };
+    let value = pointer.strip_prefix("/request").map_or_else(
+        || envelope.pointer(pointer),
+        |path| request.and_then(|request| request.pointer(path)),
+    );
+    let value = match value {
+        Some(Value::Null) | None => return absent(),
+        Some(value) => value,
+    };
+    match filter {
+        None => match format {
+            Format::Human => scalar_summary(value),
+            Format::Raw | Format::Json | Format::Pretty => raw_scalar(value),
+        },
+        Some(ReceiptFilter::Bytes) => bytes_text(value, format),
+        Some(ReceiptFilter::Size) => value.as_u64().map_or_else(absent, size_text),
+        Some(ReceiptFilter::Len) => value
+            .as_array()
+            .map_or_else(absent, |items| items.len().to_string()),
+        Some(ReceiptFilter::Plural(noun)) => value
+            .as_u64()
+            .map_or_else(absent, |count| plural_text(count, noun)),
+    }
+}
+
+/// `|bytes`: a base64 wire string as the text it encodes. Non-UTF-8 bytes
+/// stay base64, labelled `base64:` for a reader (R1-table) and bare for a
+/// script, which S4 changes to the bytes themselves.
+fn bytes_text(value: &Value, format: Format) -> String {
+    let Some(encoded) = value.as_str() else {
+        return scalar_summary(value);
+    };
+    match decode_base64_text(encoded) {
+        Some(text) => text,
+        None if format == Format::Human => format!("base64:{encoded}"),
+        None => encoded.to_owned(),
+    }
+}
+
+/// `|plural:<noun>`: a count with its noun — `1 row`, `12 rows`.
+fn plural_text(count: u64, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// `|size`: a byte count with a decimal unit — the same text the inference
+/// registry prints for a model (`format_model_size`), restated here because
+/// inference imports nothing from the workspace (Rule 3) and the CLI's
+/// non-inference builds cannot import it back.
+fn size_text(bytes: u64) -> String {
+    const GB: u64 = 1_000_000_000;
+    const MB: u64 = 1_000_000;
+    #[allow(clippy::cast_precision_loss)] // A byte count shown to one decimal.
+    let scaled = |unit: u64| bytes as f64 / unit as f64;
+    if bytes >= GB {
+        format!("{:.1} GB", scaled(GB))
+    } else if bytes >= MB {
+        format!("{:.0} MB", scaled(MB))
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// Renders a already-serialized envelope `Value` to its display string for
@@ -75,13 +371,6 @@ pub fn error_to_string(status: &impl Serialize, format: Format) -> String {
     }
 }
 
-/// The stdout text of an `Output` exactly as the binary writes it: JSON/pretty
-/// envelopes end with a newline; human/raw strings already carry their own
-/// line breaks. The binary prints this; the playground returns it (`run_line`).
-pub(crate) fn output_line(output: &Output, format: Format) -> Result<String, CliError> {
-    Ok(terminated(output_to_string(output, format)?, format))
-}
-
 /// The stderr text of an executor error exactly as the binary writes it: the
 /// error line, newline-terminated in every format.
 pub(crate) fn error_line(status: &impl Serialize, format: Format) -> String {
@@ -97,9 +386,17 @@ fn terminated(mut rendered: String, format: Format) -> String {
     rendered
 }
 
+/// Prints an `Output` the way the binary does: the answer on stdout, the
+/// feedback on stderr.
 #[cfg(feature = "native")]
-pub(crate) fn render_output(output: &Output, format: Format) -> Result<(), CliError> {
-    print!("{}", output_line(output, format)?);
+pub(crate) fn print_output(
+    output: &Output,
+    invocation: &Invocation,
+    format: Format,
+) -> Result<(), CliError> {
+    let rendered = render_output(output, invocation, format)?;
+    print!("{}", rendered.stdout);
+    eprint!("{}", rendered.stderr);
     Ok(())
 }
 
@@ -186,11 +483,6 @@ fn render_human_data(data: &Value, out: &mut String) -> Result<(), CliError> {
         }
     }
 
-    if let Some(effect) = data.get("effect") {
-        line!(out, "{}", mutation_summary(data, effect));
-        return Ok(());
-    }
-
     match data {
         Value::Bool(_) | Value::Number(_) | Value::String(_) => {
             line!(out, "{}", scalar_summary(data));
@@ -262,10 +554,6 @@ fn render_raw(value: &Value, out: &mut String) {
 
     if let Some(items) = data.get("matches").and_then(Value::as_array) {
         print_vector_matches(items, out);
-        return;
-    }
-
-    if data.get("effect").is_some() {
         return;
     }
 
@@ -825,26 +1113,6 @@ fn print_vector_matches(items: &[Value], out: &mut String) {
     }
 }
 
-fn mutation_summary(data: &Value, effect: &Value) -> String {
-    let kind = effect.get("kind").and_then(Value::as_str).unwrap_or("ok");
-    let applied = effect
-        .get("applied")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let subject = data
-        .get("key")
-        .or_else(|| data.get("collection"))
-        .or_else(|| data.get("space"))
-        .or_else(|| data.get("graph"))
-        .map(scalar_summary)
-        .unwrap_or_default();
-    if subject.is_empty() {
-        format!("{kind} applied={applied}")
-    } else {
-        format!("{kind} {subject} applied={applied}")
-    }
-}
-
 /// Rewrites schema-declared `Bytes` fields from base64 to readable text for
 /// human/raw output.
 ///
@@ -875,9 +1143,6 @@ fn humanize_kv_bytes(output: &Output, value: &mut Value) {
         }
         Output::KvScanResult { .. } | Output::SampleResult { .. } => {
             decode_bytes_item_fields(data, &["key", "value"]);
-        }
-        Output::WriteResult { .. } | Output::DeleteResult { .. } => {
-            decode_bytes_fields(data, &["key"]);
         }
         // Branch diff/merge/preview identities (and values) are logical keys —
         // decode them like `kv history` does, so the one command whose job is
@@ -939,11 +1204,17 @@ fn decode_bytes_value(value: &mut Value) {
     let Value::String(encoded) = value else {
         return;
     };
-    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded.as_str()) {
-        if let Ok(text) = String::from_utf8(decoded) {
-            *value = Value::String(text);
-        }
+    if let Some(text) = decode_base64_text(encoded) {
+        *value = Value::String(text);
     }
+}
+
+/// The text a base64 wire string encodes, when its bytes are valid UTF-8.
+fn decode_base64_text(encoded: &str) -> Option<String> {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    String::from_utf8(decoded).ok()
 }
 
 // `Bytes` fields arrive as canonical base64 strings (DSGN-5/DTO-2). The typed
@@ -1055,10 +1326,462 @@ mod tests {
         PromotionOutcomeItem, PromotionStrategy, ScanItem, SpaceComparisonItem, VersionedValue,
     };
 
-    use super::humanize_kv_bytes;
+    use strata_executor::cli_metadata::CliDisplay;
+    use strata_executor::{AdminPing, Command, MutationEffectKind};
+
+    use super::{
+        humanize_kv_bytes, is_miss, render_mutation_ack, render_output, Format, Invocation,
+        MutationAck, Rendered,
+    };
 
     fn bytes(text: &str) -> Bytes {
         Bytes::new(text.as_bytes().to_vec())
+    }
+
+    /// Renders through the format-only path, the way every undeclared output
+    /// (and every JSON/pretty output) reaches a reader.
+    fn render(output: &Output, format: super::Format) -> Rendered {
+        render_output(output, &Invocation::none(), format).expect("output renders")
+    }
+
+    /// Renders `output` the way the binary renders `command`'s result in
+    /// `format`: through the command's `display:` declaration.
+    fn render_for(command: &Command, output: &Output, format: Format) -> Rendered {
+        let invocation = Invocation::of(command, format).expect("the declaration parses");
+        render_output(output, &invocation, format).expect("output renders")
+    }
+
+    fn only_stdout(text: &str) -> Rendered {
+        Rendered {
+            stdout: text.to_owned(),
+            stderr: String::new(),
+        }
+    }
+
+    fn only_stderr(text: &str) -> Rendered {
+        Rendered {
+            stdout: String::new(),
+            stderr: text.to_owned(),
+        }
+    }
+
+    fn commit() -> CommitReceipt {
+        CommitReceipt::new(1, 10, CommitDurability::Standard, 1, 0)
+    }
+
+    /// The one envelope a `--json` rendering prints, after checking that it
+    /// printed nothing else anywhere.
+    fn envelope(rendered: &Rendered) -> serde_json::Value {
+        assert!(
+            rendered.stderr.is_empty(),
+            "an envelope format never writes to stderr: {:?}",
+            rendered.stderr
+        );
+        assert!(
+            rendered.stdout.ends_with('\n'),
+            "envelopes are newline-terminated"
+        );
+        serde_json::from_str(&rendered.stdout).expect("one JSON envelope")
+    }
+
+    fn kv_put(key: Bytes) -> Command {
+        Command::KvPut {
+            branch: None,
+            space: None,
+            key,
+            value: bytes("value"),
+        }
+    }
+
+    fn kv_write(key: Bytes, effect: MutationEffect) -> Output {
+        Output::WriteResult {
+            key,
+            effect,
+            commit: commit(),
+        }
+    }
+
+    #[test]
+    fn kv_put_renders_its_receipt_and_identity() {
+        let command = kv_put(bytes("greeting"));
+        let created = kv_write(bytes("greeting"), MutationEffect::created());
+        assert_eq!(
+            render_for(&command, &created, Format::Human),
+            only_stdout("created greeting\n")
+        );
+        assert_eq!(
+            render_for(&command, &created, Format::Raw),
+            only_stdout("greeting\n")
+        );
+        let updated = kv_write(bytes("greeting"), MutationEffect::updated());
+        assert_eq!(
+            render_for(&command, &updated, Format::Human),
+            only_stdout("updated greeting\n"),
+            "the verb is the effect kind"
+        );
+
+        let json = envelope(&render_for(&command, &created, Format::Json));
+        assert_eq!(json["type"], "write_result");
+        assert_eq!(json["data"]["effect"]["kind"], "created");
+        assert_eq!(json["data"]["commit"]["version"], 1);
+        let pretty = envelope(&render_for(&command, &created, Format::Pretty));
+        assert_eq!(pretty, json, "pretty is the same record, reflowed");
+    }
+
+    #[test]
+    fn missed_delete_is_stderr_feedback_in_human_and_raw_only() {
+        let command = Command::KvDelete {
+            branch: None,
+            space: None,
+            key: bytes("nope"),
+        };
+        let missed = Output::DeleteResult {
+            key: bytes("nope"),
+            effect: MutationEffect::not_found(),
+            commit: None,
+        };
+        for format in [Format::Human, Format::Raw] {
+            assert_eq!(
+                render_for(&command, &missed, format),
+                only_stderr("no such key: nope\n"),
+                "{format:?}: a miss is feedback, not an answer"
+            );
+        }
+        let json = envelope(&render_for(&command, &missed, Format::Json));
+        assert_eq!(json["type"], "delete_result");
+        assert_eq!(json["data"]["effect"]["kind"], "not_found");
+        assert_eq!(json["data"]["effect"]["applied"], false);
+        envelope(&render_for(&command, &missed, Format::Pretty));
+
+        let deleted = Output::DeleteResult {
+            key: bytes("nope"),
+            effect: MutationEffect::deleted(),
+            commit: Some(commit()),
+        };
+        assert_eq!(
+            render_for(&command, &deleted, Format::Human),
+            only_stdout("deleted nope\n")
+        );
+        assert_eq!(
+            render_for(&command, &deleted, Format::Raw),
+            only_stdout("nope\n")
+        );
+    }
+
+    #[test]
+    fn bool_wire_reads_its_identity_from_the_request() {
+        let command = Command::JsonDropIndex {
+            branch: None,
+            space: None,
+            name: "by_name".to_owned(),
+        };
+        assert_eq!(
+            render_for(&command, &Output::Bool(true), Format::Human),
+            only_stdout("dropped index by_name\n")
+        );
+        assert_eq!(
+            render_for(&command, &Output::Bool(true), Format::Raw),
+            only_stdout("by_name\n")
+        );
+        for format in [Format::Human, Format::Raw] {
+            assert_eq!(
+                render_for(&command, &Output::Bool(false), format),
+                only_stderr("no such index: by_name\n"),
+                "{format:?}: a bare `false` is the miss signal"
+            );
+        }
+        let json = envelope(&render_for(&command, &Output::Bool(false), Format::Json));
+        assert_eq!(json, json!({"type": "bool", "data": false}));
+    }
+
+    #[test]
+    fn request_is_serialized_only_for_a_declaration_that_quotes_it() {
+        let invocation = Invocation::for_wire("kv_put", Format::Human, || {
+            panic!("kv_put's declaration never reads the request")
+        })
+        .expect("kv_put is declared");
+        assert!(invocation.ack.is_some());
+
+        let invocation = Invocation::for_wire("json_drop_index", Format::Human, || {
+            Ok(json!({"name": "x"}))
+        })
+        .expect("json_drop_index is declared");
+        assert_eq!(
+            invocation.ack.and_then(|ack| ack.request),
+            Some(json!({"name": "x"}))
+        );
+
+        let failed = Invocation::for_wire("json_drop_index", Format::Human, || {
+            Err(<serde_json::Error as serde::de::Error>::custom(
+                "unserializable",
+            ))
+        });
+        assert!(
+            matches!(failed, Err(crate::CliError::Json(_))),
+            "a request that cannot be serialized fails the command, not the renderer"
+        );
+    }
+
+    #[test]
+    fn invocation_reads_no_declaration_for_envelope_formats_or_undeclared_commands() {
+        let command = kv_put(bytes("k"));
+        for format in [Format::Json, Format::Pretty] {
+            let invocation = Invocation::of(&command, format).expect("no catalog lookup");
+            assert!(
+                invocation.ack.is_none(),
+                "{format:?} is the record, not a receipt"
+            );
+        }
+        assert!(Invocation::of(&command, Format::Human)
+            .expect("kv_put is declared")
+            .ack
+            .is_some());
+        assert!(Invocation::of(&command, Format::Raw)
+            .expect("kv_put is declared")
+            .ack
+            .is_some());
+        let ping = Invocation::of(&Command::Ping {}, Format::Human).expect("ping is bespoke");
+        assert!(
+            ping.ack.is_none(),
+            "a bespoke command renders through its family arm"
+        );
+        let unknown = Invocation::for_wire("no_such_wire", Format::Human, || Ok(json!({})))
+            .expect("an unknown wire renders through the family path");
+        assert!(unknown.ack.is_none());
+    }
+
+    #[test]
+    fn undeclared_outputs_take_the_family_path() {
+        let output = Output::Pong(AdminPing {
+            version: "1.2.1".to_owned(),
+        });
+        for format in [Format::Human, Format::Raw] {
+            let declared = render_for(&Command::Ping {}, &output, format);
+            assert_eq!(declared, render(&output, format), "{format:?}");
+            assert!(declared.stderr.is_empty());
+            assert!(
+                declared.stdout.contains("1.2.1"),
+                "{format:?}: {declared:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_utf8_identity_is_labelled_base64_for_a_reader() {
+        let key = Bytes::new(vec![0xff]);
+        let command = kv_put(key.clone());
+        let output = kv_write(key, MutationEffect::created());
+        assert_eq!(
+            render_for(&command, &output, Format::Human),
+            only_stdout("created base64:/w==\n")
+        );
+        assert_eq!(
+            render_for(&command, &output, Format::Raw),
+            only_stdout("/w==\n"),
+            "raw keeps the bare wire form until S4 prints the bytes themselves"
+        );
+    }
+
+    #[test]
+    fn multi_value_identity_is_tab_separated_in_raw() {
+        let command = Command::GraphAddEdge {
+            branch: None,
+            space: None,
+            graph: "social".to_owned(),
+            src: "alice".to_owned(),
+            edge_type: "follows".to_owned(),
+            dst: "bob".to_owned(),
+            weight: None,
+            properties: None,
+        };
+        let edge = |effect: MutationEffect| Output::GraphEdgeWriteResult {
+            graph: "social".to_owned(),
+            src: "alice".to_owned(),
+            edge_type: "follows".to_owned(),
+            dst: "bob".to_owned(),
+            effect,
+            commit: commit(),
+        };
+        assert_eq!(
+            render_for(&command, &edge(MutationEffect::created()), Format::Human),
+            only_stdout("created edge alice -[follows]-> bob in social\n")
+        );
+        assert_eq!(
+            render_for(&command, &edge(MutationEffect::created()), Format::Raw),
+            only_stdout("alice\tfollows\tbob\n")
+        );
+        assert_eq!(
+            render_for(&command, &edge(MutationEffect::not_found()), Format::Raw),
+            only_stderr("no such edge: alice follows bob\n"),
+            "a miss line joins the identity with spaces in every format"
+        );
+    }
+
+    #[test]
+    fn bulk_delete_of_nothing_is_an_answer() {
+        let command = Command::VectorDeleteAll {
+            branch: None,
+            space: None,
+            collection: "docs".to_owned(),
+        };
+        let bulk = |effect: MutationEffect, commit| Output::VectorBulkDeleteResult {
+            collection: "docs".to_owned(),
+            effect,
+            commit,
+        };
+        let nothing = bulk(MutationEffect::not_found(), None);
+        assert_eq!(
+            render_for(&command, &nothing, Format::Human),
+            only_stdout("deleted 0 vectors from docs\n"),
+            "no noun: an empty bulk delete names no target and cannot miss"
+        );
+        assert_eq!(
+            render_for(&command, &nothing, Format::Raw),
+            only_stdout("0\n")
+        );
+        let one = bulk(
+            MutationEffect::new(true, MutationEffectKind::Deleted, true, 1),
+            Some(commit()),
+        );
+        assert_eq!(
+            render_for(&command, &one, Format::Human),
+            only_stdout("deleted 1 vector from docs\n")
+        );
+        let two = bulk(
+            MutationEffect::new(true, MutationEffectKind::Deleted, true, 2),
+            Some(commit()),
+        );
+        assert_eq!(
+            render_for(&command, &two, Format::Human),
+            only_stdout("deleted 2 vectors from docs\n")
+        );
+    }
+
+    fn declared(receipt: &str, noun: Option<&str>, identity: &[&str]) -> MutationAck {
+        let display = CliDisplay {
+            receipt: Some(receipt.to_owned()),
+            noun: noun.map(str::to_owned),
+            identity: identity.iter().map(|entry| (*entry).to_owned()).collect(),
+            ..CliDisplay::default()
+        };
+        MutationAck::parse(&display).expect("the declaration parses")
+    }
+
+    #[test]
+    fn unchanged_write_is_not_a_miss() {
+        let ack = declared("{verb} {/data/key}", Some("key"), &["/data/key"]);
+        let unchanged = json!({"type": "t", "data": {"key": "k", "effect": {
+            "applied": false, "kind": "unchanged", "matched": true, "affected_count": 0
+        }}});
+        assert_eq!(
+            render_mutation_ack(&unchanged, &ack, Format::Human),
+            only_stdout("unchanged k\n"),
+            "a create that met an existing target is a hit whose verb says so"
+        );
+        assert_eq!(
+            render_mutation_ack(&unchanged, &ack, Format::Raw),
+            only_stdout("k\n")
+        );
+        let missed = json!({"type": "t", "data": {"key": "k", "effect": {
+            "applied": false, "kind": "not_found", "matched": false, "affected_count": 0
+        }}});
+        assert_eq!(
+            render_mutation_ack(&missed, &ack, Format::Human),
+            only_stderr("no such key: k\n")
+        );
+    }
+
+    #[test]
+    fn miss_needs_a_false_applied_signal_and_no_other_kind() {
+        let effect = |applied: bool, kind: Option<&str>| {
+            let mut effect = json!({"applied": applied});
+            if let Some(kind) = kind {
+                effect["kind"] = json!(kind);
+            }
+            json!({"type": "t", "data": {"effect": effect}})
+        };
+        assert!(is_miss(&json!({"type": "bool", "data": false})));
+        assert!(!is_miss(&json!({"type": "bool", "data": true})));
+        assert!(is_miss(&effect(false, Some("not_found"))));
+        assert!(is_miss(&effect(false, None)));
+        assert!(!is_miss(&effect(false, Some("unchanged"))));
+        assert!(!is_miss(&effect(true, Some("not_found"))), "applied wins");
+        assert!(!is_miss(&effect(true, Some("created"))));
+        assert!(
+            !is_miss(&json!({"type": "t", "data": {"key": "k"}})),
+            "no applied signal at all is a hit"
+        );
+    }
+
+    #[test]
+    fn receipt_filters_render_len_plural_and_size() {
+        let ack = declared(
+            "{/data/items|len} items, {/data/n|plural:row}, {/data/size|size}",
+            None,
+            &["/data/n", "/data/size|size"],
+        );
+        let doc = |n: u64, size: u64| json!({"type": "t", "data": {"items": [1, 2, 3], "n": n, "size": size}});
+        assert_eq!(
+            render_mutation_ack(&doc(1, 12), &ack, Format::Human),
+            only_stdout("3 items, 1 row, 12 bytes\n")
+        );
+        assert_eq!(
+            render_mutation_ack(&doc(0, 1_600_000), &ack, Format::Human),
+            only_stdout("3 items, 0 rows, 2 MB\n")
+        );
+        assert_eq!(
+            render_mutation_ack(&doc(2, 2_500_000_000), &ack, Format::Human),
+            only_stdout("3 items, 2 rows, 2.5 GB\n")
+        );
+        assert_eq!(
+            render_mutation_ack(&doc(2, 2_500_000_000), &ack, Format::Raw),
+            only_stdout("2\t2.5 GB\n"),
+            "filters apply to identity columns too"
+        );
+    }
+
+    #[test]
+    fn absent_placeholder_values_render_as_the_format_empty_value() {
+        let ack = declared(
+            "{verb} {/data/missing} {/data/missing|bytes} {/data/missing|len}",
+            None,
+            &["/data/missing"],
+        );
+        let doc = json!({"type": "t", "data": {"key": "k"}});
+        assert_eq!(
+            render_mutation_ack(&doc, &ack, Format::Human),
+            only_stdout("(nil) (nil) (nil) (nil)\n")
+        );
+        assert_eq!(
+            render_mutation_ack(&doc, &ack, Format::Raw),
+            only_stdout("\n")
+        );
+        let null = json!({"type": "t", "data": {"missing": null}});
+        assert_eq!(
+            render_mutation_ack(&null, &ack, Format::Raw),
+            only_stdout("\n"),
+            "null and absent are the same hole"
+        );
+    }
+
+    #[cfg(feature = "inference")]
+    #[test]
+    fn size_text_matches_the_inference_registry() {
+        for bytes in [
+            0,
+            999,
+            1_000_000,
+            1_600_000,
+            999_999_999,
+            1_000_000_000,
+            4_700_000_000,
+        ] {
+            assert_eq!(
+                super::size_text(bytes),
+                strata_executor::format_model_size(bytes),
+                "{bytes}"
+            );
+        }
     }
 
     /// The executor result-type tags the human/raw renderers dispatch on
@@ -1389,28 +2112,16 @@ mod tests {
             bytes("meta:survival_rate"),
             41,
         )]);
-        let human = super::output_to_string(&output, super::Format::Human).expect("human renders");
+        let human = render(&output, super::Format::Human).stdout;
         assert!(
             human.contains("meta:survival_rate"),
             "human output decodes the identity: {human}"
         );
-        let json = super::output_to_string(&output, super::Format::Json).expect("json renders");
+        let json = render(&output, super::Format::Json).stdout;
         assert!(
             json.contains("bWV0YTpzdXJ2aXZhbF9yYXRl") && !json.contains("meta:survival_rate"),
             "json output stays base64: {json}"
         );
-    }
-
-    #[test]
-    fn write_result_subject_key_decodes() {
-        let output = Output::WriteResult {
-            key: bytes("user"),
-            effect: MutationEffect::created(),
-            commit: CommitReceipt::new(1, 10, CommitDurability::Standard, 1, 0),
-        };
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        humanize_kv_bytes(&output, &mut value);
-        assert_eq!(value["data"]["key"], json!("user"));
     }
 
     #[test]

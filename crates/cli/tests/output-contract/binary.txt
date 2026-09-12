@@ -4,7 +4,7 @@
 ### 00 strata kv put greeting hello · stderr
 ∎
 ### 00 strata kv put greeting hello · stdout
-created greeting applied=true
+created greeting
 ∎
 ### 01 strata --raw kv put greeting hello2 · exit
 0
@@ -12,6 +12,7 @@ created greeting applied=true
 ### 01 strata --raw kv put greeting hello2 · stderr
 ∎
 ### 01 strata --raw kv put greeting hello2 · stdout
+greeting
 ∎
 ### 02 strata --json kv put greeting hello3 · exit
 0
@@ -72,14 +73,15 @@ hello3
 0
 ∎
 ### 09 strata kv delete missing · stderr
+no such key: missing
 ∎
 ### 09 strata kv delete missing · stdout
-not_found missing applied=false
 ∎
 ### 10 strata --raw kv delete missing · exit
 0
 ∎
 ### 10 strata --raw kv delete missing · stderr
+no such key: missing
 ∎
 ### 10 strata --raw kv delete missing · stdout
 ∎
@@ -97,7 +99,7 @@ not_found missing applied=false
 ### 12 strata kv delete greeting · stderr
 ∎
 ### 12 strata kv delete greeting · stdout
-deleted greeting applied=true
+deleted greeting
 ∎
 ### 13 strata kv history greeting · exit
 0
@@ -159,7 +161,7 @@ deleted greeting applied=true
 ### 19 strata kv put b 2 · stderr
 ∎
 ### 19 strata kv put b 2 · stdout
-created b applied=true
+created b
 ∎
 ### 20 strata kv put c 3 · exit
 0
@@ -167,7 +169,7 @@ created b applied=true
 ### 20 strata kv put c 3 · stderr
 ∎
 ### 20 strata kv put c 3 · stdout
-created c applied=true
+created c
 ∎
 ### 21 strata kv list --limit 1 · exit
 0
@@ -254,16 +256,7 @@ For more information, try '--help'.
 ### 29 strata branch create exp · stderr
 ∎
 ### 29 strata branch create exp · stdout
-{
-  "branch_id": "<uuid>",
-  "created_at": 9,
-  "deleted_at": null,
-  "generation": 1,
-  "name": "exp",
-  "parent": null,
-  "state_revision": 0,
-  "status": "active"
-}
+created branch exp
 ∎
 ### 30 strata --raw branch create exp2 · exit
 0
@@ -271,7 +264,7 @@ For more information, try '--help'.
 ### 30 strata --raw branch create exp2 · stderr
 ∎
 ### 30 strata --raw branch create exp2 · stdout
-{"branch_id":"<uuid>","created_at":12,"deleted_at":null,"generation":1,"name":"exp2","parent":null,"state_revision":0,"status":"active"}
+exp2
 ∎
 ### 31 strata --json branch create exp3 · exit
 0

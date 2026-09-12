@@ -12,7 +12,6 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{json, Value};
-use strata_executor::cli_metadata::CliCommandCatalog;
 use strata_executor::error_registry::public_error_code_entries;
 
 use crate::options::{AgentsCommand, Format};
@@ -49,7 +48,7 @@ pub(crate) fn run(command: &AgentsCommand, format: Format) -> Result<i32, CliErr
 // ---- guide -----------------------------------------------------------------
 
 pub(crate) fn guide_markdown() -> Result<String, CliError> {
-    let catalog = catalog()?;
+    let catalog = crate::catalog::embedded()?;
     let mut guide = String::new();
     let version = env!("CARGO_PKG_VERSION");
 
@@ -103,7 +102,9 @@ strata ./my-db kv get k --as-of <t1>     # v1
 
 - `--json`: one compact envelope per command — `{{\"type\": ..., \"data\": ...}}`.
   KV keys/values and cursors are base64 strings on the wire.
-- `--raw`: script-friendly bare values.
+- `--raw`: shell-composable — the declared facts as bare values, one per
+  line and tab-separated; no header, hint or summary. `--json` is the one
+  unmodified record of what the engine returned.
 - default: human-readable; binary values decode to text when valid UTF-8.
 - Continuation cursors are opaque base64 tokens: pass the printed cursor
   back verbatim via `--cursor`.
@@ -172,13 +173,8 @@ command registers this MCP server with every agent surface in a workspace.\n",
 
 // ---- catalogs ---------------------------------------------------------------
 
-fn catalog() -> Result<CliCommandCatalog, CliError> {
-    CliCommandCatalog::embedded()
-        .map_err(|error| CliError::usage(format!("embedded command catalog is invalid: {error}")))
-}
-
 fn commands_value() -> Result<Value, CliError> {
-    let catalog = catalog()?;
+    let catalog = crate::catalog::embedded()?;
     let index = serde_json::to_value(catalog.index())?;
     Ok(json!({
         "type": "agents_commands",
@@ -451,7 +447,7 @@ mod tests {
     #[test]
     fn guide_covers_every_catalog_family() {
         let guide = guide_markdown().expect("agent guide renders");
-        let catalog = catalog().expect("embedded catalog resolves");
+        let catalog = crate::catalog::embedded().expect("embedded catalog resolves");
         for family in catalog.families() {
             assert!(
                 guide.contains(&format!("### {}", family.id)),
@@ -459,6 +455,33 @@ mod tests {
                 family.id
             );
         }
+    }
+
+    /// `strata agents commands` is the embedded catalog under the agents
+    /// envelope — the same index the renderer resolves declarations from, not
+    /// a second copy — so its command list is the catalog's, wire for wire.
+    #[test]
+    fn commands_value_carries_the_embedded_catalog_index() {
+        let value = commands_value().expect("agents commands renders");
+        assert_eq!(value["type"], "agents_commands");
+        let listed = value["data"]["commands"]
+            .as_array()
+            .expect("the payload lists the commands")
+            .iter()
+            .map(|command| {
+                command["wire"]
+                    .as_str()
+                    .expect("every entry names its wire")
+            })
+            .collect::<Vec<_>>();
+        let catalog = crate::catalog::embedded().expect("embedded catalog resolves");
+        let expected = catalog
+            .commands()
+            .iter()
+            .map(|command| command.wire.as_str())
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty(), "the embedded catalog has commands");
+        assert_eq!(listed, expected);
     }
 
     /// The skill is a valid Claude Code skill: YAML frontmatter with the

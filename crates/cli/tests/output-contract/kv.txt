@@ -85,9 +85,14 @@ invalid_argument.executor.kv_batch_duplicate_key: command failed∎
 1
 ∎
 ### kv.delete · responses/v1/kv/delete_missing.json · human
-not_found a applied=false
+∎
+### kv.delete · responses/v1/kv/delete_missing.json · human · stderr
+no such key: a
 ∎
 ### kv.delete · responses/v1/kv/delete_missing.json · raw
+∎
+### kv.delete · responses/v1/kv/delete_missing.json · raw · stderr
+no such key: a
 ∎
 ### kv.exists · responses/v1/kv/exists_true.json · human
 true
@@ -162,23 +167,30 @@ a1
 a2
 ∎
 ### kv.put · edge:applied=false · human
-not_found a applied=false
+∎
+### kv.put · edge:applied=false · human · stderr
+no such key: a
 ∎
 ### kv.put · edge:applied=false · raw
 ∎
+### kv.put · edge:applied=false · raw · stderr
+no such key: a
+∎
 ### kv.put · edge:committed_at=fixed · human
-created a applied=true
+created a
 ∎
 ### kv.put · edge:committed_at=fixed · raw
+a
 ∎
 ### kv.put · responses/v1/errors/kv/put_empty_key.json · human
 invalid_argument.engine.kv_key: command failed∎
 ### kv.put · responses/v1/errors/kv/put_empty_key.json · raw
 invalid_argument.engine.kv_key: command failed∎
 ### kv.put · responses/v1/kv/write_applied.json · human
-created a applied=true
+created a
 ∎
 ### kv.put · responses/v1/kv/write_applied.json · raw
+a
 ∎
 ### kv.sample · edge:has_more=true · human
 {"key":"a","timestamp":3,"value":"one","version":3}
