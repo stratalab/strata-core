@@ -435,11 +435,17 @@ fn render_wire(wire: &Wire, cells: &mut Cells, invariants: &mut Vec<String>) {
         render_output(&output, &invocation, format)
             .unwrap_or_else(|error| panic!("{}: {error}", key("render")))
     };
-    for (name, format) in [("human", Format::Human), ("raw", Format::Raw)] {
-        let rendered = render(format);
-        cells.insert(key(name), rendered.stdout);
-        if !rendered.stderr.is_empty() {
-            cells.insert(key(&format!("{name} · stderr")), rendered.stderr);
+    // A second output a command can emit — `clone`'s progress events — never
+    // reaches a reader: the binary streams it under `--json` and nothing else
+    // (`run_clone`, and `--progress jsonl` refuses any other format). Only its
+    // envelope is pinned, because only its envelope exists.
+    if wire.declared {
+        for (name, format) in [("human", Format::Human), ("raw", Format::Raw)] {
+            let rendered = render(format);
+            cells.insert(key(name), rendered.stdout);
+            if !rendered.stderr.is_empty() {
+                cells.insert(key(&format!("{name} · stderr")), rendered.stderr);
+            }
         }
     }
     let json = render(Format::Json);

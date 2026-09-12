@@ -21,26 +21,27 @@ appended user.created #0
 0
 ∎
 ### event.batch_append · edge:committed_at=fixed · human
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"event_type":"user.updated","sequence":1},"status":"ok"}
+#  STATUS  EFFECT   EVENT_TYPE    SEQUENCE
+0  ok      created  user.created         0
+1  ok      created  user.updated         1
 ∎
 ### event.batch_append · edge:committed_at=fixed · raw
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"event_type":"user.updated","sequence":1},"status":"ok"}
+0	ok	created	user.created	0
+1	ok	created	user.updated	1
 ∎
 ### event.batch_append · edge:items=[] · human
 (empty)
 ∎
 ### event.batch_append · edge:items=[] · raw
-(empty)
 ∎
 ### event.batch_append · responses/v1/event/batch_append_ok.json · human
-{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
-{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"event_type":"user.updated","sequence":1},"status":"ok"}
+#  STATUS  EFFECT   EVENT_TYPE    SEQUENCE
+0  ok      created  user.created         0
+1  ok      created  user.updated         1
 ∎
 ### event.batch_append · responses/v1/event/batch_append_ok.json · raw
-{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
-{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"event_type":"user.updated","sequence":1},"status":"ok"}
+0	ok	created	user.created	0
+1	ok	created	user.updated	1
 ∎
 ### event.count · responses/v1/event/len_two.json · human
 2

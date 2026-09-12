@@ -83,6 +83,8 @@ enum Declared {
     Record(RecordDecl),
     /// `status_sections` for an action: one declared receipt.
     Receipt(ReceiptDecl),
+    /// `batch`: one row per item, around the declared cells.
+    Batch(BatchDecl),
 }
 
 /// A parsed `mutation_ack` declaration (output contract R1/R2).
@@ -188,6 +190,15 @@ struct Field {
     columns: Vec<Column>,
 }
 
+/// A parsed `batch` declaration (output contract R1-batch): the item rows
+/// and their declared cells, plus whether this command's items report an
+/// effect — a write says what each item did, a read has nothing to report.
+#[derive(Clone, Debug)]
+struct BatchDecl {
+    rows: RowsDecl,
+    effect: bool,
+}
+
 /// A parsed `receipt:` declaration under a status rule: an action's answer
 /// (output contract Q17).
 #[derive(Clone, Debug)]
@@ -269,8 +280,12 @@ impl Invocation {
                     return Err(invalid("a record rule declares no map".to_owned()))
                 }
             },
-            // S3b: `batch` still renders through the family path.
-            CliRenderRule::Batch => return Ok(Self::none()),
+            CliRenderRule::Batch => Declared::Batch(BatchDecl {
+                rows: RowsDecl::parse(display, None).map_err(invalid)?,
+                // A write batch reports what each item did; a read batch
+                // carries `effect: null` on every item and says nothing.
+                effect: entry.access == "write",
+            }),
         };
         Ok(Self {
             declared: Some(declared),
@@ -583,7 +598,7 @@ pub fn render_output(
     invocation: &Invocation,
     format: Format,
 ) -> Result<Rendered, CliError> {
-    let mut value = serde_json::to_value(output)?;
+    let value = serde_json::to_value(output)?;
     if matches!(format, Format::Json | Format::Pretty) {
         return Ok(Rendered::stdout(terminated(
             value_to_string(&value, format)?,
@@ -598,18 +613,18 @@ pub fn render_output(
         Some(Declared::Map(map)) => return Ok(render_map(&value, map, format)),
         Some(Declared::Record(record)) => return Ok(render_record(&value, record, format)),
         Some(Declared::Receipt(receipt)) => return Ok(render_receipt(&value, receipt, format)),
+        Some(Declared::Batch(batch)) => return Ok(render_batch(&value, batch, format)),
         None => {}
     }
-    // Human and raw formats show KV keys/values as text when possible. The
-    // decode happens here — with the typed `Output` in hand — so only fields
-    // the schema declares as `Bytes` are touched (see `humanize_kv_bytes`).
-    // JSON and pretty formats stay wire-true (base64).
-    humanize_kv_bytes(output, &mut value);
-    // #3112 S5: a wall-clock instant is only useful to a reader as a date.
-    // JSON and pretty stay wire-true (raw epoch micros) so machine
-    // consumers keep an unambiguous number.
-    humanize_committed_at(&mut value);
-    Ok(Rendered::stdout(value_to_string(&value, format)?))
+    // Everything else is a `display: bespoke` command — a hand-written arm.
+    // Every other command in the catalog reaches a reader through its
+    // declaration, so an output with no arm here is a renderer bug rather
+    // than a shape to guess at.
+    let (kind, data) = tagged_output(&value)
+        .ok_or_else(|| CliError::usage("an executor output carries no type tag"))?;
+    let mut stdout = String::new();
+    render_bespoke(kind, data, format, &mut stdout)?;
+    Ok(Rendered::stdout(stdout))
 }
 
 /// Output contract R1-table for a declared row list. Human prints the
@@ -692,6 +707,114 @@ fn page_notices(facts: &Value, shown: usize, page: PageDecl, out: &mut String) {
             );
         }
     }
+}
+
+/// Output contract R1-batch: one row per item — its position, how it
+/// landed, what it did (writes only), the command's declared cells, and the
+/// error of any item that carries one. A batch that did not come back wholly
+/// `ok` says how its items landed on stderr (Q11); a clean batch is the table
+/// alone, because the STATUS column already reads `ok` on every row.
+fn render_batch(envelope: &Value, decl: &BatchDecl, format: Format) -> Rendered {
+    // A batch always answers with a list, even an empty one: the wire type
+    // carries `items` unconditionally, so there is no absent case to report.
+    let items = envelope
+        .pointer(&decl.rows.rows)
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut stdout = String::new();
+    match items {
+        [] => {
+            if format == Format::Human {
+                line!(stdout, "(empty)");
+            }
+        }
+        items => {
+            // The error column appears for the whole batch or not at all: a
+            // reader should not have to notice a column that comes and goes.
+            let failed = items.iter().any(|item| item_error(item).is_some());
+            let mut headers = vec!["#".to_owned(), "STATUS".to_owned()];
+            if decl.effect {
+                headers.push("EFFECT".to_owned());
+            }
+            headers.extend(decl.rows.columns.iter().map(|column| column.header.clone()));
+            if failed {
+                headers.push("ERROR".to_owned());
+            }
+            let mut table = Table::new(headers);
+            for item in items {
+                let mut row = vec![
+                    cell(item.pointer("/index"), None, format),
+                    cell(item.pointer("/status"), None, format),
+                ];
+                if decl.effect {
+                    row.push(cell(item.pointer("/effect/kind"), None, format));
+                }
+                row.extend(
+                    decl.rows
+                        .columns
+                        .iter()
+                        .map(|column| cell(item.pointer(&column.path), column.as_, format)),
+                );
+                if failed {
+                    // The code, not the message: it is the stable name of
+                    // what went wrong, and the whole status is in `--json`.
+                    row.push(cell(item_error(item), None, format));
+                }
+                table.push(row);
+            }
+            stdout = match format {
+                Format::Human => table.human(),
+                Format::Raw | Format::Json | Format::Pretty => table.raw(),
+            };
+        }
+    }
+    let mut stderr = String::new();
+    if format == Format::Human {
+        batch_summary(envelope, items, &mut stderr);
+    }
+    Rendered { stdout, stderr }
+}
+
+/// The error code of an item that failed, when it carries one.
+fn item_error(item: &Value) -> Option<&Value> {
+    item.pointer("/error/code").filter(|code| !code.is_null())
+}
+
+/// How a batch's items landed, when some of them did not land well (Q11):
+/// the mode the engine ran, then a count per status in the wire's own words —
+/// `-- itemwise: 2 ok, 1 miss`.
+///
+/// The trigger is the rows themselves, not the envelope's `status`: a
+/// mutation batch reports `partial` when some items applied and others were
+/// no-ops, and every one of those items is `ok` — the EFFECT column has
+/// already said which was which, and `-- itemwise: 2 ok` after it is the
+/// noise this rule exists to prevent. A machine reads `status` from `--json`.
+fn batch_summary(envelope: &Value, items: &[Value], out: &mut String) {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for item in items {
+        let status = item
+            .pointer("/status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        *counts.entry(status).or_default() += 1;
+    }
+    // `ok` leads; the rest follow in the wire's own order, whatever statuses
+    // a future batch grows.
+    let ok = counts.remove("ok").unwrap_or(0);
+    if counts.is_empty() {
+        return;
+    }
+    let mut tally = vec![format!("{ok} ok")];
+    tally.extend(
+        counts
+            .iter()
+            .map(|(status, count)| format!("{count} {status}")),
+    );
+    let mode = envelope
+        .pointer("/data/mode")
+        .and_then(Value::as_str)
+        .unwrap_or("batch");
+    line!(out, "-- {mode}: {}", tally.join(", "));
 }
 
 /// Output contract R1-table for an analytics map: one row per node under
@@ -1183,20 +1306,32 @@ fn size_text(bytes: u64) -> String {
     }
 }
 
-/// Renders a already-serialized envelope `Value` to its display string for
-/// `format`, without touching stdio. Wasm-safe.
+/// Renders one of the CLI's own reports — `doctor`, `init`, `update`,
+/// `uninstall`, `ipc start/stop`, `agents …`, the REPL's context line: JSON
+/// the CLI composes for itself, which no `display:` declaration describes
+/// because none of them is an executor command. A reader gets the payload
+/// laid out, a script gets it on one line. Executor command output never
+/// comes here — it renders through `render_output` (output contract R1).
+/// Wasm-safe.
 pub fn value_to_string(value: &Value, format: Format) -> Result<String, CliError> {
     Ok(match format {
         Format::Json => serde_json::to_string(value)?,
         Format::Pretty => serde_json::to_string_pretty(value)?,
-        Format::Human => {
-            let mut out = String::new();
-            render_human(value, &mut out)?;
-            out
-        }
-        Format::Raw => {
-            let mut out = String::new();
-            render_raw(value, &mut out);
+        Format::Human | Format::Raw => {
+            // A report names itself the way an output does; the name is for a
+            // machine reading `--json`, so the lines show the payload.
+            let data = tagged_output(value).map_or(value, |(_, data)| data);
+            let mut out = match (data, format) {
+                (Value::Null, Format::Human) => "(nil)".to_owned(),
+                (Value::Null, _) => return Ok(String::new()),
+                (Value::Bool(_) | Value::Number(_) | Value::String(_), Format::Human) => {
+                    scalar_summary(data)
+                }
+                (Value::Bool(_) | Value::Number(_) | Value::String(_), _) => raw_scalar(data),
+                (_, Format::Human) => serde_json::to_string_pretty(data)?,
+                (_, _) => serde_json::to_string(data)?,
+            };
+            out.push('\n');
             out
         }
     })
@@ -1263,120 +1398,136 @@ pub(crate) fn render_error(status: &impl Serialize, format: Format) {
     eprint!("{}", error_line(status, format));
 }
 
-fn render_human(value: &Value, out: &mut String) -> Result<(), CliError> {
-    if let Some((kind, data)) = tagged_output(value) {
-        match kind {
-            "pong" => line!(
-                out,
-                "pong {}",
-                data.get("version").and_then(Value::as_str).unwrap_or("")
-            ),
-            "inference_generation" => print_inference_generation(data, true, out),
-            "inference_text" => line!(out, "{}", data.as_str().unwrap_or_default()),
-            "inference_token_ids" => print_token_ids(data, out),
-            "inference_embeddings" => print_embeddings_summary(data, out),
-            "inference_ranking" => print_ranking(data, out),
-            #[cfg(feature = "inference")]
-            "inference_models" => print_inference_models(data, out),
-            "inference_status" => print_inference_status(data, out),
-            "inference_model_pulled" => print_model_pulled(data, out),
-            "inference_unload_result" => line!(
-                out,
-                "{}",
-                if data.get("unloaded").and_then(Value::as_bool) == Some(true) {
-                    "unloaded"
-                } else {
-                    "no cached entry"
-                }
-            ),
-            "described" => print_described(data, out),
-            _ => render_human_data(data, out)?,
+/// Output contract R1 for the commands the catalog marks `display: bespoke`:
+/// `describe`, `ping`, `branch diff` and the ten inference arms, each with
+/// the shape its own surface earned. Both formats live side by side, so what
+/// a reader sees and what a script gets are decided in one place.
+///
+/// A tag with no arm is unreachable: every other command declares its display
+/// and renders from it, and `check-cli` refuses a command that declares
+/// neither. It is reported rather than guessed at, because guessing is what
+/// this contract exists to end.
+fn render_bespoke(
+    kind: &str,
+    data: &Value,
+    format: Format,
+    out: &mut String,
+) -> Result<(), CliError> {
+    let human = format == Format::Human;
+    match kind {
+        "pong" => {
+            let version = data.get("version").and_then(Value::as_str).unwrap_or("");
+            if human {
+                line!(out, "pong {version}");
+            } else {
+                // R1: a script asked what version answered, not for a sentence.
+                line!(out, "{version}");
+            }
         }
-        return Ok(());
-    }
-
-    render_human_data(value, out)
-}
-
-fn render_human_data(data: &Value, out: &mut String) -> Result<(), CliError> {
-    if data.is_null() {
-        line!(out, "(nil)");
-        return Ok(());
-    }
-
-    if let Some(items) = data.get("items").and_then(Value::as_array) {
-        print_items(items, out);
-        return Ok(());
-    }
-
-    if let Some(found) = data.get("found").and_then(Value::as_bool) {
-        if !found {
-            line!(out, "(nil)");
-            return Ok(());
+        "described" if human => print_described(data, out),
+        // The discovery surface is a record of facts; one line of it composes.
+        "described" => line!(out, "{}", raw_scalar(data)),
+        "branch_comparison" => print_branch_comparison(data, format, out),
+        "inference_generation" => print_inference_generation(data, human, out),
+        "inference_text" => line!(out, "{}", data.as_str().unwrap_or_default()),
+        "inference_token_ids" => print_token_ids(data, out),
+        "inference_embeddings" if human => print_embeddings_summary(data, out),
+        "inference_embeddings" => print_embedding_values(data, out),
+        "inference_ranking" if human => print_ranking(data, out),
+        "inference_ranking" => print_items(items_of(data), out),
+        #[cfg(feature = "inference")]
+        "inference_models" if human => print_inference_models(data, out),
+        "inference_models" => print_items(items_of(data), out),
+        "inference_status" if human => print_inference_status(data, out),
+        "inference_status" => line!(out, "{}", raw_scalar(data)),
+        "inference_model_pulled" if human => print_model_pulled(data, out),
+        "inference_model_pulled" => line!(out, "{}", raw_scalar(data)),
+        "inference_unload_result" if human => line!(
+            out,
+            "{}",
+            if data.get("unloaded").and_then(Value::as_bool) == Some(true) {
+                "unloaded"
+            } else {
+                "no cached entry"
+            }
+        ),
+        "inference_unload_result" => line!(out, "{}", raw_scalar(data)),
+        _ => {
+            return Err(CliError::usage(format!(
+                "no renderer for `{kind}` output: the command declares no display and has no arm"
+            )))
         }
-        if let Some(value) = data.get("value") {
-            line!(out, "{}", scalar_summary(value));
-            return Ok(());
-        }
-    }
-
-    match data {
-        Value::Bool(_) | Value::Number(_) | Value::String(_) => {
-            line!(out, "{}", scalar_summary(data));
-        }
-        _ => line!(out, "{}", serde_json::to_string_pretty(data)?),
     }
     Ok(())
 }
 
-fn render_raw(value: &Value, out: &mut String) {
-    let (kind, data) = tagged_output(value).unwrap_or(("", value));
+/// The rows of a list-shaped payload (`{items: [...]}`), or none.
+fn items_of(data: &Value) -> &[Value] {
+    data.get("items")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+}
 
-    if data.is_null() {
-        return;
-    }
-
-    match kind {
-        "inference_generation" => {
-            print_inference_generation(data, false, out);
-            return;
-        }
-        "inference_text" => {
-            line!(out, "{}", data.as_str().unwrap_or_default());
-            return;
-        }
-        "inference_token_ids" => {
-            print_token_ids(data, out);
-            return;
-        }
-        "inference_embeddings" => {
-            print_embedding_values(data, out);
-            return;
-        }
-        _ => {}
-    }
-
-    if let Some(items) = data.get("items").and_then(Value::as_array) {
-        print_items(items, out);
-        return;
-    }
-
-    if let Some(found) = data.get("found").and_then(Value::as_bool) {
-        if !found {
-            return;
-        }
-        if let Some(value) = data.get("value") {
-            line!(out, "{}", raw_scalar(value));
-            return;
+/// `branch diff`: the two branches compared, then one row per changed entity
+/// (output contract Q20). The rows live two levels down — a list per change
+/// kind inside a list of spaces — and the CHANGE column is which of those
+/// lists a row came from, so no `columns:` pointer can describe it and the
+/// command stays `bespoke`.
+fn print_branch_comparison(data: &Value, format: Format, out: &mut String) {
+    let branches = [("branch_a", "/branch_a"), ("branch_b", "/branch_b")];
+    if format == Format::Human {
+        let width = branches
+            .iter()
+            .map(|(label, _)| label.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (label, pointer) in branches {
+            push_field(
+                out,
+                0,
+                label,
+                width,
+                &cell(data.pointer(pointer), None, format).text,
+            );
         }
     }
-
-    if let Some(value) = data.get("value") {
-        line!(out, "{}", raw_scalar(value));
-        return;
+    let mut table = Table::new(
+        ["SPACE", "CAPABILITY", "CHANGE", "IDENTITY", "VERSION"]
+            .iter()
+            .map(|header| (*header).to_owned())
+            .collect(),
+    );
+    for space in data
+        .get("spaces")
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
+        for change in ["added", "removed", "modified"] {
+            for entity in space
+                .get(change)
+                .and_then(Value::as_array)
+                .unwrap_or(&Vec::new())
+            {
+                table.push(vec![
+                    cell(space.get("space"), None, format),
+                    cell(space.get("capability"), None, format),
+                    Cell::text(escape_cell(change)),
+                    cell(entity.get("identity"), Some(CliDisplayAs::Bytes), format),
+                    cell(entity.get("version"), None, format),
+                ]);
+            }
+        }
     }
-
-    line!(out, "{}", raw_scalar(data));
+    let rows = match format {
+        Format::Human => {
+            // The branch lines and the table are two answers to one question;
+            // a blank line keeps them from reading as one block.
+            out.push('\n');
+            table.human()
+        }
+        Format::Raw | Format::Json | Format::Pretty => table.raw(),
+    };
+    out.push_str(&rows);
 }
 
 fn tagged_output(value: &Value) -> Option<(&str, &Value)> {
@@ -1785,75 +1936,6 @@ fn count_field(value: &Value, field: &str) -> u64 {
     value.get(field).and_then(Value::as_u64).unwrap_or(0)
 }
 
-/// Rewrites schema-declared `Bytes` fields from base64 to readable text for
-/// human/raw output on the family path. A declared command never comes
-/// here: its columns say `as: bytes` themselves (`bytes_text`). Only
-/// `branch diff` and `branch merge` still arrive undeclared; S3b takes the
-/// first and this helper goes with the second.
-///
-/// Driven by the typed `Output` variant, never by value shape, so a genuine
-/// string that merely looks like base64 is never touched — the defect that
-/// retired the old integer-array heuristic. Fields whose bytes are not valid
-/// UTF-8 keep their base64 form.
-fn humanize_kv_bytes(output: &Output, value: &mut Value) {
-    let Some(data) = value.get_mut("data") else {
-        return;
-    };
-    match output {
-        // Branch diff/merge identities (and values) are logical keys —
-        // decode them like `kv history` does, so the one command whose job is
-        // to be read by a human is readable (#3061).
-        Output::BranchComparison(_) => {
-            if let Some(spaces) = data.get_mut("spaces").and_then(Value::as_array_mut) {
-                for space in spaces {
-                    for group in ["added", "removed", "modified"] {
-                        decode_bytes_in_array(space, group, &["identity"]);
-                    }
-                }
-            }
-        }
-        Output::BranchMerge(_) => {
-            decode_bytes_in_array(data, "applied", &["identity", "value"]);
-            decode_bytes_in_array(data, "deleted", &["identity", "value"]);
-            decode_bytes_in_array(
-                data,
-                "conflicts",
-                &["identity", "source_value", "target_value"],
-            );
-        }
-        // Batch outputs also carry Bytes but are not reachable from any CLI
-        // verb today; their base64 form is still correct if that changes.
-        _ => {}
-    }
-}
-
-/// Decodes `fields` on every object in `object[array_field]`, when that is an
-/// array. Used for the item lists KV, branch diff, and promotion outputs carry.
-fn decode_bytes_in_array(object: &mut Value, array_field: &str, fields: &[&str]) {
-    if let Some(items) = object.get_mut(array_field).and_then(Value::as_array_mut) {
-        for item in items {
-            decode_bytes_fields(item, fields);
-        }
-    }
-}
-
-fn decode_bytes_fields(object: &mut Value, fields: &[&str]) {
-    for field in fields {
-        if let Some(value) = object.get_mut(*field) {
-            decode_bytes_value(value);
-        }
-    }
-}
-
-fn decode_bytes_value(value: &mut Value) {
-    let Value::String(encoded) = value else {
-        return;
-    };
-    if let Some(text) = decode_base64_text(encoded) {
-        *value = Value::String(text);
-    }
-}
-
 /// The text a base64 wire string encodes, when its bytes are valid UTF-8.
 fn decode_base64_text(encoded: &str) -> Option<String> {
     let decoded = base64::engine::general_purpose::STANDARD
@@ -1935,50 +2017,22 @@ fn human_error_line(value: &Value) -> String {
     rendered
 }
 
-/// #3112 S5: renders every `committed_at` in an envelope as a local date-time
-/// with its offset.
-///
-/// Recurses because instants appear at several depths — on a write ack's
-/// commit receipt, and on every row of a history list. Only this one field is
-/// touched, and only for human-facing formats; anything that is not a number
-/// is left exactly as it is, so an already-formatted or absent value passes
-/// through untouched.
-fn humanize_committed_at(value: &mut Value) {
-    match value {
-        Value::Object(fields) => {
-            for (key, child) in fields.iter_mut() {
-                if key == "committed_at" {
-                    if let Some(micros) = child.as_u64() {
-                        *child = Value::String(crate::wall_clock::format_instant(micros));
-                    }
-                } else {
-                    humanize_committed_at(child);
-                }
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(humanize_committed_at),
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use strata_executor::{
         BranchComparisonItem, BranchItem, BranchParentItem, BranchStatus, Bytes, CommitDurability,
-        CommitReceipt, ComparedCapability, ComparedEntityItem, ConflictKind,
-        ConflictStrategyResult, EventData, EventVersionedData, GraphBfsData, GraphPagerankData,
-        GraphWccData, HistoryItem, HistoryResult, JsonHistoryItem, MutationEffect, Output,
-        PageInfo, PreviewConflictItem, PromotedEntityItem, PromotionOutcomeItem, PromotionStrategy,
-        SampleItem, SpaceComparisonItem, VectorMatch,
+        CommitReceipt, ComparedCapability, ComparedEntityItem, EventData, EventVersionedData,
+        GraphBfsData, GraphPagerankData, GraphWccData, HistoryItem, HistoryResult, JsonHistoryItem,
+        MutationEffect, Output, PageInfo, SampleItem, SpaceComparisonItem, VectorMatch,
     };
 
     use strata_executor::cli_metadata::{CliDisplay, CliDisplayAs, CliDisplayField};
     use strata_executor::{AdminPing, Command, MutationEffectKind};
 
     use super::{
-        cell, float_text, humanize_kv_bytes, is_miss, render_map, render_mutation_ack,
-        render_output, Format, Invocation, MapDecl, MutationAck, Rendered, RowsDecl,
+        cell, float_text, is_miss, render_map, render_mutation_ack, render_output, Format,
+        Invocation, MapDecl, MutationAck, Rendered, RowsDecl,
     };
     use crate::table::Cell;
     use serde_json::Value;
@@ -2213,11 +2267,13 @@ mod tests {
         let unknown = Invocation::for_wire("no_such_wire", Format::Human, || Ok(json!({})))
             .expect("an unknown wire renders through the family path");
         assert!(!unknown.is_declared());
-        // The rule S3b owns is declared in the catalog but not yet read: it
-        // still renders through the family path.
+        // Every rule in the catalog is read now, `batch` included.
         let batch = Invocation::for_wire("kv_batch_get", Format::Human, || Ok(json!({})))
             .expect("a declared command parses");
-        assert!(!batch.is_declared(), "the batch rule waits for S3b");
+        assert!(
+            batch.is_declared(),
+            "the batch rule renders from its columns"
+        );
     }
 
     #[test]
@@ -2998,8 +3054,7 @@ mod tests {
                 "graphs": [{"name": "net", "node_count": 2, "edge_count": 1}]
             }
         }});
-        let rendered =
-            super::value_to_string(&value, super::Format::Human).expect("describe renders");
+        let rendered = human(&value);
         assert_eq!(
             rendered,
             "StrataDB 1.1.0 · durable_local\n\
@@ -3020,8 +3075,7 @@ mod tests {
             "primitives": {"kv_count": 0, "json_count": 0, "event_count": 0,
                 "vector_collections": [], "graphs": []}
         }});
-        let rendered =
-            super::value_to_string(&value, super::Format::Human).expect("describe renders");
+        let rendered = human(&value);
         assert!(
             !rendered.contains("vector collections") && !rendered.contains("graphs:"),
             "empty inventories stay silent: {rendered}"
@@ -3029,6 +3083,7 @@ mod tests {
     }
 
     const RENDERED_TAGS: &[&str] = &[
+        "branch_comparison",
         "described",
         "inference_embeddings",
         "inference_generation",
@@ -3042,8 +3097,8 @@ mod tests {
         "pong",
     ];
 
-    /// Extracts the string literals that head a `match` arm (`"tag" =>` or
-    /// `"tag" | "tag2" =>`) from the render source — the tags the renderers
+    /// Extracts the string literals that head a `match` arm (`"tag" =>`,
+    /// `"tag" | "tag2" =>`, or `"tag" if <guard> =>`) from the render source — the tags the renderers
     /// special-case. Format-string arguments (`line!(out, "...")`) never sit
     /// before `=>`/`|`, so they are not mistaken for tags.
     fn dispatch_tags() -> std::collections::BTreeSet<String> {
@@ -3069,7 +3124,7 @@ mod tests {
             let rest = source[end + 1..].trim_start();
             let is_tag = !content.is_empty()
                 && content.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-                && (rest.starts_with("=>") || rest.starts_with('|'));
+                && (rest.starts_with("=>") || rest.starts_with('|') || rest.starts_with("if "));
             if is_tag {
                 tags.insert(content.to_owned());
             }
@@ -3105,9 +3160,167 @@ mod tests {
         ))
     }
 
+    /// A write batch's wire: every item carries its position, how it landed,
+    /// what it did, and the command's declared result.
+    fn kv_batch_put(items: &serde_json::Value) -> Output {
+        output(json!({
+            "type": "batch_results",
+            "data": {
+                "mode": "itemwise",
+                "status": "ok",
+                "applied": true,
+                "commit": null,
+                "items": items
+            }
+        }))
+    }
+
+    fn batch_item(index: u64, status: &str, kind: &str, key: &str) -> serde_json::Value {
+        json!({
+            "index": index,
+            "status": status,
+            "applied": true,
+            "effect": { "applied": true, "kind": kind, "matched": false, "affected_count": 1 },
+            "commit": null,
+            "result": { "key": key },
+            "error": null
+        })
+    }
+
     #[test]
-    fn branch_diff_identities_decode_for_human_output() {
-        // Every change group (added/removed/modified) decodes, not just one.
+    fn a_write_batch_is_one_row_per_item_saying_what_each_one_did() {
+        let batch = kv_batch_put(&json!([
+            batch_item(0, "ok", "created", "YQ=="),
+            batch_item(1, "ok", "updated", "Yg=="),
+        ]));
+        assert_eq!(
+            render_wire("kv_batch_put", &batch, Format::Human),
+            only_stdout(concat!(
+                "#  STATUS  EFFECT   KEY\n",
+                "0  ok      created  a\n",
+                "1  ok      updated  b\n",
+            )),
+            "a clean batch is the table alone (Q11)"
+        );
+        assert_eq!(
+            render_wire("kv_batch_put", &batch, Format::Raw),
+            only_stdout("0\tok\tcreated\ta\n1\tok\tupdated\tb\n")
+        );
+    }
+
+    #[test]
+    fn a_read_batch_has_no_effect_to_report_and_says_what_missed() {
+        let batch = output(json!({
+            "type": "batch_get_results",
+            "data": {
+                "mode": "itemwise",
+                "status": "partial",
+                "applied": false,
+                "commit": null,
+                "items": [
+                    {
+                        "index": 0, "status": "ok", "applied": false, "effect": null,
+                        "commit": null, "error": null,
+                        "result": { "found": true, "key": "YQ==", "value": "b25l", "version": 3, "timestamp": 3 }
+                    },
+                    {
+                        "index": 1, "status": "miss", "applied": false, "effect": null,
+                        "commit": null, "error": null,
+                        "result": { "found": false, "key": "bWlzc2luZw==", "value": null, "version": null, "timestamp": null }
+                    }
+                ]
+            }
+        }));
+        // A read applies nothing, so there is no EFFECT column to show.
+        assert_eq!(
+            render_wire("kv_batch_get", &batch, Format::Human),
+            both(
+                concat!(
+                    "#  STATUS  KEY      VERSION  VALUE\n",
+                    "0  ok      a              3  one\n",
+                    "1  miss    missing        -  -\n",
+                ),
+                "-- itemwise: 1 ok, 1 miss\n"
+            )
+        );
+        // A script reads the rows; the tally is a reader's line (R5).
+        assert_eq!(
+            render_wire("kv_batch_get", &batch, Format::Raw),
+            only_stdout("0\tok\ta\t3\tone\n1\tmiss\tmissing\t\t\n")
+        );
+    }
+
+    #[test]
+    fn a_failed_item_gives_the_whole_batch_an_error_column() {
+        let mut failed = batch_item(1, "error", "created", "Yg==");
+        failed["error"] = json!({
+            "class": "invalid_argument",
+            "code": "invalid_argument.executor.batch_item",
+            "message": "invalid key",
+            "retryable": false,
+            "retry_policy": "never",
+            "commit_outcome": "not_started",
+            "suggested_fix": "Correct the batch item input and retry.",
+            "docs_url": "https://stratadb.org/e/invalid_argument.executor.batch_item",
+            "reference_id": "err-test-000001",
+            "details": [],
+            "hints": []
+        });
+        let batch = kv_batch_put(&json!([batch_item(0, "ok", "created", "YQ=="), failed]));
+        // The column appears for the batch, not for the row: a reader should
+        // not have to notice a column that comes and goes.
+        assert_eq!(
+            render_wire("kv_batch_put", &batch, Format::Human),
+            both(
+                concat!(
+                    "#  STATUS  EFFECT   KEY  ERROR\n",
+                    "0  ok      created  a    -\n",
+                    "1  error   created  b    invalid_argument.executor.batch_item\n",
+                ),
+                "-- itemwise: 1 ok, 1 error\n"
+            ),
+            "the code names what went wrong; the whole status is in --json"
+        );
+    }
+
+    #[test]
+    fn a_batch_with_no_items_says_so_to_a_reader_and_nothing_to_a_script() {
+        let empty = kv_batch_put(&json!([]));
+        assert_eq!(
+            render_wire("kv_batch_put", &empty, Format::Human),
+            only_stdout("(empty)\n")
+        );
+        assert_eq!(
+            render_wire("kv_batch_put", &empty, Format::Raw),
+            only_stdout("")
+        );
+    }
+
+    #[test]
+    fn an_output_with_no_declaration_and_no_arm_is_reported_not_guessed_at() {
+        let mut out = String::new();
+        let error = super::render_bespoke("no_such_output", &json!({}), Format::Human, &mut out)
+            .expect_err("an unrenderable output is a renderer bug");
+        assert!(
+            error
+                .to_string()
+                .contains("no renderer for `no_such_output`"),
+            "{error}"
+        );
+        assert!(out.is_empty(), "nothing is guessed at: {out:?}");
+    }
+
+    #[test]
+    fn ping_answers_a_reader_with_a_sentence_and_a_script_with_the_version() {
+        let pong = json!({ "type": "pong", "data": { "version": "1.2.1" } });
+        assert_eq!(human(&pong), "pong 1.2.1\n");
+        assert_eq!(raw(&pong), "1.2.1\n");
+    }
+
+    #[test]
+    fn branch_diff_names_its_branches_then_one_row_per_change() {
+        // Every change group becomes rows of its own, named by the column the
+        // wire has no field for.
         let space = SpaceComparisonItem::new(
             "default".to_owned(),
             ComparedCapability::Kv,
@@ -3120,85 +3333,50 @@ mod tests {
             "cleaned".to_owned(),
             vec![space],
         ));
-        let mut value = serde_json::to_value(&output).expect("output serializes");
         assert_eq!(
-            value["data"]["spaces"][0]["modified"][0]["identity"],
-            json!("bWV0YTpzdXJ2aXZhbF9yYXRl")
+            render(&output, Format::Human),
+            only_stdout(concat!(
+                "branch_a  default\n",
+                "branch_b  cleaned\n",
+                "\n",
+                "SPACE    CAPABILITY  CHANGE    IDENTITY            VERSION\n",
+                "default  kv          added     added:key                42\n",
+                "default  kv          removed   removed:key              40\n",
+                "default  kv          modified  meta:survival_rate       41\n",
+            ))
         );
-        humanize_kv_bytes(&output, &mut value);
-        let space = &value["data"]["spaces"][0];
-        assert_eq!(space["added"][0]["identity"], json!("added:key"));
-        assert_eq!(space["removed"][0]["identity"], json!("removed:key"));
+        // A script gets the rows alone: the two branch names are what it asked
+        // for, and every row repeats them.
         assert_eq!(
-            space["modified"][0]["identity"],
-            json!("meta:survival_rate")
+            render(&output, Format::Raw),
+            only_stdout(concat!(
+                "default\tkv\tadded\tadded:key\t42\n",
+                "default\tkv\tremoved\tremoved:key\t40\n",
+                "default\tkv\tmodified\tmeta:survival_rate\t41\n",
+            ))
         );
     }
 
     #[test]
     fn branch_diff_non_utf8_identity_keeps_base64() {
-        // Direction control: a non-UTF-8 identity falls back to base64.
+        // Direction control: an identity that is not text is labelled for a
+        // reader and bare for a script, like every other declared byte cell.
         let output = kv_comparison(vec![ComparedEntityItem::new(
             Bytes::new(vec![0xff, 0xfe]),
             1,
         )]);
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        humanize_kv_bytes(&output, &mut value);
-        assert_eq!(
-            value["data"]["spaces"][0]["modified"][0]["identity"],
-            json!("//4=")
+        assert!(
+            render(&output, Format::Human)
+                .stdout
+                .contains("base64://4="),
+            "{:?}",
+            render(&output, Format::Human).stdout
         );
-    }
-
-    #[test]
-    fn branch_merge_identities_and_values_decode() {
-        // applied (identity + value), deleted (identity, no value), and any
-        // conflicts (identity + both sides) all decode.
-        let applied = PromotedEntityItem::new(
-            ComparedCapability::Kv,
-            "default".to_owned(),
-            bytes("meta:survival_rate"),
-            Some(bytes("0.62")),
+        assert!(
+            render(&output, Format::Raw).stdout.contains("\t//4=\t"),
+            "{:?}",
+            render(&output, Format::Raw).stdout
         );
-        let deleted = PromotedEntityItem::new(
-            ComparedCapability::Kv,
-            "default".to_owned(),
-            bytes("meta:stale_key"),
-            None,
-        );
-        let conflict = PreviewConflictItem::new(
-            ComparedCapability::Kv,
-            "default".to_owned(),
-            bytes("meta:disputed"),
-            Some(bytes("mine")),
-            Some(bytes("theirs")),
-            ConflictKind::ValueDivergence,
-            ConflictStrategyResult::SourceWins,
-        );
-        let output = Output::BranchMerge(PromotionOutcomeItem::new(
-            "cleaned".to_owned(),
-            "default".to_owned(),
-            10,
-            PromotionStrategy::SourceWins,
-            Some(44),
-            Some(94),
-            vec![applied],
-            vec![deleted],
-            vec![conflict],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ));
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        humanize_kv_bytes(&output, &mut value);
-        let data = &value["data"];
-        assert_eq!(data["applied"][0]["identity"], json!("meta:survival_rate"));
-        assert_eq!(data["applied"][0]["value"], json!("0.62"));
-        assert_eq!(data["deleted"][0]["identity"], json!("meta:stale_key"));
-        assert_eq!(data["conflicts"][0]["identity"], json!("meta:disputed"));
-        assert_eq!(data["conflicts"][0]["source_value"], json!("mine"));
-        assert_eq!(data["conflicts"][0]["target_value"], json!("theirs"));
     }
 
     #[test]
@@ -3221,16 +3399,21 @@ mod tests {
         );
     }
 
-    fn human(value: &serde_json::Value) -> String {
+    /// Renders a tagged output through its hand-written arm, the way
+    /// `render_output` does for a `display: bespoke` command.
+    fn bespoke(value: &serde_json::Value, format: Format) -> String {
+        let (kind, data) = super::tagged_output(value).expect("a tagged output");
         let mut out = String::new();
-        super::render_human(value, &mut out).expect("render_human");
+        super::render_bespoke(kind, data, format, &mut out).expect("a bespoke arm renders");
         out
     }
 
+    fn human(value: &serde_json::Value) -> String {
+        bespoke(value, Format::Human)
+    }
+
     fn raw(value: &serde_json::Value) -> String {
-        let mut out = String::new();
-        super::render_raw(value, &mut out);
-        out
+        bespoke(value, Format::Raw)
     }
 
     /// A wire record, read back into the typed `Output` the binary renders —
@@ -3882,11 +4065,32 @@ mod tests {
     }
 
     #[test]
-    fn human_data_generic_items_empty_and_nil() {
-        let items = json!({ "items": [1, 2] });
-        assert_eq!(human(&items), "1\n2\n");
-        let empty = json!({ "items": [] });
-        assert_eq!(human(&empty), "(empty)\n");
-        assert_eq!(human(&serde_json::Value::Null), "(nil)\n");
+    fn a_cli_report_shows_its_payload_not_its_envelope() {
+        // `doctor`, `init`, `ipc start`, the REPL's context line: the CLI's own
+        // JSON, which no declaration describes. The name is for `--json`; the
+        // lines show what it carries.
+        let report = json!({ "type": "doctor", "data": { "binary": "1.2.1" } });
+        assert_eq!(
+            super::value_to_string(&report, Format::Human).expect("renders"),
+            "{\n  \"binary\": \"1.2.1\"\n}\n"
+        );
+        assert_eq!(
+            super::value_to_string(&report, Format::Raw).expect("renders"),
+            "{\"binary\":\"1.2.1\"}\n"
+        );
+        // A scalar payload reads as itself, and an absent one says so.
+        let scalar = json!({ "type": "ipc_stopped", "data": true });
+        assert_eq!(
+            super::value_to_string(&scalar, Format::Human).expect("renders"),
+            "true\n"
+        );
+        assert_eq!(
+            super::value_to_string(&json!(null), Format::Human).expect("renders"),
+            "(nil)\n"
+        );
+        assert_eq!(
+            super::value_to_string(&json!(null), Format::Raw).expect("renders"),
+            ""
+        );
     }
 }
