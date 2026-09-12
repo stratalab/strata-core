@@ -2852,6 +2852,11 @@ pub fn command_from_line(
     }
     let argv = std::iter::once("strata".to_owned()).chain(tokens);
     let cli = Cli::try_parse_from(argv).map_err(|error| error.render().to_string())?;
+    // Session arguments (`--db`, `--cache`, …) parse but cannot be honoured
+    // inside a session (#3327): refuse, never answer from the current one.
+    if let Some(refusal) = cli.line_refusal() {
+        return Err(refusal.to_string());
+    }
     let format = cli.output_format();
     let Some(command) = cli.command else {
         return Err("type a command, e.g. `kv put greeting hello`".to_owned());
@@ -3330,6 +3335,126 @@ mod tests {
         assert_eq!(format("--output-format pretty kv get k"), Format::Pretty);
         // Conflicting flags are a parse error, as on the command line.
         assert!(command_from_line("--json --raw kv get k", None, None).is_err());
+    }
+
+    #[test]
+    fn line_refusal_names_each_session_argument() {
+        // #3327: the truth table on the shared helper — every session
+        // argument the grammar accepts on a line is named back, by kind.
+        use options::LineRefusal;
+        let refusal = |line: &str| {
+            let argv = std::iter::once("strata").chain(line.split_whitespace());
+            Cli::try_parse_from(argv).expect(line).line_refusal()
+        };
+        let flag = |line: &str| match refusal(line) {
+            Some(LineRefusal::SessionFlag { flag, .. }) => flag,
+            other => panic!("{line}: expected a session-flag refusal, got {other:?}"),
+        };
+        // (Session flags are not clap globals, so after the verb they are
+        // already an unknown-argument parse error; only the leading position
+        // parses and needs refusing.)
+        assert_eq!(flag("--db /elsewhere kv get k"), "--db");
+        assert_eq!(flag("--cache kv get k"), "--cache");
+        assert_eq!(flag("--durability always kv put k v"), "--durability");
+        assert_eq!(flag("--ipc client kv get k"), "--ipc");
+        assert_eq!(flag("--read-only kv put k v"), "--read-only");
+        // A session flag with no command at all is still the flag's refusal.
+        assert_eq!(flag("--cache"), "--cache");
+        // The positional database path: a command behind it is a path
+        // refusal; a lone word is a typo'd verb.
+        assert_eq!(
+            refusal("/elsewhere kv get k"),
+            Some(LineRefusal::DatabasePath("/elsewhere".to_owned()))
+        );
+        assert_eq!(
+            refusal("foo"),
+            Some(LineRefusal::NotACommand("foo".to_owned()))
+        );
+        // Direction control: per-command globals and plain commands pass.
+        for line in [
+            "kv get k",
+            "--branch feature kv get k",
+            "--space s kv get k",
+            "--json kv get k",
+            "--raw kv get k",
+            "--output-format pretty kv get k",
+            "--json",
+        ] {
+            assert_eq!(refusal(line), None, "{line} must not be refused");
+        }
+    }
+
+    #[test]
+    fn line_refusals_name_the_argument_and_the_new_session() {
+        // Each refusal's text carries what the reader needs: the argument
+        // that was refused and, for a session argument, the invocation that
+        // opens a session with it.
+        use options::LineRefusal;
+        let flag = LineRefusal::SessionFlag {
+            flag: "--db",
+            usage: "--db <PATH>",
+        }
+        .to_string();
+        assert!(
+            flag.contains("`--db`") && flag.contains("`strata --db <PATH> <command>`"),
+            "{flag}"
+        );
+        let path = LineRefusal::DatabasePath("/elsewhere".to_owned()).to_string();
+        assert!(
+            path.contains("`/elsewhere`") && path.contains("`strata /elsewhere <command>`"),
+            "{path}"
+        );
+        let word = LineRefusal::NotACommand("foo".to_owned()).to_string();
+        assert!(word.contains("`foo`") && word.contains("`help`"), "{word}");
+    }
+
+    #[test]
+    fn command_from_line_refuses_session_arguments() {
+        // #3327 at the call site: the playground's parser returns the refusal
+        // as the text to display, naming the argument, instead of dropping
+        // it and parsing a command that would run against the session.
+        for (line, named) in [
+            ("--db /elsewhere kv get k", "`--db`"),
+            ("--cache kv get k", "`--cache`"),
+            ("--durability always kv put k v", "`--durability`"),
+            ("--ipc off kv get k", "`--ipc`"),
+            ("--read-only kv put k v", "`--read-only`"),
+            ("/elsewhere kv get k", "`/elsewhere`"),
+            ("foo", "`foo`"),
+        ] {
+            let error = command_from_line(line, None, None).expect_err(line);
+            assert!(
+                error.contains(named),
+                "{line}: refusal must name {named}: {error}"
+            );
+        }
+        // Direction control: the per-command globals still parse.
+        assert!(
+            command_from_line("--branch feature --space s --json kv get k", None, None).is_ok()
+        );
+    }
+
+    #[test]
+    fn run_line_refuses_session_arguments_instead_of_answering_from_the_session() {
+        // The user-visible defect: `--db /elsewhere kv get greeting` answered
+        // `hello` from the session's database; `--read-only kv put` wrote.
+        let mut executor = Executor::open_cache().expect("cache executor opens");
+        let run = |executor: &mut Executor, line: &str| run_line(executor, line).expect(line);
+        assert_eq!(
+            run(&mut executor, "kv put greeting hello"),
+            "created greeting applied=true\n"
+        );
+        let refused = run(&mut executor, "--db /elsewhere kv get greeting");
+        assert!(refused.contains("`--db`"), "{refused}");
+        let refused = run(&mut executor, "--read-only kv put greeting changed");
+        assert!(refused.contains("`--read-only`"), "{refused}");
+        assert_eq!(
+            run(&mut executor, "kv get greeting"),
+            "hello\n",
+            "the refused write must not have happened"
+        );
+        let refused = run(&mut executor, "descrbe");
+        assert!(refused.contains("`descrbe`"), "{refused}");
     }
 
     #[test]

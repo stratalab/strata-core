@@ -392,6 +392,60 @@ fn piped_repl_commands_execute_and_persist_durably() {
     assert_eq!(stdout(&get).trim(), "42");
 }
 
+#[test]
+fn piped_repl_refuses_session_arguments_on_a_line() {
+    // #3327: a session argument on a line used to parse and be ignored —
+    // `--db /elsewhere kv get a` answered from this database and
+    // `--read-only kv put` wrote. Each such line is now an error naming the
+    // argument, the command does not run, and the session exits non-zero.
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("tmp");
+    let db = db_arg(dir.path());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_strata"))
+        .args(["--db", &db])
+        .env_remove("STRATA_DB")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn repl");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            b"kv put a 1\n--read-only kv put a 2\n--db /elsewhere kv get a\n--cache kv get a\nfoo\nkv get a\n",
+        )
+        .expect("pipe commands");
+    let output = child.wait_with_output().expect("repl completes on EOF");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a refused line is a pipe error: {output:?}"
+    );
+    let out = String::from_utf8_lossy(&output.stdout).into_owned();
+    let err = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        ["created a applied=true", "1"],
+        "only the plain lines ran, and the refused write did not: {out}\n{err}"
+    );
+    let refusals: Vec<&str> = err
+        .lines()
+        .filter(|line| line.starts_with("error: "))
+        .collect();
+    assert_eq!(refusals.len(), 4, "one refusal per offending line: {err}");
+    for (refusal, named) in refusals
+        .iter()
+        .zip(["`--read-only`", "`--db`", "`--cache`", "`foo`"])
+    {
+        assert!(
+            refusal.contains(named),
+            "refusal must name {named}: {refusal}"
+        );
+    }
+}
+
 // --- init / observability ---------------------------------------------------
 
 #[test]

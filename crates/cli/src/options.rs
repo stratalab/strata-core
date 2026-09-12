@@ -124,6 +124,73 @@ impl Cli {
             self.format.unwrap_or(Format::Human)
         }
     }
+
+    /// Why a line typed inside a session (the REPL, the playground) cannot be
+    /// honoured as parsed, or `None` when it can. The top-level grammar is the
+    /// binary's, so a line parses the session arguments — the database target
+    /// and how it is opened — as readily as a command's own flags; a reader
+    /// that picked only the fields it wanted silently answered `--db
+    /// /elsewhere kv get k` from the current database (#3327). Both line
+    /// readers ask here right after the parse.
+    pub(crate) fn line_refusal(&self) -> Option<LineRefusal> {
+        let session_flags = [
+            ("--db", "--db <PATH>", self.db.is_some()),
+            ("--cache", "--cache", self.cache),
+            (
+                "--durability",
+                "--durability <MODE>",
+                self.durability.is_some(),
+            ),
+            ("--ipc", "--ipc <MODE>", self.ipc.is_some()),
+            ("--read-only", "--read-only", self.read_only),
+        ];
+        if let Some((flag, usage, _)) = session_flags.into_iter().find(|(_, _, set)| *set) {
+            return Some(LineRefusal::SessionFlag { flag, usage });
+        }
+        let path = self.db_path.as_ref()?.display().to_string();
+        Some(if self.command.is_some() {
+            LineRefusal::DatabasePath(path)
+        } else {
+            // A lone word the grammar could only read as the positional
+            // database path is far more likely a typo'd verb.
+            LineRefusal::NotACommand(path)
+        })
+    }
+}
+
+/// The reason a session line is refused rather than run: it carried an
+/// argument that opens a session, which cannot change from inside one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LineRefusal {
+    /// A session flag (`--db`, `--cache`, `--durability`, `--ipc`,
+    /// `--read-only`), with its usage form for the suggested new session.
+    SessionFlag {
+        flag: &'static str,
+        usage: &'static str,
+    },
+    /// A positional database path in front of a command.
+    DatabasePath(String),
+    /// A lone word that names no command (the grammar read it as a database
+    /// path).
+    NotACommand(String),
+}
+
+impl std::fmt::Display for LineRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionFlag { flag, usage } => write!(
+                f,
+                "`{flag}` opens a session and cannot change inside one; start a new session with `strata {usage} <command>`"
+            ),
+            Self::DatabasePath(path) => write!(
+                f,
+                "`{path}` was read as a database path, which opens a session and cannot change inside one; start a new session with `strata {path} <command>`"
+            ),
+            Self::NotACommand(word) => {
+                write!(f, "`{word}` is not a strata command; try `help`")
+            }
+        }
+    }
 }
 
 /// Top-level command families.

@@ -226,6 +226,23 @@ fn execute_cli_renders_failures_in_the_chosen_format() {
 }
 
 #[wasm_bindgen_test]
+fn execute_cli_refuses_session_arguments_on_a_line() {
+    // #3327: a session argument on a playground line is refused by name, and
+    // the command behind it does not run against the browser's database.
+    let mut session = StrataSession::new().expect("session opens");
+    execute_cli(&mut session, "kv put greeting hello");
+    let refused = execute_cli(&mut session, "--db /elsewhere kv get greeting");
+    assert!(refused.contains("`--db`"), "{refused}");
+    let refused = execute_cli(&mut session, "--read-only kv put greeting changed");
+    assert!(refused.contains("`--read-only`"), "{refused}");
+    assert_eq!(
+        execute_cli(&mut session, "--raw kv get greeting"),
+        "hello\n",
+        "the refused write must not have happened"
+    );
+}
+
+#[wasm_bindgen_test]
 fn engine_version_reports_a_non_empty_semver() {
     let version = engine_version();
     assert!(!version.is_empty(), "version must be reported");

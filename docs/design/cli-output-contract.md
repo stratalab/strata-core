@@ -157,6 +157,16 @@ human.) There is no stderr and no exit code in the browser, so whatever the
 human contract says about channels must also read correctly when both
 channels are one stream.
 
+Both line readers — this one and the REPL's `parse_line` — parse a line with
+the binary's whole top-level grammar, which accepts the *session* arguments
+(the positional database path, `--db`, `--cache`, `--durability`, `--ipc`,
+`--read-only`) as readily as a command's own flags. A line cannot change the
+session it runs in, so `Cli::line_refusal` refuses such a line by name (a
+lone word the grammar could only read as a database path is reported as
+"not a strata command") and the command behind it never runs; before #3327
+each reader picked the fields it wanted and answered `--db /elsewhere kv get
+k` from the current database.
+
 ### 2.5 What the tests reach
 
 - `rendered_tag_inventory_matches_dispatch_arms` (`render.rs` tests) pins
@@ -656,6 +666,7 @@ a visible CLI change and carries release notes in the PR body.
 |---|---|---|---|
 | **S0** (three PRs under the ≤1,500-LOC rule) | **S0a** — the matrix (§5.2: in-process, binary, examples cross-check; playground cells come with #3312), blessed on today's output; the three plants; both design documents committed. **S0b** — `render:` per kind in `kinds.yaml` and `display:` per command in `commands/*.yaml` (R2 as amended: `receipt`/`identity`/`noun`, `value`, `fields`, `columns`, `map`, `header`, `as`, `sort`, or `bespoke`), resolved into `cli-command-index.json` and **declared and guarded but not yet read** by the renderer (so the declaration review happens on a PR that changes no output), with the guard that `command-index.json` never carries it (the SDK boundary). **S0c** — the #3313 `check` guard (family ⇔ schema) with its shrink-only `response-model-divergences.yaml`, `wire_status: transitional` on the divergent rows, and the declarations that are simply wrong corrected (Q13) — a docs-only change to `Returns:` | none (docs `Returns:` lines change in S0c) | #3313 asks 1–2 |
 | **#3312** (its own small PR, before S1) | `command_from_line` returns the format with the command; `execute_cli` renders with it; playground cells added | none | #3312 |
+| **#3327** (its own small PR, before S1) | session arguments on a REPL/playground line are refused by name from one shared `Cli::line_refusal`; a typo'd lone verb is "not a strata command" instead of silently ignored | none (CLI text; a refused pipe line exits 1 as any pipe error does; release note) | #3327 |
 | **S1** | R1 `mutation_ack` rule from the declaration; R5 stderr line for `applied: false` (exit stays 0); R4 raw identity for writes and the `--raw` help text rewritten to "shell-composable"; `mutation_summary` deleted | none (CLI text; exit codes unchanged; release note) | #3306 (writes, `--raw` writes) |
 | **S2** | R1-table; `page`, `history`, `search`, `analytics` rules from `display.columns`; R3 dates in cells; hint to stderr; raw identities | none (release note) | #3306 (lists, dates), #3205 §3/§5 |
 | **S3** | `status_sections` for `StatusResponse` and record `Maybe`; `batch` rule; `render_human_data` and the JSON fallback **deleted**; `check` refuses an undeclared shape | none (release note) | #3306 (admin), #3205 §1/§2/§4 |
