@@ -71,6 +71,37 @@ fn pipe(args: &[&str], script: &[u8]) -> Output {
 
 // --- durable cross-process execution -----------------------------------
 
+/// #3339: the CLI's own reports are not commands and have no declaration, so
+/// their rendering is only proven through the binary that prints them.
+#[test]
+fn a_cli_report_prints_lines_not_json() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let home = dir.path().display().to_string();
+    let show = strata_env(&["config", "show"], &[("HOME", &home)]);
+    assert_ok(&show, "config show");
+    let lines = stdout(&show);
+    assert!(
+        lines.starts_with("hub.url  ") && lines.contains("\nsource   "),
+        "a report reads as a record block: {lines:?}"
+    );
+    assert!(!lines.contains('{'), "no JSON reaches a reader: {lines:?}");
+
+    let raw = strata_env(&["--raw", "config", "show"], &[("HOME", &home)]);
+    assert_ok(&raw, "config show --raw");
+    assert!(
+        stdout(&raw).starts_with("hub.url\t"),
+        "a script reads key<TAB>value: {:?}",
+        stdout(&raw)
+    );
+
+    // `--json` is untouched: the envelope is the report.
+    let json = strata_env(&["--json", "config", "show"], &[("HOME", &home)]);
+    assert_ok(&json, "config show --json");
+    let envelope: serde_json::Value =
+        serde_json::from_str(stdout(&json).trim()).expect("an envelope");
+    assert!(envelope.get("hub.url").is_some(), "envelope: {envelope}");
+}
+
 #[test]
 fn kv_round_trip_survives_across_processes() {
     let dir = tempfile::tempdir().expect("tmp");

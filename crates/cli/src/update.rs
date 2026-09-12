@@ -48,18 +48,14 @@ pub(crate) fn run_update(
 
     match decide(check_only, up_to_date, explicit) {
         Action::Report => {
-            if up_to_date {
-                eprintln!("strata is up to date ({CURRENT}).");
-            } else {
-                eprintln!("an update is available: {CURRENT} -> {wanted}  (run `strata update`)");
-            }
+            // What happened is the answer, and `render_report` prints it on
+            // stdout from this record (#3339) — not a sentence beside it.
             return Ok(json!({
                 "type": "update",
                 "data": { "current": CURRENT, "latest": wanted, "update_available": !up_to_date, "changed": false }
             }));
         }
         Action::AlreadyCurrent => {
-            eprintln!("strata is already up to date ({CURRENT}).");
             return Ok(json!({
                 "type": "update",
                 "data": { "current": CURRENT, "latest": wanted, "update_available": false, "changed": false }
@@ -70,7 +66,6 @@ pub(crate) fn run_update(
 
     install_release_asset(&exe, &wanted, &asset_name(&wanted, triple), triple)?;
 
-    eprintln!("updated strata {CURRENT} -> {wanted}");
     Ok(json!({
         "type": "update",
         "data": { "current": CURRENT, "latest": wanted, "update_available": false, "changed": true }
@@ -110,7 +105,6 @@ pub(crate) fn run_install_local() -> Result<Value, CliError> {
     })?;
 
     if has_local_execution() {
-        eprintln!("this build already runs local models ({CURRENT}).");
         return Ok(json!({
             "type": "inference_install_local",
             "data": { "version": CURRENT, "local_execution": true, "changed": false }
@@ -127,7 +121,6 @@ pub(crate) fn run_install_local() -> Result<Value, CliError> {
     let asset = local_asset_name(CURRENT, triple);
     install_release_asset(&exe, CURRENT, &asset, triple)?;
 
-    eprintln!("strata {CURRENT} now runs local models; `strata inference status` confirms it");
     Ok(json!({
         "type": "inference_install_local",
         "data": { "version": CURRENT, "local_execution": true, "changed": true }
