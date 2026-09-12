@@ -256,9 +256,13 @@ fn parse_line(line: &str) -> Result<ParsedLine, CliError> {
     let mut argv = Vec::with_capacity(words.len() + 1);
     argv.push("strata".to_owned());
     argv.extend(words);
-    Cli::try_parse_from(argv)
-        .map(|cli| ParsedLine::Command(Box::new(cli)))
-        .map_err(|error| CliError::usage(error.to_string()))
+    let cli = Cli::try_parse_from(argv).map_err(|error| CliError::usage(error.to_string()))?;
+    // Session arguments (`--db`, `--cache`, …) parse but cannot be honoured
+    // inside a session (#3327): refuse, never answer from the current one.
+    if let Some(refusal) = cli.line_refusal() {
+        return Err(CliError::usage(refusal.to_string()));
+    }
+    Ok(ParsedLine::Command(Box::new(cli)))
 }
 
 fn parse_use(words: &[String]) -> Result<ParsedLine, CliError> {
