@@ -143,30 +143,6 @@ fn unparseable(input: &str) -> String {
     )
 }
 
-/// Renders an instant as a readable local time with its offset, for human
-/// output.
-///
-/// The offset is always shown: without it the reader cannot tell which zone the
-/// time is in, which is the whole failure this feature exists to fix.
-///
-/// Microsecond precision is kept even though it is noisier to read, because a
-/// truncated date is a trap: it looks like a valid input, and feeding it back
-/// resolves to the commit BEFORE the one it came from — a silently wrong read
-/// rather than an error.
-pub(crate) fn format_instant(micros: u64) -> String {
-    i64::try_from(micros)
-        .ok()
-        .and_then(DateTime::from_timestamp_micros)
-        .map_or_else(
-            || micros.to_string(),
-            |utc| {
-                utc.with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M:%S%.6f %:z")
-                    .to_string()
-            },
-        )
-}
-
 /// Renders an instant as a UTC date to the microsecond, for a table cell
 /// (output contract Q3: `2026-09-10 20:19:44.123456 UTC`).
 ///
@@ -296,32 +272,6 @@ mod tests {
     fn a_pre_epoch_time_is_refused_rather_than_wrapped() {
         let error = parse_instant("1969-07-20T20:17:00Z").expect_err("must be refused");
         assert!(error.contains("before 1970"), "got: {error}");
-    }
-
-    /// Formatting always carries the offset, so a rendered time is never
-    /// ambiguous about which zone it is in.
-    #[test]
-    fn formatting_shows_the_zone_offset() {
-        let rendered = format_instant(1_788_732_596_132_961);
-        assert!(
-            rendered.contains('+') || rendered.contains('-'),
-            "rendered time must carry its offset: {rendered}"
-        );
-        assert!(rendered.starts_with("20"), "got: {rendered}");
-    }
-
-    /// Parsing and formatting are inverses at second precision, so a time read
-    /// off human output can be typed back in.
-    #[test]
-    fn a_rendered_time_parses_back_to_the_same_second() {
-        let original = 1_788_732_596_132_961;
-        let rendered = format_instant(original);
-        let reparsed = parse_instant(&rendered).expect("rendered output is accepted input");
-        assert_eq!(
-            reparsed, original,
-            "rendered {rendered} must name the SAME instant, to the microsecond — \
-             a truncated round trip resolves to the previous commit"
-        );
     }
 
     /// A table cell is the same UTC instant on every machine, to the

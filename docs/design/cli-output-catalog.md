@@ -54,7 +54,7 @@ Exit codes: 0 = the command did what it was asked (including `(nil)` / `(empty)`
 
 Q14, Q16, Q18 and the R4 rewording were decided 2026-09-11 (marked ✅); the second review round the same day **revised five things** (marked 🔁) — each is applied throughout the catalog below. The third round (same day, the go for S0) found **two places where this catalog contradicted the contract** and one polish item, all fixed (marked 🛠). Q15, Q17, Q19, Q20 stand as proposed unless the review says otherwise.
 
-- 🛠 **Successful read batches still showed `-- itemwise: 2 ok`.** A generator bug, not a design change: the reference implementation tested `applied == false` as its "atomic batch not applied" signal, and every *read* batch (`batch_get`, `batch_exists`) carries `applied: false` on the wire because a read applies nothing. The signal is the engine's own top-level `status` (`ok` / `partial` / `failed`) — one field, declared, and it already encodes "an item missed or failed, or the batch did not apply". The renderer in S2 reads that field and nothing else.
+- 🛠 **Successful read batches still showed `-- itemwise: 2 ok`.** A generator bug, not a design change: the reference implementation tested `applied == false` as its "atomic batch not applied" signal, and every *read* batch (`batch_get`, `batch_exists`) carries `applied: false` on the wire because a read applies nothing. *Built at S3b as the items' own `status`, not the envelope's: a mutation batch reports `partial` when some items applied and others were no-ops, and every one of those items is `ok` — reading the envelope would have printed `-- itemwise: 2 ok` under a table whose EFFECT column already said which was which. The envelope's `status` is what `--json` carries for a machine.*
 - 🛠 **Record-valued `Maybe<T>` had five `--raw` behaviours.** `vector get` printed compact JSON of `data`, `event get` the payload, `graph get-node` the properties, `graph get-edge` and `graph meta` a one-line TSV, `ontology get` compact JSON — sensible one by one, underivable as a family. Now one rule, and it is the same rule status objects already follow: a `read.get` declares either a **value** (`kv get`, `json get`, `config <key>` — human prints it, `--raw` prints it verbatim) or **fields** (a record — human prints the key/value block, `--raw` prints `key<TAB>value` lines of the same fields, Q16). No command-level `raw:` projection exists; the declaration that drives human mode drives raw mode. `graph get-edge --raw` is therefore `src<TAB>alice` / `edge_type<TAB>knows` / … rather than `alice<TAB>knows<TAB>bob<TAB>1.0`; a script that wants the row uses `cut -f2 | paste -s`, and one that wants the record uses `--json`.
 - 🛠 **`-- sampled 3 of 3` is gone.** A sample that returned the whole population needs no one's attention; the notice appears only when the sample is smaller than the population. This is the "diagnostics only on attention" principle applied to the last place it was not.
 
@@ -2155,7 +2155,7 @@ human proposed      branch_a  default
                     default  vector      added     base64:AAVub3Rlc24x        9
 raw today           {"branch_a":"default","branch_b":"experiment","spaces":[{"added":[],"capability":"kv","modified":[{"identity":"config","version":8}],"removed":[],"space":"default"},{"added":[{"identity":"\u0000\u0005notesn1","version":9}],"capability":"vector","modified":[],"removed":[],"space":"default"}]}
 raw proposed        default⇥kv⇥modified⇥config⇥8
-                    default⇥vector⇥added⇥base64:AAVub3Rlc24x⇥9
+                    default⇥vector⇥added⇥AAVub3Rlc24x⇥9
 --json (unchanged)  {"data":{"branch_a":"default","branch_b":"experiment","spaces":[{"added":[],"capability":"kv","modified":[{"identity":"Y29uZmln","version":8}],"removed":[],"space":"default"},{"added":[{"identity":"AAVub3Rlc24x","version":9}],"capability":"vector","modified":[],"removed":[],"space":"default"}]},"type":"branch_comparison"}
 ```
 
@@ -2641,7 +2641,7 @@ $ strata ping
 human today         pong 1.2.1
 human proposed      = unchanged
 raw today           {"version":"1.2.1"}
-raw proposed        = unchanged
+raw proposed        1.2.1
 --json (unchanged)  {"data":{"version":"1.2.1"},"type":"pong"}
 ```
 

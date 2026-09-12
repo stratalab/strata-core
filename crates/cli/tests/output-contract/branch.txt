@@ -25,27 +25,14 @@ deleted branch feature
 feature
 ∎
 ### branch.diff · responses/v1/branches/diff.json · human
-{
-  "branch_a": "default",
-  "branch_b": "feature",
-  "spaces": [
-    {
-      "added": [],
-      "capability": "kv",
-      "modified": [],
-      "removed": [
-        {
-          "identity": "a",
-          "version": 3
-        }
-      ],
-      "space": "default"
-    }
-  ]
-}
+branch_a  default
+branch_b  feature
+
+SPACE    CAPABILITY  CHANGE   IDENTITY  VERSION
+default  kv          removed  a               3
 ∎
 ### branch.diff · responses/v1/branches/diff.json · raw
-{"branch_a":"default","branch_b":"feature","spaces":[{"added":[],"capability":"kv","modified":[],"removed":[{"identity":"a","version":3}],"space":"default"}]}
+default	kv	removed	a	3
 ∎
 ### branch.fork · responses/v1/branches/fork.json · human
 forked feature-fork from default

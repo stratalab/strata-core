@@ -3830,18 +3830,25 @@ mod tests {
             .and_then(|details| details.size_bytes)
             .expect("a catalogued variant has a size");
 
-        let table = crate::render::value_to_string(
-            &serde_json::json!({
-                "type": "inference_models",
-                "data": { "items": [{
-                    "name": "miniLM", "task": "embed", "architecture": "bert",
-                    "default_quant": "f16", "is_local": false, "runnable": true,
-                    "size_bytes": size_bytes
-                }] }
-            }),
+        // Through the renderer the binary uses: `models list` is a
+        // `display: bespoke` command, so its table comes from its own arm.
+        let listed: strata_executor::Output = serde_json::from_value(serde_json::json!({
+            "type": "inference_models",
+            "data": { "items": [{
+                "name": "miniLM", "task": "embed", "architecture": "bert",
+                "default_quant": "f16", "is_local": false, "runnable": true,
+                "size_bytes": size_bytes, "embedding_dim": 384,
+                "hf_repo": "sentence-transformers/all-MiniLM-L6-v2", "local_path": null
+            }], "cursor": null, "has_more": false }
+        }))
+        .expect("the wire deserializes");
+        let table = crate::render::render_output(
+            &listed,
+            &crate::render::Invocation::none(),
             Format::Human,
         )
-        .expect("renders");
+        .expect("renders")
+        .stdout;
         let size = table.trim_end().rsplit('\t').next().expect("a size column");
         assert!(
             size.ends_with(" MB"),

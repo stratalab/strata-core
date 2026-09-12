@@ -1,74 +1,79 @@
 ### json.batch_delete · edge:committed_at=fixed · human
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":1,"durability":"not_durable","put_count":0,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"document_version":null},"status":"ok"}
-{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"document_version":null},"status":"ok"}
+#  STATUS  EFFECT     DOCUMENT_VERSION
+0  ok      deleted    -
+1  ok      not_found  -
 ∎
 ### json.batch_delete · edge:committed_at=fixed · raw
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":1,"durability":"not_durable","put_count":0,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"document_version":null},"status":"ok"}
-{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"document_version":null},"status":"ok"}
+0	ok	deleted	
+1	ok	not_found	
 ∎
 ### json.batch_delete · edge:items=[] · human
 (empty)
 ∎
 ### json.batch_delete · edge:items=[] · raw
-(empty)
 ∎
 ### json.batch_delete · responses/v1/json/batch_delete_partial.json · human
-{"applied":true,"commit":{"committed_at":null,"delete_count":1,"durability":"not_durable","put_count":0,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"document_version":null},"status":"ok"}
-{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"document_version":null},"status":"ok"}
+#  STATUS  EFFECT     DOCUMENT_VERSION
+0  ok      deleted    -
+1  ok      not_found  -
 ∎
 ### json.batch_delete · responses/v1/json/batch_delete_partial.json · raw
-{"applied":true,"commit":{"committed_at":null,"delete_count":1,"durability":"not_durable","put_count":0,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"deleted","matched":true},"error":null,"index":0,"result":{"document_version":null},"status":"ok"}
-{"applied":false,"commit":null,"effect":{"affected_count":0,"applied":false,"kind":"not_found","matched":false},"error":null,"index":1,"result":{"document_version":null},"status":"ok"}
+0	ok	deleted	
+1	ok	not_found	
 ∎
 ### json.batch_exists · edge:items=[] · human
 (empty)
 ∎
 ### json.batch_exists · edge:items=[] · raw
-(empty)
 ∎
 ### json.batch_exists · responses/v1/json/batch_exists.json · human
-{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"exists":true},"status":"ok"}
-{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"exists":false},"status":"ok"}
+#  STATUS  EXISTS
+0  ok      true
+1  ok      false
 ∎
 ### json.batch_exists · responses/v1/json/batch_exists.json · raw
-{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"exists":true},"status":"ok"}
-{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"exists":false},"status":"ok"}
+0	ok	true
+1	ok	false
 ∎
 ### json.batch_get · edge:items=[] · human
 (empty)
 ∎
 ### json.batch_get · edge:items=[] · raw
-(empty)
 ∎
 ### json.batch_get · responses/v1/json/batch_get_ok.json · human
-{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"document_version":1,"found":true,"timestamp":3,"value":"Ada","version":3},"status":"ok"}
-{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"document_version":null,"found":false,"timestamp":null,"value":null,"version":null},"status":"miss"}
+#  STATUS  DOCUMENT_VERSION  VERSION  VALUE
+0  ok                     1        3  Ada
+1  miss                   -        -  -
+∎
+### json.batch_get · responses/v1/json/batch_get_ok.json · human · stderr
+-- itemwise: 1 ok, 1 miss
 ∎
 ### json.batch_get · responses/v1/json/batch_get_ok.json · raw
-{"applied":false,"commit":null,"effect":null,"error":null,"index":0,"result":{"document_version":1,"found":true,"timestamp":3,"value":"Ada","version":3},"status":"ok"}
-{"applied":false,"commit":null,"effect":null,"error":null,"index":1,"result":{"document_version":null,"found":false,"timestamp":null,"value":null,"version":null},"status":"miss"}
+0	ok	1	3	Ada
+1	miss			
 ∎
 ### json.batch_set · edge:committed_at=fixed · human
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":2,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"document_version":1},"status":"ok"}
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":2,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"document_version":1},"status":"ok"}
+#  STATUS  EFFECT   DOCUMENT_VERSION
+0  ok      created                 1
+1  ok      created                 1
 ∎
 ### json.batch_set · edge:committed_at=fixed · raw
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":2,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"document_version":1},"status":"ok"}
-{"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":2,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"document_version":1},"status":"ok"}
+0	ok	created	1
+1	ok	created	1
 ∎
 ### json.batch_set · edge:items=[] · human
 (empty)
 ∎
 ### json.batch_set · edge:items=[] · raw
-(empty)
 ∎
 ### json.batch_set · responses/v1/json/batch_set_ok.json · human
-{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":2,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"document_version":1},"status":"ok"}
-{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":2,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"document_version":1},"status":"ok"}
+#  STATUS  EFFECT   DOCUMENT_VERSION
+0  ok      created                 1
+1  ok      created                 1
 ∎
 ### json.batch_set · responses/v1/json/batch_set_ok.json · raw
-{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":2,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"document_version":1},"status":"ok"}
-{"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":2,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":1,"result":{"document_version":1},"status":"ok"}
+0	ok	created	1
+1	ok	created	1
 ∎
 ### json.count · responses/v1/status/uint_count.json · human
 2
