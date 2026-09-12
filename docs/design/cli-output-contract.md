@@ -381,7 +381,9 @@ on the wire (Q15). Those are the only two `/request` pointers today.
 
 **Receipts.** A `receipt` is a template: literal text plus `{/pointer}`
 placeholders, each taking at most one filter — `|bytes` (a base64 payload
-shown as text), `|size` (a byte count with a unit), `|len` (an array's
+shown as text), `|size` (a byte count in decimal units — `135 B`, `41 kB`,
+`536.9 MB`, `6.7 GB`; one decimal, trimmed when it adds nothing, and a unit
+promoted when rounding fills it, #3335), `|len` (an array's
 length), `|plural:<noun>` (a count with its noun) — plus `{verb}`, which
 reads `/data/effect/kind` and is refused on a response without an `effect`
 (those acks — branch create/fork/merge, bulk insert, ontology freeze, index

@@ -1,5 +1,5 @@
 ### arrow.export · responses/v1/arrow/export_kv_csv.json · human
-exported 3 rows of kv to kv_out.csv (135 bytes)
+exported 3 rows of kv to kv_out.csv (135 B)
 ∎
 ### arrow.export · responses/v1/arrow/export_kv_csv.json · raw
 format	csv

@@ -44,7 +44,7 @@ default_branch	default
 branch_count	1
 ∎
 ### admin.hub_clone · responses/v1/admin/hub_clone.json · human
-cloned strata/titanic@default into ./titanic.strata (12 objects, 40960 bytes)
+cloned strata/titanic@default into ./titanic.strata (12 objects, 41 kB)
 ∎
 ### admin.hub_clone · responses/v1/admin/hub_clone.json · raw
 branch	default
@@ -63,7 +63,7 @@ branch_count    1
 space_count     1
 memory_budget
   source       derived_from_host
-  total        537 MB
+  total        536.9 MB
   usable_host  2.1 GB
 ∎
 ### admin.info · responses/v1/admin/info.json · raw

@@ -31,7 +31,7 @@
     "admin.info": [
       {
         "in": "strata info",
-        "out": "target          cache\nversion         masked\ndurable         false\ndefault_branch  default\nbranch_count    1\nspace_count     1\nmemory_budget\n  source       derived_from_host\n  total        0 bytes\n  usable_host  0 bytes",
+        "out": "target          cache\nversion         masked\ndurable         false\ndefault_branch  default\nbranch_count    1\nspace_count     1\nmemory_budget\n  source       derived_from_host\n  total        0 B\n  usable_host  0 B",
         "reproducible": false
       }
     ],
@@ -78,7 +78,7 @@
       },
       {
         "in": "strata command run --command-json '{\"format\":\"parquet\",\"path\":\"/tmp/exports/kv.parquet\",\"primitive\":\"kv\",\"type\":\"arrow_export\"}'",
-        "out": "exported 1 row of kv to masked (1915 bytes)",
+        "out": "exported 1 row of kv to masked (1.9 kB)",
         "reproducible": false,
         "note": "One file per primitive; Parquet by default."
       },
@@ -106,7 +106,7 @@
       },
       {
         "in": "strata command run --command-json '{\"format\":\"parquet\",\"path\":\"/tmp/exports/kv.parquet\",\"primitive\":\"kv\",\"type\":\"arrow_export\"}'",
-        "out": "exported 1 row of kv to masked (1915 bytes)",
+        "out": "exported 1 row of kv to masked (1.9 kB)",
         "reproducible": false
       },
       {
@@ -1245,7 +1245,7 @@
     "inference.models.list": [
       {
         "in": "strata inference models list",
-        "out": "miniLM\tembed\tbert\tf16\tunavailable\t45 MB\nnomic-embed\tembed\tnomic-bert\tq8_0\tunavailable\t260 MB\nbge-m3\tembed\txlm-roberta\tq8_0\tunavailable\t1.2 GB\ngemma-embed\tembed\tgemma3\tq8_0\tunavailable\t320 MB\ngpt2\tgenerate\tgpt2\tq8_0\tunavailable\t178 MB\ntinyllama\tgenerate\tllama\tq4_k_m\tunavailable\t670 MB\nqwen3:1.7b\tgenerate\tqwen3\tq8_0\tunavailable\t2.0 GB\ngemma3:1b\tgenerate\tgemma3\tq4_k_m\tunavailable\t780 MB\nphi3.5\tgenerate\tphi3\tq4_k_m\tunavailable\t2.4 GB\nllama3.1:8b\tgenerate\tllama\tq4_k_m\tunavailable\t4.6 GB\nqwen3:8b\tgenerate\tqwen3\tq4_k_m\tunavailable\t4.7 GB\n\n11 model(s) unavailable: this build cannot run local models -- a bare name like these means a local model. Add local execution with `strata inference install-local`, or name a cloud model instead (`openai:<model>`, `google:<model>`, `anthropic:<model>`).",
+        "out": "miniLM\tembed\tbert\tf16\tunavailable\t45 MB\nnomic-embed\tembed\tnomic-bert\tq8_0\tunavailable\t260 MB\nbge-m3\tembed\txlm-roberta\tq8_0\tunavailable\t1.2 GB\ngemma-embed\tembed\tgemma3\tq8_0\tunavailable\t320 MB\ngpt2\tgenerate\tgpt2\tq8_0\tunavailable\t178 MB\ntinyllama\tgenerate\tllama\tq4_k_m\tunavailable\t670 MB\nqwen3:1.7b\tgenerate\tqwen3\tq8_0\tunavailable\t2 GB\ngemma3:1b\tgenerate\tgemma3\tq4_k_m\tunavailable\t780 MB\nphi3.5\tgenerate\tphi3\tq4_k_m\tunavailable\t2.4 GB\nllama3.1:8b\tgenerate\tllama\tq4_k_m\tunavailable\t4.6 GB\nqwen3:8b\tgenerate\tqwen3\tq4_k_m\tunavailable\t4.7 GB\n\n11 model(s) unavailable: this build cannot run local models -- a bare name like these means a local model. Add local execution with `strata inference install-local`, or name a cloud model instead (`openai:<model>`, `google:<model>`, `anthropic:<model>`).",
         "reproducible": true
       }
     ],
@@ -2082,7 +2082,7 @@
       },
       {
         "in": "strata command run --command-json '{\"collection\":\"docs\",\"k\":2,\"query\":[1.0,0.0,0.0],\"type\":\"vector_index_query\"}'",
-        "out": "KEY  SCORE  METADATA\na      1.0  -\nb      0.0  -\n\ndiagnostics\n  active_delta_count            0\n  active_delta_seal_threshold   16\n  active_delta_source_count     0\n  artifact_sources              -\n  collection                    docs\n  collection_exact_threshold    64\n  derived                       0 bytes\n  exact_fallback_count          0\n  exact_source_count            1\n  filtered_underfill_fallback   true\n  flat_source_count             0\n  hnsw_graph_builds             0\n  hnsw_memory_budget            67 MB\n  hnsw_source_count             0\n  indexed_source_count          0\n  indexed_vector_count          0\n  last_query_fallback_reason    collection_below_exact_threshold\n  last_query_used_index         false\n  manifest_generation           -\n  manifest_inherited_ref_count  0\n  manifest_owned_ref_count      0\n  manifest_ref_count            0\n  manifest_status               missing\n  overfetch_factor              4\n  policy_mode                   auto\n  resolved_index_kind_summary   exact\n  source_candidate_limit        18446744073709551615\n  source_flat_threshold         64\n  source_hnsw_threshold         18446744073709551615",
+        "out": "KEY  SCORE  METADATA\na      1.0  -\nb      0.0  -\n\ndiagnostics\n  active_delta_count            0\n  active_delta_seal_threshold   16\n  active_delta_source_count     0\n  artifact_sources              -\n  collection                    docs\n  collection_exact_threshold    64\n  derived                       0 B\n  exact_fallback_count          0\n  exact_source_count            1\n  filtered_underfill_fallback   true\n  flat_source_count             0\n  hnsw_graph_builds             0\n  hnsw_memory_budget            67.1 MB\n  hnsw_source_count             0\n  indexed_source_count          0\n  indexed_vector_count          0\n  last_query_fallback_reason    collection_below_exact_threshold\n  last_query_used_index         false\n  manifest_generation           -\n  manifest_inherited_ref_count  0\n  manifest_owned_ref_count      0\n  manifest_ref_count            0\n  manifest_status               missing\n  overfetch_factor              4\n  policy_mode                   auto\n  resolved_index_kind_summary   exact\n  source_candidate_limit        18446744073709551615\n  source_flat_threshold         64\n  source_hnsw_threshold         18446744073709551615",
         "reproducible": true
       }
     ],

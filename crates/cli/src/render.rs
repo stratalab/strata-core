@@ -1291,19 +1291,26 @@ fn plural_text(count: u64, noun: &str) -> String {
 /// `|size`: a byte count with a decimal unit — the same text the inference
 /// registry prints for a model (`format_model_size`), restated here because
 /// inference imports nothing from the workspace (Rule 3) and the CLI's
-/// non-inference builds cannot import it back.
+/// non-inference builds cannot import it back. The two are kept in step by
+/// `size_text_matches_the_inference_registry`.
 fn size_text(bytes: u64) -> String {
-    const GB: u64 = 1_000_000_000;
-    const MB: u64 = 1_000_000;
-    #[allow(clippy::cast_precision_loss)] // A byte count shown to one decimal.
-    let scaled = |unit: u64| bytes as f64 / unit as f64;
-    if bytes >= GB {
-        format!("{:.1} GB", scaled(GB))
-    } else if bytes >= MB {
-        format!("{:.0} MB", scaled(MB))
-    } else {
-        format!("{bytes} bytes")
+    // Decimal units, because a byte count a reader is shown is about scale,
+    // not about memory pages: 1 kB is 1000 bytes, as every disk and download
+    // says. One decimal, trimmed when it adds nothing (`1 kB`, not `1.0 kB`),
+    // and whole bytes below a kilobyte.
+    const UNITS: [(u64, &str); 3] = [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "kB")];
+    for (scale, unit) in UNITS {
+        #[allow(clippy::cast_precision_loss)] // A byte count shown to one decimal.
+        let scaled = bytes as f64 / scale as f64;
+        // Rounding decides the unit, so a count that reads as `1000 MB` after
+        // rounding is shown as `1 GB` instead.
+        let rounded = (scaled * 10.0).round() / 10.0;
+        if rounded >= 1.0 {
+            let text = format!("{rounded:.1}");
+            return format!("{} {unit}", text.strip_suffix(".0").unwrap_or(&text));
+        }
     }
+    format!("{bytes} B")
 }
 
 /// Renders one of the CLI's own reports — `doctor`, `init`, `update`,
@@ -2973,11 +2980,11 @@ mod tests {
         let doc = |n: u64, size: u64| json!({"type": "t", "data": {"items": [1, 2, 3], "n": n, "size": size}});
         assert_eq!(
             render_mutation_ack(&doc(1, 12), &ack, Format::Human),
-            only_stdout("3 items, 1 row, 12 bytes\n")
+            only_stdout("3 items, 1 row, 12 B\n")
         );
         assert_eq!(
             render_mutation_ack(&doc(0, 1_600_000), &ack, Format::Human),
-            only_stdout("3 items, 0 rows, 2 MB\n")
+            only_stdout("3 items, 0 rows, 1.6 MB\n")
         );
         assert_eq!(
             render_mutation_ack(&doc(2, 2_500_000_000), &ack, Format::Human),
@@ -3019,12 +3026,25 @@ mod tests {
     fn size_text_matches_the_inference_registry() {
         for bytes in [
             0,
+            1,
+            949,
+            // Every boundary the rule turns on: a unit's floor, a count that
+            // rounds up into the next unit, and one that stops just short.
             999,
+            1_000,
+            1_024,
+            40_960,
+            949_999,
+            999_999,
             1_000_000,
+            1_048_576,
             1_600_000,
+            67_108_864,
+            536_870_912,
             999_999_999,
             1_000_000_000,
             4_700_000_000,
+            26_646_880_256,
         ] {
             assert_eq!(
                 super::size_text(bytes),
@@ -3499,7 +3519,7 @@ mod tests {
                 "space_count     1\n",
                 "memory_budget\n",
                 "  source       derived_from_host\n",
-                "  total        537 MB\n",
+                "  total        536.9 MB\n",
                 "  usable_host  2.1 GB\n",
             ))
         );
@@ -3673,7 +3693,7 @@ mod tests {
         }));
         assert_eq!(
             render_wire("arrow_export", &exported, Format::Human),
-            only_stdout("exported 3 rows of kv to kv_out.csv (135 bytes)\n")
+            only_stdout("exported 3 rows of kv to kv_out.csv (135 B)\n")
         );
         // Q17: an action declares no fields to choose between, so a script
         // gets the whole record, in the wire's own order.
@@ -3770,7 +3790,7 @@ mod tests {
         );
         assert!(
             human.contains("  artifact_sources              -\n")
-                && human.contains("  hnsw_memory_budget            67 MB\n"),
+                && human.contains("  hnsw_memory_budget            67.1 MB\n"),
             "{human}"
         );
         // A script's rows stay one record per line: the diagnostics are a
@@ -3898,7 +3918,7 @@ mod tests {
         };
         assert_eq!(row(1_100_000_000), "m\tchat\tllama\tq4\tready\t1.1 GB\n");
         assert_eq!(row(45_000_000), "m\tchat\tllama\tq4\tready\t45 MB\n");
-        assert_eq!(row(999_999), "m\tchat\tllama\tq4\tready\t999999 bytes\n");
+        assert_eq!(row(999_999), "m\tchat\tllama\tq4\tready\t1 MB\n");
         assert_eq!(
             row(1_100_000_000).trim_end(),
             format!(

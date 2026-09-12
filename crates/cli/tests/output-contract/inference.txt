@@ -89,9 +89,9 @@ fake:Write a haiku about databases.
 fake:Write a haiku about databases.
 ∎
 ### inference.models.list · edge:has_more=true · human
-fake-embed	embed	fake	q8_0	not downloaded	0 bytes
-fake-generate	generate	fake	q8_0	not downloaded	0 bytes
-fake-rank	rank	fake	q8_0	not downloaded	0 bytes
+fake-embed	embed	fake	q8_0	not downloaded	0 B
+fake-generate	generate	fake	q8_0	not downloaded	0 B
+fake-rank	rank	fake	q8_0	not downloaded	0 B
 ∎
 ### inference.models.list · edge:has_more=true · raw
 {"architecture":"fake","default_quant":"q8_0","embedding_dim":8,"hf_repo":"fake/fake","is_local":false,"local_path":null,"name":"fake-embed","runnable":true,"size_bytes":0,"task":"embed"}
@@ -105,9 +105,9 @@ fake-rank	rank	fake	q8_0	not downloaded	0 bytes
 (empty)
 ∎
 ### inference.models.list · responses/v1/inference/models_list.json · human
-fake-embed	embed	fake	q8_0	not downloaded	0 bytes
-fake-generate	generate	fake	q8_0	not downloaded	0 bytes
-fake-rank	rank	fake	q8_0	not downloaded	0 bytes
+fake-embed	embed	fake	q8_0	not downloaded	0 B
+fake-generate	generate	fake	q8_0	not downloaded	0 B
+fake-rank	rank	fake	q8_0	not downloaded	0 B
 ∎
 ### inference.models.list · responses/v1/inference/models_list.json · raw
 {"architecture":"fake","default_quant":"q8_0","embedding_dim":8,"hf_repo":"fake/fake","is_local":false,"local_path":null,"name":"fake-embed","runnable":true,"size_bytes":0,"task":"embed"}
