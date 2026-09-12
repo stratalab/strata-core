@@ -652,6 +652,7 @@ fn json_history_version_timestamp_and_list_at_are_stable() {
             updated_version: updated.commit().version(),
             path_deleted_version: path_deleted.version(),
             root_deleted_version: root_deleted.version(),
+            created_timestamp: created.commit().timestamp(),
             updated_timestamp: updated.commit().timestamp(),
             root_deleted_timestamp: root_deleted.timestamp(),
         },
@@ -673,6 +674,7 @@ struct JsonHistoryReadFacts {
     updated_version: CommitVersion,
     path_deleted_version: CommitVersion,
     root_deleted_version: CommitVersion,
+    created_timestamp: Timestamp,
     updated_timestamp: Timestamp,
     root_deleted_timestamp: Timestamp,
 }
@@ -717,6 +719,37 @@ fn assert_json_version_timestamp_reads(
     assert!(json
         .get_at(doc, &root(), facts.root_deleted_timestamp)
         .expect("root delete timestamp read succeeds")
+        .is_none());
+    assert_json_versioned_at_reads(json, doc, facts);
+}
+
+/// #3334: a read as of a timestamp answers with the commit that was visible
+/// then and says which one that was, so an as-of read carries the same record
+/// a live read does — the contract `KvService::get_versioned_at` already held.
+fn assert_json_versioned_at_reads(
+    json: &mut JsonService<'_>,
+    doc: &JsonDocumentId,
+    facts: JsonHistoryReadFacts,
+) {
+    let updated = json
+        .get_versioned_at(doc, &path("count"), facts.updated_timestamp)
+        .expect("versioned timestamp read succeeds")
+        .expect("updated value");
+    assert_eq!(updated.value().as_inner(), &json!(2));
+    assert_eq!(updated.version(), facts.updated_version);
+    assert_eq!(updated.timestamp(), facts.updated_timestamp);
+    // The earlier commit is still reachable, and reports its own metadata
+    // rather than the instant that was asked for.
+    let created = json
+        .get_versioned_at(doc, &path("count"), facts.created_timestamp)
+        .expect("versioned timestamp read succeeds")
+        .expect("created value");
+    assert_eq!(created.value().as_inner(), &json!(1));
+    assert_eq!(created.version(), facts.created_version);
+    assert_ne!(created.version(), updated.version());
+    assert!(json
+        .get_versioned_at(doc, &root(), facts.root_deleted_timestamp)
+        .expect("versioned root delete read succeeds")
         .is_none());
 }
 

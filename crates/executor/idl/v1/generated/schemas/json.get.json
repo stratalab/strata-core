@@ -29,20 +29,6 @@
       ],
       "type": "object"
     },
-    "MaybeJsonValue": {
-      "description": "JSON point-read result that distinguishes absence from a stored JSON null.\n\nSerializes the same `{found, value}` wire shape as the shared\n[`Maybe`](super::Maybe) envelope, but carries a non-optional `value` so a\nstored JSON `null` (`found: true, value: null`) stays distinct from an\nabsent document (`found: false, value: null`). `Maybe<serde_json::Value>`\ncannot express that distinction because `Option<Value>` deserializes a JSON\n`null` back to absence — hence this dedicated type.",
-      "properties": {
-        "found": {
-          "type": "boolean"
-        },
-        "value": true
-      },
-      "required": [
-        "found",
-        "value"
-      ],
-      "type": "object"
-    },
     "MaybeJsonVersionedValue": {
       "description": "JSON versioned point-read result that distinguishes absence from a stored JSON null.",
       "properties": {
@@ -142,41 +128,5 @@
       "data"
     ],
     "type": "object"
-  },
-  "responses": [
-    {
-      "description": "Optional JSON value.",
-      "properties": {
-        "data": {
-          "$ref": "#/$defs/MaybeJsonValue"
-        },
-        "type": {
-          "const": "json_value",
-          "type": "string"
-        }
-      },
-      "required": [
-        "type",
-        "data"
-      ],
-      "type": "object"
-    },
-    {
-      "description": "Optional JSON value with commit metadata.",
-      "properties": {
-        "data": {
-          "$ref": "#/$defs/MaybeJsonVersionedValue"
-        },
-        "type": {
-          "const": "json_versioned_value",
-          "type": "string"
-        }
-      },
-      "required": [
-        "type",
-        "data"
-      ],
-      "type": "object"
-    }
-  ]
+  }
 }

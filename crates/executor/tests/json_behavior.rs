@@ -71,6 +71,75 @@ fn wire_command_guard_rejects_integers_beyond_i64_u64_range() {
 }
 
 #[test]
+fn json_get_as_of_answers_with_the_same_versioned_envelope_as_a_live_read() {
+    // #3334: the as-of branch used to answer with a bare `json_value`, so one
+    // command had two wire shapes and an as-of read lost the very facts it
+    // asked about. Both branches now return `json_versioned_value`, and the
+    // as-of answer reports the commit that was visible then.
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let set = |executor: &mut Executor, value: Value| {
+        executor
+            .execute(Command::JsonSet {
+                branch: None,
+                space: None,
+                key: "as-of-doc".to_owned(),
+                path: "$".to_owned(),
+                value,
+            })
+            .expect("set succeeds")
+    };
+    let first = match set(&mut executor, json!({"name": "Ada"})) {
+        Output::JsonWriteResult { commit, .. } => commit,
+        other => panic!("unexpected set output: {other:?}"),
+    };
+    set(&mut executor, json!({"name": "Grace"}));
+
+    let get = |executor: &mut Executor, as_of: Option<u64>| match executor
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "as-of-doc".to_owned(),
+            path: "$".to_owned(),
+            as_of,
+            as_of_time: None,
+        })
+        .expect("get succeeds")
+    {
+        Output::JsonVersionedValue(value) => value,
+        other => panic!("unexpected get output: {other:?}"),
+    };
+
+    let live = get(&mut executor, None);
+    let live = live.value().expect("the document is present");
+    assert_eq!(live.value(), &json!({"name": "Grace"}));
+
+    let historical = get(&mut executor, Some(first.timestamp()));
+    let historical = historical.value().expect("the earlier document is present");
+    assert_eq!(historical.value(), &json!({"name": "Ada"}));
+    assert_eq!(historical.version(), first.version());
+    assert_eq!(historical.timestamp(), first.timestamp());
+    assert_ne!(historical.version(), live.version());
+
+    // A miss keeps the same envelope, so absence reads the same either way.
+    let absent = match executor
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "never-written".to_owned(),
+            path: "$".to_owned(),
+            as_of: Some(first.timestamp()),
+            as_of_time: None,
+        })
+        .expect("get succeeds")
+    {
+        Output::JsonVersionedValue(value) => value,
+        other => panic!("unexpected get output: {other:?}"),
+    };
+    assert!(!absent.is_found());
+    assert!(absent.value().is_none());
+}
+
+#[test]
 fn cache_executor_runs_complete_json_command_suite() {
     let mut executor = Executor::open_cache().expect("cache executor opens");
     run_json_command_suite(&mut executor);
@@ -1800,7 +1869,7 @@ fn execute_json_get_as_of(
         })
         .expect("historical JSON get succeeds")
     {
-        Output::JsonValue(value) => value.into_option(),
+        Output::JsonVersionedValue(value) => value.into_option().map(|value| value.value().clone()),
         output => panic!("unexpected historical JSON get output: {output:?}"),
     }
 }

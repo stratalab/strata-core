@@ -5,12 +5,12 @@ use super::{
     json_batch_get_failed, json_batch_get_result, json_batch_item_failed, json_batch_item_result,
     json_batch_result, json_delete_output, json_document_id, json_get_entry, json_history_items,
     json_index_definition, json_index_name, json_list_output, json_path, json_sample_item,
-    json_sample_output, json_value, json_value_output, json_versioned_value, json_write_output,
+    json_sample_output, json_value, json_versioned_value, json_write_output,
     optional_json_document_id, optional_json_prefix, optional_limit, presence_exists_failed,
     presence_exists_item, presence_exists_result, reject_duplicate_json_targets, upsert_effect,
     usize_to_u64, BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry, Executor,
-    ExecutorResult, JsonIndexType, JsonSetEntry, MaybeJsonValue, MaybeJsonVersionedValue, Output,
-    PageInfo, DEFAULT_JSON_LIST_LIMIT,
+    ExecutorResult, JsonIndexType, JsonSetEntry, MaybeJsonVersionedValue, Output, PageInfo,
+    DEFAULT_JSON_LIST_LIMIT,
 };
 
 impl Executor {
@@ -49,19 +49,15 @@ impl Executor {
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
         let mut service = self.json_service(branch, space)?;
-        if let Some(as_of) = as_of {
-            let value = service.get_at(&id, &path, as_of)?;
-            return Ok(Output::JsonValue(MaybeJsonValue::from_option(
-                value.map(json_value_output),
-            )));
-        }
+        // #3334: an as-of read answers with the same versioned record a live
+        // read does, and says which commit answered it — one wire shape per
+        // command, as every other point read already has.
+        let value = match as_of {
+            Some(as_of) => service.get_versioned_at(&id, &path, as_of)?,
+            None => service.get_versioned(&id, &path)?,
+        };
         Ok(Output::JsonVersionedValue(
-            MaybeJsonVersionedValue::from_option(
-                service
-                    .get_versioned(&id, &path)?
-                    .as_ref()
-                    .map(json_versioned_value),
-            ),
+            MaybeJsonVersionedValue::from_option(value.as_ref().map(json_versioned_value)),
         ))
     }
 

@@ -6443,7 +6443,6 @@
       "wire": "json_get",
       "output": "Output::JsonVersionedValue",
       "outputs": [
-        "Output::JsonValue",
         "Output::JsonVersionedValue"
       ],
       "wire_status": "stable",
@@ -6480,9 +6479,6 @@
       "fixtures": {
         "request": "requests/v1/json/get.json",
         "response": "responses/v1/json/get_versioned_found.json",
-        "responses": [
-          "responses/v1/json/get_found.json"
-        ],
         "setup": [
           "requests/v1/json/set.json"
         ],
@@ -6492,7 +6488,7 @@
               "requests/v1/json/set.json"
             ],
             "request": "requests/v1/json/get_as_of.json",
-            "response": "responses/v1/json/get_found.json"
+            "response": "responses/v1/json/get_versioned_found.json"
           }
         ]
       },

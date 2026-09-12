@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "8fa30ad3358dc1747651c5820c34609c8b8307c82bd7dd942ddd019f5d1395d3",
+    "checksum_sha256": "1cd2019829c0f23889739c027d8f7fbf563bde495a613a32e9b225e7b6b74924",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -6816,7 +6816,6 @@
       "input": "Command::JsonGet",
       "wire": "json_get",
       "outputs": [
-        "Output::JsonValue",
         "Output::JsonVersionedValue"
       ],
       "response_model": "Maybe<JsonVersionedValue>",
@@ -6849,9 +6848,6 @@
       "fixtures": {
         "request": "requests/v1/json/get.json",
         "response": "responses/v1/json/get_versioned_found.json",
-        "responses": [
-          "responses/v1/json/get_found.json"
-        ],
         "setup": [
           "requests/v1/json/set.json"
         ],
@@ -6861,7 +6857,7 @@
               "requests/v1/json/set.json"
             ],
             "request": "requests/v1/json/get_as_of.json",
-            "response": "responses/v1/json/get_found.json"
+            "response": "responses/v1/json/get_versioned_found.json"
           }
         ]
       },

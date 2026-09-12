@@ -216,9 +216,10 @@ where
 /// `null` as a record — struct payloads round-trip cleanly through
 /// `Option<T>`. JSON is the one exception: a stored JSON `null` is a real value
 /// that `Option<serde_json::Value>` would collapse to absence on deserialize,
-/// so JSON reads use the dedicated [`MaybeJsonValue`](super::MaybeJsonValue)
-/// envelope, which carries a non-optional `value` to keep found-null distinct
-/// from absent. Both envelopes serialize the same `{found, value}` wire shape.
+/// so a JSON read answers with
+/// [`MaybeJsonVersionedValue`](super::MaybeJsonVersionedValue), whose payload
+/// carries a non-optional `value` to keep found-null distinct from absent.
+/// Both envelopes serialize the same `{found, value}` wire shape.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
 pub struct Maybe<T> {
