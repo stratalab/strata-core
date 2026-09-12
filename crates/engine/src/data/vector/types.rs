@@ -20,7 +20,7 @@ pub struct VectorCollectionName(String);
 
 impl VectorCollectionName {
     /// Creates a validated vector collection name.
-    pub fn new(name: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(name: impl Into<String>) -> Result<Self, EngineError> {
         let name = name.into();
         validate_text_component(
             &name,
@@ -81,7 +81,7 @@ pub struct VectorKey(String);
 
 impl VectorKey {
     /// Creates a validated vector key.
-    pub fn new(key: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(key: impl Into<String>) -> Result<Self, EngineError> {
         let key = key.into();
         validate_text_component(
             &key,
@@ -130,7 +130,7 @@ pub struct VectorEmbedding(Vec<f32>);
 
 impl VectorEmbedding {
     /// Creates a validated embedding.
-    pub fn new(values: impl Into<Vec<f32>>) -> EngineResult<Self> {
+    pub fn new(values: impl Into<Vec<f32>>) -> Result<Self, EngineError> {
         let values = values.into();
         validate_embedding_values(&values)?;
         Ok(Self(values))
@@ -154,7 +154,7 @@ impl VectorEmbedding {
         self.0
     }
 
-    pub(crate) fn validate_dimension(&self, expected: usize) -> EngineResult<()> {
+    pub(crate) fn validate_dimension(&self, expected: usize) -> Result<(), EngineError> {
         if self.dimension() != expected {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_dimension",
@@ -167,7 +167,7 @@ impl VectorEmbedding {
         Ok(())
     }
 
-    pub(crate) fn from_stored(values: Vec<f32>) -> EngineResult<Self> {
+    pub(crate) fn from_stored(values: Vec<f32>) -> Result<Self, EngineError> {
         Self::new(values)
     }
 
@@ -176,7 +176,7 @@ impl VectorEmbedding {
     /// without becoming non-finite or losing a non-zero magnitude to underflow is
     /// rejected with `invalid_argument.engine.vector_embedding`, so the caller is
     /// told rather than a corrupted (silently zeroed) vector being stored.
-    pub fn from_wire(values: Vec<f64>) -> EngineResult<Self> {
+    pub fn from_wire(values: Vec<f64>) -> Result<Self, EngineError> {
         let narrowed = values
             .into_iter()
             .map(narrow_embedding_value)
@@ -201,7 +201,7 @@ pub struct VectorMetadata(Value);
 
 impl VectorMetadata {
     /// Creates validated vector metadata.
-    pub fn new(value: Value) -> EngineResult<Self> {
+    pub fn new(value: Value) -> Result<Self, EngineError> {
         if !value.is_object() {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_metadata",
@@ -290,7 +290,7 @@ impl EmbeddingModelId {
     /// Accepts any model spec the caller uses — `miniLM`,
     /// `openai:text-embedding-3-small` — because the shape belongs to the
     /// inference layer, which engine cannot see.
-    pub fn new(id: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(id: impl Into<String>) -> Result<Self, EngineError> {
         let id = id.into();
         if id.is_empty() {
             return Err(EngineError::invalid_input(
@@ -342,7 +342,7 @@ pub struct VectorConfig {
 
 impl VectorConfig {
     /// Creates a validated vector collection config.
-    pub fn new(dimension: usize, metric: VectorDistanceMetric) -> EngineResult<Self> {
+    pub fn new(dimension: usize, metric: VectorDistanceMetric) -> Result<Self, EngineError> {
         if dimension == 0 || dimension > MAX_VECTOR_DIMENSION {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_dimension",
@@ -542,7 +542,7 @@ impl VectorFilterCondition {
         field: impl Into<String>,
         op: VectorFilterOp,
         value: impl Into<VectorScalar>,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         let field = field.into();
         validate_metadata_field(&field)?;
         let value = value.into();
@@ -600,7 +600,7 @@ impl VectorFilter {
         mut self,
         field: impl Into<String>,
         value: impl Into<VectorScalar>,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         let condition = VectorFilterCondition::new(field, VectorFilterOp::Eq, value)?;
         self.0.push(condition);
         Ok(self)
@@ -660,7 +660,7 @@ pub struct VectorMetadataPatch(Map<String, Value>);
 
 impl VectorMetadataPatch {
     /// Creates a validated metadata patch from a JSON object.
-    pub fn new(value: Value) -> EngineResult<Self> {
+    pub fn new(value: Value) -> Result<Self, EngineError> {
         let Value::Object(map) = value else {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_metadata_patch",
@@ -671,7 +671,7 @@ impl VectorMetadataPatch {
     }
 
     /// Creates a validated metadata patch from an object map.
-    pub fn from_map(map: Map<String, Value>) -> EngineResult<Self> {
+    pub fn from_map(map: Map<String, Value>) -> Result<Self, EngineError> {
         if map.is_empty() {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_metadata_patch",
@@ -766,7 +766,7 @@ fn validate_text_component(
     allow_empty: bool,
     code: &'static str,
     label: &'static str,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     if !allow_empty && value.is_empty() {
         return Err(EngineError::invalid_input(
             code,
@@ -788,7 +788,7 @@ fn validate_text_component(
     Ok(())
 }
 
-fn validate_metadata_field(field: &str) -> EngineResult<()> {
+fn validate_metadata_field(field: &str) -> Result<(), EngineError> {
     validate_text_component(
         field,
         MAX_VECTOR_KEY_BYTES,
@@ -805,7 +805,7 @@ fn validate_metadata_field(field: &str) -> EngineResult<()> {
     Ok(())
 }
 
-fn validate_embedding_values(values: &[f32]) -> EngineResult<()> {
+fn validate_embedding_values(values: &[f32]) -> Result<(), EngineError> {
     if values.is_empty() || values.len() > MAX_VECTOR_DIMENSION {
         return Err(EngineError::invalid_input(
             "invalid_argument.engine.vector_embedding",
@@ -826,7 +826,7 @@ fn validate_embedding_values(values: &[f32]) -> EngineResult<()> {
 /// silently corrupted a stored vector, and which `VectorEmbedding::new` cannot
 /// see (`0.0` is finite). Non-finite input and overflow to infinity are left to
 /// `new`'s finiteness check, which rejects them with the same code.
-fn narrow_embedding_value(value: f64) -> EngineResult<f32> {
+fn narrow_embedding_value(value: f64) -> Result<f32, EngineError> {
     #[allow(clippy::cast_possible_truncation)]
     let narrowed = value as f32;
     if narrowed == 0.0 && value != 0.0 {

@@ -18,7 +18,7 @@
 //!
 //! [`Command`]: crate::command::Command
 
-use crate::error::{ExecutorError, ExecutorResult};
+use crate::error::ExecutorError;
 
 /// Rejects a JSON text — a wire command, or a user-supplied JSON argument — that
 /// contains an integer literal outside `[i64::MIN, u64::MAX]` (which `serde_json`
@@ -26,7 +26,7 @@ use crate::error::{ExecutorError, ExecutorResult};
 /// `invalid_argument.executor.json_number`. Wire bindings call this before
 /// `serde_json::from_str::<Command>`; the CLI calls it on a JSON argument before
 /// parsing it to a `Value`.
-pub fn guard_json_integers(json: &str) -> ExecutorResult<()> {
+pub fn guard_json_integers(json: &str) -> Result<(), ExecutorError> {
     if has_unrepresentable_integer(json) {
         return Err(ExecutorError::new(
             "invalid_argument.executor.json_number",

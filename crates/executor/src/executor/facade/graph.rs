@@ -1,11 +1,11 @@
 use super::super::{
-    Command, Executor, ExecutorResult, GraphBatchOperation, GraphBindingTarget, GraphBulkEdge,
+    Command, Executor, ExecutorError, GraphBatchOperation, GraphBindingTarget, GraphBulkEdge,
     GraphBulkNode, GraphDeletePolicy, GraphDirection, GraphEntityBinding, Output,
 };
 
 impl Executor {
     /// Executes a default-branch graph-create command.
-    pub fn graph_create(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_create(&mut self, graph: impl Into<String>) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphCreate {
             branch: None,
             space: None,
@@ -14,7 +14,7 @@ impl Executor {
     }
 
     /// Executes a default-branch graph-delete command.
-    pub fn graph_delete(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_delete(&mut self, graph: impl Into<String>) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphDelete {
             branch: None,
             space: None,
@@ -27,7 +27,7 @@ impl Executor {
         &mut self,
         cursor: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphList {
             branch: None,
             space: None,
@@ -39,7 +39,7 @@ impl Executor {
     }
 
     /// Executes a default-branch graph-metadata command.
-    pub fn graph_get_meta(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_get_meta(&mut self, graph: impl Into<String>) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphGetMeta {
             branch: None,
             space: None,
@@ -56,7 +56,7 @@ impl Executor {
         node_id: impl Into<String>,
         properties: Option<serde_json::Value>,
         binding: Option<GraphEntityBinding>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphAddNode {
             branch: None,
             space: None,
@@ -75,7 +75,7 @@ impl Executor {
         node_id: impl Into<String>,
         object_type: impl Into<String>,
         properties: Option<serde_json::Value>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphAddNode {
             branch: None,
             space: None,
@@ -93,7 +93,7 @@ impl Executor {
         graph: impl Into<String>,
         name: impl Into<String>,
         properties: std::collections::BTreeMap<String, crate::types::GraphPropertyDef>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphDefineObjectType {
             branch: None,
             space: None,
@@ -111,7 +111,7 @@ impl Executor {
         source: impl Into<String>,
         target: impl Into<String>,
         cardinality: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphDefineLinkType {
             branch: None,
             space: None,
@@ -129,7 +129,7 @@ impl Executor {
         &mut self,
         graph: impl Into<String>,
         name: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphDeleteObjectType {
             branch: None,
             space: None,
@@ -143,7 +143,7 @@ impl Executor {
         &mut self,
         graph: impl Into<String>,
         name: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphDeleteLinkType {
             branch: None,
             space: None,
@@ -153,7 +153,10 @@ impl Executor {
     }
 
     /// Executes a default-branch ontology freeze command.
-    pub fn graph_freeze_ontology(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_freeze_ontology(
+        &mut self,
+        graph: impl Into<String>,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphFreezeOntology {
             branch: None,
             space: None,
@@ -162,7 +165,10 @@ impl Executor {
     }
 
     /// Executes a default-branch ontology read command.
-    pub fn graph_get_ontology(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_get_ontology(
+        &mut self,
+        graph: impl Into<String>,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphGetOntology {
             branch: None,
             space: None,
@@ -173,7 +179,10 @@ impl Executor {
     }
 
     /// Executes a default-branch ontology summary command.
-    pub fn graph_ontology_summary(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_ontology_summary(
+        &mut self,
+        graph: impl Into<String>,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphOntologySummary {
             branch: None,
             space: None,
@@ -190,7 +199,7 @@ impl Executor {
         object_type: impl Into<String>,
         cursor: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphNodesByType {
             branch: None,
             space: None,
@@ -208,7 +217,7 @@ impl Executor {
         &mut self,
         graph: impl Into<String>,
         node_id: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphGetNode {
             branch: None,
             space: None,
@@ -224,7 +233,7 @@ impl Executor {
         &mut self,
         graph: impl Into<String>,
         node_id: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphRemoveNode {
             branch: None,
             space: None,
@@ -240,7 +249,7 @@ impl Executor {
         prefix: Option<String>,
         cursor: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphListNodes {
             branch: None,
             space: None,
@@ -263,7 +272,7 @@ impl Executor {
         dst: impl Into<String>,
         weight: Option<f64>,
         properties: Option<serde_json::Value>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphAddEdge {
             branch: None,
             space: None,
@@ -283,7 +292,7 @@ impl Executor {
         src: impl Into<String>,
         edge_type: impl Into<String>,
         dst: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphGetEdge {
             branch: None,
             space: None,
@@ -303,7 +312,7 @@ impl Executor {
         src: impl Into<String>,
         edge_type: impl Into<String>,
         dst: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphRemoveEdge {
             branch: None,
             space: None,
@@ -323,7 +332,7 @@ impl Executor {
         edge_type: Option<String>,
         cursor: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphNeighbors {
             branch: None,
             space: None,
@@ -344,7 +353,7 @@ impl Executor {
         target: GraphBindingTarget,
         cursor: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphBindingsForEntity {
             branch: None,
             space: None,
@@ -361,7 +370,7 @@ impl Executor {
         &mut self,
         graph: impl Into<String>,
         operations: Vec<GraphBatchOperation>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphBatchWrite {
             branch: None,
             space: None,
@@ -371,7 +380,7 @@ impl Executor {
     }
 
     /// Executes a default-branch weakly-connected-components command.
-    pub fn graph_wcc(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_wcc(&mut self, graph: impl Into<String>) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphWcc {
             branch: None,
             space: None,
@@ -383,7 +392,7 @@ impl Executor {
     }
 
     /// Executes a default-branch clustering-coefficient command.
-    pub fn graph_lcc(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_lcc(&mut self, graph: impl Into<String>) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphLcc {
             branch: None,
             space: None,
@@ -400,7 +409,7 @@ impl Executor {
         graph: impl Into<String>,
         source: impl Into<String>,
         direction: Option<GraphDirection>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphSssp {
             branch: None,
             space: None,
@@ -419,7 +428,7 @@ impl Executor {
         &mut self,
         graph: impl Into<String>,
         personalization: Option<std::collections::BTreeMap<String, f64>>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphPagerank {
             branch: None,
             space: None,
@@ -435,7 +444,7 @@ impl Executor {
     }
 
     /// Executes a default-branch community-detection command.
-    pub fn graph_cdlp(&mut self, graph: impl Into<String>) -> ExecutorResult<Output> {
+    pub fn graph_cdlp(&mut self, graph: impl Into<String>) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphCdlp {
             branch: None,
             space: None,
@@ -454,7 +463,7 @@ impl Executor {
         graph: impl Into<String>,
         start: impl Into<String>,
         direction: Option<GraphDirection>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphBfs {
             branch: None,
             space: None,
@@ -475,7 +484,7 @@ impl Executor {
         &mut self,
         target: GraphBindingTarget,
         policy: GraphDeletePolicy,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphApplyDeletePolicy {
             branch: None,
             space: None,
@@ -490,7 +499,7 @@ impl Executor {
         graph: impl Into<String>,
         nodes: Vec<GraphBulkNode>,
         edges: Vec<GraphBulkEdge>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphBulkInsert {
             branch: None,
             space: None,

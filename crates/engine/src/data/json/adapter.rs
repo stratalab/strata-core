@@ -10,7 +10,7 @@ use crate::branch::adapter::{
     CapabilityBranchAdapter, ComparableEntity, DerivedDisposition, EntitySummary,
 };
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{
     decode_json_document_id, encode_json_space_prefix, PersistenceReadRow, RowClass,
 };
@@ -35,7 +35,7 @@ impl CapabilityBranchAdapter for JsonBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         let id = decode_json_document_id(space, row.key())?;
         let summary = if row.is_tombstone() {
             EntitySummary::Absent

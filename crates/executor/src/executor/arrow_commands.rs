@@ -2,7 +2,7 @@
 //! twins live in `arrow_disabled.rs`.
 
 use super::{
-    ArrowExportPrimitive, ArrowFileFormat, ArrowImportTarget, Executor, ExecutorResult, Output,
+    ArrowExportPrimitive, ArrowFileFormat, ArrowImportTarget, Executor, ExecutorError, Output,
 };
 
 impl Executor {
@@ -18,7 +18,7 @@ impl Executor {
         value_column: Option<&str>,
         collection: Option<&str>,
         graph: Option<&str>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         crate::arrow::import::import_file(
             self,
             branch,
@@ -46,7 +46,7 @@ impl Executor {
         collection: Option<String>,
         graph: Option<String>,
         event_type: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         crate::arrow::export::export_file(
             self, branch, space, primitive, format, path, prefix, limit, collection, graph,
             event_type,

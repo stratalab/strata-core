@@ -146,7 +146,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         name: VectorCollectionName,
         config: VectorConfig,
-    ) -> EngineResult<VectorCollectionInfo> {
+    ) -> Result<VectorCollectionInfo, EngineError> {
         let record = self.branch_record()?;
         let address = self.collection_address(&record, &name);
         if self
@@ -176,7 +176,7 @@ impl<'a> VectorService<'a> {
     }
 
     /// Deletes a vector collection and all currently visible vectors in it.
-    pub fn delete_collection(&mut self, name: &VectorCollectionName) -> EngineResult<bool> {
+    pub fn delete_collection(&mut self, name: &VectorCollectionName) -> Result<bool, EngineError> {
         let record = self.branch_record()?;
         let Some(_) = self.collection_config_row(&record, name, ReadSelector::Latest)? else {
             return Ok(false);
@@ -218,7 +218,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         model: &EmbeddingModelId,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let record = self.branch_record()?;
         let config = self.require_collection_config(&record, collection)?;
         match config.embedding_model() {
@@ -251,7 +251,7 @@ impl<'a> VectorService<'a> {
     pub fn recorded_embedding_model(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<EmbeddingModelId> {
+    ) -> Result<EmbeddingModelId, EngineError> {
         self.recorded_embedding_model_with_selector(collection, ReadSelector::Latest)
     }
 
@@ -270,7 +270,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         timestamp: Timestamp,
-    ) -> EngineResult<EmbeddingModelId> {
+    ) -> Result<EmbeddingModelId, EngineError> {
         self.recorded_embedding_model_with_selector(
             collection,
             ReadSelector::AtTimestamp(timestamp),
@@ -281,7 +281,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         selector: ReadSelector,
-    ) -> EngineResult<EmbeddingModelId> {
+    ) -> Result<EmbeddingModelId, EngineError> {
         let record = self.branch_record()?;
         let config = self.require_collection_config_with_selector(&record, collection, selector)?;
         config.embedding_model().cloned().ok_or_else(|| {
@@ -311,7 +311,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         model: EmbeddingModelId,
-    ) -> EngineResult<VectorCollectionInfo> {
+    ) -> Result<VectorCollectionInfo, EngineError> {
         self.require_embedding_model(collection, &model)?;
         let record = self.branch_record()?;
         let row = self
@@ -344,7 +344,7 @@ impl<'a> VectorService<'a> {
     }
 
     /// Lists visible vector collections.
-    pub fn list_collections(&mut self) -> EngineResult<Vec<VectorCollectionInfo>> {
+    pub fn list_collections(&mut self) -> Result<Vec<VectorCollectionInfo>, EngineError> {
         let record = self.branch_record()?;
         let mut collections = self
             .persistence
@@ -367,7 +367,7 @@ impl<'a> VectorService<'a> {
     pub fn collection_info(
         &mut self,
         name: &VectorCollectionName,
-    ) -> EngineResult<Option<VectorCollectionInfo>> {
+    ) -> Result<Option<VectorCollectionInfo>, EngineError> {
         let record = self.branch_record()?;
         self.collection_config_row(&record, name, ReadSelector::Latest)?
             .map(|row| self.collection_info_from_row(&record, &row))
@@ -381,7 +381,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         count: usize,
-    ) -> EngineResult<(u64, Vec<VectorVersionedEntry>)> {
+    ) -> Result<(u64, Vec<VectorVersionedEntry>), EngineError> {
         let entries = self.scan(collection, None, None)?;
         let total_count = u64::try_from(entries.len()).unwrap_or(u64::MAX);
         if count == 0 || entries.is_empty() {
@@ -398,7 +398,7 @@ impl<'a> VectorService<'a> {
     }
 
     /// Counts visible vectors in a collection.
-    pub fn count(&mut self, name: &VectorCollectionName) -> EngineResult<u64> {
+    pub fn count(&mut self, name: &VectorCollectionName) -> Result<u64, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, name)?;
         self.count_with_record(&record, name, ReadSelector::Latest)
@@ -409,7 +409,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         name: &VectorCollectionName,
         timestamp: Timestamp,
-    ) -> EngineResult<u64> {
+    ) -> Result<u64, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, name)?;
         self.count_with_record(&record, name, ReadSelector::AtTimestamp(timestamp))
@@ -422,7 +422,7 @@ impl<'a> VectorService<'a> {
         key: VectorKey,
         embedding: VectorEmbedding,
         metadata: Option<VectorMetadata>,
-    ) -> EngineResult<VectorWriteOutcome> {
+    ) -> Result<VectorWriteOutcome, EngineError> {
         let record = self.branch_record()?;
         let config = self.require_collection_config(&record, &collection)?;
         embedding.validate_dimension(config.dimension())?;
@@ -445,7 +445,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         key: &VectorKey,
-    ) -> EngineResult<Option<VectorEntry>> {
+    ) -> Result<Option<VectorEntry>, EngineError> {
         Ok(self
             .get_versioned(collection, key)?
             .map(|entry| entry.entry().clone()))
@@ -456,7 +456,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         key: &VectorKey,
-    ) -> EngineResult<Option<VectorVersionedEntry>> {
+    ) -> Result<Option<VectorVersionedEntry>, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, collection)?;
         let address = self.vector_address(&record, collection, key);
@@ -472,7 +472,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         key: &VectorKey,
         version: CommitVersion,
-    ) -> EngineResult<Option<VectorVersionedEntry>> {
+    ) -> Result<Option<VectorVersionedEntry>, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config_with_selector(
             &record,
@@ -495,7 +495,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         key: &VectorKey,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<VectorVersionedEntry>> {
+    ) -> Result<Option<VectorVersionedEntry>, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config_with_selector(
             &record,
@@ -522,7 +522,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         rows: Vec<VectorHistoryRow>,
-    ) -> EngineResult<Vec<VectorHistoryRow>> {
+    ) -> Result<Vec<VectorHistoryRow>, EngineError> {
         let versions: Vec<_> = rows.iter().map(VectorHistoryRow::version).collect();
         let instants = self
             .persistence
@@ -539,7 +539,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         key: &VectorKey,
-    ) -> EngineResult<Option<VectorHistory>> {
+    ) -> Result<Option<VectorHistory>, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config_history(&record, collection)?;
         let address = self.vector_address(&record, collection, key);
@@ -560,7 +560,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         key: &VectorKey,
-    ) -> EngineResult<bool> {
+    ) -> Result<bool, EngineError> {
         Ok(self.get_versioned(collection, key)?.is_some())
     }
 
@@ -573,7 +573,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         keys: &[VectorKey],
-    ) -> EngineResult<Vec<bool>> {
+    ) -> Result<Vec<bool>, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, collection)?;
         let mut results = Vec::with_capacity(keys.len());
@@ -590,7 +590,7 @@ impl<'a> VectorService<'a> {
         prefix: Option<&VectorKey>,
         cursor: Option<&VectorKey>,
         limit: usize,
-    ) -> EngineResult<VectorKeyPage> {
+    ) -> Result<VectorKeyPage, EngineError> {
         self.list_keys_with_selector(collection, prefix, cursor, limit, ReadSelector::Latest)
     }
 
@@ -602,7 +602,7 @@ impl<'a> VectorService<'a> {
         cursor: Option<&VectorKey>,
         limit: usize,
         timestamp: Timestamp,
-    ) -> EngineResult<VectorKeyPage> {
+    ) -> Result<VectorKeyPage, EngineError> {
         self.list_keys_with_selector(
             collection,
             prefix,
@@ -619,7 +619,7 @@ impl<'a> VectorService<'a> {
         cursor: Option<&VectorKey>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<VectorKeyPage> {
+    ) -> Result<VectorKeyPage, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, collection)?;
         if limit == 0 {
@@ -652,7 +652,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         start: Option<&VectorKey>,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<VectorVersionedEntry>> {
+    ) -> Result<Vec<VectorVersionedEntry>, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, collection)?;
         if limit == Some(0) {
@@ -692,7 +692,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         key: VectorKey,
         patch: &VectorMetadataPatch,
-    ) -> EngineResult<VectorMetadataUpdateOutcome> {
+    ) -> Result<VectorMetadataUpdateOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, collection)?;
         let address = self.vector_address(&record, collection, &key);
@@ -745,7 +745,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         key: VectorKey,
-    ) -> EngineResult<VectorDeleteOutcome> {
+    ) -> Result<VectorDeleteOutcome, EngineError> {
         let outcome = self.batch_delete(collection, std::slice::from_ref(&key))?;
         let deleted = outcome.deleted().first().copied().unwrap_or(false);
         Ok(VectorDeleteOutcome::new(key, deleted, outcome.commit()))
@@ -756,7 +756,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         filter: &VectorFilter,
-    ) -> EngineResult<VectorBulkDeleteOutcome> {
+    ) -> Result<VectorBulkDeleteOutcome, EngineError> {
         if filter.is_empty() {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.vector_filter",
@@ -770,7 +770,7 @@ impl<'a> VectorService<'a> {
     pub fn delete_all(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<VectorBulkDeleteOutcome> {
+    ) -> Result<VectorBulkDeleteOutcome, EngineError> {
         self.delete_matching(collection, |_| true)
     }
 
@@ -779,7 +779,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         entries: &[VectorUpsertEntry],
-    ) -> EngineResult<VectorBatchUpsertOutcome> {
+    ) -> Result<VectorBatchUpsertOutcome, EngineError> {
         let record = self.branch_record()?;
         let config = self.require_collection_config(&record, collection)?;
         if entries.is_empty() {
@@ -844,7 +844,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         keys: &[VectorKey],
-    ) -> EngineResult<VectorBatchGetOutcome> {
+    ) -> Result<VectorBatchGetOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, collection)?;
         let mut entries = Vec::with_capacity(keys.len());
@@ -864,7 +864,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         keys: &[VectorKey],
-    ) -> EngineResult<VectorBatchDeleteOutcome> {
+    ) -> Result<VectorBatchDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, collection)?;
         if keys.is_empty() {
@@ -902,7 +902,7 @@ impl<'a> VectorService<'a> {
         query: &VectorEmbedding,
         k: usize,
         filter: Option<&VectorFilter>,
-    ) -> EngineResult<VectorSearchResult> {
+    ) -> Result<VectorSearchResult, EngineError> {
         self.query_with_selector(collection, query, k, filter, ReadSelector::Latest)
     }
 
@@ -914,7 +914,7 @@ impl<'a> VectorService<'a> {
         k: usize,
         filter: Option<&VectorFilter>,
         timestamp: Timestamp,
-    ) -> EngineResult<VectorSearchResult> {
+    ) -> Result<VectorSearchResult, EngineError> {
         self.query_with_selector(
             collection,
             query,
@@ -931,7 +931,7 @@ impl<'a> VectorService<'a> {
         query: &VectorEmbedding,
         k: usize,
         filter: Option<&VectorFilter>,
-    ) -> EngineResult<(VectorSearchResult, VectorIndexDiagnostics)> {
+    ) -> Result<(VectorSearchResult, VectorIndexDiagnostics), EngineError> {
         self.query_with_selector_and_policy(
             collection,
             query,
@@ -950,7 +950,7 @@ impl<'a> VectorService<'a> {
         query: &VectorEmbedding,
         k: usize,
         filter: Option<&VectorFilter>,
-    ) -> EngineResult<(VectorSearchResult, VectorIndexDiagnostics)> {
+    ) -> Result<(VectorSearchResult, VectorIndexDiagnostics), EngineError> {
         self.query_with_index_diagnostics(collection, query, k, filter)
     }
 
@@ -963,7 +963,7 @@ impl<'a> VectorService<'a> {
         k: usize,
         filter: Option<&VectorFilter>,
         policy: VectorIndexPolicy,
-    ) -> EngineResult<(VectorSearchResult, VectorIndexDiagnostics)> {
+    ) -> Result<(VectorSearchResult, VectorIndexDiagnostics), EngineError> {
         self.query_with_selector_and_policy(
             collection,
             query,
@@ -982,7 +982,7 @@ impl<'a> VectorService<'a> {
         k: usize,
         filter: Option<&VectorFilter>,
         timestamp: Timestamp,
-    ) -> EngineResult<(VectorSearchResult, VectorIndexDiagnostics)> {
+    ) -> Result<(VectorSearchResult, VectorIndexDiagnostics), EngineError> {
         self.query_with_selector_and_policy(
             collection,
             query,
@@ -1002,7 +1002,7 @@ impl<'a> VectorService<'a> {
         k: usize,
         filter: Option<&VectorFilter>,
         timestamp: Timestamp,
-    ) -> EngineResult<(VectorSearchResult, VectorIndexDiagnostics)> {
+    ) -> Result<(VectorSearchResult, VectorIndexDiagnostics), EngineError> {
         self.query_at_with_index_diagnostics(collection, query, k, filter, timestamp)
     }
 
@@ -1016,7 +1016,7 @@ impl<'a> VectorService<'a> {
         filter: Option<&VectorFilter>,
         timestamp: Timestamp,
         policy: VectorIndexPolicy,
-    ) -> EngineResult<(VectorSearchResult, VectorIndexDiagnostics)> {
+    ) -> Result<(VectorSearchResult, VectorIndexDiagnostics), EngineError> {
         self.query_with_selector_and_policy(
             collection,
             query,
@@ -1035,7 +1035,7 @@ impl<'a> VectorService<'a> {
         query: &VectorEmbedding,
         k: usize,
         filter: Option<&VectorFilter>,
-    ) -> EngineResult<VectorSearchResult> {
+    ) -> Result<VectorSearchResult, EngineError> {
         self.query_exact_with_selector(collection, query, k, filter, ReadSelector::Latest)
     }
 
@@ -1048,7 +1048,7 @@ impl<'a> VectorService<'a> {
         k: usize,
         filter: Option<&VectorFilter>,
         timestamp: Timestamp,
-    ) -> EngineResult<VectorSearchResult> {
+    ) -> Result<VectorSearchResult, EngineError> {
         self.query_exact_with_selector(
             collection,
             query,
@@ -1063,7 +1063,7 @@ impl<'a> VectorService<'a> {
     pub fn seed_empty_index_manifest_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         self.seed_index_manifest_for_test(collection, Vec::new(), 0)
     }
 
@@ -1072,7 +1072,7 @@ impl<'a> VectorService<'a> {
     pub fn index_manifest_artifact_ids_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<Vec<String>> {
+    ) -> Result<Vec<String>, EngineError> {
         let resolution = self.index_manifest_resolution_for_test(collection)?;
         Ok(resolution
             .artifact_refs
@@ -1086,7 +1086,7 @@ impl<'a> VectorService<'a> {
     pub fn index_manifest_byte_len_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<Option<usize>> {
+    ) -> Result<Option<usize>, EngineError> {
         let record = self.branch_record()?;
         let address = self.index_manifest_address(&record, collection);
         Ok(self
@@ -1100,7 +1100,7 @@ impl<'a> VectorService<'a> {
     pub fn remove_manifest_flat_artifacts_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<usize> {
+    ) -> Result<usize, EngineError> {
         let artifact_ids = self.index_manifest_flat_artifact_ids_for_test(collection)?;
         for artifact_id in &artifact_ids {
             self.artifacts.remove_for_test(artifact_id)?;
@@ -1113,7 +1113,7 @@ impl<'a> VectorService<'a> {
     pub fn corrupt_manifest_flat_artifacts_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<usize> {
+    ) -> Result<usize, EngineError> {
         let artifact_ids = self.index_manifest_flat_artifact_ids_for_test(collection)?;
         for artifact_id in &artifact_ids {
             self.artifacts
@@ -1127,7 +1127,7 @@ impl<'a> VectorService<'a> {
     pub fn remove_manifest_hnsw_artifacts_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<usize> {
+    ) -> Result<usize, EngineError> {
         let artifact_ids = self.index_manifest_hnsw_artifact_ids_for_test(collection)?;
         for artifact_id in &artifact_ids {
             self.artifacts.remove_hnsw_for_test(artifact_id)?;
@@ -1140,7 +1140,7 @@ impl<'a> VectorService<'a> {
     pub fn corrupt_manifest_hnsw_artifacts_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<usize> {
+    ) -> Result<usize, EngineError> {
         let artifact_ids = self.index_manifest_hnsw_artifact_ids_for_test(collection)?;
         for artifact_id in &artifact_ids {
             self.artifacts
@@ -1154,7 +1154,7 @@ impl<'a> VectorService<'a> {
     pub fn make_manifest_flat_artifacts_stale_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<usize> {
+    ) -> Result<usize, EngineError> {
         let resolution = self.index_manifest_resolution_for_test(collection)?;
         let (_, collection_generation) = {
             let record = self.branch_record()?;
@@ -1199,7 +1199,7 @@ impl<'a> VectorService<'a> {
     fn index_manifest_flat_artifact_ids_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<Vec<VectorArtifactId>> {
+    ) -> Result<Vec<VectorArtifactId>, EngineError> {
         let resolution = self.index_manifest_resolution_for_test(collection)?;
         resolution
             .artifact_refs
@@ -1213,7 +1213,7 @@ impl<'a> VectorService<'a> {
     fn index_manifest_hnsw_artifact_ids_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<Vec<VectorArtifactId>> {
+    ) -> Result<Vec<VectorArtifactId>, EngineError> {
         let resolution = self.index_manifest_resolution_for_test(collection)?;
         resolution
             .artifact_refs
@@ -1227,7 +1227,7 @@ impl<'a> VectorService<'a> {
     fn index_manifest_resolution_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<VectorIndexManifestResolution> {
+    ) -> Result<VectorIndexManifestResolution, EngineError> {
         let record = self.branch_record()?;
         let (config, collection_generation) = self.require_collection_config_with_generation(
             &record,
@@ -1250,7 +1250,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         artifact_refs: &[(BranchId, usize, VectorDistanceMetric)],
         active_delta_count: u64,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let artifact_refs = artifact_refs
             .iter()
             .enumerate()
@@ -1280,7 +1280,7 @@ impl<'a> VectorService<'a> {
     pub fn seed_synthetic_hnsw_index_manifest_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let record = self.branch_record()?;
         let (config, _) = self.require_collection_config_with_generation(
             &record,
@@ -1310,7 +1310,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         artifact_refs: Vec<VectorArtifactRef>,
         active_delta_count: u64,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let record = self.branch_record()?;
         let (_, collection_generation) = self.require_collection_config_with_generation(
             &record,
@@ -1335,7 +1335,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let artifact_ref = self.build_flat_artifact_ref_from_visible_rows_for_test(
             collection, source_id, None, None,
         )?;
@@ -1348,7 +1348,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let flat_ref = self.build_flat_artifact_ref_from_visible_rows_for_test(
             collection, source_id, None, None,
         )?;
@@ -1363,7 +1363,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         policy: VectorIndexPolicy,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let record = self.branch_record()?;
         let (config, collection_generation) = self.require_collection_config_with_generation(
             &record,
@@ -1388,7 +1388,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         source_id: &str,
         max_bytes: Option<usize>,
-    ) -> EngineResult<&'static str> {
+    ) -> Result<&'static str, EngineError> {
         let (record, config, collection_generation) =
             self.collection_artifact_context_for_test(collection)?;
         let identity = self.flat_artifact_identity_for_test(
@@ -1412,7 +1412,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         source_id: &str,
         max_bytes: Option<usize>,
-    ) -> EngineResult<&'static str> {
+    ) -> Result<&'static str, EngineError> {
         let (record, config, collection_generation) =
             self.collection_artifact_context_for_test(collection)?;
         let identity = VectorFlatArtifactIdentity::new(
@@ -1440,7 +1440,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<Option<u64>> {
+    ) -> Result<Option<u64>, EngineError> {
         let (record, config, collection_generation) =
             self.collection_artifact_context_for_test(collection)?;
         let identity = self.flat_artifact_identity_for_test(
@@ -1462,7 +1462,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let artifact_id = self.flat_artifact_id_for_test(collection, source_id)?;
         self.artifacts.remove_for_test(&artifact_id)
     }
@@ -1473,7 +1473,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let artifact_id = self.flat_artifact_id_for_test(collection, source_id)?;
         self.artifacts
             .put_raw_flat_for_test(artifact_id, vec![1, 2, 3])
@@ -1485,7 +1485,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let (record, config, collection_generation) =
             self.collection_artifact_context_for_test(collection)?;
         let identity = self.flat_artifact_identity_for_test(
@@ -1518,7 +1518,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         bytes: Vec<u8>,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let record = self.branch_record()?;
         self.put_index_manifest_bytes(&record, collection, bytes)
     }
@@ -1528,7 +1528,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         bytes: Vec<u8>,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         self.persistence.commit(&CommitPlan::new(
             record.storage_branch_id(),
             vec![RowMutation::put(
@@ -1547,7 +1547,7 @@ impl<'a> VectorService<'a> {
         source_id: &str,
         artifact_id: Option<VectorArtifactId>,
         rows: Option<Vec<(PersistenceReadRow, VectorEntry)>>,
-    ) -> EngineResult<VectorArtifactRef> {
+    ) -> Result<VectorArtifactRef, EngineError> {
         let (record, config, collection_generation) =
             self.collection_artifact_context_for_test(collection)?;
         let identity = match artifact_id {
@@ -1598,7 +1598,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<VectorArtifactRef> {
+    ) -> Result<VectorArtifactRef, EngineError> {
         let (record, config, collection_generation) =
             self.collection_artifact_context_for_test(collection)?;
         let identity = VectorFlatArtifactIdentity::new(
@@ -1640,7 +1640,7 @@ impl<'a> VectorService<'a> {
     fn collection_artifact_context_for_test(
         &mut self,
         collection: &VectorCollectionName,
-    ) -> EngineResult<(BranchCatalogRecord, VectorConfig, CommitVersion)> {
+    ) -> Result<(BranchCatalogRecord, VectorConfig, CommitVersion), EngineError> {
         let record = self.branch_record()?;
         let (config, collection_generation) = self.require_collection_config_with_generation(
             &record,
@@ -1658,7 +1658,7 @@ impl<'a> VectorService<'a> {
         collection_generation: CommitVersion,
         source_id: &str,
         config: &VectorConfig,
-    ) -> EngineResult<VectorFlatArtifactIdentity> {
+    ) -> Result<VectorFlatArtifactIdentity, EngineError> {
         VectorFlatArtifactIdentity::new(
             self.flat_artifact_id_for_test(collection, source_id)?,
             record.storage_branch_id(),
@@ -1678,7 +1678,7 @@ impl<'a> VectorService<'a> {
         &self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<VectorArtifactId> {
+    ) -> Result<VectorArtifactId, EngineError> {
         VectorArtifactId::new(format!(
             "flat:{}:{}:{source_id}",
             self.space.as_str(),
@@ -1691,7 +1691,7 @@ impl<'a> VectorService<'a> {
         &self,
         collection: &VectorCollectionName,
         source_id: &str,
-    ) -> EngineResult<VectorArtifactId> {
+    ) -> Result<VectorArtifactId, EngineError> {
         VectorArtifactId::new(format!(
             "hnsw:{}:{}:{source_id}",
             self.space.as_str(),
@@ -1703,7 +1703,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         collection: &VectorCollectionName,
         predicate: impl Fn(&VectorEntry) -> bool,
-    ) -> EngineResult<VectorBulkDeleteOutcome> {
+    ) -> Result<VectorBulkDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_collection_config(&record, collection)?;
         let rows = self.visible_vector_entries(&record, collection, ReadSelector::Latest)?;
@@ -1732,7 +1732,7 @@ impl<'a> VectorService<'a> {
         k: usize,
         filter: Option<&VectorFilter>,
         selector: ReadSelector,
-    ) -> EngineResult<VectorSearchResult> {
+    ) -> Result<VectorSearchResult, EngineError> {
         Ok(self
             .query_with_selector_and_policy(
                 collection,
@@ -1754,7 +1754,7 @@ impl<'a> VectorService<'a> {
         filter: Option<&VectorFilter>,
         selector: ReadSelector,
         policy: VectorIndexPolicy,
-    ) -> EngineResult<(VectorSearchResult, VectorIndexDiagnostics)> {
+    ) -> Result<(VectorSearchResult, VectorIndexDiagnostics), EngineError> {
         let record = self.branch_record()?;
         let (config, collection_generation) =
             self.require_collection_config_with_generation(&record, collection, selector)?;
@@ -1884,7 +1884,7 @@ impl<'a> VectorService<'a> {
         k: usize,
         filter: Option<&VectorFilter>,
         selector: ReadSelector,
-    ) -> EngineResult<VectorSearchResult> {
+    ) -> Result<VectorSearchResult, EngineError> {
         let record = self.branch_record()?;
         let config = self.require_collection_config_with_selector(&record, collection, selector)?;
         query.validate_dimension(config.dimension())?;
@@ -1895,7 +1895,7 @@ impl<'a> VectorService<'a> {
         query_vector_exact(query, config.metric(), k, filter, &entries)
     }
 
-    fn branch_record(&self) -> EngineResult<BranchCatalogRecord> {
+    fn branch_record(&self) -> Result<BranchCatalogRecord, EngineError> {
         self.control.require_healthy()?;
         self.control
             .lookup_branch(&self.branch)
@@ -1950,7 +1950,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         selector: ReadSelector,
-    ) -> EngineResult<Option<PersistenceReadRow>> {
+    ) -> Result<Option<PersistenceReadRow>, EngineError> {
         let address = self.collection_address(record, collection);
         Ok(self
             .persistence
@@ -1962,7 +1962,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
-    ) -> EngineResult<VectorConfig> {
+    ) -> Result<VectorConfig, EngineError> {
         self.require_collection_config_with_selector(record, collection, ReadSelector::Latest)
     }
 
@@ -1971,7 +1971,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         selector: ReadSelector,
-    ) -> EngineResult<VectorConfig> {
+    ) -> Result<VectorConfig, EngineError> {
         self.require_collection_config_with_generation(record, collection, selector)
             .map(|(config, _)| config)
     }
@@ -1981,7 +1981,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         selector: ReadSelector,
-    ) -> EngineResult<(VectorConfig, CommitVersion)> {
+    ) -> Result<(VectorConfig, CommitVersion), EngineError> {
         let Some(row) = self.collection_config_row(record, collection, selector)? else {
             return Err(EngineError::not_found(
                 "not_found.engine.vector_collection",
@@ -2005,7 +2005,7 @@ impl<'a> VectorService<'a> {
         config: &VectorConfig,
         collection_generation: CommitVersion,
         selector: ReadSelector,
-    ) -> EngineResult<VectorIndexManifestResolution> {
+    ) -> Result<VectorIndexManifestResolution, EngineError> {
         let address = self.index_manifest_address(record, collection);
         let Some(row) = self
             .persistence
@@ -2074,7 +2074,7 @@ impl<'a> VectorService<'a> {
         manifest_resolution: &VectorIndexManifestResolution,
         visible_entry_count: usize,
         policy: VectorIndexPolicy,
-    ) -> EngineResult<VectorIndexArtifactLoadSet> {
+    ) -> Result<VectorIndexArtifactLoadSet, EngineError> {
         if !policy.should_load_flat_sources(visible_entry_count) {
             return Ok(VectorIndexArtifactLoadSet::unavailable(
                 "collection_below_exact_threshold",
@@ -2175,7 +2175,7 @@ impl<'a> VectorService<'a> {
         artifact_ref: &VectorArtifactRef,
         flat_artifacts: &mut Vec<VectorFlatArtifactSourceInput>,
         load_budget_bytes: usize,
-    ) -> EngineResult<&'static str> {
+    ) -> Result<&'static str, EngineError> {
         let identity = VectorFlatArtifactIdentity::from_manifest_ref(
             self.space.clone(),
             collection.clone(),
@@ -2219,7 +2219,7 @@ impl<'a> VectorService<'a> {
         artifact_ref: &VectorArtifactRef,
         hnsw_artifacts: &mut Vec<VectorHnswArtifactSourceInput>,
         load_budget_bytes: usize,
-    ) -> EngineResult<(&'static str, bool)> {
+    ) -> Result<(&'static str, bool), EngineError> {
         let identity = VectorFlatArtifactIdentity::from_hnsw_manifest_ref(
             self.space.clone(),
             collection.clone(),
@@ -2321,7 +2321,7 @@ impl<'a> VectorService<'a> {
         config: &VectorConfig,
         snapshot: &VectorQuerySnapshot,
         policy: VectorIndexPolicy,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let mut artifact_refs = self.seal_index_artifacts_from_immutable_sources(
             record,
             collection,
@@ -2373,7 +2373,7 @@ impl<'a> VectorService<'a> {
         collection_generation: CommitVersion,
         config: &VectorConfig,
         policy: VectorIndexPolicy,
-    ) -> EngineResult<Vec<VectorArtifactRef>> {
+    ) -> Result<Vec<VectorArtifactRef>, EngineError> {
         let start = encode_vector_collection_entry_prefix(&self.space, collection);
         let end = next_prefix(&start);
         let sources = self.persistence.scan_immutable_sources(
@@ -2417,7 +2417,7 @@ impl<'a> VectorService<'a> {
         collection_generation: CommitVersion,
         config: &VectorConfig,
         snapshot: &VectorQuerySnapshot,
-    ) -> EngineResult<VectorArtifactRef> {
+    ) -> Result<VectorArtifactRef, EngineError> {
         let seal_version = snapshot
             .entries
             .iter()
@@ -2455,7 +2455,7 @@ impl<'a> VectorService<'a> {
         collection_generation: CommitVersion,
         config: &VectorConfig,
         snapshot: &VectorQuerySnapshot,
-    ) -> EngineResult<VectorArtifactRef> {
+    ) -> Result<VectorArtifactRef, EngineError> {
         let seal_version = snapshot
             .entries
             .iter()
@@ -2493,7 +2493,7 @@ impl<'a> VectorService<'a> {
         config: &VectorConfig,
         source: &PersistenceImmutableSource,
         entries: &[(PersistenceReadRow, VectorEntry)],
-    ) -> EngineResult<VectorArtifactRef> {
+    ) -> Result<VectorArtifactRef, EngineError> {
         let source_id = VectorSourceId::new(source.source_id())?;
         let artifact_id = VectorArtifactId::new(format!(
             "flat:{}:{}:source:{}",
@@ -2531,7 +2531,7 @@ impl<'a> VectorService<'a> {
         config: &VectorConfig,
         source: &PersistenceImmutableSource,
         entries: &[(PersistenceReadRow, VectorEntry)],
-    ) -> EngineResult<VectorArtifactRef> {
+    ) -> Result<VectorArtifactRef, EngineError> {
         let source_id = VectorSourceId::new(source.source_id())?;
         let artifact_id = VectorArtifactId::new(format!(
             "hnsw:{}:{}:source:{}",
@@ -2568,7 +2568,7 @@ impl<'a> VectorService<'a> {
         entries: &[(PersistenceReadRow, VectorEntry)],
         covered_commit_version: CommitVersion,
         fork_version_cap: Option<CommitVersion>,
-    ) -> EngineResult<VectorArtifactRef> {
+    ) -> Result<VectorArtifactRef, EngineError> {
         let artifact = FlatVectorArtifact::from_visible_entries_with_budget(
             identity.clone(),
             entries,
@@ -2598,7 +2598,7 @@ impl<'a> VectorService<'a> {
         entries: &[(PersistenceReadRow, VectorEntry)],
         covered_commit_version: CommitVersion,
         fork_version_cap: Option<CommitVersion>,
-    ) -> EngineResult<VectorArtifactRef> {
+    ) -> Result<VectorArtifactRef, EngineError> {
         let artifact = HnswVectorArtifact::from_visible_entries_with_budget(
             identity.clone(),
             HnswArtifactConfig::default_for_engine(),
@@ -2626,7 +2626,7 @@ impl<'a> VectorService<'a> {
         &self,
         collection: &VectorCollectionName,
         source: &PersistenceImmutableSource,
-    ) -> EngineResult<Vec<(PersistenceReadRow, VectorEntry)>> {
+    ) -> Result<Vec<(PersistenceReadRow, VectorEntry)>, EngineError> {
         let mut selected: BTreeMap<VectorKey, VectorSourceSelectedRow> = BTreeMap::new();
         for row in source.rows() {
             let (row_collection, key) = decode_vector_key(&self.space, row.key())?;
@@ -2665,7 +2665,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         if let Some(row) = self.collection_config_row(record, collection, ReadSelector::Latest)? {
             let value = row.value().ok_or_else(|| {
                 EngineError::corruption(
@@ -2702,7 +2702,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         row: &PersistenceReadRow,
-    ) -> EngineResult<VectorCollectionInfo> {
+    ) -> Result<VectorCollectionInfo, EngineError> {
         let name = decode_vector_collection_name(&self.space, row.key())?;
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
@@ -2726,7 +2726,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         selector: ReadSelector,
-    ) -> EngineResult<u64> {
+    ) -> Result<u64, EngineError> {
         let count = self
             .vector_rows(record, collection, selector)?
             .into_iter()
@@ -2740,7 +2740,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.persistence.scan_prefix(
             record.storage_branch_id(),
             RowClass::Vector,
@@ -2755,7 +2755,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<(PersistenceReadRow, VectorEntry)>> {
+    ) -> Result<Vec<(PersistenceReadRow, VectorEntry)>, EngineError> {
         self.vector_rows(record, collection, selector)?
             .into_iter()
             .filter(|row| !row.is_tombstone())
@@ -2772,7 +2772,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         selector: ReadSelector,
-    ) -> EngineResult<VectorQuerySnapshot> {
+    ) -> Result<VectorQuerySnapshot, EngineError> {
         let rows = self.vector_rows(record, collection, selector)?;
         self.snapshot_from_rows(collection, rows)
     }
@@ -2786,7 +2786,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         watermark: CommitVersion,
-    ) -> EngineResult<VectorQuerySnapshot> {
+    ) -> Result<VectorQuerySnapshot, EngineError> {
         let rows = self.persistence.scan_prefix_after_version(
             record.storage_branch_id(),
             RowClass::Vector,
@@ -2802,7 +2802,7 @@ impl<'a> VectorService<'a> {
         &self,
         collection: &VectorCollectionName,
         rows: Vec<PersistenceReadRow>,
-    ) -> EngineResult<VectorQuerySnapshot> {
+    ) -> Result<VectorQuerySnapshot, EngineError> {
         let mut entries = Vec::new();
         let mut tombstones = Vec::new();
         for row in rows {
@@ -2832,7 +2832,7 @@ impl<'a> VectorService<'a> {
         cursor: Option<&VectorKey>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<VectorKey>> {
+    ) -> Result<Vec<VectorKey>, EngineError> {
         let prefix_start = encode_vector_collection_entry_prefix(&self.space, collection);
         let prefix_end = next_prefix(&prefix_start);
         let mut start = prefix_start.clone();
@@ -2885,7 +2885,7 @@ impl<'a> VectorService<'a> {
         mut start: Vec<u8>,
         end: &[u8],
         limit: usize,
-    ) -> EngineResult<Vec<VectorVersionedEntry>> {
+    ) -> Result<Vec<VectorVersionedEntry>, EngineError> {
         let mut visible = Vec::with_capacity(limit.min(VECTOR_LIST_RAW_PAGE_MIN));
         while visible.len() < limit && start.as_slice() < end {
             let remaining = limit.saturating_sub(visible.len());
@@ -2920,7 +2920,7 @@ impl<'a> VectorService<'a> {
         &self,
         collection: &VectorCollectionName,
         row: &PersistenceReadRow,
-    ) -> EngineResult<VectorVersionedEntry> {
+    ) -> Result<VectorVersionedEntry, EngineError> {
         let (_, key) = decode_vector_key(&self.space, row.key())?;
         let entry = Self::entry_from_row(collection, &key, row)?;
         Ok(VectorVersionedEntry::new(
@@ -2935,7 +2935,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         key: &VectorKey,
-    ) -> EngineResult<bool> {
+    ) -> Result<bool, EngineError> {
         let address = self.vector_address(record, collection, key);
         Ok(self
             .persistence
@@ -2948,7 +2948,7 @@ impl<'a> VectorService<'a> {
         record: &BranchCatalogRecord,
         collection: &VectorCollectionName,
         key: &VectorKey,
-    ) -> EngineResult<Option<u64>> {
+    ) -> Result<Option<u64>, EngineError> {
         let address = self.vector_address(record, collection, key);
         if let Some(row) = self
             .persistence
@@ -2975,7 +2975,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         key: &VectorKey,
         row: &PersistenceReadRow,
-    ) -> EngineResult<Option<VectorVersionedEntry>> {
+    ) -> Result<Option<VectorVersionedEntry>, EngineError> {
         if row.is_tombstone() {
             return Ok(None);
         }
@@ -2990,7 +2990,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         key: &VectorKey,
         row: &PersistenceReadRow,
-    ) -> EngineResult<VectorHistoryRow> {
+    ) -> Result<VectorHistoryRow, EngineError> {
         if row.is_tombstone() {
             return Ok(VectorHistoryRow::new(
                 None,
@@ -3015,7 +3015,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         key: &VectorKey,
         row: &PersistenceReadRow,
-    ) -> EngineResult<VectorEntry> {
+    ) -> Result<VectorEntry, EngineError> {
         let vector = Self::vector_record_from_row(collection, key, row)?;
         Ok(VectorEntry::new(
             vector.key().clone(),
@@ -3029,7 +3029,7 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         key: &VectorKey,
         row: &PersistenceReadRow,
-    ) -> EngineResult<VectorRecord> {
+    ) -> Result<VectorRecord, EngineError> {
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
                 "data_loss.engine.vector_record",
@@ -3043,7 +3043,7 @@ impl<'a> VectorService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
-    ) -> EngineResult<CommitOutcome> {
+    ) -> Result<CommitOutcome, EngineError> {
         let mut mutations = mutations;
         if mutations.is_empty() {
             return Err(EngineError::invalid_input(
@@ -3161,7 +3161,7 @@ fn source_covered_commit_version(
     space: &ProductSpace,
     collection: &VectorCollectionName,
     source: &PersistenceImmutableSource,
-) -> EngineResult<CommitVersion> {
+) -> Result<CommitVersion, EngineError> {
     let mut watermark = CommitVersion::new(0);
     for row in source.rows() {
         let (row_collection, _) = decode_vector_key(space, row.key())?;

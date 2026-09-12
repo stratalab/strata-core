@@ -1,8 +1,8 @@
 use super::{
     BTreeSet, BatchExistsItemResult, BatchExistsPresence, BatchGetItemResult, BatchItem,
     BatchItemResult, BatchMode, BatchResult, Bytes, EventBatchAppendItemResult, ExecutorError,
-    ExecutorResult, GraphBatchItemResult, JsonBatchGetItemResult, JsonBatchItemResult,
-    VectorBatchGetItemResult, VectorBatchItemResult,
+    GraphBatchItemResult, JsonBatchGetItemResult, JsonBatchItemResult, VectorBatchGetItemResult,
+    VectorBatchItemResult,
 };
 
 pub(super) fn empty_batch_results(len: usize) -> Vec<Option<BatchItem<BatchItemResult>>> {
@@ -175,7 +175,7 @@ fn unwrap_slots<T>(results: Vec<Option<BatchItem<T>>>, label: &str) -> Vec<Batch
 
 pub(super) fn reject_duplicate_valid_keys<'a>(
     keys: impl IntoIterator<Item = &'a Bytes>,
-) -> ExecutorResult<()> {
+) -> Result<(), ExecutorError> {
     reject_duplicates(
         keys.into_iter().map(Bytes::as_slice),
         "invalid_argument.executor.kv_batch_duplicate_key",
@@ -187,7 +187,7 @@ pub(super) fn reject_duplicate_valid_keys<'a>(
 /// same pair are a duplicate, while two paths of one document are distinct.
 pub(super) fn reject_duplicate_json_targets<'a>(
     targets: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> ExecutorResult<()> {
+) -> Result<(), ExecutorError> {
     reject_duplicates(
         targets,
         "invalid_argument.executor.json_batch_duplicate_key",
@@ -197,7 +197,7 @@ pub(super) fn reject_duplicate_json_targets<'a>(
 
 pub(super) fn reject_duplicate_vector_keys<'a>(
     keys: impl IntoIterator<Item = &'a str>,
-) -> ExecutorResult<()> {
+) -> Result<(), ExecutorError> {
     reject_duplicates(
         keys,
         "invalid_argument.executor.vector_batch_duplicate_key",
@@ -212,7 +212,7 @@ fn reject_duplicates<T: Ord>(
     keys: impl IntoIterator<Item = T>,
     code: &'static str,
     message: &'static str,
-) -> ExecutorResult<()> {
+) -> Result<(), ExecutorError> {
     let mut seen = BTreeSet::new();
     for key in keys {
         if !seen.insert(key) {

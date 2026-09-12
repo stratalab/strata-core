@@ -3,7 +3,7 @@
 use strata_core::Timestamp;
 
 use crate::api::{
-    BranchName, Database, EngineResult, EventRangeDirection, EventSequence, GraphDirection,
+    BranchName, Database, EngineError, EventRangeDirection, EventSequence, GraphDirection,
     GraphName, JsonPath, KvKey, ProductSpace,
 };
 use crate::data::json::JsonDocumentId;
@@ -14,7 +14,10 @@ use super::{ArtifactModel, ArtifactSection, BranchArtifact};
 const EXPORT_PAGE: usize = 1024;
 
 /// Exports the branch's logical content as deterministic payload sections.
-pub fn export_branch(db: &mut Database, branch: &BranchName) -> EngineResult<BranchArtifact> {
+pub fn export_branch(
+    db: &mut Database,
+    branch: &BranchName,
+) -> Result<BranchArtifact, EngineError> {
     let mut spaces = db.spaces(branch.clone())?.list()?;
     spaces.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
@@ -42,7 +45,7 @@ fn export_kv(
     space: &ProductSpace,
     sections: &mut Vec<ArtifactSection>,
     tracker: &mut TimestampTracker,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let mut service = db.kv(branch.clone(), space.clone())?;
     let mut encoder = SectionEncoder::default();
     let mut start: Option<KvKey> = None;
@@ -75,7 +78,7 @@ fn export_json(
     space: &ProductSpace,
     sections: &mut Vec<ArtifactSection>,
     tracker: &mut TimestampTracker,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let mut service = db.json(branch.clone(), space.clone())?;
     let mut encoder = SectionEncoder::default();
     let mut cursor: Option<JsonDocumentId> = None;
@@ -108,7 +111,7 @@ fn export_events(
     space: &ProductSpace,
     sections: &mut Vec<ArtifactSection>,
     tracker: &mut TimestampTracker,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let mut service = db.event(branch.clone(), space.clone())?;
     let mut encoder = SectionEncoder::default();
     let mut start = EventSequence::new(0);
@@ -149,7 +152,7 @@ fn export_vector_collections(
     space: &ProductSpace,
     sections: &mut Vec<ArtifactSection>,
     tracker: &mut TimestampTracker,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let mut service = db.vector(branch.clone(), space.clone())?;
     let mut collections = service.list_collections()?;
     collections.sort_by(|a, b| a.name().as_str().cmp(b.name().as_str()));
@@ -203,7 +206,7 @@ fn export_graphs(
     space: &ProductSpace,
     sections: &mut Vec<ArtifactSection>,
     tracker: &mut TimestampTracker,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let mut service = db.graph(branch.clone(), space.clone())?;
     let mut graphs: Vec<GraphName> = Vec::new();
     let mut cursor: Option<GraphName> = None;
@@ -298,7 +301,7 @@ fn export_graphs(
 
 /// Byte-lexicographic successor: the smallest key strictly greater than
 /// `key`, used to advance inclusive-start scans without revisiting.
-fn successor_key(key: &KvKey) -> EngineResult<KvKey> {
+fn successor_key(key: &KvKey) -> Result<KvKey, EngineError> {
     let mut bytes = key.as_bytes().to_vec();
     bytes.push(0);
     KvKey::new(bytes)

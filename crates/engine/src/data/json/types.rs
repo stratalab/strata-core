@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 const MAX_DOCUMENT_ID_BYTES: usize = u16::MAX as usize;
 const MAX_INDEX_NAME_BYTES: usize = 256;
@@ -23,7 +23,7 @@ pub struct JsonDocumentId(String);
 
 impl JsonDocumentId {
     /// Creates a validated document id.
-    pub fn new(id: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(id: impl Into<String>) -> Result<Self, EngineError> {
         let id = id.into();
         validate_component(
             &id,
@@ -65,7 +65,7 @@ pub struct JsonIndexName(String);
 
 impl JsonIndexName {
     /// Creates a validated index name.
-    pub fn new(name: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(name: impl Into<String>) -> Result<Self, EngineError> {
         let name = name.into();
         validate_component(
             &name,
@@ -113,7 +113,7 @@ pub struct JsonValue(Value);
 
 impl JsonValue {
     /// Creates a JSON value after applying document limits.
-    pub fn new(value: Value) -> EngineResult<Self> {
+    pub fn new(value: Value) -> Result<Self, EngineError> {
         let wrapped = Self(value);
         wrapped.validate()?;
         Ok(wrapped)
@@ -145,7 +145,7 @@ impl JsonValue {
         Self(value)
     }
 
-    pub(crate) fn validate(&self) -> EngineResult<()> {
+    pub(crate) fn validate(&self) -> Result<(), EngineError> {
         // Enforce the nesting bound FIRST, with an iterative traversal, so a
         // pathologically deep value is rejected before the recursive
         // serialization/measurement below can overflow the stack (finding U36).
@@ -225,7 +225,7 @@ impl JsonPath {
     }
 
     /// Creates a path from validated segments.
-    pub fn from_segments(segments: Vec<JsonPathSegment>) -> EngineResult<Self> {
+    pub fn from_segments(segments: Vec<JsonPathSegment>) -> Result<Self, EngineError> {
         let path = Self(segments);
         path.validate()?;
         Ok(path)
@@ -243,7 +243,7 @@ impl JsonPath {
         &self.0
     }
 
-    fn validate(&self) -> EngineResult<()> {
+    fn validate(&self) -> Result<(), EngineError> {
         if self.0.len() > MAX_PATH_SEGMENTS {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.json_path_too_long",
@@ -538,7 +538,7 @@ pub(crate) fn set_at_path(
     path: &JsonPath,
     replacement: JsonValue,
     create_missing: bool,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     if path.is_root() {
         *value = replacement;
         value.validate()?;
@@ -553,7 +553,7 @@ pub(crate) fn set_at_path(
     value.validate()
 }
 
-pub(crate) fn delete_at_path(value: &mut JsonValue, path: &JsonPath) -> EngineResult<bool> {
+pub(crate) fn delete_at_path(value: &mut JsonValue, path: &JsonPath) -> Result<bool, EngineError> {
     if path.is_root() {
         return Ok(false);
     }
@@ -574,7 +574,7 @@ fn parse_bracket_segment(
     chars: &[char],
     index: &mut usize,
     segments: &mut Vec<JsonPathSegment>,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     *index += 1;
     if *index < chars.len() && (chars[*index] == '"' || chars[*index] == '\'') {
         // Quoted-key bracket notation addresses arbitrary keys — dots, spaces,
@@ -634,7 +634,7 @@ fn set_value_at_path(
     segments: &[JsonPathSegment],
     replacement: Value,
     create_missing: bool,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let Some((first, rest)) = segments.split_first() else {
         *current = replacement;
         return Ok(());
@@ -677,7 +677,7 @@ fn set_terminal_value(
     segment: &JsonPathSegment,
     replacement: Value,
     create_missing: bool,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     match segment {
         JsonPathSegment::Key(key) => {
             if current.is_null() && create_missing {
@@ -705,7 +705,10 @@ fn set_terminal_value(
     }
 }
 
-fn delete_value_at_path(current: &mut Value, segments: &[JsonPathSegment]) -> EngineResult<bool> {
+fn delete_value_at_path(
+    current: &mut Value,
+    segments: &[JsonPathSegment],
+) -> Result<bool, EngineError> {
     let Some((first, rest)) = segments.split_first() else {
         return Ok(false);
     };
@@ -747,7 +750,7 @@ fn validate_component(
     max_bytes: usize,
     code: &'static str,
     label: &'static str,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     if value.is_empty() {
         return Err(EngineError::invalid_input(
             code,

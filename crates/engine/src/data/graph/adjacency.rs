@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::{GraphEdgeType, GraphName, GraphNodeId};
 
@@ -208,7 +208,7 @@ impl GraphAdjacencyIndexBuilder {
         }
     }
 
-    pub(crate) fn add_node(&mut self, node_id: GraphNodeId) -> EngineResult<()> {
+    pub(crate) fn add_node(&mut self, node_id: GraphNodeId) -> Result<(), EngineError> {
         debug_assert!(!self.nodes_finished, "add_node after finish_nodes");
         if self.node_ids.len() >= self.budget.max_nodes() {
             return Err(budget_error("nodes", self.budget.max_nodes()));
@@ -239,7 +239,7 @@ impl GraphAdjacencyIndexBuilder {
         edge_type: &GraphEdgeType,
         dst: &GraphNodeId,
         weight: f64,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         debug_assert!(self.nodes_finished, "add_edge before finish_nodes");
         if self.edge_count >= self.budget.max_edges() as u64 {
             return Err(budget_error("edges", self.budget.max_edges()));

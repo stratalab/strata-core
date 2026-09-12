@@ -6,7 +6,7 @@ use arrow::record_batch::RecordBatch;
 use base64::Engine;
 use serde_json::Value;
 
-use crate::error::ExecutorResult;
+use crate::error::ExecutorError;
 use crate::types::ArrowImportTarget;
 
 use super::{internal_error, invalid_input};
@@ -27,7 +27,7 @@ pub(crate) fn resolve_mapping(
     target: ArrowImportTarget,
     key_column: Option<&str>,
     value_column: Option<&str>,
-) -> ExecutorResult<ImportMapping> {
+) -> Result<ImportMapping, ExecutorError> {
     let key_idx = resolve_key_column(schema, key_column)?;
     let (value_idx, mut extra_indices, mut extra_names) = match target {
         ArrowImportTarget::Kv => resolve_kv_value(schema, key_idx, value_column)?,
@@ -82,7 +82,7 @@ pub(crate) fn key_bytes(
     batch: &RecordBatch,
     mapping: &ImportMapping,
     row: usize,
-) -> ExecutorResult<Option<Vec<u8>>> {
+) -> Result<Option<Vec<u8>>, ExecutorError> {
     let key_col = batch.column(mapping.key_idx);
     if key_col.is_null(row) {
         return Ok(None);
@@ -95,7 +95,7 @@ pub(crate) fn value_bytes(
     batch: &RecordBatch,
     mapping: &ImportMapping,
     row: usize,
-) -> ExecutorResult<Vec<u8>> {
+) -> Result<Vec<u8>, ExecutorError> {
     if let Some(value_idx) = mapping.value_idx {
         let value_col = batch.column(value_idx);
         let encoding = encoding_at(batch, mapping.value_encoding_idx, row);
@@ -113,7 +113,7 @@ pub(crate) fn json_document(
     batch: &RecordBatch,
     mapping: &ImportMapping,
     row: usize,
-) -> ExecutorResult<Value> {
+) -> Result<Value, ExecutorError> {
     if let Some(value_idx) = mapping.value_idx {
         return cell_to_json_document(batch.column(value_idx).as_ref(), row);
     }
@@ -134,7 +134,7 @@ pub(crate) fn vector_metadata(
     batch: &RecordBatch,
     mapping: &ImportMapping,
     row: usize,
-) -> ExecutorResult<Option<Value>> {
+) -> Result<Option<Value>, ExecutorError> {
     // A designated `metadata` column (as written by `arrow export vector`) is a
     // JSON document: parse it and return it unwrapped, matching what was stored.
     if let Some(metadata_idx) = mapping.metadata_idx {
@@ -161,7 +161,7 @@ pub(crate) fn row_to_json_object(
     row: usize,
     indices: &[usize],
     names: &[String],
-) -> ExecutorResult<Value> {
+) -> Result<Value, ExecutorError> {
     let mut map = serde_json::Map::new();
     for (index, name) in indices.iter().zip(names) {
         let column = batch.column(*index);
@@ -170,7 +170,7 @@ pub(crate) fn row_to_json_object(
     Ok(Value::Object(map))
 }
 
-fn resolve_key_column(schema: &Schema, key_column: Option<&str>) -> ExecutorResult<usize> {
+fn resolve_key_column(schema: &Schema, key_column: Option<&str>) -> Result<usize, ExecutorError> {
     if let Some(column) = key_column {
         return schema.index_of(column).map_err(|_| {
             invalid_input(
@@ -196,11 +196,16 @@ fn resolve_key_column(schema: &Schema, key_column: Option<&str>) -> ExecutorResu
     ))
 }
 
+/// Where a primitive's value lives in an Arrow schema, and what else came with
+/// it: the value column's index when the schema names one, then the indices and
+/// names of every other column, kept parallel.
+type ValueColumns = (Option<usize>, Vec<usize>, Vec<String>);
+
 fn resolve_kv_value(
     schema: &Schema,
     key_idx: usize,
     value_column: Option<&str>,
-) -> ExecutorResult<(Option<usize>, Vec<usize>, Vec<String>)> {
+) -> Result<ValueColumns, ExecutorError> {
     if let Some(column) = value_column {
         let value_idx = schema.index_of(column).map_err(|_| {
             invalid_input(
@@ -256,7 +261,7 @@ fn resolve_json_document(
     schema: &Schema,
     key_idx: usize,
     value_column: Option<&str>,
-) -> ExecutorResult<(Option<usize>, Vec<usize>, Vec<String>)> {
+) -> Result<ValueColumns, ExecutorError> {
     if let Some(column) = value_column {
         let value_idx = schema.index_of(column).map_err(|_| {
             invalid_input(
@@ -282,7 +287,7 @@ fn resolve_vector_embedding(
     schema: &Schema,
     key_idx: usize,
     value_column: Option<&str>,
-) -> ExecutorResult<(Option<usize>, Vec<usize>, Vec<String>)> {
+) -> Result<ValueColumns, ExecutorError> {
     let value_idx = if let Some(column) = value_column {
         schema.index_of(column).map_err(|_| {
             invalid_input(
@@ -336,7 +341,7 @@ fn resolve_vector_embedding(
     Ok(resolve_extras(schema, &[key_idx, value_idx]))
 }
 
-fn resolve_extras(schema: &Schema, exclude: &[usize]) -> (Option<usize>, Vec<usize>, Vec<String>) {
+fn resolve_extras(schema: &Schema, exclude: &[usize]) -> ValueColumns {
     let value_idx = exclude.last().copied();
     let (extra_indices, extra_names) = collect_extras(schema, exclude);
     (value_idx, extra_indices, extra_names)
@@ -393,7 +398,7 @@ fn cell_to_bytes(
     column: &dyn Array,
     row: usize,
     encoding: Option<&str>,
-) -> ExecutorResult<Vec<u8>> {
+) -> Result<Vec<u8>, ExecutorError> {
     if column.is_null(row) {
         return Ok(Vec::new());
     }
@@ -440,7 +445,7 @@ fn cell_to_bytes(
     }
 }
 
-fn cell_to_json_document(column: &dyn Array, row: usize) -> ExecutorResult<Value> {
+fn cell_to_json_document(column: &dyn Array, row: usize) -> Result<Value, ExecutorError> {
     if column.is_null(row) {
         return Ok(Value::Null);
     }
@@ -458,7 +463,7 @@ fn cell_to_json_document(column: &dyn Array, row: usize) -> ExecutorResult<Value
 /// the number under a successful import (#3078). Reject them with a typed error
 /// instead of corrupting the document. Finite floats produce the exact JSON
 /// `serde_json` already produced (an f32 widens to f64 identically).
-fn finite_float_to_json(value: f64) -> ExecutorResult<Value> {
+fn finite_float_to_json(value: f64) -> Result<Value, ExecutorError> {
     if value.is_finite() {
         Ok(serde_json::json!(value))
     } else {
@@ -469,7 +474,7 @@ fn finite_float_to_json(value: f64) -> ExecutorResult<Value> {
     }
 }
 
-fn cell_to_json(column: &dyn Array, row: usize) -> ExecutorResult<Value> {
+fn cell_to_json(column: &dyn Array, row: usize) -> Result<Value, ExecutorError> {
     if column.is_null(row) {
         return Ok(Value::Null);
     }
@@ -646,7 +651,7 @@ fn cell_to_json(column: &dyn Array, row: usize) -> ExecutorResult<Value> {
     }
 }
 
-fn cell_to_string(column: &dyn Array, row: usize) -> ExecutorResult<String> {
+fn cell_to_string(column: &dyn Array, row: usize) -> Result<String, ExecutorError> {
     if column.is_null(row) {
         return Ok(String::new());
     }

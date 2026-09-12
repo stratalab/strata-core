@@ -61,7 +61,7 @@ impl BatchDeleteState {
         }
     }
 
-    fn delete(&mut self, path: &super::JsonPath) -> EngineResult<bool> {
+    fn delete(&mut self, path: &super::JsonPath) -> Result<bool, EngineError> {
         if self.current.is_none() {
             return Ok(false);
         }
@@ -100,7 +100,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         id: JsonDocumentId,
         value: JsonValue,
-    ) -> EngineResult<JsonWriteOutcome> {
+    ) -> Result<JsonWriteOutcome, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, &id);
         if self
@@ -143,7 +143,7 @@ impl<'a> JsonService<'a> {
         id: JsonDocumentId,
         path: &super::JsonPath,
         value: JsonValue,
-    ) -> EngineResult<JsonWriteOutcome> {
+    ) -> Result<JsonWriteOutcome, EngineError> {
         self.set_inner(id, path, value, true)
     }
 
@@ -153,7 +153,7 @@ impl<'a> JsonService<'a> {
         id: JsonDocumentId,
         path: &super::JsonPath,
         value: JsonValue,
-    ) -> EngineResult<JsonWriteOutcome> {
+    ) -> Result<JsonWriteOutcome, EngineError> {
         self.set_inner(id, path, value, false)
     }
 
@@ -162,7 +162,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         id: &JsonDocumentId,
         path: &super::JsonPath,
-    ) -> EngineResult<Option<JsonValue>> {
+    ) -> Result<Option<JsonValue>, EngineError> {
         Ok(self
             .get_versioned(id, path)?
             .map(|value| value.value().clone()))
@@ -173,7 +173,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         id: &JsonDocumentId,
         path: &super::JsonPath,
-    ) -> EngineResult<Option<JsonVersionedValue>> {
+    ) -> Result<Option<JsonVersionedValue>, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, id);
         let Some(row) = self.persistence.read_row(address, ReadSelector::Latest)? else {
@@ -188,7 +188,7 @@ impl<'a> JsonService<'a> {
         id: &JsonDocumentId,
         path: &super::JsonPath,
         version: CommitVersion,
-    ) -> EngineResult<Option<JsonValue>> {
+    ) -> Result<Option<JsonValue>, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, id);
         let Some(row) = self
@@ -206,7 +206,7 @@ impl<'a> JsonService<'a> {
         id: &JsonDocumentId,
         path: &super::JsonPath,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<JsonValue>> {
+    ) -> Result<Option<JsonValue>, EngineError> {
         Ok(self
             .get_versioned_at(id, path, timestamp)?
             .map(|value| value.value().clone()))
@@ -223,7 +223,7 @@ impl<'a> JsonService<'a> {
         id: &JsonDocumentId,
         path: &super::JsonPath,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<JsonVersionedValue>> {
+    ) -> Result<Option<JsonVersionedValue>, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, id);
         let Some(row) = self
@@ -245,7 +245,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         rows: Vec<JsonHistoryRow>,
-    ) -> EngineResult<Vec<JsonHistoryRow>> {
+    ) -> Result<Vec<JsonHistoryRow>, EngineError> {
         let versions: Vec<_> = rows.iter().map(JsonHistoryRow::version).collect();
         let instants = self
             .persistence
@@ -258,7 +258,10 @@ impl<'a> JsonService<'a> {
     }
 
     /// Reads full document history newest-first.
-    pub fn get_versions(&mut self, id: &JsonDocumentId) -> EngineResult<Option<JsonHistory>> {
+    pub fn get_versions(
+        &mut self,
+        id: &JsonDocumentId,
+    ) -> Result<Option<JsonHistory>, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, id);
         let rows = self
@@ -277,7 +280,7 @@ impl<'a> JsonService<'a> {
     pub fn batch_get(
         &mut self,
         entries: &[JsonGetEntry],
-    ) -> EngineResult<Vec<Option<JsonVersionedValue>>> {
+    ) -> Result<Vec<Option<JsonVersionedValue>>, EngineError> {
         let record = self.branch_record()?;
         let mut results = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -292,7 +295,7 @@ impl<'a> JsonService<'a> {
     }
 
     /// Returns true when the document exists.
-    pub fn exists(&mut self, id: &JsonDocumentId) -> EngineResult<bool> {
+    pub fn exists(&mut self, id: &JsonDocumentId) -> Result<bool, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, id);
         Ok(self
@@ -302,7 +305,7 @@ impl<'a> JsonService<'a> {
     }
 
     /// Checks multiple documents for latest visible values.
-    pub fn batch_exists(&mut self, ids: &[JsonDocumentId]) -> EngineResult<Vec<bool>> {
+    pub fn batch_exists(&mut self, ids: &[JsonDocumentId]) -> Result<Vec<bool>, EngineError> {
         let record = self.branch_record()?;
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
@@ -321,7 +324,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         id: JsonDocumentId,
         path: &super::JsonPath,
-    ) -> EngineResult<JsonDeleteOutcome> {
+    ) -> Result<JsonDeleteOutcome, EngineError> {
         if path.is_root() {
             return self.delete_document(id);
         }
@@ -360,14 +363,17 @@ impl<'a> JsonService<'a> {
     }
 
     /// Deletes a whole document.
-    pub fn delete_document(&mut self, id: JsonDocumentId) -> EngineResult<JsonDeleteOutcome> {
+    pub fn delete_document(
+        &mut self,
+        id: JsonDocumentId,
+    ) -> Result<JsonDeleteOutcome, EngineError> {
         let outcome = self.batch_delete([id])?;
         let deleted = outcome.deleted().first().copied().unwrap_or(false);
         Ok(JsonDeleteOutcome::new(deleted, outcome.commit()))
     }
 
     /// Sets multiple JSON entries in one commit.
-    pub fn batch_set_or_create<I>(&mut self, entries: I) -> EngineResult<JsonBatchSetOutcome>
+    pub fn batch_set_or_create<I>(&mut self, entries: I) -> Result<JsonBatchSetOutcome, EngineError>
     where
         I: IntoIterator<Item = JsonSetEntry>,
     {
@@ -436,7 +442,7 @@ impl<'a> JsonService<'a> {
     }
 
     /// Deletes multiple whole documents in one commit.
-    pub fn batch_delete<I>(&mut self, ids: I) -> EngineResult<JsonBatchDeleteOutcome>
+    pub fn batch_delete<I>(&mut self, ids: I) -> Result<JsonBatchDeleteOutcome, EngineError>
     where
         I: IntoIterator<Item = JsonDocumentId>,
     {
@@ -482,7 +488,10 @@ impl<'a> JsonService<'a> {
     }
 
     /// Deletes multiple JSON documents or paths in one commit.
-    pub fn batch_delete_entries<I>(&mut self, entries: I) -> EngineResult<JsonBatchDeleteOutcome>
+    pub fn batch_delete_entries<I>(
+        &mut self,
+        entries: I,
+    ) -> Result<JsonBatchDeleteOutcome, EngineError>
     where
         I: IntoIterator<Item = JsonGetEntry>,
     {
@@ -550,7 +559,7 @@ impl<'a> JsonService<'a> {
         prefix: Option<&JsonDocumentId>,
         cursor: Option<&JsonDocumentId>,
         limit: usize,
-    ) -> EngineResult<JsonListPage> {
+    ) -> Result<JsonListPage, EngineError> {
         self.list_with_selector(prefix, cursor, limit, ReadSelector::Latest)
     }
 
@@ -561,12 +570,12 @@ impl<'a> JsonService<'a> {
         cursor: Option<&JsonDocumentId>,
         limit: usize,
         timestamp: Timestamp,
-    ) -> EngineResult<JsonListPage> {
+    ) -> Result<JsonListPage, EngineError> {
         self.list_with_selector(prefix, cursor, limit, ReadSelector::AtTimestamp(timestamp))
     }
 
     /// Counts latest visible documents by prefix.
-    pub fn count(&mut self, prefix: Option<&JsonDocumentId>) -> EngineResult<u64> {
+    pub fn count(&mut self, prefix: Option<&JsonDocumentId>) -> Result<u64, EngineError> {
         self.count_with_selector(prefix, ReadSelector::Latest)
     }
 
@@ -575,7 +584,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         prefix: Option<&JsonDocumentId>,
         timestamp: Timestamp,
-    ) -> EngineResult<u64> {
+    ) -> Result<u64, EngineError> {
         self.count_with_selector(prefix, ReadSelector::AtTimestamp(timestamp))
     }
 
@@ -583,7 +592,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         prefix: Option<&JsonDocumentId>,
         selector: ReadSelector,
-    ) -> EngineResult<u64> {
+    ) -> Result<u64, EngineError> {
         let record = self.branch_record()?;
         let count = self
             .persistence
@@ -605,7 +614,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         prefix: Option<&JsonDocumentId>,
         count: usize,
-    ) -> EngineResult<JsonSample> {
+    ) -> Result<JsonSample, EngineError> {
         let record = self.branch_record()?;
         let rows = self
             .persistence
@@ -643,7 +652,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         start: Option<&JsonDocumentId>,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<JsonSampleRow>> {
+    ) -> Result<Vec<JsonSampleRow>, EngineError> {
         if limit == Some(0) {
             return Ok(Vec::new());
         }
@@ -679,7 +688,7 @@ impl<'a> JsonService<'a> {
         name: JsonIndexName,
         field_path: super::JsonPath,
         index_type: JsonIndexType,
-    ) -> EngineResult<JsonIndexDefinition> {
+    ) -> Result<JsonIndexDefinition, EngineError> {
         let record = self.branch_record()?;
         let meta_address = self.index_meta_address(&record, &name);
         if self
@@ -729,7 +738,7 @@ impl<'a> JsonService<'a> {
     }
 
     /// Drops a JSON secondary index and its entries.
-    pub fn drop_index(&mut self, name: &JsonIndexName) -> EngineResult<bool> {
+    pub fn drop_index(&mut self, name: &JsonIndexName) -> Result<bool, EngineError> {
         let record = self.branch_record()?;
         let meta_address = self.index_meta_address(&record, name);
         let exists = self
@@ -763,7 +772,7 @@ impl<'a> JsonService<'a> {
     }
 
     /// Lists JSON secondary index definitions.
-    pub fn list_indexes(&mut self) -> EngineResult<Vec<JsonIndexDefinition>> {
+    pub fn list_indexes(&mut self) -> Result<Vec<JsonIndexDefinition>, EngineError> {
         let record = self.branch_record()?;
         self.load_indexes(&record)
     }
@@ -774,7 +783,7 @@ impl<'a> JsonService<'a> {
         path: &super::JsonPath,
         value: JsonValue,
         create_if_missing: bool,
-    ) -> EngineResult<JsonWriteOutcome> {
+    ) -> Result<JsonWriteOutcome, EngineError> {
         let record = self.branch_record()?;
         let indexes = self.load_indexes(&record)?;
         let (document, old_value) = self.apply_set(&record, id, path, value, create_if_missing)?;
@@ -807,7 +816,7 @@ impl<'a> JsonService<'a> {
         path: &super::JsonPath,
         value: JsonValue,
         create_if_missing: bool,
-    ) -> EngineResult<(JsonDocument, Option<JsonValue>)> {
+    ) -> Result<(JsonDocument, Option<JsonValue>), EngineError> {
         let address = self.row_address(record, &id);
         match self.persistence.read_row(address, ReadSelector::Latest)? {
             Some(row) if !row.is_tombstone() => {
@@ -835,7 +844,7 @@ impl<'a> JsonService<'a> {
         cursor: Option<&JsonDocumentId>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<JsonListPage> {
+    ) -> Result<JsonListPage, EngineError> {
         if limit == 0 {
             return Ok(JsonListPage::new(Vec::new(), false, None));
         }
@@ -855,7 +864,7 @@ impl<'a> JsonService<'a> {
         cursor: Option<&JsonDocumentId>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<JsonDocumentId>> {
+    ) -> Result<Vec<JsonDocumentId>, EngineError> {
         let record = self.branch_record()?;
         let prefix_start = self.scan_prefix(prefix);
         let prefix_end = next_prefix(&prefix_start);
@@ -916,7 +925,7 @@ impl<'a> JsonService<'a> {
         mut start: Vec<u8>,
         end: &[u8],
         limit: usize,
-    ) -> EngineResult<Vec<JsonSampleRow>> {
+    ) -> Result<Vec<JsonSampleRow>, EngineError> {
         let mut visible = Vec::with_capacity(limit.min(JSON_LIST_RAW_PAGE_MIN));
         while visible.len() < limit && start.as_slice() < end {
             let remaining = limit.saturating_sub(visible.len());
@@ -947,7 +956,7 @@ impl<'a> JsonService<'a> {
         Ok(visible)
     }
 
-    fn branch_record(&self) -> EngineResult<BranchCatalogRecord> {
+    fn branch_record(&self) -> Result<BranchCatalogRecord, EngineError> {
         self.control.require_healthy()?;
         self.control
             .lookup_branch(&self.branch)
@@ -1001,7 +1010,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.persistence.scan_prefix(
             record.storage_branch_id(),
             RowClass::Json,
@@ -1014,7 +1023,7 @@ impl<'a> JsonService<'a> {
     fn load_indexes(
         &mut self,
         record: &BranchCatalogRecord,
-    ) -> EngineResult<Vec<JsonIndexDefinition>> {
+    ) -> Result<Vec<JsonIndexDefinition>, EngineError> {
         self.persistence
             .scan_prefix(
                 record.storage_branch_id(),
@@ -1082,7 +1091,7 @@ impl<'a> JsonService<'a> {
     fn document_from_row(
         id: &JsonDocumentId,
         row: &PersistenceReadRow,
-    ) -> EngineResult<JsonDocument> {
+    ) -> Result<JsonDocument, EngineError> {
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
                 "data_loss.engine.json_document",
@@ -1096,7 +1105,7 @@ impl<'a> JsonService<'a> {
         id: &JsonDocumentId,
         path: &super::JsonPath,
         row: &PersistenceReadRow,
-    ) -> EngineResult<Option<JsonValue>> {
+    ) -> Result<Option<JsonValue>, EngineError> {
         if row.is_tombstone() {
             return Ok(None);
         }
@@ -1108,7 +1117,7 @@ impl<'a> JsonService<'a> {
         id: &JsonDocumentId,
         path: &super::JsonPath,
         row: &PersistenceReadRow,
-    ) -> EngineResult<Option<JsonVersionedValue>> {
+    ) -> Result<Option<JsonVersionedValue>, EngineError> {
         if row.is_tombstone() {
             return Ok(None);
         }
@@ -1126,7 +1135,7 @@ impl<'a> JsonService<'a> {
     fn history_row_from_row(
         id: &JsonDocumentId,
         row: &PersistenceReadRow,
-    ) -> EngineResult<JsonHistoryRow> {
+    ) -> Result<JsonHistoryRow, EngineError> {
         if row.is_tombstone() {
             return Ok(JsonHistoryRow::new(
                 None,
@@ -1146,7 +1155,7 @@ impl<'a> JsonService<'a> {
         ))
     }
 
-    fn sample_row_from_row(&self, row: &PersistenceReadRow) -> EngineResult<JsonSampleRow> {
+    fn sample_row_from_row(&self, row: &PersistenceReadRow) -> Result<JsonSampleRow, EngineError> {
         let id = decode_json_document_id(&self.space, row.key())?;
         let document = Self::document_from_row(&id, row)?;
         Ok(JsonSampleRow::new(
@@ -1162,7 +1171,7 @@ impl<'a> JsonService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
-    ) -> EngineResult<CommitOutcome> {
+    ) -> Result<CommitOutcome, EngineError> {
         let mut mutations = mutations;
         if mutations.is_empty() {
             return Err(EngineError::invalid_input(

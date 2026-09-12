@@ -7,7 +7,7 @@ use crate::branch::catalog::{
 };
 use crate::control::ControlPlane;
 use crate::data::vector::{decode_vector_index_manifest, encode_vector_index_manifest};
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{
     decode_vector_index_manifest_key, vector_index_manifest_key, vector_index_manifest_prefix,
     CommitPlan, PersistenceBranchCleanup, PersistenceBranchOutcome, PersistenceBranchStatus,
@@ -39,7 +39,7 @@ impl<'a> BranchService<'a> {
     }
 
     /// Lists active product branches.
-    pub fn list(&self) -> EngineResult<Vec<BranchSummary>> {
+    pub fn list(&self) -> Result<Vec<BranchSummary>, EngineError> {
         self.control.require_healthy()?;
         Ok(self
             .control
@@ -50,7 +50,7 @@ impl<'a> BranchService<'a> {
     }
 
     /// Looks up an active product branch by name.
-    pub fn get(&self, name: &BranchName) -> EngineResult<BranchSummary> {
+    pub fn get(&self, name: &BranchName) -> Result<BranchSummary, EngineError> {
         self.control.require_healthy()?;
         let record = self.control.lookup_branch(name).ok_or_else(|| {
             EngineError::not_found(
@@ -62,7 +62,7 @@ impl<'a> BranchService<'a> {
     }
 
     /// Creates an empty root product branch.
-    pub fn create(&mut self, name: BranchName) -> EngineResult<BranchCreateOutcome> {
+    pub fn create(&mut self, name: BranchName) -> Result<BranchCreateOutcome, EngineError> {
         self.control.require_healthy()?;
         self.reject_duplicate_active(&name)?;
         let generation = self.control.next_generation_for_name(&name);
@@ -101,7 +101,7 @@ impl<'a> BranchService<'a> {
         &mut self,
         source: &BranchName,
         name: BranchName,
-    ) -> EngineResult<BranchCreateOutcome> {
+    ) -> Result<BranchCreateOutcome, EngineError> {
         self.control.require_healthy()?;
         self.reject_duplicate_active(&name)?;
         let source_record = self.control.lookup_branch(source).cloned().ok_or_else(|| {
@@ -192,7 +192,7 @@ impl<'a> BranchService<'a> {
         source: &BranchName,
         name: BranchName,
         version: CommitVersion,
-    ) -> EngineResult<BranchCreateOutcome> {
+    ) -> Result<BranchCreateOutcome, EngineError> {
         self.fork_with(
             source,
             name,
@@ -208,7 +208,7 @@ impl<'a> BranchService<'a> {
         source: &BranchName,
         name: BranchName,
         timestamp: Timestamp,
-    ) -> EngineResult<BranchCreateOutcome> {
+    ) -> Result<BranchCreateOutcome, EngineError> {
         self.fork_with(
             source,
             name,
@@ -226,7 +226,7 @@ impl<'a> BranchService<'a> {
         branch_a: &BranchName,
         branch_b: &BranchName,
         selector: BranchStateSelector,
-    ) -> EngineResult<BranchComparison> {
+    ) -> Result<BranchComparison, EngineError> {
         self.control.require_healthy()?;
         let record_a = self
             .control
@@ -259,7 +259,7 @@ impl<'a> BranchService<'a> {
         source: &BranchName,
         target: &BranchName,
         strategy: PromotionStrategy,
-    ) -> EngineResult<BranchPreview> {
+    ) -> Result<BranchPreview, EngineError> {
         self.control.require_healthy()?;
         let source_record = self.control.lookup_branch(source).cloned().ok_or_else(|| {
             EngineError::not_found(
@@ -290,7 +290,7 @@ impl<'a> BranchService<'a> {
         source: &BranchName,
         target: &BranchName,
         strategy: PromotionStrategy,
-    ) -> EngineResult<PromotionOutcome> {
+    ) -> Result<PromotionOutcome, EngineError> {
         self.control.require_healthy()?;
         let source_record = self.control.lookup_branch(source).cloned().ok_or_else(|| {
             EngineError::not_found(
@@ -375,7 +375,7 @@ impl<'a> BranchService<'a> {
         source_record: &BranchCatalogRecord,
         target_record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
-    ) -> EngineResult<(CommitVersion, Timestamp)> {
+    ) -> Result<(CommitVersion, Timestamp), EngineError> {
         // Capture the target's timeline head before mutating, so reopen recovery
         // can tell whether the data commit landed after a crash.
         let (baseline, _) = self
@@ -434,7 +434,7 @@ impl<'a> BranchService<'a> {
     }
 
     /// Deletes an active product branch.
-    pub fn delete(&mut self, name: &BranchName) -> EngineResult<BranchDeleteOutcome> {
+    pub fn delete(&mut self, name: &BranchName) -> Result<BranchDeleteOutcome, EngineError> {
         self.control.require_healthy()?;
         if name == self.control.default_branch() {
             return Err(EngineError::invalid_input(
@@ -495,8 +495,8 @@ impl<'a> BranchService<'a> {
             strata_core::BranchId,
             strata_core::BranchId,
             u64,
-        ) -> EngineResult<PersistenceBranchOutcome>,
-    ) -> EngineResult<BranchCreateOutcome> {
+        ) -> Result<PersistenceBranchOutcome, EngineError>,
+    ) -> Result<BranchCreateOutcome, EngineError> {
         self.control.require_healthy()?;
         self.reject_duplicate_active(&name)?;
         let source_record = self.control.lookup_branch(source).cloned().ok_or_else(|| {
@@ -565,7 +565,10 @@ impl<'a> BranchService<'a> {
     /// Rejects a new branch whose derived storage identity collides with an
     /// existing branch of a different name (finding U8), before any durable
     /// state is written.
-    fn reject_aliasing_storage_branch(&self, record: &BranchCatalogRecord) -> EngineResult<()> {
+    fn reject_aliasing_storage_branch(
+        &self,
+        record: &BranchCatalogRecord,
+    ) -> Result<(), EngineError> {
         if let Some(existing) = self
             .control
             .find_aliasing_storage_branch(record.name(), record.storage_branch_id())
@@ -582,7 +585,7 @@ impl<'a> BranchService<'a> {
         Ok(())
     }
 
-    fn reject_duplicate_active(&self, name: &BranchName) -> EngineResult<()> {
+    fn reject_duplicate_active(&self, name: &BranchName) -> Result<(), EngineError> {
         if self.control.contains_branch(name) {
             return Err(EngineError::conflict(
                 "already_exists.engine.branch",
@@ -652,7 +655,7 @@ impl<'a> BranchService<'a> {
         }
     }
 
-    fn persist_catalog_record(&mut self, record: BranchCatalogRecord) -> EngineResult<()> {
+    fn persist_catalog_record(&mut self, record: BranchCatalogRecord) -> Result<(), EngineError> {
         match self.control.persist_branch_record(self.persistence, record) {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -669,7 +672,7 @@ impl<'a> BranchService<'a> {
         child_record: &BranchCatalogRecord,
         fork_version: CommitVersion,
         fork_timestamp: Option<Timestamp>,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         if fork_version == CommitVersion::ZERO {
             return Ok(());
         }
@@ -707,7 +710,7 @@ impl<'a> BranchService<'a> {
         child_record: &BranchCatalogRecord,
         fork_version: CommitVersion,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<RowMutation>> {
+    ) -> Result<Vec<RowMutation>, EngineError> {
         let rows = self.persistence.scan_prefix(
             source_record.storage_branch_id(),
             RowClass::SpaceControl,

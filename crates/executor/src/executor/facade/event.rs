@@ -1,10 +1,13 @@
 use super::super::{
-    BatchEventEntry, Command, EventRangeDirection, Executor, ExecutorResult, Output,
+    BatchEventEntry, Command, EventRangeDirection, Executor, ExecutorError, Output,
 };
 
 impl Executor {
     /// Executes a default-branch event batch-append command.
-    pub fn event_batch_append(&mut self, entries: Vec<BatchEventEntry>) -> ExecutorResult<Output> {
+    pub fn event_batch_append(
+        &mut self,
+        entries: Vec<BatchEventEntry>,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::EventBatchAppend {
             branch: None,
             space: None,
@@ -17,7 +20,7 @@ impl Executor {
         &mut self,
         event_type: impl Into<String>,
         payload: serde_json::Value,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::EventAppend {
             branch: None,
             space: None,
@@ -27,7 +30,7 @@ impl Executor {
     }
 
     /// Executes a default-branch event get command.
-    pub fn event_get(&mut self, sequence: u64) -> ExecutorResult<Output> {
+    pub fn event_get(&mut self, sequence: u64) -> Result<Output, ExecutorError> {
         self.execute(Command::EventGet {
             branch: None,
             space: None,
@@ -38,7 +41,7 @@ impl Executor {
     }
 
     /// Executes a default-branch event exists command.
-    pub fn event_exists(&mut self, sequence: u64) -> ExecutorResult<Output> {
+    pub fn event_exists(&mut self, sequence: u64) -> Result<Output, ExecutorError> {
         self.execute(Command::EventExists {
             branch: None,
             space: None,
@@ -53,7 +56,7 @@ impl Executor {
         event_type: impl Into<String>,
         limit: Option<u64>,
         after_sequence: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::EventList {
             branch: None,
             space: None,
@@ -66,7 +69,7 @@ impl Executor {
     }
 
     /// Executes a default-branch event count command.
-    pub fn event_count(&mut self) -> ExecutorResult<Output> {
+    pub fn event_count(&mut self) -> Result<Output, ExecutorError> {
         self.execute(Command::EventCount {
             branch: None,
             space: None,
@@ -83,7 +86,7 @@ impl Executor {
         limit: Option<u64>,
         direction: EventRangeDirection,
         event_type: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::EventRange {
             branch: None,
             space: None,
@@ -103,7 +106,7 @@ impl Executor {
         limit: Option<u64>,
         direction: EventRangeDirection,
         event_type: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::EventRangeByTime {
             branch: None,
             space: None,
@@ -116,7 +119,7 @@ impl Executor {
     }
 
     /// Executes a default-branch event type-list command.
-    pub fn event_list_types(&mut self) -> ExecutorResult<Output> {
+    pub fn event_list_types(&mut self) -> Result<Output, ExecutorError> {
         self.execute(Command::EventListTypes {
             branch: None,
             space: None,
@@ -130,7 +133,7 @@ impl Executor {
         &mut self,
         event_type: Option<String>,
         limit: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::EventList {
             branch: None,
             space: None,
@@ -143,7 +146,7 @@ impl Executor {
     }
 
     /// Executes a default-branch event chain-verify command.
-    pub fn event_verify_chain(&mut self) -> ExecutorResult<Output> {
+    pub fn event_verify_chain(&mut self) -> Result<Output, ExecutorError> {
         self.execute(Command::EventVerifyChain {
             branch: None,
             space: None,

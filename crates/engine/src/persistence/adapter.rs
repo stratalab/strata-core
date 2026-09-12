@@ -25,7 +25,7 @@ use strata_storage::api::{
 
 use crate::branch::catalog::{DEFAULT_BRANCH_GENERATION, SYSTEM_BRANCH_ID};
 use crate::commit::CommitOutcome;
-use crate::diagnostics::{EngineError, EngineResult, ErrorDetail};
+use crate::diagnostics::{EngineError, ErrorDetail};
 use crate::time_compat::{SystemTime, UNIX_EPOCH};
 
 use super::fault::FaultOp;
@@ -393,7 +393,7 @@ impl StoragePersistence {
     #[cfg(test)]
     pub(crate) fn open(
         target: PersistenceOpenTarget,
-    ) -> EngineResult<(Self, PersistenceOpenSummary)> {
+    ) -> Result<(Self, PersistenceOpenSummary), EngineError> {
         Self::open_with_budget(target, None, None, crate::api::CachePreheat::WhenIdle)
     }
 
@@ -402,7 +402,7 @@ impl StoragePersistence {
         memory_budget_bytes: Option<u64>,
         data_block_bytes: Option<u32>,
         cache_preheat: crate::api::CachePreheat,
-    ) -> EngineResult<(Self, PersistenceOpenSummary)> {
+    ) -> Result<(Self, PersistenceOpenSummary), EngineError> {
         let (runtime, summary, durable) = match target {
             PersistenceOpenTarget::Cache => {
                 let options =
@@ -460,7 +460,7 @@ impl StoragePersistence {
     /// Returns an injected fault for `op` as a mapped engine error, if a test
     /// armed one.
     #[cfg(any(test, feature = "testkit"))]
-    fn guard_fault(&self, op: FaultOp) -> EngineResult<()> {
+    fn guard_fault(&self, op: FaultOp) -> Result<(), EngineError> {
         if let Some(error) = self.faults.take(op) {
             return Err(map_storage_error(error));
         }
@@ -473,7 +473,7 @@ impl StoragePersistence {
     /// callers need no `cfg` branching.
     #[cfg(not(any(test, feature = "testkit")))]
     #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
-    fn guard_fault(&self, _op: FaultOp) -> EngineResult<()> {
+    fn guard_fault(&self, _op: FaultOp) -> Result<(), EngineError> {
         Ok(())
     }
 
@@ -507,7 +507,7 @@ impl StoragePersistence {
     #[allow(clippy::unused_self)]
     fn corrupt_rows(&self, _op: FaultOp, _rows: &mut [PersistenceReadRow]) {}
 
-    pub(crate) fn create_system_branch_for_new_database(&mut self) -> EngineResult<()> {
+    pub(crate) fn create_system_branch_for_new_database(&mut self) -> Result<(), EngineError> {
         self.ensure_branch_created(SYSTEM_BRANCH_ID, DEFAULT_BRANCH_GENERATION)
     }
 
@@ -515,7 +515,7 @@ impl StoragePersistence {
         &mut self,
         branch_id: BranchId,
         generation: u64,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         if self.branch_exists(branch_id)? {
             return Ok(());
         }
@@ -530,7 +530,7 @@ impl StoragePersistence {
         }
     }
 
-    pub(crate) fn branch_exists(&self, branch_id: BranchId) -> EngineResult<bool> {
+    pub(crate) fn branch_exists(&self, branch_id: BranchId) -> Result<bool, EngineError> {
         let request = BranchRequest::new(branch_id, BranchAction::Describe, None);
         match self.runtime.branch(&request) {
             Ok(outcome) => Ok(outcome
@@ -545,7 +545,7 @@ impl StoragePersistence {
         &mut self,
         branch_id: BranchId,
         generation: u64,
-    ) -> EngineResult<PersistenceBranchOutcome> {
+    ) -> Result<PersistenceBranchOutcome, EngineError> {
         self.branch_action(
             branch_id,
             BranchAction::Create,
@@ -556,7 +556,7 @@ impl StoragePersistence {
     pub(crate) fn describe_branch(
         &self,
         branch_id: BranchId,
-    ) -> EngineResult<PersistenceBranchSummary> {
+    ) -> Result<PersistenceBranchSummary, EngineError> {
         let outcome = self.branch_action(branch_id, BranchAction::Describe, None)?;
         Ok(outcome.branch())
     }
@@ -570,7 +570,7 @@ impl StoragePersistence {
     pub(crate) fn branch_timeline_head(
         &self,
         branch_id: BranchId,
-    ) -> EngineResult<(Option<CommitVersion>, Option<Timestamp>)> {
+    ) -> Result<(Option<CommitVersion>, Option<Timestamp>), EngineError> {
         let outcome = self
             .runtime
             .timeline_bounds(TimelineBoundsRequest::new(branch_id))
@@ -591,7 +591,7 @@ impl StoragePersistence {
         &self,
         branch_id: BranchId,
         instant: Timestamp,
-    ) -> EngineResult<Timestamp> {
+    ) -> Result<Timestamp, EngineError> {
         let outcome = self
             .runtime
             .resolve_wall_clock(WallClockLookupRequest::new(branch_id, instant))
@@ -610,7 +610,7 @@ impl StoragePersistence {
         &self,
         branch_id: BranchId,
         versions: &[CommitVersion],
-    ) -> EngineResult<Vec<Option<Timestamp>>> {
+    ) -> Result<Vec<Option<Timestamp>>, EngineError> {
         if versions.is_empty() {
             return Ok(Vec::new());
         }
@@ -624,7 +624,7 @@ impl StoragePersistence {
         branch_id: BranchId,
         source: BranchId,
         generation: u64,
-    ) -> EngineResult<PersistenceBranchOutcome> {
+    ) -> Result<PersistenceBranchOutcome, EngineError> {
         self.branch_action(
             branch_id,
             BranchAction::ForkCurrent { source },
@@ -638,7 +638,7 @@ impl StoragePersistence {
         source: BranchId,
         version: CommitVersion,
         generation: u64,
-    ) -> EngineResult<PersistenceBranchOutcome> {
+    ) -> Result<PersistenceBranchOutcome, EngineError> {
         self.branch_action(
             branch_id,
             BranchAction::ForkAtVersion { source, version },
@@ -652,7 +652,7 @@ impl StoragePersistence {
         source: BranchId,
         timestamp: Timestamp,
         generation: u64,
-    ) -> EngineResult<PersistenceBranchOutcome> {
+    ) -> Result<PersistenceBranchOutcome, EngineError> {
         self.branch_action(
             branch_id,
             BranchAction::ForkAtTimestamp { source, timestamp },
@@ -664,7 +664,7 @@ impl StoragePersistence {
         &mut self,
         branch_id: BranchId,
         generation: u64,
-    ) -> EngineResult<PersistenceBranchOutcome> {
+    ) -> Result<PersistenceBranchOutcome, EngineError> {
         self.branch_action(
             branch_id,
             BranchAction::Delete,
@@ -682,7 +682,7 @@ impl StoragePersistence {
         branch_id: BranchId,
         action: BranchAction,
         generation: Option<StorageBranchGeneration>,
-    ) -> EngineResult<PersistenceBranchOutcome> {
+    ) -> Result<PersistenceBranchOutcome, EngineError> {
         self.guard_fault(FaultOp::Branch)?;
         let request = BranchRequest::new(branch_id, action, generation);
         let outcome = self.runtime.branch(&request).map_err(map_storage_error)?;
@@ -715,7 +715,7 @@ impl StoragePersistence {
         *replay(&self.replay_structural_timestamp) = timestamp;
     }
 
-    pub(crate) fn commit(&self, plan: &CommitPlan) -> EngineResult<CommitOutcome> {
+    pub(crate) fn commit(&self, plan: &CommitPlan) -> Result<CommitOutcome, EngineError> {
         self.guard_fault(FaultOp::Commit)?;
         let mut mutations = Vec::with_capacity(plan.mutations().len());
         for mutation in plan.mutations() {
@@ -764,7 +764,7 @@ impl StoragePersistence {
         &self,
         address: RowAddress,
         selector: ReadSelector,
-    ) -> EngineResult<Option<Vec<u8>>> {
+    ) -> Result<Option<Vec<u8>>, EngineError> {
         Ok(self
             .read_row(address, selector)?
             .and_then(|row| (!row.is_tombstone()).then_some(row))
@@ -775,7 +775,7 @@ impl StoragePersistence {
         &self,
         address: RowAddress,
         selector: ReadSelector,
-    ) -> EngineResult<Option<PersistenceReadRow>> {
+    ) -> Result<Option<PersistenceReadRow>, EngineError> {
         self.guard_fault(FaultOp::Read)?;
         let outcome = self
             .runtime
@@ -794,7 +794,7 @@ impl StoragePersistence {
         &self,
         address: &RowAddress,
         include_tombstones: bool,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.guard_fault(FaultOp::Read)?;
         let request = HistoryReadRequest::new(
             address.branch_id(),
@@ -820,7 +820,7 @@ impl StoragePersistence {
         prefix: Vec<u8>,
         selector: ReadSelector,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.scan_prefix_inner(branch_id, row_class, prefix, selector, limit, None)
     }
 
@@ -835,7 +835,7 @@ impl StoragePersistence {
         selector: ReadSelector,
         limit: Option<usize>,
         after_version: CommitVersion,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.scan_prefix_inner(
             branch_id,
             row_class,
@@ -854,7 +854,7 @@ impl StoragePersistence {
         selector: ReadSelector,
         limit: Option<usize>,
         after_version: Option<CommitVersion>,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.guard_fault(FaultOp::Scan)?;
         if limit == Some(0) {
             return Ok(Vec::new());
@@ -888,7 +888,7 @@ impl StoragePersistence {
         end: Option<Vec<u8>>,
         selector: ReadSelector,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.guard_fault(FaultOp::Scan)?;
         if limit == Some(0) {
             return Ok(Vec::new());
@@ -916,7 +916,7 @@ impl StoragePersistence {
         start: Option<Vec<u8>>,
         end: Option<Vec<u8>>,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<PersistenceImmutableSource>> {
+    ) -> Result<Vec<PersistenceImmutableSource>, EngineError> {
         self.guard_fault(FaultOp::Scan)?;
         let outcome = self
             .runtime
@@ -931,7 +931,7 @@ impl StoragePersistence {
             .collect())
     }
 
-    pub(crate) fn close(&mut self) -> EngineResult<StorageCloseSummary> {
+    pub(crate) fn close(&mut self) -> Result<StorageCloseSummary, EngineError> {
         self.runtime.close().map_err(map_storage_error)
     }
 
@@ -941,7 +941,7 @@ impl StoragePersistence {
     /// seed commits stop depending on the user-space WAL staging that a
     /// process kill vaporizes — a store's durable manifest must never
     /// outlive its control plane. Cache targets have nothing to force.
-    pub(crate) fn force_creation_durability(&mut self) -> EngineResult<()> {
+    pub(crate) fn force_creation_durability(&mut self) -> Result<(), EngineError> {
         if !self.durable() {
             return Ok(());
         }
@@ -970,7 +970,10 @@ impl StoragePersistence {
     }
 
     #[cfg(any(test, feature = "testkit"))]
-    pub(crate) fn flush_branch_for_test(&mut self, branch_id: BranchId) -> EngineResult<usize> {
+    pub(crate) fn flush_branch_for_test(
+        &mut self,
+        branch_id: BranchId,
+    ) -> Result<usize, EngineError> {
         self.runtime
             .maintenance(&MaintenanceRequest::new(
                 MaintenanceTask::Flush,
@@ -990,7 +993,9 @@ impl StoragePersistence {
     }
 }
 
-fn map_branch_outcome(outcome: &StorageBranchOutcome) -> EngineResult<PersistenceBranchOutcome> {
+fn map_branch_outcome(
+    outcome: &StorageBranchOutcome,
+) -> Result<PersistenceBranchOutcome, EngineError> {
     let branch = outcome.branch().ok_or_else(|| {
         EngineError::corruption(
             "data_loss.engine.branch_catalog",
@@ -1012,7 +1017,9 @@ fn map_branch_outcome(outcome: &StorageBranchOutcome) -> EngineResult<Persistenc
     })
 }
 
-fn map_branch_summary(summary: StorageBranchSummary) -> EngineResult<PersistenceBranchSummary> {
+fn map_branch_summary(
+    summary: StorageBranchSummary,
+) -> Result<PersistenceBranchSummary, EngineError> {
     let status = match summary.status() {
         StorageBranchStatus::Active => PersistenceBranchStatus::Active,
         StorageBranchStatus::Deleted => PersistenceBranchStatus::Deleted,
@@ -1046,7 +1053,7 @@ fn map_branch_cleanup(cleanup: StorageBranchCleanupSummary) -> PersistenceBranch
     }
 }
 
-fn to_storage_mutation(mutation: &RowMutation) -> EngineResult<CommitMutation> {
+fn to_storage_mutation(mutation: &RowMutation) -> Result<CommitMutation, EngineError> {
     match mutation {
         RowMutation::Put { address, value } => Ok(CommitMutation::Put {
             storage_space: storage_space(address)?,
@@ -1061,26 +1068,26 @@ fn to_storage_mutation(mutation: &RowMutation) -> EngineResult<CommitMutation> {
     }
 }
 
-fn storage_space(address: &RowAddress) -> EngineResult<StorageSpaceId> {
+fn storage_space(address: &RowAddress) -> Result<StorageSpaceId, EngineError> {
     storage_space_for_class(address.row_class())
 }
 
-fn storage_space_for_class(row_class: RowClass) -> EngineResult<StorageSpaceId> {
+fn storage_space_for_class(row_class: RowClass) -> Result<StorageSpaceId, EngineError> {
     StorageSpaceId::new(vec![row_class.storage_space_id()]).map_err(map_storage_error)
 }
 
-fn storage_key(address: &RowAddress) -> EngineResult<StorageKey> {
+fn storage_key(address: &RowAddress) -> Result<StorageKey, EngineError> {
     storage_key_from_bytes(address.key().to_vec())
 }
 
-fn storage_key_from_bytes(bytes: Vec<u8>) -> EngineResult<StorageKey> {
+fn storage_key_from_bytes(bytes: Vec<u8>) -> Result<StorageKey, EngineError> {
     StorageKey::new(bytes).map_err(map_storage_error)
 }
 
 fn point_read_request(
     address: RowAddress,
     selector: ReadSelector,
-) -> EngineResult<PointReadRequest> {
+) -> Result<PointReadRequest, EngineError> {
     // B4: the encoded key is allocated once (encode_kv_key and friends) and
     // MOVED through the request instead of re-copied.
     Ok(PointReadRequest::new(
@@ -1098,7 +1105,7 @@ fn prefix_scan_request(
     selector: ReadSelector,
     limit: Option<ReadLimit>,
     after_version: Option<CommitVersion>,
-) -> EngineResult<PrefixScanReadRequest> {
+) -> Result<PrefixScanReadRequest, EngineError> {
     let request = PrefixScanReadRequest::new(
         branch_id,
         storage_space_for_class(row_class)?,
@@ -1119,7 +1126,7 @@ fn scan_range_request(
     end: Option<Vec<u8>>,
     selector: ReadSelector,
     limit: Option<ReadLimit>,
-) -> EngineResult<ScanReadRequest> {
+) -> Result<ScanReadRequest, EngineError> {
     let range = ScanRange::new(
         start.map(storage_key_from_bytes).transpose()?,
         end.map(storage_key_from_bytes).transpose()?,
@@ -1140,7 +1147,7 @@ fn immutable_source_scan_request(
     start: Option<Vec<u8>>,
     end: Option<Vec<u8>>,
     selector: ReadSelector,
-) -> EngineResult<ImmutableSourceScanReadRequest> {
+) -> Result<ImmutableSourceScanReadRequest, EngineError> {
     let range = ScanRange::new(
         start.map(storage_key_from_bytes).transpose()?,
         end.map(storage_key_from_bytes).transpose()?,
@@ -1162,7 +1169,7 @@ fn storage_read_bound(selector: ReadSelector) -> ReadBound {
     }
 }
 
-fn read_limit(limit: Option<usize>) -> EngineResult<Option<ReadLimit>> {
+fn read_limit(limit: Option<usize>) -> Result<Option<ReadLimit>, EngineError> {
     match limit {
         Some(limit) => ReadLimit::new(limit).map(Some).map_err(map_storage_error),
         None => Ok(None),
@@ -1184,7 +1191,7 @@ const fn commit_durability(summary: CommitDurabilitySummary) -> crate::commit::C
 fn apply_memory_budget(
     options: StorageOpenOptions,
     memory_budget_bytes: Option<u64>,
-) -> EngineResult<StorageOpenOptions> {
+) -> Result<StorageOpenOptions, EngineError> {
     match memory_budget_bytes {
         Some(bytes) => {
             let budget = StorageMemoryBudget::new(bytes).map_err(map_storage_error)?;

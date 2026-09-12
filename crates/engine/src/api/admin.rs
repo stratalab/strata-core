@@ -9,7 +9,7 @@ use crate::data::kv::{KvService, ProductSpace};
 use crate::data::vector::{
     VectorArtifactStore, VectorCollectionInfo, VectorDistanceMetric, VectorService,
 };
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::StoragePersistence;
 
 use super::{
@@ -237,7 +237,7 @@ impl<'a> AdminService<'a> {
     }
 
     /// Returns stable database facts.
-    pub fn info(&mut self, branch: Option<&BranchName>) -> EngineResult<AdminDatabaseInfo> {
+    pub fn info(&mut self, branch: Option<&BranchName>) -> Result<AdminDatabaseInfo, EngineError> {
         let branch = self.resolved_branch(branch).clone();
         let space_count = self.space_count(&branch)?;
         Ok(AdminDatabaseInfo {
@@ -277,7 +277,10 @@ impl<'a> AdminService<'a> {
     }
 
     /// Returns compact metrics facts.
-    pub fn metrics(&mut self, branch: Option<&BranchName>) -> EngineResult<AdminMetricsSummary> {
+    pub fn metrics(
+        &mut self,
+        branch: Option<&BranchName>,
+    ) -> Result<AdminMetricsSummary, EngineError> {
         let branch = self.resolved_branch(branch).clone();
         let health = self.health(Some(&branch));
         Ok(AdminMetricsSummary {
@@ -291,7 +294,10 @@ impl<'a> AdminService<'a> {
     }
 
     /// Returns a structured database snapshot for agent/CLI introspection.
-    pub fn describe(&mut self, branch: Option<&BranchName>) -> EngineResult<AdminDescribeSummary> {
+    pub fn describe(
+        &mut self,
+        branch: Option<&BranchName>,
+    ) -> Result<AdminDescribeSummary, EngineError> {
         self.control.require_healthy()?;
         let branch = self.resolved_branch(branch).clone();
         let space = ProductSpace::new(control_space::DEFAULT_SPACE)?;
@@ -337,7 +343,7 @@ impl<'a> AdminService<'a> {
     }
 
     /// Returns one sanitized config value from the allowlist.
-    pub fn config_value(&self, key: &str) -> EngineResult<Option<String>> {
+    pub fn config_value(&self, key: &str) -> Result<Option<String>, EngineError> {
         match key.trim().to_ascii_lowercase().as_str() {
             "target" => Ok(Some(match self.summary.target() {
                 DatabaseOpenTarget::Cache => "cache".to_owned(),
@@ -358,7 +364,7 @@ impl<'a> AdminService<'a> {
         &mut self,
         branch: &BranchName,
         space: &ProductSpace,
-    ) -> EngineResult<AdminPrimitiveSummary> {
+    ) -> Result<AdminPrimitiveSummary, EngineError> {
         let kv_count = {
             let mut service = KvService::new(
                 self.persistence,
@@ -436,7 +442,7 @@ impl<'a> AdminService<'a> {
     fn branch_record(
         &self,
         branch: &BranchName,
-    ) -> EngineResult<crate::branch::catalog::BranchCatalogRecord> {
+    ) -> Result<crate::branch::catalog::BranchCatalogRecord, EngineError> {
         self.control.lookup_branch(branch).cloned().ok_or_else(|| {
             EngineError::not_found(
                 "not_found.engine.branch",
@@ -445,7 +451,7 @@ impl<'a> AdminService<'a> {
         })
     }
 
-    fn space_count(&mut self, branch: &BranchName) -> EngineResult<u64> {
+    fn space_count(&mut self, branch: &BranchName) -> Result<u64, EngineError> {
         let record = self.branch_record(branch)?;
         let count = control_space::registered_spaces(self.persistence, &record)?.len();
         Ok(u64::try_from(count).unwrap_or(u64::MAX))

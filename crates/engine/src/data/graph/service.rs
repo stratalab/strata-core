@@ -70,7 +70,10 @@ impl<'a> GraphService<'a> {
     }
 
     /// Creates a graph, returning the new metadata and the create commit.
-    pub fn create_graph(&mut self, name: GraphName) -> EngineResult<(GraphInfo, CommitOutcome)> {
+    pub fn create_graph(
+        &mut self,
+        name: GraphName,
+    ) -> Result<(GraphInfo, CommitOutcome), EngineError> {
         let record = self.branch_record()?;
         let address = self.metadata_address(&record, &name);
         if self
@@ -104,7 +107,7 @@ impl<'a> GraphService<'a> {
     }
 
     /// Deletes a graph and all visible graph data rows.
-    pub fn delete_graph(&mut self, name: &GraphName) -> EngineResult<GraphDeleteOutcome> {
+    pub fn delete_graph(&mut self, name: &GraphName) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
         if self
             .graph_metadata_row(&record, name, ReadSelector::Latest)?
@@ -179,7 +182,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         cursor: Option<&GraphName>,
         limit: usize,
-    ) -> EngineResult<GraphNamePage> {
+    ) -> Result<GraphNamePage, EngineError> {
         self.list_graphs_with_selector(cursor, limit, ReadSelector::Latest)
     }
 
@@ -189,7 +192,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphName>,
         limit: usize,
         version: CommitVersion,
-    ) -> EngineResult<GraphNamePage> {
+    ) -> Result<GraphNamePage, EngineError> {
         self.list_graphs_with_selector(cursor, limit, ReadSelector::AtVersion(version))
     }
 
@@ -199,7 +202,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphName>,
         limit: usize,
         timestamp: Timestamp,
-    ) -> EngineResult<GraphNamePage> {
+    ) -> Result<GraphNamePage, EngineError> {
         self.list_graphs_with_selector(cursor, limit, ReadSelector::AtTimestamp(timestamp))
     }
 
@@ -208,7 +211,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphName>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<GraphNamePage> {
+    ) -> Result<GraphNamePage, EngineError> {
         let record = self.branch_record()?;
         if limit == 0 {
             return Ok(GraphNamePage::new(Vec::new(), false, None));
@@ -239,7 +242,7 @@ impl<'a> GraphService<'a> {
     }
 
     /// Returns graph metadata when the graph exists.
-    pub fn graph_info(&mut self, name: &GraphName) -> EngineResult<Option<GraphInfo>> {
+    pub fn graph_info(&mut self, name: &GraphName) -> Result<Option<GraphInfo>, EngineError> {
         self.graph_info_with_selector(name, ReadSelector::Latest)
     }
 
@@ -248,7 +251,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         name: &GraphName,
         version: CommitVersion,
-    ) -> EngineResult<Option<GraphInfo>> {
+    ) -> Result<Option<GraphInfo>, EngineError> {
         self.graph_info_with_selector(name, ReadSelector::AtVersion(version))
     }
 
@@ -257,7 +260,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         name: &GraphName,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<GraphInfo>> {
+    ) -> Result<Option<GraphInfo>, EngineError> {
         self.graph_info_with_selector(name, ReadSelector::AtTimestamp(timestamp))
     }
 
@@ -265,7 +268,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         name: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Option<GraphInfo>> {
+    ) -> Result<Option<GraphInfo>, EngineError> {
         let record = self.branch_record()?;
         self.graph_metadata_row(&record, name, selector)?
             .map(|row| self.graph_info_from_row(&record, &row, selector))
@@ -293,7 +296,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         target: &GraphBindingTarget,
         policy: GraphDeletePolicy,
-    ) -> EngineResult<GraphDeletePolicyOutcome> {
+    ) -> Result<GraphDeletePolicyOutcome, EngineError> {
         let record = self.branch_record()?;
         self.validate_binding_target(target)?;
 
@@ -389,7 +392,7 @@ impl<'a> GraphService<'a> {
     pub fn resolve_binding_target(
         &mut self,
         target: &GraphBindingTarget,
-    ) -> EngineResult<GraphTargetStatus> {
+    ) -> Result<GraphTargetStatus, EngineError> {
         let record = self.branch_record()?;
         self.binding_target_status(&record, target, ReadSelector::Latest)
     }
@@ -399,7 +402,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         target: &GraphBindingTarget,
         version: CommitVersion,
-    ) -> EngineResult<GraphTargetStatus> {
+    ) -> Result<GraphTargetStatus, EngineError> {
         let record = self.branch_record()?;
         self.binding_target_status(&record, target, ReadSelector::AtVersion(version))
     }
@@ -409,7 +412,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         target: &GraphBindingTarget,
         timestamp: Timestamp,
-    ) -> EngineResult<GraphTargetStatus> {
+    ) -> Result<GraphTargetStatus, EngineError> {
         let record = self.branch_record()?;
         self.binding_target_status(&record, target, ReadSelector::AtTimestamp(timestamp))
     }
@@ -422,7 +425,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         target: &GraphBindingTarget,
         selector: ReadSelector,
-    ) -> EngineResult<GraphTargetStatus> {
+    ) -> Result<GraphTargetStatus, EngineError> {
         let (class, key) = match target.primitive() {
             GraphBindingPrimitive::Kv => (
                 RowClass::Kv,
@@ -463,7 +466,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         node: &GraphNode,
         selector: ReadSelector,
-    ) -> EngineResult<Option<GraphTargetStatus>> {
+    ) -> Result<Option<GraphTargetStatus>, EngineError> {
         match node.data().binding() {
             Some(binding) => Ok(Some(self.binding_target_status(
                 record,
@@ -474,7 +477,7 @@ impl<'a> GraphService<'a> {
         }
     }
 
-    fn validate_binding_target(&self, target: &GraphBindingTarget) -> EngineResult<()> {
+    fn validate_binding_target(&self, target: &GraphBindingTarget) -> Result<(), EngineError> {
         if let Some(target_branch) = target.branch() {
             if target_branch != &self.branch {
                 return Err(EngineError::unsupported(
@@ -496,7 +499,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         node_id: GraphNodeId,
         data: super::GraphNodeData,
-    ) -> EngineResult<GraphWriteOutcome> {
+    ) -> Result<GraphWriteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         if let Some(binding) = data.binding() {
@@ -568,7 +571,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         node_id: &GraphNodeId,
-    ) -> EngineResult<Option<GraphNode>> {
+    ) -> Result<Option<GraphNode>, EngineError> {
         self.get_node_with_selector(graph, node_id, ReadSelector::Latest)
     }
 
@@ -578,7 +581,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         node_id: &GraphNodeId,
         version: CommitVersion,
-    ) -> EngineResult<Option<GraphNode>> {
+    ) -> Result<Option<GraphNode>, EngineError> {
         self.get_node_with_selector(graph, node_id, ReadSelector::AtVersion(version))
     }
 
@@ -588,7 +591,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         node_id: &GraphNodeId,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<GraphNode>> {
+    ) -> Result<Option<GraphNode>, EngineError> {
         self.get_node_with_selector(graph, node_id, ReadSelector::AtTimestamp(timestamp))
     }
 
@@ -597,7 +600,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         node_id: &GraphNodeId,
         selector: ReadSelector,
-    ) -> EngineResult<Option<GraphNode>> {
+    ) -> Result<Option<GraphNode>, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
         self.node_row_with_selector(&record, graph, node_id, selector)?
@@ -610,7 +613,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         node_id: &GraphNodeId,
-    ) -> EngineResult<GraphDeleteOutcome> {
+    ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         let Some(current) = self.node_record(&record, graph, node_id)? else {
@@ -643,7 +646,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         count: usize,
-    ) -> EngineResult<(u64, Vec<GraphNode>)> {
+    ) -> Result<(u64, Vec<GraphNode>), EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, ReadSelector::Latest)?;
         let mut nodes = self
@@ -674,7 +677,7 @@ impl<'a> GraphService<'a> {
         prefix: Option<&GraphNodeId>,
         cursor: Option<&GraphNodeId>,
         limit: usize,
-    ) -> EngineResult<GraphNodePage> {
+    ) -> Result<GraphNodePage, EngineError> {
         self.list_nodes_with_selector(graph, prefix, cursor, limit, ReadSelector::Latest)
     }
 
@@ -686,7 +689,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphNodeId>,
         limit: usize,
         version: CommitVersion,
-    ) -> EngineResult<GraphNodePage> {
+    ) -> Result<GraphNodePage, EngineError> {
         self.list_nodes_with_selector(
             graph,
             prefix,
@@ -704,7 +707,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphNodeId>,
         limit: usize,
         timestamp: Timestamp,
-    ) -> EngineResult<GraphNodePage> {
+    ) -> Result<GraphNodePage, EngineError> {
         self.list_nodes_with_selector(
             graph,
             prefix,
@@ -721,7 +724,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphNodeId>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<GraphNodePage> {
+    ) -> Result<GraphNodePage, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
         if limit == 0 {
@@ -756,7 +759,7 @@ impl<'a> GraphService<'a> {
         edge_type: GraphEdgeType,
         dst: GraphNodeId,
         data: super::GraphEdgeData,
-    ) -> EngineResult<GraphEdgeWriteOutcome> {
+    ) -> Result<GraphEdgeWriteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         let src_record = self
@@ -836,7 +839,7 @@ impl<'a> GraphService<'a> {
             super::GraphEdgeData,
         )],
         chunk_size: Option<usize>,
-    ) -> EngineResult<GraphBulkInsertOutcome> {
+    ) -> Result<GraphBulkInsertOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         if nodes.is_empty() && edges.is_empty() {
@@ -949,7 +952,7 @@ impl<'a> GraphService<'a> {
             GraphNodeId,
             super::GraphEdgeData,
         )],
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let ontology = self.frozen_ontology(record, graph)?;
         let mut call_nodes: BTreeMap<&GraphNodeId, &super::GraphNodeData> = BTreeMap::new();
         for (node_id, data) in nodes {
@@ -996,7 +999,7 @@ impl<'a> GraphService<'a> {
         src: &GraphNodeId,
         edge_type: &GraphEdgeType,
         dst: &GraphNodeId,
-    ) -> EngineResult<Option<GraphEdge>> {
+    ) -> Result<Option<GraphEdge>, EngineError> {
         self.get_edge_with_selector(graph, src, edge_type, dst, ReadSelector::Latest)
     }
 
@@ -1008,7 +1011,7 @@ impl<'a> GraphService<'a> {
         edge_type: &GraphEdgeType,
         dst: &GraphNodeId,
         version: CommitVersion,
-    ) -> EngineResult<Option<GraphEdge>> {
+    ) -> Result<Option<GraphEdge>, EngineError> {
         self.get_edge_with_selector(graph, src, edge_type, dst, ReadSelector::AtVersion(version))
     }
 
@@ -1020,7 +1023,7 @@ impl<'a> GraphService<'a> {
         edge_type: &GraphEdgeType,
         dst: &GraphNodeId,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<GraphEdge>> {
+    ) -> Result<Option<GraphEdge>, EngineError> {
         self.get_edge_with_selector(
             graph,
             src,
@@ -1037,7 +1040,7 @@ impl<'a> GraphService<'a> {
         edge_type: &GraphEdgeType,
         dst: &GraphNodeId,
         selector: ReadSelector,
-    ) -> EngineResult<Option<GraphEdge>> {
+    ) -> Result<Option<GraphEdge>, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
         self.edge_row_with_selector(&record, graph, src, edge_type, dst, selector)?
@@ -1052,7 +1055,7 @@ impl<'a> GraphService<'a> {
         src: &GraphNodeId,
         edge_type: &GraphEdgeType,
         dst: &GraphNodeId,
-    ) -> EngineResult<GraphDeleteOutcome> {
+    ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         let Some(edge) = self.edge_record(&record, graph, src, edge_type, dst)? else {
@@ -1073,7 +1076,7 @@ impl<'a> GraphService<'a> {
         edge_type: Option<&GraphEdgeType>,
         cursor: Option<&str>,
         limit: usize,
-    ) -> EngineResult<GraphNeighborPage> {
+    ) -> Result<GraphNeighborPage, EngineError> {
         self.neighbors_with_selector(
             graph,
             node_id,
@@ -1095,7 +1098,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&str>,
         limit: usize,
         version: CommitVersion,
-    ) -> EngineResult<GraphNeighborPage> {
+    ) -> Result<GraphNeighborPage, EngineError> {
         self.neighbors_with_selector(
             graph,
             node_id,
@@ -1117,7 +1120,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&str>,
         limit: usize,
         timestamp: Timestamp,
-    ) -> EngineResult<GraphNeighborPage> {
+    ) -> Result<GraphNeighborPage, EngineError> {
         self.neighbors_with_selector(
             graph,
             node_id,
@@ -1138,7 +1141,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&str>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<GraphNeighborPage> {
+    ) -> Result<GraphNeighborPage, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
         if limit == 0
@@ -1173,7 +1176,7 @@ impl<'a> GraphService<'a> {
         target: &GraphBindingTarget,
         cursor: Option<&str>,
         limit: usize,
-    ) -> EngineResult<GraphBindingPage> {
+    ) -> Result<GraphBindingPage, EngineError> {
         self.bindings_for_entity_with_selector(target, cursor, limit, ReadSelector::Latest)
     }
 
@@ -1184,7 +1187,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&str>,
         limit: usize,
         version: CommitVersion,
-    ) -> EngineResult<GraphBindingPage> {
+    ) -> Result<GraphBindingPage, EngineError> {
         self.bindings_for_entity_with_selector(
             target,
             cursor,
@@ -1200,7 +1203,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&str>,
         limit: usize,
         timestamp: Timestamp,
-    ) -> EngineResult<GraphBindingPage> {
+    ) -> Result<GraphBindingPage, EngineError> {
         self.bindings_for_entity_with_selector(
             target,
             cursor,
@@ -1215,7 +1218,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&str>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<GraphBindingPage> {
+    ) -> Result<GraphBindingPage, EngineError> {
         let record = self.branch_record()?;
         if limit == 0 {
             return Ok(GraphBindingPage::new(Vec::new(), false, None));
@@ -1251,7 +1254,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         batch: &GraphBatchWrite,
-    ) -> EngineResult<GraphBatchWriteOutcome> {
+    ) -> Result<GraphBatchWriteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         if batch.is_empty() {
@@ -1421,7 +1424,7 @@ impl<'a> GraphService<'a> {
     }
 
     /// Returns the graph's ontology, or `None` before any type was defined.
-    pub fn ontology(&mut self, graph: &GraphName) -> EngineResult<Option<GraphOntology>> {
+    pub fn ontology(&mut self, graph: &GraphName) -> Result<Option<GraphOntology>, EngineError> {
         self.ontology_with_selector(graph, ReadSelector::Latest)
     }
 
@@ -1430,7 +1433,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         version: CommitVersion,
-    ) -> EngineResult<Option<GraphOntology>> {
+    ) -> Result<Option<GraphOntology>, EngineError> {
         self.ontology_with_selector(graph, ReadSelector::AtVersion(version))
     }
 
@@ -1439,7 +1442,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<GraphOntology>> {
+    ) -> Result<Option<GraphOntology>, EngineError> {
         self.ontology_with_selector(graph, ReadSelector::AtTimestamp(timestamp))
     }
 
@@ -1447,7 +1450,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Option<GraphOntology>> {
+    ) -> Result<Option<GraphOntology>, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
         let Some(row) = self.ontology_row(&record, graph, selector)? else {
@@ -1471,7 +1474,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         def: GraphObjectTypeDef,
-    ) -> EngineResult<GraphOntologyWriteOutcome> {
+    ) -> Result<GraphOntologyWriteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
@@ -1492,7 +1495,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         def: GraphLinkTypeDef,
-    ) -> EngineResult<GraphOntologyWriteOutcome> {
+    ) -> Result<GraphOntologyWriteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
@@ -1514,7 +1517,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         name: &GraphTypeName,
-    ) -> EngineResult<GraphDeleteOutcome> {
+    ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
@@ -1530,7 +1533,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         name: &GraphTypeName,
-    ) -> EngineResult<GraphDeleteOutcome> {
+    ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
@@ -1549,7 +1552,7 @@ impl<'a> GraphService<'a> {
     pub fn freeze_ontology(
         &mut self,
         graph: &GraphName,
-    ) -> EngineResult<GraphOntologyFreezeOutcome> {
+    ) -> Result<GraphOntologyFreezeOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
@@ -1581,7 +1584,7 @@ impl<'a> GraphService<'a> {
         object_type: &GraphTypeName,
         cursor: Option<&GraphNodeId>,
         limit: usize,
-    ) -> EngineResult<GraphNodePage> {
+    ) -> Result<GraphNodePage, EngineError> {
         self.nodes_by_type_with_selector(graph, object_type, cursor, limit, ReadSelector::Latest)
     }
 
@@ -1593,7 +1596,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphNodeId>,
         limit: usize,
         version: CommitVersion,
-    ) -> EngineResult<GraphNodePage> {
+    ) -> Result<GraphNodePage, EngineError> {
         self.nodes_by_type_with_selector(
             graph,
             object_type,
@@ -1611,7 +1614,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphNodeId>,
         limit: usize,
         timestamp: Timestamp,
-    ) -> EngineResult<GraphNodePage> {
+    ) -> Result<GraphNodePage, EngineError> {
         self.nodes_by_type_with_selector(
             graph,
             object_type,
@@ -1628,7 +1631,7 @@ impl<'a> GraphService<'a> {
         cursor: Option<&GraphNodeId>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<GraphNodePage> {
+    ) -> Result<GraphNodePage, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
         if limit == 0 {
@@ -1687,7 +1690,7 @@ impl<'a> GraphService<'a> {
     pub fn ontology_summary(
         &mut self,
         graph: &GraphName,
-    ) -> EngineResult<Option<GraphOntologySummary>> {
+    ) -> Result<Option<GraphOntologySummary>, EngineError> {
         self.ontology_summary_with_selector(graph, ReadSelector::Latest)
     }
 
@@ -1696,7 +1699,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         version: CommitVersion,
-    ) -> EngineResult<Option<GraphOntologySummary>> {
+    ) -> Result<Option<GraphOntologySummary>, EngineError> {
         self.ontology_summary_with_selector(graph, ReadSelector::AtVersion(version))
     }
 
@@ -1705,7 +1708,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<GraphOntologySummary>> {
+    ) -> Result<Option<GraphOntologySummary>, EngineError> {
         self.ontology_summary_with_selector(graph, ReadSelector::AtTimestamp(timestamp))
     }
 
@@ -1713,7 +1716,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Option<GraphOntologySummary>> {
+    ) -> Result<Option<GraphOntologySummary>, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
         let Some(row) = self.ontology_row(&record, graph, selector)? else {
@@ -1792,7 +1795,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.persistence.scan_prefix(
             record.storage_branch_id(),
             RowClass::GraphTypeIndex,
@@ -1811,7 +1814,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         graph: &GraphName,
         budget: &GraphAnalyticsBudget,
-    ) -> EngineResult<GraphAdjacencyIndex> {
+    ) -> Result<GraphAdjacencyIndex, EngineError> {
         self.adjacency_index_with_selector(graph, budget, ReadSelector::Latest)
     }
 
@@ -1821,7 +1824,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         budget: &GraphAnalyticsBudget,
         version: CommitVersion,
-    ) -> EngineResult<GraphAdjacencyIndex> {
+    ) -> Result<GraphAdjacencyIndex, EngineError> {
         self.adjacency_index_with_selector(graph, budget, ReadSelector::AtVersion(version))
     }
 
@@ -1831,7 +1834,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         budget: &GraphAnalyticsBudget,
         timestamp: Timestamp,
-    ) -> EngineResult<GraphAdjacencyIndex> {
+    ) -> Result<GraphAdjacencyIndex, EngineError> {
         self.adjacency_index_with_selector(graph, budget, ReadSelector::AtTimestamp(timestamp))
     }
 
@@ -1840,7 +1843,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         budget: &GraphAnalyticsBudget,
         selector: ReadSelector,
-    ) -> EngineResult<GraphAdjacencyIndex> {
+    ) -> Result<GraphAdjacencyIndex, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
         let mut builder = GraphAdjacencyIndexBuilder::new(graph.clone(), *budget);
@@ -1880,7 +1883,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Option<PersistenceReadRow>> {
+    ) -> Result<Option<PersistenceReadRow>, EngineError> {
         let address = self.ontology_address(record, graph);
         Ok(self
             .persistence
@@ -1891,7 +1894,7 @@ impl<'a> GraphService<'a> {
     fn ontology_record_from_row(
         graph: &GraphName,
         row: &PersistenceReadRow,
-    ) -> EngineResult<GraphOntologyRecord> {
+    ) -> Result<GraphOntologyRecord, EngineError> {
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
                 "data_loss.engine.graph_ontology_record",
@@ -1908,7 +1911,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
-    ) -> EngineResult<Option<GraphOntologyRecord>> {
+    ) -> Result<Option<GraphOntologyRecord>, EngineError> {
         match self.ontology_row(record, graph, ReadSelector::Latest)? {
             Some(row) => {
                 let ontology = Self::ontology_record_from_row(graph, &row)?;
@@ -1925,7 +1928,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
-    ) -> EngineResult<GraphOntologyRecord> {
+    ) -> Result<GraphOntologyRecord, EngineError> {
         let ontology = match self.ontology_row(record, graph, ReadSelector::Latest)? {
             Some(row) => Self::ontology_record_from_row(graph, &row)?,
             None => GraphOntologyRecord::empty_draft(graph.clone()),
@@ -1944,7 +1947,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         ontology: &GraphOntologyRecord,
-    ) -> EngineResult<CommitOutcome> {
+    ) -> Result<CommitOutcome, EngineError> {
         debug_assert_eq!(ontology.graph(), graph);
         self.commit_batch(
             record,
@@ -1955,7 +1958,7 @@ impl<'a> GraphService<'a> {
         )
     }
 
-    fn branch_record(&self) -> EngineResult<BranchCatalogRecord> {
+    fn branch_record(&self) -> Result<BranchCatalogRecord, EngineError> {
         self.control.require_healthy()?;
         self.control
             .lookup_branch(&self.branch)
@@ -2038,7 +2041,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Option<PersistenceReadRow>> {
+    ) -> Result<Option<PersistenceReadRow>, EngineError> {
         let address = self.metadata_address(record, graph);
         Ok(self
             .persistence
@@ -2050,7 +2053,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         self.require_graph_with_selector(record, graph, ReadSelector::Latest)
     }
 
@@ -2059,7 +2062,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let Some(row) = self.graph_metadata_row(record, graph, selector)? else {
             return Err(EngineError::not_found(
                 "not_found.engine.graph",
@@ -2081,7 +2084,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         row: &PersistenceReadRow,
         selector: ReadSelector,
-    ) -> EngineResult<GraphInfo> {
+    ) -> Result<GraphInfo, EngineError> {
         let graph = decode_graph_metadata_key(&self.space, row.key())?;
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
@@ -2127,7 +2130,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         node_id: &GraphNodeId,
         selector: ReadSelector,
-    ) -> EngineResult<Option<PersistenceReadRow>> {
+    ) -> Result<Option<PersistenceReadRow>, EngineError> {
         let address = self.node_address(record, graph, node_id);
         Ok(self
             .persistence
@@ -2140,7 +2143,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         node_id: &GraphNodeId,
-    ) -> EngineResult<Option<GraphNodeRecord>> {
+    ) -> Result<Option<GraphNodeRecord>, EngineError> {
         self.node_record_with_selector(record, graph, node_id, ReadSelector::Latest)
     }
 
@@ -2150,7 +2153,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         node_id: &GraphNodeId,
         selector: ReadSelector,
-    ) -> EngineResult<Option<GraphNodeRecord>> {
+    ) -> Result<Option<GraphNodeRecord>, EngineError> {
         self.node_row_with_selector(record, graph, node_id, selector)?
             .map(|row| self.node_record_from_row(&row))
             .transpose()
@@ -2164,7 +2167,7 @@ impl<'a> GraphService<'a> {
         edge_type: &GraphEdgeType,
         dst: &GraphNodeId,
         selector: ReadSelector,
-    ) -> EngineResult<Option<PersistenceReadRow>> {
+    ) -> Result<Option<PersistenceReadRow>, EngineError> {
         let address = self.edge_address(record, graph, src, edge_type, dst);
         Ok(self
             .persistence
@@ -2179,7 +2182,7 @@ impl<'a> GraphService<'a> {
         src: &GraphNodeId,
         edge_type: &GraphEdgeType,
         dst: &GraphNodeId,
-    ) -> EngineResult<Option<GraphEdgeRecord>> {
+    ) -> Result<Option<GraphEdgeRecord>, EngineError> {
         self.edge_row_with_selector(record, graph, src, edge_type, dst, ReadSelector::Latest)?
             .map(|row| self.edge_record_from_forward_row(&row))
             .transpose()
@@ -2190,7 +2193,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.persistence.scan_prefix(
             record.storage_branch_id(),
             RowClass::GraphNode,
@@ -2205,7 +2208,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.persistence.scan_prefix(
             record.storage_branch_id(),
             RowClass::GraphEdge,
@@ -2220,7 +2223,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.persistence.scan_prefix(
             record.storage_branch_id(),
             RowClass::GraphReverseEdge,
@@ -2234,7 +2237,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<PersistenceReadRow>> {
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.persistence.scan_prefix(
             record.storage_branch_id(),
             RowClass::GraphBindingIndex,
@@ -2249,7 +2252,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<BTreeMap<GraphNodeId, GraphNodeRecord>> {
+    ) -> Result<BTreeMap<GraphNodeId, GraphNodeRecord>, EngineError> {
         self.node_rows(record, graph, selector)?
             .into_iter()
             .filter(|row| !row.is_tombstone())
@@ -2265,7 +2268,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
-    ) -> EngineResult<BTreeMap<EdgeIdentity, GraphEdgeRecord>> {
+    ) -> Result<BTreeMap<EdgeIdentity, GraphEdgeRecord>, EngineError> {
         self.edge_rows(record, graph, selector)?
             .into_iter()
             .filter(|row| !row.is_tombstone())
@@ -2283,7 +2286,7 @@ impl<'a> GraphService<'a> {
         node_id: &GraphNodeId,
         edge_type: Option<&GraphEdgeType>,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<GraphNeighbor>> {
+    ) -> Result<Vec<GraphNeighbor>, EngineError> {
         self.persistence
             .scan_prefix(
                 record.storage_branch_id(),
@@ -2319,7 +2322,7 @@ impl<'a> GraphService<'a> {
         node_id: &GraphNodeId,
         edge_type: Option<&GraphEdgeType>,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<GraphNeighbor>> {
+    ) -> Result<Vec<GraphNeighbor>, EngineError> {
         self.persistence
             .scan_prefix(
                 record.storage_branch_id(),
@@ -2354,7 +2357,7 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         node_id: &GraphNodeId,
         selector: ReadSelector,
-    ) -> EngineResult<GraphNode> {
+    ) -> Result<GraphNode, EngineError> {
         self.get_node_with_record(record, graph, node_id, selector)?
             .ok_or_else(|| {
                 EngineError::corruption(
@@ -2370,13 +2373,13 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
         node_id: &GraphNodeId,
         selector: ReadSelector,
-    ) -> EngineResult<Option<GraphNode>> {
+    ) -> Result<Option<GraphNode>, EngineError> {
         self.node_row_with_selector(record, graph, node_id, selector)?
             .map(|row| self.node_from_row(&row))
             .transpose()
     }
 
-    fn node_from_row(&self, row: &PersistenceReadRow) -> EngineResult<GraphNode> {
+    fn node_from_row(&self, row: &PersistenceReadRow) -> Result<GraphNode, EngineError> {
         let record = self.node_record_from_row(row)?;
         Ok(GraphNode::new(
             record.graph().clone(),
@@ -2387,7 +2390,10 @@ impl<'a> GraphService<'a> {
         ))
     }
 
-    fn node_record_from_row(&self, row: &PersistenceReadRow) -> EngineResult<GraphNodeRecord> {
+    fn node_record_from_row(
+        &self,
+        row: &PersistenceReadRow,
+    ) -> Result<GraphNodeRecord, EngineError> {
         let (graph, node_id) = decode_graph_node_key(&self.space, row.key())?;
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
@@ -2398,12 +2404,12 @@ impl<'a> GraphService<'a> {
         decode_graph_node_record(&graph, &node_id, value)
     }
 
-    fn edge_from_forward_row(&self, row: &PersistenceReadRow) -> EngineResult<GraphEdge> {
+    fn edge_from_forward_row(&self, row: &PersistenceReadRow) -> Result<GraphEdge, EngineError> {
         let record = self.edge_record_from_forward_row(row)?;
         Ok(Self::edge_from_record(&record, row))
     }
 
-    fn edge_from_reverse_row(&self, row: &PersistenceReadRow) -> EngineResult<GraphEdge> {
+    fn edge_from_reverse_row(&self, row: &PersistenceReadRow) -> Result<GraphEdge, EngineError> {
         let record = self.edge_record_from_reverse_row(row)?;
         Ok(Self::edge_from_record(&record, row))
     }
@@ -2423,7 +2429,7 @@ impl<'a> GraphService<'a> {
     fn edge_record_from_forward_row(
         &self,
         row: &PersistenceReadRow,
-    ) -> EngineResult<GraphEdgeRecord> {
+    ) -> Result<GraphEdgeRecord, EngineError> {
         let (graph, src, edge_type, dst) = decode_graph_edge_key(&self.space, row.key())?;
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
@@ -2437,7 +2443,7 @@ impl<'a> GraphService<'a> {
     fn edge_record_from_reverse_row(
         &self,
         row: &PersistenceReadRow,
-    ) -> EngineResult<GraphEdgeRecord> {
+    ) -> Result<GraphEdgeRecord, EngineError> {
         let (graph, dst, edge_type, src) = decode_graph_reverse_edge_key(&self.space, row.key())?;
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
@@ -2448,7 +2454,7 @@ impl<'a> GraphService<'a> {
         decode_graph_edge_record(&graph, &src, &edge_type, &dst, value)
     }
 
-    fn binding_from_row(&self, row: &PersistenceReadRow) -> EngineResult<GraphBinding> {
+    fn binding_from_row(&self, row: &PersistenceReadRow) -> Result<GraphBinding, EngineError> {
         binding_from_index_row(&self.space, row)
     }
 
@@ -2457,7 +2463,7 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         mutations: &mut MutationMap,
         edge: &GraphEdgeRecord,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let encoded = encode_graph_edge_record(edge)?;
         mutations.put(
             self.edge_address(
@@ -2508,7 +2514,7 @@ impl<'a> GraphService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
-    ) -> EngineResult<CommitOutcome> {
+    ) -> Result<CommitOutcome, EngineError> {
         let mut mutations = mutations;
         if mutations.is_empty() {
             return Err(EngineError::invalid_input(
@@ -2630,7 +2636,7 @@ fn binding_cursor(binding: &GraphBinding) -> String {
 fn binding_from_index_row(
     space: &ProductSpace,
     row: &PersistenceReadRow,
-) -> EngineResult<GraphBinding> {
+) -> Result<GraphBinding, EngineError> {
     let (target, graph, node_id) = decode_graph_binding_key(space, row.key())?;
     let value = row.value().ok_or_else(|| {
         EngineError::corruption(

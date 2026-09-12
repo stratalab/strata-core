@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 pub(crate) const DEFAULT_BRANCH: &str = "default";
 pub(crate) const SYSTEM_BRANCH: &str = "_system_";
@@ -17,7 +17,7 @@ pub struct BranchName(String);
 
 impl BranchName {
     /// Creates a branch name after rejecting reserved internal spellings.
-    pub fn new(name: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(name: impl Into<String>) -> Result<Self, EngineError> {
         let name = name.into();
         validate_branch_name(&name)?;
         Ok(Self(name))
@@ -57,7 +57,7 @@ impl fmt::Display for BranchName {
     }
 }
 
-fn validate_branch_name(name: &str) -> EngineResult<()> {
+fn validate_branch_name(name: &str) -> Result<(), EngineError> {
     if name.is_empty() {
         return Err(EngineError::invalid_input(
             "invalid_argument.engine.branch_name",

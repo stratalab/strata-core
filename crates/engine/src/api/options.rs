@@ -1,7 +1,7 @@
 //! Explicit database open options.
 
 use crate::branch::BranchName;
-use crate::diagnostics::EngineResult;
+use crate::diagnostics::EngineError;
 
 /// Options for explicit cache database open.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,7 +22,7 @@ impl CacheOpenOptions {
     }
 
     /// Selects the default branch for a newly-created database.
-    pub fn with_default_branch(mut self, name: impl Into<String>) -> EngineResult<Self> {
+    pub fn with_default_branch(mut self, name: impl Into<String>) -> Result<Self, EngineError> {
         self.default_branch = Some(BranchName::new(name)?);
         Ok(self)
     }
@@ -114,7 +114,7 @@ impl DurableLocalOpenOptions {
     }
 
     /// Selects the default branch for a newly-created database.
-    pub fn with_default_branch(mut self, name: impl Into<String>) -> EngineResult<Self> {
+    pub fn with_default_branch(mut self, name: impl Into<String>) -> Result<Self, EngineError> {
         self.default_branch = Some(BranchName::new(name)?);
         Ok(self)
     }

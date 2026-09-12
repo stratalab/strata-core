@@ -20,7 +20,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         graph: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let mut service = self.graph_service(branch, space)?;
         let (info, commit) = service.create_graph(graph)?;
@@ -32,7 +32,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         graph: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let mut service = self.graph_service(branch, space)?;
         Ok(graph_delete_output(
@@ -52,7 +52,7 @@ impl Executor {
         limit: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let cursor = optional_graph_name(cursor)?;
         let limit = optional_limit(limit)?.unwrap_or(DEFAULT_GRAPH_LIST_LIMIT);
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
@@ -74,7 +74,7 @@ impl Executor {
         graph: String,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
@@ -104,7 +104,7 @@ impl Executor {
         properties: Option<serde_json::Value>,
         binding: Option<GraphEntityBinding>,
         object_type: Option<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let node_id = graph_node_id(node_id)?;
         let mut data = GraphNodeData::new(properties, binding);
@@ -126,7 +126,7 @@ impl Executor {
         node_id: String,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let node_id = graph_node_id(node_id)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
@@ -149,7 +149,7 @@ impl Executor {
         space: Option<&str>,
         graph: String,
         node_id: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let node_id = graph_node_id(node_id)?;
         let mut service = self.graph_service(branch, space)?;
@@ -168,7 +168,7 @@ impl Executor {
         space: Option<&str>,
         graph: String,
         count: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let count = optional_limit(count)?.unwrap_or(10);
         let mut service = self.graph_service(branch, space)?;
@@ -191,7 +191,7 @@ impl Executor {
         limit: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let prefix = optional_graph_node_id(prefix)?;
         let cursor = optional_graph_node_id(cursor)?;
@@ -219,7 +219,7 @@ impl Executor {
         dst: String,
         weight: Option<f64>,
         properties: Option<serde_json::Value>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let src = graph_node_id(src)?;
         let edge_type = graph_edge_type(edge_type)?;
@@ -242,7 +242,7 @@ impl Executor {
         dst: String,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let src = graph_node_id(src)?;
         let edge_type = graph_edge_type(edge_type)?;
@@ -270,7 +270,7 @@ impl Executor {
         src: String,
         edge_type: String,
         dst: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let src = graph_node_id(src)?;
         let edge_type = graph_edge_type(edge_type)?;
@@ -298,7 +298,7 @@ impl Executor {
         limit: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let node_id = graph_node_id(node_id)?;
         let direction = engine_graph_direction(direction);
@@ -341,7 +341,7 @@ impl Executor {
         limit: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let target = engine_graph_binding_target(target)?;
         let limit = optional_limit(limit)?.unwrap_or(DEFAULT_GRAPH_LIST_LIMIT);
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
@@ -362,7 +362,7 @@ impl Executor {
         space: Option<&str>,
         graph: String,
         operations: Vec<GraphBatchOperation>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let operation_names = operations
             .iter()
@@ -387,7 +387,7 @@ impl Executor {
         graph: String,
         name: String,
         properties: std::collections::BTreeMap<String, GraphPropertyDef>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let def = EngineGraphObjectTypeDef::new(
             graph_type_name(name)?,
@@ -411,7 +411,7 @@ impl Executor {
         target: String,
         cardinality: Option<String>,
         properties: std::collections::BTreeMap<String, GraphPropertyDef>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let def = EngineGraphLinkTypeDef::new(
             graph_type_name(name)?,
@@ -433,7 +433,7 @@ impl Executor {
         space: Option<&str>,
         graph: String,
         name: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let name = graph_type_name(name)?;
         let mut service = self.graph_service(branch, space)?;
@@ -450,7 +450,7 @@ impl Executor {
         space: Option<&str>,
         graph: String,
         name: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let name = graph_type_name(name)?;
         let mut service = self.graph_service(branch, space)?;
@@ -466,7 +466,7 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         graph: String,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let mut service = self.graph_service(branch, space)?;
         Ok(graph_ontology_freeze_output(
@@ -481,7 +481,7 @@ impl Executor {
         graph: String,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
@@ -504,7 +504,7 @@ impl Executor {
         graph: String,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
@@ -531,7 +531,7 @@ impl Executor {
         limit: Option<u64>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let object_type = graph_type_name(object_type)?;
         let cursor = optional_graph_node_id(cursor)?;
@@ -569,7 +569,7 @@ impl Executor {
         budget: Option<GraphAnalyticsBudget>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<EngineGraphAdjacencyIndex> {
+    ) -> Result<EngineGraphAdjacencyIndex, ExecutorError> {
         let budget = engine_graph_budget(budget)?;
         // #3112 S3b: the analytics family shares one resolution point — every
         // `graph <algorithm>` command reaches its snapshot through here.
@@ -590,7 +590,7 @@ impl Executor {
         budget: Option<GraphAnalyticsBudget>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let index = self.graph_analytics_index(branch, space, &graph, budget, as_of, as_of_time)?;
         Ok(graph_wcc_output(&index, &index.wcc()))
@@ -604,7 +604,7 @@ impl Executor {
         budget: Option<GraphAnalyticsBudget>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let index = self.graph_analytics_index(branch, space, &graph, budget, as_of, as_of_time)?;
         Ok(graph_lcc_output(&index, &index.lcc()))
@@ -620,7 +620,7 @@ impl Executor {
         budget: Option<GraphAnalyticsBudget>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let source = graph_node_id(source)?;
         let direction = direction.unwrap_or(GraphDirection::Outgoing);
@@ -642,7 +642,7 @@ impl Executor {
         budget: Option<GraphAnalyticsBudget>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let options = engine_graph_pagerank_options(damping, max_iterations, tolerance)?;
         let index = self.graph_analytics_index(branch, space, &graph, budget, as_of, as_of_time)?;
@@ -665,7 +665,7 @@ impl Executor {
         budget: Option<GraphAnalyticsBudget>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let options = engine_graph_cdlp_options(max_iterations, direction)?;
         let index = self.graph_analytics_index(branch, space, &graph, budget, as_of, as_of_time)?;
@@ -686,7 +686,7 @@ impl Executor {
         budget: Option<GraphAnalyticsBudget>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let start = graph_node_id(start)?;
         let options = engine_graph_bfs_options(max_depth, max_nodes, edge_types, direction)?;
@@ -701,7 +701,7 @@ impl Executor {
         space: Option<&str>,
         target: GraphBindingTarget,
         policy: GraphDeletePolicy,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let target = engine_graph_binding_target(target)?;
         let policy = engine_graph_delete_policy(policy);
         let mut service = self.graph_service(branch, space)?;
@@ -717,7 +717,7 @@ impl Executor {
         nodes: Vec<GraphBulkNode>,
         edges: Vec<GraphBulkEdge>,
         chunk_size: Option<u64>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let nodes = engine_graph_bulk_nodes(nodes)?;
         let edges = engine_graph_bulk_edges(edges)?;

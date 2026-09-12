@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use strata_core::{CommitVersion, Timestamp};
 
 use crate::commit::CommitOutcome;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::types::validate_text_component;
 use super::{GraphEdgeType, GraphName, GraphNodeData};
@@ -41,7 +41,7 @@ pub struct GraphTypeName(String);
 
 impl GraphTypeName {
     /// Creates a validated type name.
-    pub fn new(name: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(name: impl Into<String>) -> Result<Self, EngineError> {
         let name = name.into();
         validate_text_component(
             &name,
@@ -93,7 +93,7 @@ pub struct GraphPropertyDef {
 
 impl GraphPropertyDef {
     /// Creates a property definition.
-    pub fn new(value_type: Option<String>, required: bool) -> EngineResult<Self> {
+    pub fn new(value_type: Option<String>, required: bool) -> Result<Self, EngineError> {
         if let Some(hint) = value_type.as_deref() {
             validate_text_component(
                 hint,
@@ -133,7 +133,7 @@ impl GraphObjectTypeDef {
     pub fn new(
         name: GraphTypeName,
         properties: impl IntoIterator<Item = (String, GraphPropertyDef)>,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         Ok(Self {
             name,
             properties: validated_properties(properties)?,
@@ -171,7 +171,7 @@ impl GraphLinkTypeDef {
         target: GraphTypeName,
         cardinality: Option<String>,
         properties: impl IntoIterator<Item = (String, GraphPropertyDef)>,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         if let Some(hint) = cardinality.as_deref() {
             validate_text_component(
                 hint,
@@ -229,7 +229,7 @@ impl GraphLinkTypeDef {
 
 fn validated_properties(
     properties: impl IntoIterator<Item = (String, GraphPropertyDef)>,
-) -> EngineResult<BTreeMap<String, GraphPropertyDef>> {
+) -> Result<BTreeMap<String, GraphPropertyDef>, EngineError> {
     let mut validated = BTreeMap::new();
     for (name, def) in properties {
         validate_text_component(
@@ -604,7 +604,7 @@ impl GraphOntologyRecord {
     /// GO2 write validation for a node under a frozen ontology: untyped
     /// nodes always pass (AI-first light enforcement); a typed node must
     /// name a declared object type and carry every required property.
-    pub(crate) fn validate_node(&self, data: &GraphNodeData) -> EngineResult<()> {
+    pub(crate) fn validate_node(&self, data: &GraphNodeData) -> Result<(), EngineError> {
         let Some(object_type) = data.object_type() else {
             return Ok(());
         };
@@ -643,7 +643,7 @@ impl GraphOntologyRecord {
         edge_type: &GraphEdgeType,
         src: &GraphNodeData,
         dst: &GraphNodeData,
-    ) -> EngineResult<()> {
+    ) -> Result<(), EngineError> {
         let Some(link) = self
             .link_types
             .iter()
@@ -731,7 +731,9 @@ struct StoredPropertyDef {
     required: bool,
 }
 
-pub(crate) fn encode_graph_ontology_record(record: &GraphOntologyRecord) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_graph_ontology_record(
+    record: &GraphOntologyRecord,
+) -> Result<Vec<u8>, EngineError> {
     let stored = StoredGraphOntology {
         graph: record.graph().as_str().to_owned(),
         status: match record.status() {
@@ -779,7 +781,7 @@ pub(crate) fn encode_graph_ontology_record(record: &GraphOntologyRecord) -> Engi
 pub(crate) fn decode_graph_ontology_record(
     expected_graph: &GraphName,
     bytes: &[u8],
-) -> EngineResult<GraphOntologyRecord> {
+) -> Result<GraphOntologyRecord, EngineError> {
     if bytes.first().copied() != Some(GRAPH_ONTOLOGY_FORMAT_VERSION) {
         return Err(corruption("has an unknown format version"));
     }
@@ -848,7 +850,7 @@ fn properties_to_stored(
 
 fn properties_from_stored(
     stored: BTreeMap<String, StoredPropertyDef>,
-) -> EngineResult<Vec<(String, GraphPropertyDef)>> {
+) -> Result<Vec<(String, GraphPropertyDef)>, EngineError> {
     stored
         .into_iter()
         .map(|(name, def)| {

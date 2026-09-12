@@ -232,13 +232,13 @@ pub struct Executor {
 
 impl Executor {
     /// Opens a volatile cache-backed executor handle.
-    pub fn open_cache() -> ExecutorResult<Self> {
+    pub fn open_cache() -> Result<Self, ExecutorError> {
         let outcome = Database::open_cache(CacheOpenOptions::new())?;
         Ok(Self::from_database(outcome.into_database()))
     }
 
     /// Opens a durable-local executor handle at the selected path.
-    pub fn open_durable_local(path: impl Into<PathBuf>) -> ExecutorResult<Self> {
+    pub fn open_durable_local(path: impl Into<PathBuf>) -> Result<Self, ExecutorError> {
         Self::open_durable_local_with_options(path, DurableLocalOpenOptions::new())
     }
 
@@ -247,7 +247,7 @@ impl Executor {
     pub fn open_durable_local_with_options(
         path: impl Into<PathBuf>,
         options: DurableLocalOpenOptions,
-    ) -> ExecutorResult<Self> {
+    ) -> Result<Self, ExecutorError> {
         let outcome = Database::open_local(path, options)?;
         Ok(Self::from_database(outcome.into_database()))
     }
@@ -324,13 +324,13 @@ impl Executor {
     }
 
     /// Sets the default branch used when commands omit their branch.
-    pub fn with_default_branch(mut self, branch: impl Into<String>) -> ExecutorResult<Self> {
+    pub fn with_default_branch(mut self, branch: impl Into<String>) -> Result<Self, ExecutorError> {
         self.set_default_branch(branch)?;
         Ok(self)
     }
 
     /// Sets the default branch in place (for a session whose scope changes).
-    pub fn set_default_branch(&mut self, branch: impl Into<String>) -> ExecutorResult<()> {
+    pub fn set_default_branch(&mut self, branch: impl Into<String>) -> Result<(), ExecutorError> {
         let branch = branch.into();
         let _validated = branch_name(Some(branch.as_str()), DEFAULT_BRANCH)?;
         self.default_branch = branch;
@@ -348,13 +348,13 @@ impl Executor {
     /// The executor owns branch and space session context (executor charter
     /// §2), so every frontend resolves omitted spaces uniformly instead of
     /// injecting a default per command.
-    pub fn with_default_space(mut self, space: impl Into<String>) -> ExecutorResult<Self> {
+    pub fn with_default_space(mut self, space: impl Into<String>) -> Result<Self, ExecutorError> {
         self.set_default_space(space)?;
         Ok(self)
     }
 
     /// Sets the default product space in place (for a session whose scope changes).
-    pub fn set_default_space(&mut self, space: impl Into<String>) -> ExecutorResult<()> {
+    pub fn set_default_space(&mut self, space: impl Into<String>) -> Result<(), ExecutorError> {
         let space = space.into();
         let _validated = product_space(Some(space.as_str()), DEFAULT_SPACE)?;
         self.default_space = space;
@@ -368,7 +368,7 @@ impl Executor {
     }
 
     /// Closes the underlying database handle.
-    pub fn close(&mut self) -> ExecutorResult<()> {
+    pub fn close(&mut self) -> Result<(), ExecutorError> {
         self.database.close()?;
         Ok(())
     }

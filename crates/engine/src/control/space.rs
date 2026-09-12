@@ -4,7 +4,7 @@ use strata_core::BranchId;
 
 use crate::branch::catalog::BranchCatalogRecord;
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineErrorClass, EngineResult};
+use crate::diagnostics::{EngineError, EngineErrorClass};
 use crate::persistence::{
     reserved_space_key, space_catalog_key, space_index_key, CommitPlan, ReadSelector, RowAddress,
     RowClass, RowMutation, StoragePersistence,
@@ -21,7 +21,7 @@ pub(crate) const SYSTEM_SPACE: &str = "_system_";
 pub(crate) fn seed_required_space_rows(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let mutations = required_space_mutations(persistence, record)?;
     if mutations.is_empty() {
         return Ok(());
@@ -38,7 +38,7 @@ pub(crate) fn registration_mutations(
     persistence: &StoragePersistence,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
-) -> EngineResult<Vec<RowMutation>> {
+) -> Result<Vec<RowMutation>, EngineError> {
     let mut spaces = read_required_space_index(persistence, record)?;
     if spaces.iter().any(|existing| existing == space) {
         validate_space_catalog_row(persistence, record, space)?;
@@ -72,7 +72,7 @@ pub(crate) fn registration_and_deletion_mutations(
     record: &BranchCatalogRecord,
     to_add: &[ProductSpace],
     to_remove: &[ProductSpace],
-) -> EngineResult<Vec<RowMutation>> {
+) -> Result<Vec<RowMutation>, EngineError> {
     let mut spaces = read_required_space_index(persistence, record)?;
     let added: Vec<ProductSpace> = to_add
         .iter()
@@ -122,7 +122,7 @@ pub(crate) fn registration_and_deletion_mutations(
 pub(crate) fn registered_spaces(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
-) -> EngineResult<Vec<ProductSpace>> {
+) -> Result<Vec<ProductSpace>, EngineError> {
     let spaces = read_required_space_index(persistence, record)?;
     for space in &spaces {
         validate_space_catalog_row(persistence, record, space)?;
@@ -139,7 +139,7 @@ pub(crate) fn read_space_index_at(
     persistence: &mut StoragePersistence,
     storage_branch: BranchId,
     selector: ReadSelector,
-) -> EngineResult<Vec<ProductSpace>> {
+) -> Result<Vec<ProductSpace>, EngineError> {
     let address = RowAddress::new(storage_branch, RowClass::SpaceControl, space_index_key());
     match persistence.read(address, selector)? {
         Some(bytes) => decode_space_index(&bytes),
@@ -151,7 +151,7 @@ pub(crate) fn space_exists(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
-) -> EngineResult<bool> {
+) -> Result<bool, EngineError> {
     Ok(registered_spaces(persistence, record)?
         .iter()
         .any(|existing| existing == space))
@@ -161,7 +161,7 @@ pub(crate) fn deletion_mutations(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
-) -> EngineResult<Option<Vec<RowMutation>>> {
+) -> Result<Option<Vec<RowMutation>>, EngineError> {
     let mut spaces = read_required_space_index(persistence, record)?;
     for existing in &spaces {
         validate_space_catalog_row(persistence, record, existing)?;
@@ -191,14 +191,14 @@ pub(crate) fn deletion_mutations(
 pub(crate) fn validate_required_space_rows(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     validate_required_space_rows_and_count(persistence, record).map(|_| ())
 }
 
 pub(crate) fn validate_required_space_rows_and_count(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
-) -> EngineResult<usize> {
+) -> Result<usize, EngineError> {
     let spaces = read_required_space_index(persistence, record)?;
     let default = default_space()?;
     if !spaces.iter().any(|space| space == &default) {
@@ -221,7 +221,7 @@ pub(crate) fn validate_required_space_rows_and_count(
 fn required_space_mutations(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
-) -> EngineResult<Vec<RowMutation>> {
+) -> Result<Vec<RowMutation>, EngineError> {
     let default = default_space()?;
     let mut spaces = match persistence.read(
         space_address(record, space_index_key()),
@@ -255,7 +255,7 @@ fn required_space_mutations(
 fn read_required_space_index(
     persistence: &StoragePersistence,
     record: &BranchCatalogRecord,
-) -> EngineResult<Vec<ProductSpace>> {
+) -> Result<Vec<ProductSpace>, EngineError> {
     let bytes = read_required(persistence, &space_address(record, space_index_key()))?;
     decode_space_index(&bytes)
 }
@@ -264,7 +264,7 @@ fn validate_space_catalog_row(
     persistence: &StoragePersistence,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
-) -> EngineResult<()> {
+) -> Result<(), EngineError> {
     let bytes = read_required(
         persistence,
         &space_address(record, space_catalog_key(space.as_str())),
@@ -279,7 +279,10 @@ fn validate_space_catalog_row(
     Ok(())
 }
 
-fn read_required(persistence: &StoragePersistence, address: &RowAddress) -> EngineResult<Vec<u8>> {
+fn read_required(
+    persistence: &StoragePersistence,
+    address: &RowAddress,
+) -> Result<Vec<u8>, EngineError> {
     match persistence.read(address.clone(), ReadSelector::Latest) {
         Ok(Some(value)) => Ok(value),
         Ok(None) => Err(EngineError::corruption(
@@ -294,7 +297,7 @@ fn read_required(persistence: &StoragePersistence, address: &RowAddress) -> Engi
     }
 }
 
-fn default_space() -> EngineResult<ProductSpace> {
+fn default_space() -> Result<ProductSpace, EngineError> {
     ProductSpace::new(DEFAULT_SPACE)
 }
 

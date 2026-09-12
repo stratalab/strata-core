@@ -7,7 +7,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use serde_json::Value;
 
-use crate::error::ExecutorResult;
+use crate::error::ExecutorError;
 use crate::output::Output;
 use crate::types::{
     ArrowFileFormat, ArrowImportResult, ArrowImportTarget, BatchEventEntry, BatchJsonEntry,
@@ -35,7 +35,7 @@ pub(crate) fn import_file(
     value_column: Option<&str>,
     collection: Option<&str>,
     graph: Option<&str>,
-) -> ExecutorResult<Output> {
+) -> Result<Output, ExecutorError> {
     let path = PathBuf::from(&file_path);
     let format = match format {
         Some(format) => format,
@@ -142,7 +142,7 @@ fn validate_import_flags(
     target: ArrowImportTarget,
     has_collection: bool,
     has_graph: bool,
-) -> ExecutorResult<()> {
+) -> Result<(), ExecutorError> {
     if has_collection && !matches!(target, ArrowImportTarget::Vector) {
         return Err(invalid_input(
             "invalid_argument.executor.arrow_collection",
@@ -164,7 +164,7 @@ fn import_kv(
     space: Option<&str>,
     batches: &[arrow::record_batch::RecordBatch],
     mapping: &super::schema::ImportMapping,
-) -> ExecutorResult<ImportCounts> {
+) -> Result<ImportCounts, ExecutorError> {
     let mut counts = ImportCounts::default();
     for batch in batches {
         let mut entries = Vec::with_capacity(batch.num_rows());
@@ -212,7 +212,7 @@ fn import_json(
     space: Option<&str>,
     batches: &[arrow::record_batch::RecordBatch],
     mapping: &super::schema::ImportMapping,
-) -> ExecutorResult<ImportCounts> {
+) -> Result<ImportCounts, ExecutorError> {
     let mut counts = ImportCounts::default();
     for batch in batches {
         let mut entries = Vec::with_capacity(batch.num_rows());
@@ -259,7 +259,7 @@ fn import_vector(
     collection: &str,
     batches: &[arrow::record_batch::RecordBatch],
     mapping: &super::schema::ImportMapping,
-) -> ExecutorResult<ImportCounts> {
+) -> Result<ImportCounts, ExecutorError> {
     let mut counts = ImportCounts::default();
     let collection_ready = collection_exists(executor, branch, space, collection)?;
     for batch in batches {
@@ -326,7 +326,7 @@ fn collection_exists(
     branch: Option<&str>,
     space: Option<&str>,
     collection: &str,
-) -> ExecutorResult<bool> {
+) -> Result<bool, ExecutorError> {
     let output = executor.execute(Command::VectorListCollections {
         branch: branch.map(str::to_owned),
         space: space.map(str::to_owned),
@@ -350,7 +350,7 @@ fn import_graph(
     graph: Option<&str>,
     base_path: &Path,
     format: ArrowFileFormat,
-) -> ExecutorResult<ImportCounts> {
+) -> Result<ImportCounts, ExecutorError> {
     let graph_name = required_option(
         graph,
         "invalid_argument.executor.arrow_graph",
@@ -436,7 +436,7 @@ fn import_event(
     space: Option<&str>,
     schema: &Schema,
     batches: &[RecordBatch],
-) -> ExecutorResult<ImportCounts> {
+) -> Result<ImportCounts, ExecutorError> {
     let event_type_idx = event_column_index(schema, "event_type")?;
     let payload_idx = event_column_index(schema, "payload")?;
 
@@ -480,7 +480,7 @@ fn import_event(
     Ok(counts)
 }
 
-fn event_column_index(schema: &Schema, name: &str) -> ExecutorResult<usize> {
+fn event_column_index(schema: &Schema, name: &str) -> Result<usize, ExecutorError> {
     schema.index_of(name).map_err(|_| {
         invalid_input(
             "invalid_argument.executor.arrow_event",
@@ -489,7 +489,11 @@ fn event_column_index(schema: &Schema, name: &str) -> ExecutorResult<usize> {
     })
 }
 
-fn event_string_cell(batch: &RecordBatch, index: usize, row: usize) -> ExecutorResult<String> {
+fn event_string_cell(
+    batch: &RecordBatch,
+    index: usize,
+    row: usize,
+) -> Result<String, ExecutorError> {
     batch
         .column(index)
         .as_any()
@@ -503,7 +507,7 @@ fn event_string_cell(batch: &RecordBatch, index: usize, row: usize) -> ExecutorR
         })
 }
 
-fn graph_column_index(schema: &Schema, name: &str) -> ExecutorResult<usize> {
+fn graph_column_index(schema: &Schema, name: &str) -> Result<usize, ExecutorError> {
     schema.index_of(name).map_err(|_| {
         invalid_input(
             "invalid_argument.executor.arrow_graph",
@@ -513,7 +517,11 @@ fn graph_column_index(schema: &Schema, name: &str) -> ExecutorResult<usize> {
 }
 
 /// Reads a required Utf8 cell (node id, edge endpoint, or edge type).
-fn graph_string_cell(batch: &RecordBatch, index: usize, row: usize) -> ExecutorResult<String> {
+fn graph_string_cell(
+    batch: &RecordBatch,
+    index: usize,
+    row: usize,
+) -> Result<String, ExecutorError> {
     let array = batch
         .column(index)
         .as_any()
@@ -537,7 +545,7 @@ fn graph_string_cell(batch: &RecordBatch, index: usize, row: usize) -> ExecutorR
 }
 
 /// Reads a required Float64 edge weight cell.
-fn graph_f64_cell(batch: &RecordBatch, index: usize, row: usize) -> ExecutorResult<f64> {
+fn graph_f64_cell(batch: &RecordBatch, index: usize, row: usize) -> Result<f64, ExecutorError> {
     batch
         .column(index)
         .as_any()
@@ -557,7 +565,7 @@ fn graph_optional_string(
     batch: &RecordBatch,
     index: Option<usize>,
     row: usize,
-) -> ExecutorResult<Option<String>> {
+) -> Result<Option<String>, ExecutorError> {
     let Some(index) = index else {
         return Ok(None);
     };
@@ -582,7 +590,7 @@ fn graph_optional_json(
     batch: &RecordBatch,
     index: Option<usize>,
     row: usize,
-) -> ExecutorResult<Option<Value>> {
+) -> Result<Option<Value>, ExecutorError> {
     let Some(text) = graph_optional_string(batch, index, row)? else {
         return Ok(None);
     };
@@ -599,7 +607,7 @@ fn graph_optional_binding(
     batch: &RecordBatch,
     index: Option<usize>,
     row: usize,
-) -> ExecutorResult<Option<GraphEntityBinding>> {
+) -> Result<Option<GraphEntityBinding>, ExecutorError> {
     let Some(text) = graph_optional_string(batch, index, row)? else {
         return Ok(None);
     };

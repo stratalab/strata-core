@@ -3,7 +3,7 @@
 //! A connection is either `Local` (this process won the writer lock and holds
 //! the one `Executor`, optionally hosting a socket for others) or `Remote`
 //! (another process owns the store and we speak to it over its socket). Both
-//! present the same `execute(Command) -> ExecutorResult<Output>`, so callers
+//! present the same `execute(Command) -> Result<Output, ExecutorError>`, so callers
 //! never branch on which they got.
 //!
 //! `open_durable_local_brokered` is the open dance: try to win the lock; on
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    Command, DurableLocalOpenOptions, Executor, ExecutorResult, IpcMode, Output, DEFAULT_BRANCH,
+    Command, DurableLocalOpenOptions, Executor, ExecutorError, IpcMode, Output, DEFAULT_BRANCH,
     DEFAULT_SPACE,
 };
 
@@ -91,7 +91,7 @@ impl Connection {
         options: DurableLocalOpenOptions,
         ipc: IpcMode,
         access: SessionAccess,
-    ) -> ExecutorResult<Self> {
+    ) -> Result<Self, ExecutorError> {
         let path = path.into();
         match ipc {
             // Opt out: a raw single-process open, no socket and no fallback.
@@ -111,7 +111,7 @@ impl Connection {
         options: DurableLocalOpenOptions,
         host: bool,
         access: SessionAccess,
-    ) -> ExecutorResult<Self> {
+    ) -> Result<Self, ExecutorError> {
         // Quiet open: a lost-lock loss that then brokers to the owner must not
         // cross the logging boundary as an engine failure (#3071). Only a
         // definitive failure is converted to a logged `ExecutorError` below.
@@ -141,7 +141,7 @@ impl Connection {
         options: DurableLocalOpenOptions,
         host: bool,
         access: SessionAccess,
-    ) -> ExecutorResult<Self> {
+    ) -> Result<Self, ExecutorError> {
         // A capacity refusal is remembered across the window: slots may free
         // as clients disconnect, so we keep riding — but if the window closes
         // with the store still locked, the refusal is the truthful error to
@@ -360,7 +360,7 @@ impl Connection {
     /// The command's own error, the read-only rejection on a `Read`-access
     /// connection submitting a write, or a transport error if a remote
     /// owner's connection fails.
-    pub fn execute(&self, command: Command) -> ExecutorResult<Output> {
+    pub fn execute(&self, command: Command) -> Result<Output, ExecutorError> {
         // One chokepoint for both transports. Remotely this is a courtesy
         // (the owner's dispatch gate is the authority and would reject the
         // same way); locally it is the only gate there is.
@@ -408,7 +408,7 @@ impl Connection {
     /// # Errors
     ///
     /// The executor close error, for a local owner.
-    pub fn close(self) -> ExecutorResult<()> {
+    pub fn close(self) -> Result<(), ExecutorError> {
         match self.inner {
             ConnectionInner::Local { executor, server } => {
                 drop(server); // stop the listener and unlink the socket first

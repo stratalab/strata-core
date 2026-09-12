@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde_json::value::RawValue;
 
-use crate::{Command, ErrorStatus, ExecutorError, ExecutorResult, Output};
+use crate::{Command, ErrorStatus, ExecutorError, Output};
 
 use super::protocol::{
     self, ClientIdentity, HelloFrame, HelloRequest, ServerHello, SessionAccess, WireRequestOwned,
@@ -153,7 +153,7 @@ impl IpcClient {
         branch: Option<&str>,
         space: Option<&str>,
         command: &Command,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         let command_json = serde_json::to_string(command).map_err(|error| {
             ExecutorError::new(
                 "internal.executor.wire_response",
@@ -196,7 +196,7 @@ impl IpcClient {
 /// Turn a response envelope (`{"type","data"}` or `{"error":…}`) back into a
 /// typed `ExecutorResult<Output>` — the inverse of the server's encode step, so
 /// the remote result is indistinguishable from a local one.
-fn decode_wire_response(bytes: &[u8]) -> ExecutorResult<Output> {
+fn decode_wire_response(bytes: &[u8]) -> Result<Output, ExecutorError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(transport_error)?;
     if let Some(error) = value.get("error") {
         let status: ErrorStatus = serde_json::from_value(error.clone()).map_err(transport_error)?;

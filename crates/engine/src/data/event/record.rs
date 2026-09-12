@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use strata_core::Timestamp;
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::hash::hash_version;
 use super::{compute_event_hash, EventHash, EventPayload, EventSequence, EventType};
@@ -184,7 +184,7 @@ struct StoredEventMetadata {
     summaries: BTreeMap<String, EventTypeSummary>,
 }
 
-pub(crate) fn encode_event_record(record: &EventRecordEnvelope) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_event_record(record: &EventRecordEnvelope) -> Result<Vec<u8>, EngineError> {
     let stored = StoredEventRecord {
         sequence: record.sequence().as_u64(),
         event_type: record.event_type().as_str().to_owned(),
@@ -206,7 +206,7 @@ pub(crate) fn encode_event_record(record: &EventRecordEnvelope) -> EngineResult<
 pub(crate) fn decode_event_record(
     expected_sequence: EventSequence,
     bytes: &[u8],
-) -> EngineResult<EventRecordEnvelope> {
+) -> Result<EventRecordEnvelope, EngineError> {
     if bytes.first().copied() != Some(EVENT_RECORD_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.event_record",
@@ -261,7 +261,7 @@ pub(crate) fn decode_event_record(
     ))
 }
 
-pub(crate) fn encode_event_metadata(metadata: &EventLogMetadata) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_event_metadata(metadata: &EventLogMetadata) -> Result<Vec<u8>, EngineError> {
     let stored = StoredEventMetadata {
         next_sequence: metadata.next_sequence,
         head_hash: metadata.head_hash,
@@ -278,7 +278,7 @@ pub(crate) fn encode_event_metadata(metadata: &EventLogMetadata) -> EngineResult
     Ok(bytes)
 }
 
-pub(crate) fn decode_event_metadata(bytes: &[u8]) -> EngineResult<EventLogMetadata> {
+pub(crate) fn decode_event_metadata(bytes: &[u8]) -> Result<EventLogMetadata, EngineError> {
     if bytes.first().copied() != Some(EVENT_METADATA_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.event_metadata",

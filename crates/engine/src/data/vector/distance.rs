@@ -1,6 +1,6 @@
 //! Exact vector scoring.
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::{VectorDistanceMetric, VectorEmbedding};
 
@@ -8,7 +8,7 @@ pub(crate) fn vector_score(
     query: &VectorEmbedding,
     candidate: &VectorEmbedding,
     metric: VectorDistanceMetric,
-) -> EngineResult<f32> {
+) -> Result<f32, EngineError> {
     if query.dimension() != candidate.dimension() {
         return Err(EngineError::invalid_input(
             "invalid_argument.engine.vector_dimension",

@@ -18,7 +18,7 @@ use crate::branch::adapter::{
     CapabilityBranchAdapter, ComparableEntity, DerivedDisposition, EntitySummary,
 };
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{
     decode_graph_edge_key, decode_graph_metadata_key, decode_graph_node_key,
     decode_graph_ontology_key, encode_graph_edge_space_prefix, encode_graph_metadata_prefix,
@@ -34,7 +34,7 @@ fn interpret(
     prefix: &[u8],
     key_code: &'static str,
     record_code: &'static str,
-) -> EngineResult<ComparableEntity> {
+) -> Result<ComparableEntity, EngineError> {
     let identity = row
         .key()
         .strip_prefix(prefix)
@@ -89,7 +89,7 @@ impl CapabilityBranchAdapter for GraphMetadataBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         decode_graph_metadata_key(space, row.key())?;
         interpret(
             row,
@@ -124,7 +124,7 @@ impl CapabilityBranchAdapter for GraphNodeBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         decode_graph_node_key(space, row.key())?;
         interpret(
             row,
@@ -159,7 +159,7 @@ impl CapabilityBranchAdapter for GraphEdgeBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         decode_graph_edge_key(space, row.key())?;
         interpret(
             row,
@@ -196,7 +196,7 @@ impl CapabilityBranchAdapter for GraphOntologyBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity> {
+    ) -> Result<ComparableEntity, EngineError> {
         // Validate the full length-prefixed ontology key structure — not just the
         // space prefix — so a malformed suffix under the right prefix surfaces as
         // structured corruption instead of an opaque identity.

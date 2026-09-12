@@ -7,7 +7,7 @@ use crate::branch::catalog::{
 };
 use crate::branch::BranchName;
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 const PAYLOAD_VERSION: u8 = 1;
 const IDENTITY_MAGIC: &[u8] = b"strata.engine.identity";
@@ -48,7 +48,9 @@ pub(crate) fn encode_database_identity(record: &DatabaseIdentityRecord) -> Vec<u
     out
 }
 
-pub(crate) fn decode_database_identity(bytes: &[u8]) -> EngineResult<DatabaseIdentityRecord> {
+pub(crate) fn decode_database_identity(
+    bytes: &[u8],
+) -> Result<DatabaseIdentityRecord, EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, IDENTITY_MAGIC)?);
     let layout_version = cursor.u16("database identity layout version")?;
     cursor.finish("database identity")?;
@@ -67,7 +69,9 @@ pub(crate) fn encode_local_instance_identity(record: &DatabaseIdentityRecord) ->
     out
 }
 
-pub(crate) fn decode_local_instance_identity(bytes: &[u8]) -> EngineResult<DatabaseIdentityRecord> {
+pub(crate) fn decode_local_instance_identity(
+    bytes: &[u8],
+) -> Result<DatabaseIdentityRecord, EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, LOCAL_INSTANCE_MAGIC)?);
     let layout_version = cursor.u16("local instance identity layout version")?;
     cursor.finish("local instance identity")?;
@@ -87,7 +91,7 @@ pub(crate) fn encode_storage_registry() -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_storage_registry(bytes: &[u8]) -> EngineResult<()> {
+pub(crate) fn decode_storage_registry(bytes: &[u8]) -> Result<(), EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, REGISTRY_MAGIC)?);
     let version = cursor.u16("storage registry version")?;
     let ids = cursor.remaining();
@@ -107,7 +111,7 @@ pub(crate) fn encode_capability_registry() -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_capability_registry(bytes: &[u8]) -> EngineResult<()> {
+pub(crate) fn decode_capability_registry(bytes: &[u8]) -> Result<(), EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, CAPABILITY_MAGIC)?);
     let version = cursor.u16("capability registry version")?;
     let capability = cursor.remaining();
@@ -126,7 +130,7 @@ pub(crate) fn encode_migration_registry() -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_migration_registry(bytes: &[u8]) -> EngineResult<()> {
+pub(crate) fn decode_migration_registry(bytes: &[u8]) -> Result<(), EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, MIGRATION_MAGIC)?);
     let version = cursor.u16("migration registry version")?;
     cursor.finish("migration registry")?;
@@ -139,11 +143,11 @@ pub(crate) fn decode_migration_registry(bytes: &[u8]) -> EngineResult<()> {
     Ok(())
 }
 
-pub(crate) fn encode_branch_index(names: &[BranchName]) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_branch_index(names: &[BranchName]) -> Result<Vec<u8>, EngineError> {
     encode_name_index(INDEX_MAGIC, names)
 }
 
-pub(crate) fn decode_branch_index(bytes: &[u8]) -> EngineResult<Vec<BranchName>> {
+pub(crate) fn decode_branch_index(bytes: &[u8]) -> Result<Vec<BranchName>, EngineError> {
     decode_name_index(bytes, INDEX_MAGIC, "branch index")
 }
 
@@ -153,18 +157,18 @@ pub(crate) fn encode_default_branch(name: &BranchName) -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_default_branch(bytes: &[u8]) -> EngineResult<BranchName> {
+pub(crate) fn decode_default_branch(bytes: &[u8]) -> Result<BranchName, EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, DEFAULT_BRANCH_MAGIC)?);
     let name = BranchName::new(cursor.name("default branch")?)?;
     cursor.finish("default branch")?;
     Ok(name)
 }
 
-pub(crate) fn encode_pending_branch_index(names: &[BranchName]) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_pending_branch_index(names: &[BranchName]) -> Result<Vec<u8>, EngineError> {
     encode_name_index(PENDING_INDEX_MAGIC, names)
 }
 
-pub(crate) fn decode_pending_branch_index(bytes: &[u8]) -> EngineResult<Vec<BranchName>> {
+pub(crate) fn decode_pending_branch_index(bytes: &[u8]) -> Result<Vec<BranchName>, EngineError> {
     decode_name_index(bytes, PENDING_INDEX_MAGIC, "pending branch index")
 }
 
@@ -174,7 +178,7 @@ pub(crate) fn encode_branch_record(record: &BranchCatalogRecord) -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_branch_record(bytes: &[u8]) -> EngineResult<BranchCatalogRecord> {
+pub(crate) fn decode_branch_record(bytes: &[u8]) -> Result<BranchCatalogRecord, EngineError> {
     decode_branch_like(bytes, BRANCH_MAGIC, "branch catalog")
 }
 
@@ -192,7 +196,7 @@ pub(crate) fn encode_pending_branch_record(
 
 pub(crate) fn decode_pending_branch_record(
     bytes: &[u8],
-) -> EngineResult<(BranchOperationKind, BranchCatalogRecord)> {
+) -> Result<(BranchOperationKind, BranchCatalogRecord), EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, PENDING_MAGIC)?);
     let kind =
         BranchOperationKind::from_u8(cursor.u8("pending operation kind")?).ok_or_else(|| {
@@ -206,7 +210,7 @@ pub(crate) fn decode_pending_branch_record(
     Ok((kind, record))
 }
 
-pub(crate) fn encode_space_index(spaces: &[ProductSpace]) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_space_index(spaces: &[ProductSpace]) -> Result<Vec<u8>, EngineError> {
     let count = u16::try_from(spaces.len()).map_err(|_| {
         EngineError::invalid_input(
             "invalid_argument.engine.space_catalog",
@@ -221,7 +225,7 @@ pub(crate) fn encode_space_index(spaces: &[ProductSpace]) -> EngineResult<Vec<u8
     Ok(out)
 }
 
-pub(crate) fn decode_space_index(bytes: &[u8]) -> EngineResult<Vec<ProductSpace>> {
+pub(crate) fn decode_space_index(bytes: &[u8]) -> Result<Vec<ProductSpace>, EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, SPACE_INDEX_MAGIC)?);
     let count = usize::from(cursor.u16("space index")?);
     let mut spaces = Vec::with_capacity(count);
@@ -252,7 +256,7 @@ pub(crate) fn encode_space_record(space: &ProductSpace) -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_space_record(bytes: &[u8]) -> EngineResult<ProductSpace> {
+pub(crate) fn decode_space_record(bytes: &[u8]) -> Result<ProductSpace, EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, SPACE_MAGIC)?);
     let name = cursor.name("space record")?;
     let space = ProductSpace::new(name).map_err(|_| {
@@ -272,7 +276,7 @@ pub(crate) fn encode_reserved_system_space() -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_reserved_system_space(bytes: &[u8]) -> EngineResult<()> {
+pub(crate) fn decode_reserved_system_space(bytes: &[u8]) -> Result<(), EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, RESERVED_SPACE_MAGIC)?);
     let name = cursor.name("reserved space")?;
     let user_managed = cursor.u8("reserved space user-managed flag")?;
@@ -290,7 +294,7 @@ fn decode_branch_like(
     bytes: &[u8],
     magic: &[u8],
     description: &'static str,
-) -> EngineResult<BranchCatalogRecord> {
+) -> Result<BranchCatalogRecord, EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, magic)?);
     let record = decode_branch_body(&mut cursor, description)?;
     cursor.finish(description)?;
@@ -303,7 +307,7 @@ fn decode_branch_like(
 fn decode_branch_body(
     cursor: &mut Cursor<'_>,
     description: &'static str,
-) -> EngineResult<BranchCatalogRecord> {
+) -> Result<BranchCatalogRecord, EngineError> {
     let name = BranchName::new(cursor.name(description)?)?;
     let branch_id = cursor.branch_id("branch id")?;
     let storage_branch_id = cursor.branch_id("storage branch id")?;
@@ -349,7 +353,7 @@ fn decode_branch_body(
 fn decode_merge_parent(
     cursor: &mut Cursor<'_>,
     description: &'static str,
-) -> EngineResult<Option<BranchMergeRecord>> {
+) -> Result<Option<BranchMergeRecord>, EngineError> {
     match cursor.u8("merge parent flag")? {
         0 => Ok(None),
         1 => {
@@ -427,7 +431,7 @@ fn encode_branch_body(out: &mut Vec<u8>, record: &BranchCatalogRecord) {
 fn decode_parent(
     cursor: &mut Cursor<'_>,
     description: &'static str,
-) -> EngineResult<Option<BranchParentRecord>> {
+) -> Result<Option<BranchParentRecord>, EngineError> {
     match cursor.u8("parent flag")? {
         0 => Ok(None),
         1 => {
@@ -459,7 +463,7 @@ fn versioned_payload(magic: &[u8]) -> Vec<u8> {
     out
 }
 
-fn expect_payload<'a>(bytes: &'a [u8], magic: &[u8]) -> EngineResult<&'a [u8]> {
+fn expect_payload<'a>(bytes: &'a [u8], magic: &[u8]) -> Result<&'a [u8], EngineError> {
     let header_len = magic.len() + 2;
     if bytes.len() < header_len || &bytes[..magic.len()] != magic || bytes[magic.len()] != 0 {
         return Err(EngineError::corruption(
@@ -477,7 +481,7 @@ fn expect_payload<'a>(bytes: &'a [u8], magic: &[u8]) -> EngineResult<&'a [u8]> {
     Ok(&bytes[header_len..])
 }
 
-fn encode_name_index(magic: &[u8], names: &[BranchName]) -> EngineResult<Vec<u8>> {
+fn encode_name_index(magic: &[u8], names: &[BranchName]) -> Result<Vec<u8>, EngineError> {
     let count = u16::try_from(names.len()).map_err(|_| {
         EngineError::invalid_input(
             "invalid_argument.engine.branch_catalog",
@@ -496,7 +500,7 @@ fn decode_name_index(
     bytes: &[u8],
     magic: &[u8],
     description: &'static str,
-) -> EngineResult<Vec<BranchName>> {
+) -> Result<Vec<BranchName>, EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, magic)?);
     let count = usize::from(cursor.u16(description)?);
     let mut names = Vec::with_capacity(count);
@@ -556,16 +560,16 @@ impl<'a> Cursor<'a> {
         self.offset >= self.bytes.len()
     }
 
-    fn u8(&mut self, field: &'static str) -> EngineResult<u8> {
+    fn u8(&mut self, field: &'static str) -> Result<u8, EngineError> {
         self.take(1, field).map(|bytes| bytes[0])
     }
 
-    fn u16(&mut self, field: &'static str) -> EngineResult<u16> {
+    fn u16(&mut self, field: &'static str) -> Result<u16, EngineError> {
         let bytes = self.take(2, field)?;
         Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
-    fn u64(&mut self, field: &'static str) -> EngineResult<u64> {
+    fn u64(&mut self, field: &'static str) -> Result<u64, EngineError> {
         let bytes = self.take(8, field)?;
         Ok(u64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -575,7 +579,7 @@ impl<'a> Cursor<'a> {
     fn optional_commit_version(
         &mut self,
         field: &'static str,
-    ) -> EngineResult<Option<CommitVersion>> {
+    ) -> Result<Option<CommitVersion>, EngineError> {
         match self.u8(field)? {
             0 => Ok(None),
             1 => Ok(Some(CommitVersion::new(self.u64(field)?))),
@@ -586,7 +590,10 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn optional_timestamp(&mut self, field: &'static str) -> EngineResult<Option<Timestamp>> {
+    fn optional_timestamp(
+        &mut self,
+        field: &'static str,
+    ) -> Result<Option<Timestamp>, EngineError> {
         match self.u8(field)? {
             0 => Ok(None),
             1 => Ok(Some(Timestamp::from_micros(self.u64(field)?))),
@@ -597,14 +604,14 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn branch_id(&mut self, field: &'static str) -> EngineResult<BranchId> {
+    fn branch_id(&mut self, field: &'static str) -> Result<BranchId, EngineError> {
         let bytes = self.take(BranchId::BYTE_LEN, field)?;
         BranchId::try_from_slice(bytes).map_err(|_| {
             EngineError::corruption("data_loss.engine.branch_id", "branch id payload is invalid")
         })
     }
 
-    fn name(&mut self, field: &'static str) -> EngineResult<String> {
+    fn name(&mut self, field: &'static str) -> Result<String, EngineError> {
         let len = usize::from(self.u16(field)?);
         let bytes = self.take(len, field)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| {
@@ -615,7 +622,7 @@ impl<'a> Cursor<'a> {
         })
     }
 
-    fn finish(&self, description: &'static str) -> EngineResult<()> {
+    fn finish(&self, description: &'static str) -> Result<(), EngineError> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
@@ -626,7 +633,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn take(&mut self, len: usize, field: &'static str) -> EngineResult<&'a [u8]> {
+    fn take(&mut self, len: usize, field: &'static str) -> Result<&'a [u8], EngineError> {
         let end = self.offset.saturating_add(len);
         if end > self.bytes.len() {
             return Err(EngineError::corruption(

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::{
     get_at_path, JsonDocumentId, JsonIndexDefinition, JsonIndexName, JsonIndexType, JsonPath,
@@ -88,7 +88,7 @@ struct StoredIndexDefinition {
     created_timestamp: u64,
 }
 
-pub(crate) fn encode_stored_document(document: &JsonDocument) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_stored_document(document: &JsonDocument) -> Result<Vec<u8>, EngineError> {
     let stored = StoredJsonDocument {
         id: document.id().as_str().to_owned(),
         document_version: document.document_version(),
@@ -109,7 +109,7 @@ pub(crate) fn encode_stored_document(document: &JsonDocument) -> EngineResult<Ve
 pub(crate) fn decode_stored_document(
     expected_id: &JsonDocumentId,
     bytes: &[u8],
-) -> EngineResult<JsonDocument> {
+) -> Result<JsonDocument, EngineError> {
     if bytes.first().copied() != Some(DOCUMENT_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.json_document",
@@ -148,7 +148,9 @@ pub(crate) fn decode_stored_document(
     ))
 }
 
-pub(crate) fn encode_index_definition(definition: &JsonIndexDefinition) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_index_definition(
+    definition: &JsonIndexDefinition,
+) -> Result<Vec<u8>, EngineError> {
     let stored = StoredIndexDefinition {
         name: definition.name().as_str().to_owned(),
         space: definition.space().as_str().to_owned(),
@@ -168,7 +170,7 @@ pub(crate) fn encode_index_definition(definition: &JsonIndexDefinition) -> Engin
     Ok(bytes)
 }
 
-pub(crate) fn decode_index_definition(bytes: &[u8]) -> EngineResult<JsonIndexDefinition> {
+pub(crate) fn decode_index_definition(bytes: &[u8]) -> Result<JsonIndexDefinition, EngineError> {
     if bytes.first().copied() != Some(INDEX_DEFINITION_FORMAT_VERSION) {
         return Err(EngineError::corruption(
             "data_loss.engine.json_index",

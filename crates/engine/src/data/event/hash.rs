@@ -2,7 +2,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 use super::{EventHash, EventPayload, EventType};
 
@@ -18,7 +18,7 @@ pub(crate) fn compute_event_hash(
     payload: &EventPayload,
     timestamp_micros: u64,
     previous_hash: &EventHash,
-) -> EngineResult<EventHash> {
+) -> Result<EventHash, EngineError> {
     let mut hasher = Sha256::new();
     hasher.update(sequence.to_le_bytes());
     hasher.update(

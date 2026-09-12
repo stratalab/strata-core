@@ -12,7 +12,7 @@ use fast_hnsw::{
 };
 use strata_core::{CommitVersion, Timestamp};
 
-use crate::diagnostics::EngineResult;
+use crate::diagnostics::EngineError;
 use crate::persistence::{PersistenceReadRow, ReadSelector};
 
 use super::{
@@ -923,7 +923,7 @@ impl VectorCandidate {
         version: CommitVersion,
         timestamp: Timestamp,
         dimension: usize,
-    ) -> EngineResult<Self> {
+    ) -> Result<Self, EngineError> {
         debug_assert!(dimension > 0);
         let placeholder = VectorEmbedding::new(vec![1.0; dimension])?;
         Ok(Self {
@@ -952,7 +952,7 @@ trait VectorCandidateSource {
         metric: VectorDistanceMetric,
         limit: usize,
         filter: Option<&VectorFilter>,
-    ) -> EngineResult<Vec<VectorCandidate>>;
+    ) -> Result<Vec<VectorCandidate>, EngineError>;
 }
 
 struct ExactVectorSource<'a> {
@@ -1027,7 +1027,7 @@ impl VectorCandidateSource for ExactVectorSource<'_> {
         metric: VectorDistanceMetric,
         limit: usize,
         filter: Option<&VectorFilter>,
-    ) -> EngineResult<Vec<VectorCandidate>> {
+    ) -> Result<Vec<VectorCandidate>, EngineError> {
         score_entries(self.entries, self.tombstones, query, metric, limit, filter)
     }
 }
@@ -1051,7 +1051,7 @@ impl VectorCandidateSource for ActiveDeltaVectorSource<'_> {
         metric: VectorDistanceMetric,
         limit: usize,
         _filter: Option<&VectorFilter>,
-    ) -> EngineResult<Vec<VectorCandidate>> {
+    ) -> Result<Vec<VectorCandidate>, EngineError> {
         let entries = self
             .entries
             .iter()
@@ -1110,7 +1110,7 @@ impl VectorCandidateSource for FlatArtifactVectorSource<'_> {
         metric: VectorDistanceMetric,
         limit: usize,
         filter: Option<&VectorFilter>,
-    ) -> EngineResult<Vec<VectorCandidate>> {
+    ) -> Result<Vec<VectorCandidate>, EngineError> {
         score_flat_artifact(
             self.artifact,
             self.selector,
@@ -1156,7 +1156,7 @@ impl VectorCandidateSource for HnswArtifactVectorSource<'_> {
         metric: VectorDistanceMetric,
         limit: usize,
         filter: Option<&VectorFilter>,
-    ) -> EngineResult<Vec<VectorCandidate>> {
+    ) -> Result<Vec<VectorCandidate>, EngineError> {
         if filter.is_some()
             || !matches!(self.selector, ReadSelector::Latest)
             || self.input.fork_cap_excludes_rows
@@ -1239,7 +1239,7 @@ pub(crate) fn query_vector_sources_with_index_artifacts(
     policy: VectorIndexPolicy,
     collection_size: usize,
     entries_are_complete: bool,
-) -> EngineResult<(VectorSearchResult, VectorIndexDiagnostics)> {
+) -> Result<(VectorSearchResult, VectorIndexDiagnostics), EngineError> {
     // `entries` may be only the active delta (rows past the manifest watermark) when a sealed
     // index covers the rest, so index-kind selection uses `collection_size` (from the manifest),
     // and the internal exact-underfill fallback only runs when `entries` is the complete visible
@@ -1368,7 +1368,7 @@ fn execute_exact_fallback(
     filter: Option<&VectorFilter>,
     entries: &[(PersistenceReadRow, VectorEntry)],
     diagnostics: &mut VectorIndexDiagnostics,
-) -> EngineResult<VectorSearchResult> {
+) -> Result<VectorSearchResult, EngineError> {
     let source = ExactVectorSource::new(entries);
     let result = execute_vector_plan(
         query,
@@ -1402,7 +1402,7 @@ pub(crate) fn query_vector_exact(
     k: usize,
     filter: Option<&VectorFilter>,
     entries: &[(PersistenceReadRow, VectorEntry)],
-) -> EngineResult<VectorSearchResult> {
+) -> Result<VectorSearchResult, EngineError> {
     if k == 0 {
         return Ok(VectorSearchResult::new(Vec::new()));
     }
@@ -1433,7 +1433,7 @@ fn execute_vector_plan(
     filter: Option<&VectorFilter>,
     sources: &[PlannedVectorSource<'_>],
     diagnostics: &mut VectorIndexDiagnostics,
-) -> EngineResult<VectorSearchResult> {
+) -> Result<VectorSearchResult, EngineError> {
     let mut candidates = Vec::new();
     for planned_source in sources {
         diagnostics.record_source(planned_source.source);
@@ -1463,7 +1463,7 @@ fn score_entries(
     metric: VectorDistanceMetric,
     limit: usize,
     filter: Option<&VectorFilter>,
-) -> EngineResult<Vec<VectorCandidate>> {
+) -> Result<Vec<VectorCandidate>, EngineError> {
     let mut candidates = Vec::new();
     for (row, entry) in entries {
         if filter.is_some_and(|filter| !filter.matches(entry.metadata())) {
@@ -1500,7 +1500,7 @@ fn score_flat_artifact(
     metric: VectorDistanceMetric,
     limit: usize,
     filter: Option<&VectorFilter>,
-) -> EngineResult<Vec<VectorCandidate>> {
+) -> Result<Vec<VectorCandidate>, EngineError> {
     let mut candidates = Vec::new();
     for row in artifact.rows() {
         if !artifact_row_visible(
@@ -1537,7 +1537,7 @@ fn score_hnsw_artifact_exact(
     metric: VectorDistanceMetric,
     limit: usize,
     filter: Option<&VectorFilter>,
-) -> EngineResult<Vec<VectorCandidate>> {
+) -> Result<Vec<VectorCandidate>, EngineError> {
     let mut candidates = Vec::new();
     for row in artifact.rows() {
         if !artifact_row_visible(
@@ -1617,7 +1617,7 @@ fn merge_and_rerank_candidates(
     k: usize,
     filter: Option<&VectorFilter>,
     candidates: Vec<VectorCandidate>,
-) -> EngineResult<Vec<VectorSearchMatch>> {
+) -> Result<Vec<VectorSearchMatch>, EngineError> {
     let mut newest_by_key: BTreeMap<VectorKey, VectorCandidate> = BTreeMap::new();
     for candidate in candidates {
         let key = candidate.key.clone();

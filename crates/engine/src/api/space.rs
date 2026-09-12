@@ -7,7 +7,7 @@ use crate::branch::BranchName;
 use crate::commit::CommitOutcome;
 use crate::control::{space as control_space, ControlPlane};
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{
     decode_vector_index_manifest_key, encode_event_meta_space_prefix, encode_event_space_prefix,
     encode_event_type_index_space_prefix, encode_graph_binding_space_prefix,
@@ -271,13 +271,13 @@ impl<'a> SpaceService<'a> {
     }
 
     /// Lists registered product spaces on this branch.
-    pub fn list(&mut self) -> EngineResult<Vec<ProductSpace>> {
+    pub fn list(&mut self) -> Result<Vec<ProductSpace>, EngineError> {
         let record = self.branch_record()?;
         control_space::registered_spaces(self.persistence, &record)
     }
 
     /// Creates a product space catalog entry.
-    pub fn create(&mut self, space: ProductSpace) -> EngineResult<SpaceCreateOutcome> {
+    pub fn create(&mut self, space: ProductSpace) -> Result<SpaceCreateOutcome, EngineError> {
         let record = self.branch_record()?;
         let mutations = control_space::registration_mutations(self.persistence, &record, &space)?;
         if mutations.is_empty() {
@@ -295,13 +295,13 @@ impl<'a> SpaceService<'a> {
     }
 
     /// Returns whether a product space is registered on this branch.
-    pub fn exists(&mut self, space: &ProductSpace) -> EngineResult<bool> {
+    pub fn exists(&mut self, space: &ProductSpace) -> Result<bool, EngineError> {
         let record = self.branch_record()?;
         control_space::space_exists(self.persistence, &record, space)
     }
 
     /// Returns visible usage for a registered or valid product space.
-    pub fn usage(&mut self, space: &ProductSpace) -> EngineResult<SpaceUsageSummary> {
+    pub fn usage(&mut self, space: &ProductSpace) -> Result<SpaceUsageSummary, EngineError> {
         let record = self.branch_record()?;
         self.usage_for_record(&record, space)
     }
@@ -311,7 +311,7 @@ impl<'a> SpaceService<'a> {
         &mut self,
         space: &ProductSpace,
         force: bool,
-    ) -> EngineResult<SpaceDeleteOutcome> {
+    ) -> Result<SpaceDeleteOutcome, EngineError> {
         if space.as_str() == control_space::DEFAULT_SPACE {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.space_delete_default",
@@ -381,7 +381,7 @@ impl<'a> SpaceService<'a> {
         ))
     }
 
-    fn branch_record(&self) -> EngineResult<BranchCatalogRecord> {
+    fn branch_record(&self) -> Result<BranchCatalogRecord, EngineError> {
         self.control.require_healthy()?;
         self.control
             .lookup_branch(&self.branch)
@@ -398,7 +398,7 @@ impl<'a> SpaceService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         space: &ProductSpace,
-    ) -> EngineResult<SpaceUsageSummary> {
+    ) -> Result<SpaceUsageSummary, EngineError> {
         Ok(SpaceUsageSummary::new(
             space.clone(),
             self.visible_count(record, RowClass::Kv, encode_kv_space_prefix(space))?,
@@ -433,7 +433,7 @@ impl<'a> SpaceService<'a> {
         record: &BranchCatalogRecord,
         row_class: RowClass,
         prefix: Vec<u8>,
-    ) -> EngineResult<u64> {
+    ) -> Result<u64, EngineError> {
         let count = self
             .persistence
             .scan_prefix(
@@ -453,7 +453,7 @@ impl<'a> SpaceService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         space: &ProductSpace,
-    ) -> EngineResult<Vec<RowMutation>> {
+    ) -> Result<Vec<RowMutation>, EngineError> {
         let mut mutations = Vec::new();
         for (row_class, prefix) in data_delete_prefixes(space) {
             let rows = self.persistence.scan_prefix(

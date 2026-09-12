@@ -1,5 +1,5 @@
 use super::super::{
-    BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry, Command, Executor, ExecutorResult,
+    BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry, Command, Executor, ExecutorError,
     Output,
 };
 
@@ -10,7 +10,7 @@ impl Executor {
         key: impl Into<String>,
         path: impl Into<String>,
         value: serde_json::Value,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::JsonSet {
             branch: None,
             space: None,
@@ -25,7 +25,7 @@ impl Executor {
         &mut self,
         key: impl Into<String>,
         path: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::JsonGet {
             branch: None,
             space: None,
@@ -41,7 +41,7 @@ impl Executor {
         &mut self,
         key: impl Into<String>,
         path: impl Into<String>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::JsonDelete {
             branch: None,
             space: None,
@@ -51,7 +51,10 @@ impl Executor {
     }
 
     /// Executes a default-branch JSON batch set command.
-    pub fn json_batch_set(&mut self, entries: Vec<BatchJsonEntry>) -> ExecutorResult<Output> {
+    pub fn json_batch_set(
+        &mut self,
+        entries: Vec<BatchJsonEntry>,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::JsonBatchSet {
             branch: None,
             space: None,
@@ -60,7 +63,10 @@ impl Executor {
     }
 
     /// Executes a default-branch JSON batch get command.
-    pub fn json_batch_get(&mut self, entries: Vec<BatchJsonGetEntry>) -> ExecutorResult<Output> {
+    pub fn json_batch_get(
+        &mut self,
+        entries: Vec<BatchJsonGetEntry>,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::JsonBatchGet {
             branch: None,
             space: None,
@@ -72,7 +78,7 @@ impl Executor {
     pub fn json_batch_delete(
         &mut self,
         entries: Vec<BatchJsonDeleteEntry>,
-    ) -> ExecutorResult<Output> {
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::JsonBatchDelete {
             branch: None,
             space: None,

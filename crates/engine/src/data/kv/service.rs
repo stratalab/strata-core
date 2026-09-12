@@ -49,7 +49,7 @@ impl<'a> KvService<'a> {
     ///
     /// The returned outcome carries the create-vs-update fact computed by the
     /// engine, so callers never need a separate existence probe (rule 7).
-    pub fn put(&mut self, key: KvKey, value: KvValue) -> EngineResult<KvWriteOutcome> {
+    pub fn put(&mut self, key: KvKey, value: KvValue) -> Result<KvWriteOutcome, EngineError> {
         let outcome = self.put_batch([(key, value)])?;
         let created = outcome.created().first().copied().unwrap_or(false);
         Ok(KvWriteOutcome::new(outcome.commit(), created))
@@ -60,7 +60,7 @@ impl<'a> KvService<'a> {
     /// The engine determines whether each key was a create or an update by
     /// reading its latest visible state before the batch commits; duplicate keys
     /// are rejected, so the per-input flags stay positional with the input.
-    pub fn put_batch<I>(&mut self, entries: I) -> EngineResult<KvBatchPutOutcome>
+    pub fn put_batch<I>(&mut self, entries: I) -> Result<KvBatchPutOutcome, EngineError>
     where
         I: IntoIterator<Item = (KvKey, KvValue)>,
     {
@@ -84,12 +84,12 @@ impl<'a> KvService<'a> {
     }
 
     /// Reads the latest visible KV value.
-    pub fn get(&mut self, key: &KvKey) -> EngineResult<Option<KvValue>> {
+    pub fn get(&mut self, key: &KvKey) -> Result<Option<KvValue>, EngineError> {
         Ok(self.get_versioned(key)?.map(KvVersionedValue::into_value))
     }
 
     /// Reads the latest visible KV value with commit metadata.
-    pub fn get_versioned(&mut self, key: &KvKey) -> EngineResult<Option<KvVersionedValue>> {
+    pub fn get_versioned(&mut self, key: &KvKey) -> Result<Option<KvVersionedValue>, EngineError> {
         let branch_id = self.read_branch_id()?;
         let address = self.row_address_for_branch(branch_id, key);
         let Some(row) = self.persistence.read_row(address, ReadSelector::Latest)? else {
@@ -103,7 +103,7 @@ impl<'a> KvService<'a> {
         &mut self,
         key: &KvKey,
         version: CommitVersion,
-    ) -> EngineResult<Option<KvValue>> {
+    ) -> Result<Option<KvValue>, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, key);
         let Some(row) = self
@@ -116,7 +116,11 @@ impl<'a> KvService<'a> {
     }
 
     /// Reads a KV value at a commit timestamp.
-    pub fn get_at(&mut self, key: &KvKey, timestamp: Timestamp) -> EngineResult<Option<KvValue>> {
+    pub fn get_at(
+        &mut self,
+        key: &KvKey,
+        timestamp: Timestamp,
+    ) -> Result<Option<KvValue>, EngineError> {
         Ok(self
             .get_versioned_at(key, timestamp)?
             .map(KvVersionedValue::into_value))
@@ -127,7 +131,7 @@ impl<'a> KvService<'a> {
         &mut self,
         key: &KvKey,
         timestamp: Timestamp,
-    ) -> EngineResult<Option<KvVersionedValue>> {
+    ) -> Result<Option<KvVersionedValue>, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, key);
         let Some(row) = self
@@ -149,7 +153,7 @@ impl<'a> KvService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         rows: Vec<KvHistoryRow>,
-    ) -> EngineResult<Vec<KvHistoryRow>> {
+    ) -> Result<Vec<KvHistoryRow>, EngineError> {
         let versions: Vec<_> = rows.iter().map(KvHistoryRow::version).collect();
         let instants = self
             .persistence
@@ -162,7 +166,7 @@ impl<'a> KvService<'a> {
     }
 
     /// Reads full version history for a KV key.
-    pub fn get_versions(&mut self, key: &KvKey) -> EngineResult<Option<KvHistory>> {
+    pub fn get_versions(&mut self, key: &KvKey) -> Result<Option<KvHistory>, EngineError> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, key);
         let rows = self
@@ -178,7 +182,10 @@ impl<'a> KvService<'a> {
     }
 
     /// Reads multiple latest visible KV values with commit metadata.
-    pub fn batch_get(&mut self, keys: &[KvKey]) -> EngineResult<Vec<Option<KvVersionedValue>>> {
+    pub fn batch_get(
+        &mut self,
+        keys: &[KvKey],
+    ) -> Result<Vec<Option<KvVersionedValue>>, EngineError> {
         let record = self.branch_record()?;
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -193,12 +200,12 @@ impl<'a> KvService<'a> {
     }
 
     /// Returns true when the key has a latest visible value.
-    pub fn exists(&mut self, key: &KvKey) -> EngineResult<bool> {
+    pub fn exists(&mut self, key: &KvKey) -> Result<bool, EngineError> {
         Ok(self.get(key)?.is_some())
     }
 
     /// Checks multiple keys for latest visible values.
-    pub fn batch_exists(&mut self, keys: &[KvKey]) -> EngineResult<Vec<bool>> {
+    pub fn batch_exists(&mut self, keys: &[KvKey]) -> Result<Vec<bool>, EngineError> {
         let record = self.branch_record()?;
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -213,7 +220,7 @@ impl<'a> KvService<'a> {
     }
 
     /// Lists latest visible keys with an optional user-key prefix.
-    pub fn list(&mut self, prefix: Option<&KvKey>) -> EngineResult<Vec<KvKey>> {
+    pub fn list(&mut self, prefix: Option<&KvKey>) -> Result<Vec<KvKey>, EngineError> {
         let record = self.branch_record()?;
         let scan_prefix = self.scan_prefix(prefix);
         self.persistence
@@ -236,7 +243,7 @@ impl<'a> KvService<'a> {
         prefix: Option<&KvKey>,
         cursor: Option<&KvKey>,
         limit: usize,
-    ) -> EngineResult<KvListPage> {
+    ) -> Result<KvListPage, EngineError> {
         if limit == 0 {
             return Ok(KvListPage::new(Vec::new(), false, None));
         }
@@ -263,7 +270,7 @@ impl<'a> KvService<'a> {
         cursor: Option<&KvKey>,
         limit: usize,
         timestamp: Timestamp,
-    ) -> EngineResult<KvListPage> {
+    ) -> Result<KvListPage, EngineError> {
         if limit == 0 {
             return Ok(KvListPage::new(Vec::new(), false, None));
         }
@@ -286,7 +293,7 @@ impl<'a> KvService<'a> {
         &mut self,
         prefix: Option<&KvKey>,
         timestamp: Timestamp,
-    ) -> EngineResult<Vec<KvKey>> {
+    ) -> Result<Vec<KvKey>, EngineError> {
         let record = self.branch_record()?;
         self.persistence
             .scan_prefix(
@@ -307,7 +314,7 @@ impl<'a> KvService<'a> {
         &mut self,
         start: Option<&KvKey>,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<KvScanRow>> {
+    ) -> Result<Vec<KvScanRow>, EngineError> {
         self.scan_range(start, None, limit)
     }
 
@@ -317,7 +324,7 @@ impl<'a> KvService<'a> {
         start: Option<&KvKey>,
         end: Option<&KvKey>,
         limit: Option<usize>,
-    ) -> EngineResult<Vec<KvScanRow>> {
+    ) -> Result<Vec<KvScanRow>, EngineError> {
         if limit == Some(0) {
             return Ok(Vec::new());
         }
@@ -353,12 +360,16 @@ impl<'a> KvService<'a> {
     }
 
     /// Counts latest visible keys with an optional user-key prefix.
-    pub fn count(&mut self, prefix: Option<&KvKey>) -> EngineResult<u64> {
+    pub fn count(&mut self, prefix: Option<&KvKey>) -> Result<u64, EngineError> {
         self.count_with_selector(prefix, ReadSelector::Latest)
     }
 
     /// Counts keys visible at a commit timestamp with an optional user-key prefix.
-    pub fn count_at(&mut self, prefix: Option<&KvKey>, timestamp: Timestamp) -> EngineResult<u64> {
+    pub fn count_at(
+        &mut self,
+        prefix: Option<&KvKey>,
+        timestamp: Timestamp,
+    ) -> Result<u64, EngineError> {
         self.count_with_selector(prefix, ReadSelector::AtTimestamp(timestamp))
     }
 
@@ -366,7 +377,7 @@ impl<'a> KvService<'a> {
         &mut self,
         prefix: Option<&KvKey>,
         selector: ReadSelector,
-    ) -> EngineResult<u64> {
+    ) -> Result<u64, EngineError> {
         let record = self.branch_record()?;
         let count = self
             .persistence
@@ -384,7 +395,11 @@ impl<'a> KvService<'a> {
     }
 
     /// Samples latest visible rows from one prefix scan.
-    pub fn sample(&mut self, prefix: Option<&KvKey>, count: usize) -> EngineResult<KvSample> {
+    pub fn sample(
+        &mut self,
+        prefix: Option<&KvKey>,
+        count: usize,
+    ) -> Result<KvSample, EngineError> {
         let record = self.branch_record()?;
         let rows = self
             .persistence
@@ -414,14 +429,14 @@ impl<'a> KvService<'a> {
     }
 
     /// Deletes a KV value if present.
-    pub fn delete(&mut self, key: KvKey) -> EngineResult<KvDeleteOutcome> {
+    pub fn delete(&mut self, key: KvKey) -> Result<KvDeleteOutcome, EngineError> {
         let outcome = self.delete_batch([key])?;
         let deleted = outcome.deleted().first().copied().unwrap_or(false);
         Ok(KvDeleteOutcome::new(deleted, outcome.commit()))
     }
 
     /// Deletes multiple KV values in one commit.
-    pub fn delete_batch<I>(&mut self, keys: I) -> EngineResult<KvBatchDeleteOutcome>
+    pub fn delete_batch<I>(&mut self, keys: I) -> Result<KvBatchDeleteOutcome, EngineError>
     where
         I: IntoIterator<Item = KvKey>,
     {
@@ -460,7 +475,7 @@ impl<'a> KvService<'a> {
     /// alloc). The catalog lookup itself stays: it is the staleness check
     /// (no control-plane epoch exists). Write paths keep [`branch_record`]
     /// (commits need the generation and full record).
-    fn read_branch_id(&self) -> EngineResult<strata_core::BranchId> {
+    fn read_branch_id(&self) -> Result<strata_core::BranchId, EngineError> {
         self.control.require_healthy()?;
         self.control
             .lookup_branch(&self.branch)
@@ -477,7 +492,7 @@ impl<'a> KvService<'a> {
         RowAddress::new(branch_id, RowClass::Kv, encode_kv_key(&self.space, key))
     }
 
-    fn branch_record(&self) -> EngineResult<BranchCatalogRecord> {
+    fn branch_record(&self) -> Result<BranchCatalogRecord, EngineError> {
         self.control.require_healthy()?;
         self.control
             .lookup_branch(&self.branch)
@@ -511,7 +526,7 @@ impl<'a> KvService<'a> {
         cursor: Option<&KvKey>,
         limit: usize,
         selector: ReadSelector,
-    ) -> EngineResult<Vec<KvKey>> {
+    ) -> Result<Vec<KvKey>, EngineError> {
         let record = self.branch_record()?;
         let prefix_start = self.scan_prefix(prefix);
         let prefix_end = next_prefix(&prefix_start);
@@ -569,7 +584,7 @@ impl<'a> KvService<'a> {
         mut start: Vec<u8>,
         end: &[u8],
         limit: usize,
-    ) -> EngineResult<Vec<KvScanRow>> {
+    ) -> Result<Vec<KvScanRow>, EngineError> {
         let mut visible = Vec::with_capacity(limit.min(KV_SCAN_RAW_PAGE_MIN));
         while visible.len() < limit && start.as_slice() < end {
             let remaining = limit.saturating_sub(visible.len());
@@ -600,7 +615,11 @@ impl<'a> KvService<'a> {
         Ok(visible)
     }
 
-    fn encode_batch_key(&self, key: KvKey, seen: &mut BTreeSet<Vec<u8>>) -> EngineResult<Vec<u8>> {
+    fn encode_batch_key(
+        &self,
+        key: KvKey,
+        seen: &mut BTreeSet<Vec<u8>>,
+    ) -> Result<Vec<u8>, EngineError> {
         let key_bytes = key.into_bytes();
         let encoded_key = encode_kv_key_bytes(&self.space, &key_bytes);
         if !seen.insert(encoded_key.clone()) {
@@ -616,7 +635,7 @@ impl<'a> KvService<'a> {
         &mut self,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
-    ) -> EngineResult<CommitOutcome> {
+    ) -> Result<CommitOutcome, EngineError> {
         let mut mutations = mutations;
         if mutations.is_empty() {
             return Err(EngineError::invalid_input(
@@ -650,7 +669,9 @@ impl<'a> KvService<'a> {
     }
 }
 
-fn versioned_value_from_row(row: &PersistenceReadRow) -> EngineResult<Option<KvVersionedValue>> {
+fn versioned_value_from_row(
+    row: &PersistenceReadRow,
+) -> Result<Option<KvVersionedValue>, EngineError> {
     if row.is_tombstone() {
         return Ok(None);
     }
@@ -662,14 +683,14 @@ fn versioned_value_from_row(row: &PersistenceReadRow) -> EngineResult<Option<KvV
     )))
 }
 
-fn value_from_row(row: &PersistenceReadRow) -> EngineResult<Option<KvValue>> {
+fn value_from_row(row: &PersistenceReadRow) -> Result<Option<KvValue>, EngineError> {
     if row.is_tombstone() {
         return Ok(None);
     }
     row_value(row).map(Some)
 }
 
-fn history_row_from_row(row: &PersistenceReadRow) -> EngineResult<KvHistoryRow> {
+fn history_row_from_row(row: &PersistenceReadRow) -> Result<KvHistoryRow, EngineError> {
     let value = if row.is_tombstone() {
         None
     } else {
@@ -683,7 +704,10 @@ fn history_row_from_row(row: &PersistenceReadRow) -> EngineResult<KvHistoryRow> 
     ))
 }
 
-fn scan_row_from_row(space: &ProductSpace, row: &PersistenceReadRow) -> EngineResult<KvScanRow> {
+fn scan_row_from_row(
+    space: &ProductSpace,
+    row: &PersistenceReadRow,
+) -> Result<KvScanRow, EngineError> {
     let key = decode_kv_key(space, row.key())?;
     let value = row_value(row)?;
     Ok(KvScanRow::new(
@@ -694,7 +718,7 @@ fn scan_row_from_row(space: &ProductSpace, row: &PersistenceReadRow) -> EngineRe
     ))
 }
 
-fn row_value(row: &PersistenceReadRow) -> EngineResult<KvValue> {
+fn row_value(row: &PersistenceReadRow) -> Result<KvValue, EngineError> {
     row.value().map(KvValue::new).ok_or_else(|| {
         EngineError::corruption(
             "data_loss.engine.kv_value",

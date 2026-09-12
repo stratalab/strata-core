@@ -19,7 +19,7 @@
 use strata_core::{BranchId, CommitVersion};
 
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::EngineResult;
+use crate::diagnostics::EngineError;
 use crate::persistence::{PersistenceReadRow, RowAddress, RowClass, RowMutation};
 
 /// How a capability's rows are treated across branch workflows.
@@ -134,7 +134,7 @@ pub(crate) trait CapabilityBranchAdapter {
         &self,
         space: &ProductSpace,
         row: &PersistenceReadRow,
-    ) -> EngineResult<ComparableEntity>;
+    ) -> Result<ComparableEntity, EngineError>;
 
     /// Build the row mutation that writes `summary` for `identity` in `space`
     /// onto branch `branch_id` — the write-side inverse of
@@ -169,7 +169,7 @@ mod tests {
     use strata_core::CommitVersion;
 
     use crate::data::kv::ProductSpace;
-    use crate::diagnostics::{EngineError, EngineErrorClass, EngineResult};
+    use crate::diagnostics::{EngineError, EngineErrorClass};
     use crate::persistence::{PersistenceReadRow, RowClass};
 
     const FAKE_PREFIX: &[u8] = b"fake/";
@@ -198,7 +198,7 @@ mod tests {
             &self,
             space: &ProductSpace,
             row: &PersistenceReadRow,
-        ) -> EngineResult<ComparableEntity> {
+        ) -> Result<ComparableEntity, EngineError> {
             let prefix = self.space_prefix(space);
             let identity = row
                 .key()

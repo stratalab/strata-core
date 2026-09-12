@@ -26,7 +26,7 @@ use crate::branch::preview::{
 use crate::control::space::{registered_spaces, registration_and_deletion_mutations};
 use crate::data::kv::ProductSpace;
 use crate::data::vector::plan_collection_promotion;
-use crate::diagnostics::EngineResult;
+use crate::diagnostics::EngineError;
 use crate::persistence::{
     encode_event_space_prefix, encode_graph_edge_space_prefix, encode_graph_metadata_prefix,
     encode_graph_node_space_prefix, ReadSelector, RowClass, RowMutation, StoragePersistence,
@@ -53,7 +53,7 @@ pub(crate) fn plan_promotion(
     source: &BranchCatalogRecord,
     target: &BranchCatalogRecord,
     strategy: PromotionStrategy,
-) -> EngineResult<PromotionPlan> {
+) -> Result<PromotionPlan, EngineError> {
     let strategy_result = match strategy {
         PromotionStrategy::Strict => ConflictStrategyResult::Refused,
         PromotionStrategy::SourceWins => ConflictStrategyResult::SourceWins,
@@ -206,7 +206,7 @@ fn space_has_unpromoted_target_rows(
     persistence: &mut StoragePersistence,
     target: &BranchCatalogRecord,
     space: &ProductSpace,
-) -> EngineResult<bool> {
+) -> Result<bool, EngineError> {
     let branch = target.storage_branch_id();
     let classes = [
         (RowClass::Event, encode_event_space_prefix(space)),

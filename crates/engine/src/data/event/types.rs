@@ -5,7 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 
 const MAX_EVENT_TYPE_BYTES: usize = 256;
 const MAX_EVENT_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -18,7 +18,7 @@ pub struct EventType(String);
 
 impl EventType {
     /// Creates a validated event type.
-    pub fn new(event_type: impl Into<String>) -> EngineResult<Self> {
+    pub fn new(event_type: impl Into<String>) -> Result<Self, EngineError> {
         let event_type = event_type.into();
         if event_type.is_empty() || event_type.trim().is_empty() {
             return Err(EngineError::invalid_input(
@@ -78,7 +78,7 @@ pub struct EventPayload(Value);
 
 impl EventPayload {
     /// Creates a validated event payload.
-    pub fn new(value: Value) -> EngineResult<Self> {
+    pub fn new(value: Value) -> Result<Self, EngineError> {
         if !value.is_object() {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.event_payload",
@@ -124,7 +124,7 @@ impl EventPayload {
         self.0.clone()
     }
 
-    pub(crate) fn from_stored(value: Value) -> EngineResult<Self> {
+    pub(crate) fn from_stored(value: Value) -> Result<Self, EngineError> {
         Self::new(value)
     }
 }
@@ -217,7 +217,7 @@ impl EventBatchAppendEntry {
         }
     }
 
-    pub(crate) fn validate(&self) -> EngineResult<(EventType, EventPayload)> {
+    pub(crate) fn validate(&self) -> Result<(EventType, EventPayload), EngineError> {
         let event_type = EventType::new(self.event_type.clone())?;
         let payload = EventPayload::new(self.payload.clone())?;
         Ok((event_type, payload))
