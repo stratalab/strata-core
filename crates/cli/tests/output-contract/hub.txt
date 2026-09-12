@@ -1,141 +1,100 @@
 ### hub.get_dataset · responses/v1/hub/dataset.json · human
-{
-  "badge": "official",
-  "capability_registry_version": 1,
-  "citation": "Fixture citation.",
-  "clone_command": "strata clone titanic",
-  "created": "2026-09-01T00:00:00Z",
-  "default_branch": "main",
-  "description": "Classic passenger-survival dataset.",
-  "downloads": 7,
-  "engine_version_required": ">=1.1.0",
-  "format_version": "v1",
-  "frontmatter_extras": {
-    "source": "fixture"
-  },
-  "last_updated": "2026-09-02T00:00:00Z",
-  "license": "CC0",
-  "manifest_hash": "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "name": "titanic",
-  "owner": "stratahub",
-  "primitives": [
-    "kv"
-  ],
-  "provenance": {
-    "curator": "stratahub",
-    "license_text_url": "https://example.test/license",
-    "source": "fixture"
-  },
-  "quick_start_snippets": {
-    "python": "print('titanic')"
-  },
-  "readme": "# Titanic\n",
-  "sample_preview": {
-    "kv": [
-      {
-        "key": "passenger:1",
-        "value_summary": "survived=true"
-      }
-    ]
-  },
-  "schema": {
-    "kv": {
-      "namespaces": [
-        {
-          "entry_count": 1,
-          "prefix": "passenger:",
-          "value_type": "json"
-        }
-      ]
-    }
-  },
-  "size_bytes": 1024,
-  "strata_features": {
-    "branches": [
-      {
-        "is_default": true,
-        "name": "main"
-      }
-    ],
-    "example_notebook": "examples/titanic.ipynb",
-    "multi_primitive_demos": [],
-    "time_travel_highlights": []
-  },
-  "summary_excerpt": "Classic passenger-survival dataset.",
-  "tags": [
-    "tabular"
-  ],
-  "tasks": [
-    "classification"
-  ]
-}
+name                     titanic
+owner                    stratahub
+badge                    official
+description              Classic passenger-survival dataset.
+license                  CC0
+primitives               kv
+tags                     tabular
+tasks                    classification
+size                     1024 bytes
+downloads                7
+default_branch           main
+created                  2026-09-01T00:00:00Z
+last_updated             2026-09-02T00:00:00Z
+engine_version_required  >=1.1.0
+clone_command            strata clone titanic
 ∎
 ### hub.get_dataset · responses/v1/hub/dataset.json · raw
-{"badge":"official","capability_registry_version":1,"citation":"Fixture citation.","clone_command":"strata clone titanic","created":"2026-09-01T00:00:00Z","default_branch":"main","description":"Classic passenger-survival dataset.","downloads":7,"engine_version_required":">=1.1.0","format_version":"v1","frontmatter_extras":{"source":"fixture"},"last_updated":"2026-09-02T00:00:00Z","license":"CC0","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","name":"titanic","owner":"stratahub","primitives":["kv"],"provenance":{"curator":"stratahub","license_text_url":"https://example.test/license","source":"fixture"},"quick_start_snippets":{"python":"print('titanic')"},"readme":"# Titanic\n","sample_preview":{"kv":[{"key":"passenger:1","value_summary":"survived=true"}]},"schema":{"kv":{"namespaces":[{"entry_count":1,"prefix":"passenger:","value_type":"json"}]}},"size_bytes":1024,"strata_features":{"branches":[{"is_default":true,"name":"main"}],"example_notebook":"examples/titanic.ipynb","multi_primitive_demos":[],"time_travel_highlights":[]},"summary_excerpt":"Classic passenger-survival dataset.","tags":["tabular"],"tasks":["classification"]}
+name	titanic
+owner	stratahub
+badge	official
+description	Classic passenger-survival dataset.
+license	CC0
+primitives	["kv"]
+tags	["tabular"]
+tasks	["classification"]
+size_bytes	1024
+downloads	7
+default_branch	main
+created	2026-09-01T00:00:00Z
+last_updated	2026-09-02T00:00:00Z
+engine_version_required	>=1.1.0
+clone_command	strata clone titanic
 ∎
 ### hub.info · responses/v1/hub/info.json · human
-{
-  "hash_algorithm": "blake3",
-  "max_dataset_size_bytes": 5368709120,
-  "max_manifest_size_bytes": 1048576,
-  "max_object_size_bytes": 536870912,
-  "protocol_version": "v1",
-  "server_implementation": "stratahub",
-  "server_version": "0.1.0",
-  "supported_object_content_types": [
-    "application/octet-stream"
-  ],
-  "telemetry_endpoint_enabled": false
-}
+server_implementation           stratahub
+server_version                  0.1.0
+protocol_version                v1
+hash_algorithm                  blake3
+max_dataset_size                5.4 GB
+max_object_size                 537 MB
+max_manifest_size               1 MB
+supported_object_content_types  application/octet-stream
+telemetry_endpoint_enabled      false
 ∎
 ### hub.info · responses/v1/hub/info.json · raw
-{"hash_algorithm":"blake3","max_dataset_size_bytes":5368709120,"max_manifest_size_bytes":1048576,"max_object_size_bytes":536870912,"protocol_version":"v1","server_implementation":"stratahub","server_version":"0.1.0","supported_object_content_types":["application/octet-stream"],"telemetry_endpoint_enabled":false}
+server_implementation	stratahub
+server_version	0.1.0
+protocol_version	v1
+hash_algorithm	blake3
+max_dataset_size_bytes	5368709120
+max_object_size_bytes	536870912
+max_manifest_size_bytes	1048576
+supported_object_content_types	["application/octet-stream"]
+telemetry_endpoint_enabled	false
 ∎
 ### hub.list_datasets · edge:items=[] · human
 (empty)
 ∎
 ### hub.list_datasets · edge:items=[] · raw
-(empty)
 ∎
 ### hub.list_datasets · responses/v1/errors/hub/list_datasets_bad_limit.json · human
 invalid_argument.executor.hub_filter: command failed∎
 ### hub.list_datasets · responses/v1/errors/hub/list_datasets_bad_limit.json · raw
 invalid_argument.executor.hub_filter: command failed∎
 ### hub.list_datasets · responses/v1/hub/datasets.json · human
-{"badge":"official","default_branch":"main","description":"Classic passenger-survival dataset.","downloads":7,"last_updated":"2026-09-02T00:00:00Z","license":"CC0","name":"titanic","primitives":["kv"],"size_bytes":1024,"tags":["tabular"],"tasks":["classification"]}
+NAME     BADGE     LICENSE  PRIMITIVES  SIZE        DOWNLOADS  LAST_UPDATED
+titanic  official  CC0      kv          1024 bytes          7  2026-09-02T00:00:00Z
 ∎
 ### hub.list_datasets · responses/v1/hub/datasets.json · raw
-{"badge":"official","default_branch":"main","description":"Classic passenger-survival dataset.","downloads":7,"last_updated":"2026-09-02T00:00:00Z","license":"CC0","name":"titanic","primitives":["kv"],"size_bytes":1024,"tags":["tabular"],"tasks":["classification"]}
+titanic	official	CC0	["kv"]	1024	7	2026-09-02T00:00:00Z
 ∎
 ### hub.list_refs · responses/v1/hub/refs.json · human
-{
-  "dataset": "titanic",
-  "default_branch": "main",
-  "refs": [
-    {
-      "branch": "main",
-      "last_updated": "2026-09-02T00:00:00Z",
-      "manifest_hash": "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    }
-  ]
-}
+dataset         titanic
+default_branch  main
+refs
+  BRANCH  LAST_UPDATED          MANIFEST_HASH
+  main    2026-09-02T00:00:00Z  blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ∎
 ### hub.list_refs · responses/v1/hub/refs.json · raw
-{"dataset":"titanic","default_branch":"main","refs":[{"branch":"main","last_updated":"2026-09-02T00:00:00Z","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]}
+dataset	titanic
+default_branch	main
+refs	[{"branch":"main","last_updated":"2026-09-02T00:00:00Z","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]
 ∎
 ### hub.list_yanked · edge:items=[] · human
 (empty)
 ∎
 ### hub.list_yanked · edge:items=[] · raw
-(empty)
 ∎
 ### hub.list_yanked · responses/v1/errors/hub/list_yanked_bad_since.json · human
 invalid_argument.executor.hub_since: command failed∎
 ### hub.list_yanked · responses/v1/errors/hub/list_yanked_bad_since.json · raw
 invalid_argument.executor.hub_since: command failed∎
 ### hub.list_yanked · responses/v1/hub/yanked.json · human
-{"branch":"main","dataset":"bad-dataset","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","reason":"policy_violation","yanked_at":"2026-09-02T00:00:00Z"}
+DATASET      BRANCH  REASON            YANKED_AT             MANIFEST_HASH
+bad-dataset  main    policy_violation  2026-09-02T00:00:00Z  blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ∎
 ### hub.list_yanked · responses/v1/hub/yanked.json · raw
-{"branch":"main","dataset":"bad-dataset","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","reason":"policy_violation","yanked_at":"2026-09-02T00:00:00Z"}
+bad-dataset	main	policy_violation	2026-09-02T00:00:00Z	blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ∎

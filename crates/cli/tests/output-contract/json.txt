@@ -98,7 +98,9 @@ true
 ### json.get · edge:found=false · raw
 ∎
 ### json.get · responses/v1/json/get_versioned_found.json · human
-{"name":"Ada"}
+{
+  "name": "Ada"
+}
 ∎
 ### json.get · responses/v1/json/get_versioned_found.json · raw
 {"name":"Ada"}

@@ -70,17 +70,21 @@ pub(super) fn read_schema_document(repo_root: &Path, command_id: &str) -> Result
     serde_json::from_str(&text).map_err(|source| IdlError::Json { path, source })
 }
 
-/// Checks one command's declaration: shape against the kind's rule, then
-/// every pointer, placeholder, filter and `as` against the schema document.
-pub(super) fn validate_display(
+/// Checks one command's declaration — shape against the kind's rule, then
+/// every pointer, placeholder, filter and `as` against the schema document —
+/// and returns it resolved: every `as: table` field carries the columns its
+/// row schema implies. The resolved form is what `generate-cli` writes, so
+/// the renderer reads a table's columns from the index and never guesses
+/// them from a row.
+pub(super) fn resolve_display(
     command_id: &str,
     rule: CliRenderRule,
     decl: &CliDisplayDecl,
     document: &Value,
-) -> Result<()> {
+) -> Result<CliDisplayDecl> {
     validate_display_shape(command_id, rule, decl).map_err(invalid)?;
     let CliDisplayDecl::Declared(display) = decl else {
-        return Ok(());
+        return Ok(decl.clone());
     };
     let schema = SchemaDoc { document };
     let outcome = match display.shape() {
@@ -91,7 +95,14 @@ pub(super) fn validate_display(
         Ok(CliDisplayShape::Map) => check_map(&schema, display),
         Err(reason) => Err(reason),
     };
-    outcome.map_err(|reason| invalid(format!("command `{command_id}` display {reason}")))
+    // Only a fields block renders a nested table; a column's `as: table`
+    // stays a compact-JSON cell, so its columns are never needed.
+    let resolved = outcome.and_then(|()| {
+        let mut resolved = display.clone();
+        resolve_tables(&schema, &mut resolved.fields)?;
+        Ok(CliDisplayDecl::Declared(resolved))
+    });
+    resolved.map_err(|reason| invalid(format!("command `{command_id}` display {reason}")))
 }
 
 /// Fails when a serialized command index carries a `display` or `render`
@@ -521,6 +532,7 @@ fn check_fields(schema: &SchemaDoc<'_>, fields: &[CliDisplayField], parent: Opti
         if !seen.insert(pointer) {
             return Err(format!("`fields` repeats `{pointer}`"));
         }
+        check_authored_columns(pointer, field)?;
         check_header(pointer, field.header.as_deref())?;
         let node = schema.resolve(pointer)?;
         if let Some(as_) = field.as_ {
@@ -542,6 +554,18 @@ fn check_fields(schema: &SchemaDoc<'_>, fields: &[CliDisplayField], parent: Opti
         }
     }
     Ok(())
+}
+
+/// A table's columns are resolved, never authored: a declaration that
+/// spells them out would restate the schema, and drift from it.
+fn check_authored_columns(pointer: &str, field: &CliDisplayField) -> Check {
+    if field.columns.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "field `{pointer}` carries `columns`; a table's columns are resolved from the schema"
+        ))
+    }
 }
 
 fn check_header(pointer: &str, header: Option<&str>) -> Check {
@@ -584,6 +608,7 @@ fn check_columns(schema: &SchemaDoc<'_>, display: &CliDisplay, rule: CliRenderRu
                 "column `{pointer}` carries `fields`; only a record field may"
             ));
         }
+        check_authored_columns(pointer, column)?;
         check_header(pointer, column.header.as_deref())?;
         let node = schema.resolve(pointer)?;
         if let Some(as_) = column.as_ {
@@ -605,6 +630,72 @@ fn check_columns(schema: &SchemaDoc<'_>, display: &CliDisplay, rule: CliRenderRu
         ));
     }
     check_fields(schema, &display.fields, None)
+}
+
+/// Fills the `columns` of every `as: table` field from its row schema, at
+/// every depth a nested `fields` reaches.
+fn resolve_tables(schema: &SchemaDoc<'_>, fields: &mut [CliDisplayField]) -> Check {
+    for field in fields {
+        if field.as_ == Some(CliDisplayAs::Table) {
+            field.columns = table_columns(schema, &field.field)?;
+        }
+        resolve_tables(schema, &mut field.fields)?;
+    }
+    Ok(())
+}
+
+/// One column per property of the row record, in the order `--json` prints
+/// them (alphabetical), each with the presentation its type implies: base64
+/// as `bytes` (a preview conflict's identity decodes to text, Q20),
+/// structured values as compact `json`, scalars as they are.
+fn table_columns(
+    schema: &SchemaDoc<'_>,
+    pointer: &str,
+) -> std::result::Result<Vec<CliDisplayField>, String> {
+    let rows = schema.resolve(pointer)?;
+    let row = schema.element(pointer, &rows)?;
+    let names: BTreeSet<&str> = row
+        .schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(Map::keys)
+        .map(String::as_str)
+        .collect();
+    let mut columns = Vec::with_capacity(names.len());
+    for name in names {
+        let field = format!("{pointer}/*/{name}");
+        let node = schema.resolve(&field)?;
+        columns.push(CliDisplayField {
+            field,
+            header: None,
+            as_: implied_as(node.ty),
+            fields: Vec::new(),
+            columns: Vec::new(),
+        });
+    }
+    if columns.is_empty() {
+        return Err(format!(
+            "`as: table` on `{pointer}` has a row with no fields"
+        ));
+    }
+    Ok(columns)
+}
+
+/// The presentation a resolved column takes from its type, when the scalar
+/// text would not do.
+const fn implied_as(ty: SchemaType) -> Option<CliDisplayAs> {
+    match ty {
+        SchemaType::Base64 => Some(CliDisplayAs::Bytes),
+        SchemaType::Object | SchemaType::Map | SchemaType::Array | SchemaType::Any => {
+            Some(CliDisplayAs::Json)
+        }
+        SchemaType::Text
+        | SchemaType::Integer
+        | SchemaType::Number
+        | SchemaType::Boolean
+        | SchemaType::Enum => None,
+    }
 }
 
 fn check_map(schema: &SchemaDoc<'_>, display: &CliDisplay) -> Check {

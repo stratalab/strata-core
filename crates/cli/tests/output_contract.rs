@@ -181,6 +181,12 @@ struct Wire {
     fixture: String,
     value: Value,
     is_error: bool,
+    /// Whether the binary renders this wire through the command's `display:`
+    /// declaration. A command's own response does; a second output it can
+    /// emit — `clone`'s progress events — is streamed with no declaration
+    /// (`run_clone`), so rendering it as the command's answer would pin a
+    /// receipt no reader ever sees.
+    declared: bool,
 }
 
 fn read_json(path: &Path) -> Value {
@@ -204,6 +210,10 @@ fn wires_for(command: &Value, fixtures_root: &Path) -> Vec<Wire> {
     let request = read_json(&fixtures_root.join(fixtures["request"].as_str().expect("request")));
     let mut wires = Vec::new();
     let primary = fixtures["response"].as_str().expect("response fixture");
+    let primary_tag = read_json(&fixtures_root.join(primary))["type"]
+        .as_str()
+        .expect("response fixture names its wire type")
+        .to_owned();
     let mut responses = vec![primary];
     responses.extend(
         fixtures["responses"]
@@ -213,13 +223,16 @@ fn wires_for(command: &Value, fixtures_root: &Path) -> Vec<Wire> {
             .map(|alternate| alternate.as_str().expect("alternate fixture")),
     );
     for fixture in responses {
+        let value = read_json(&fixtures_root.join(fixture));
+        let declared = value["type"].as_str() == Some(primary_tag.as_str());
         wires.push(Wire {
             command: id.clone(),
             name: wire_name.clone(),
             request: request.clone(),
             fixture: fixture.to_owned(),
-            value: read_json(&fixtures_root.join(fixture)),
+            value,
             is_error: false,
+            declared,
         });
     }
     let family = command["family"].as_str().expect("family");
@@ -231,6 +244,7 @@ fn wires_for(command: &Value, fixtures_root: &Path) -> Vec<Wire> {
             fixture: label,
             value,
             is_error: false,
+            declared: true,
         });
     }
     for case in fixtures["error_cases"].as_array().into_iter().flatten() {
@@ -242,6 +256,7 @@ fn wires_for(command: &Value, fixtures_root: &Path) -> Vec<Wire> {
             fixture: fixture.to_owned(),
             value: read_json(&fixtures_root.join(fixture)),
             is_error: true,
+            declared: false,
         });
     }
     wires
@@ -411,8 +426,12 @@ fn render_wire(wire: &Wire, cells: &mut Cells, invariants: &mut Vec<String>) {
     }
     let output = typed(&wire.command, &wire.fixture, &wire.value);
     let render = |format| {
-        let invocation = Invocation::for_wire(&wire.name, format, || Ok(wire.request.clone()))
-            .unwrap_or_else(|error| panic!("{}: {error}", key("declaration")));
+        let invocation = if wire.declared {
+            Invocation::for_wire(&wire.name, format, || Ok(wire.request.clone()))
+                .unwrap_or_else(|error| panic!("{}: {error}", key("declaration")))
+        } else {
+            Invocation::none()
+        };
         render_output(&output, &invocation, format)
             .unwrap_or_else(|error| panic!("{}: {error}", key("render")))
     };
@@ -684,6 +703,19 @@ fn scrub(text: &str) -> String {
             "${1}<bytes>",
         ),
         (r#"("version":\s*)"\d+\.\d+\.\d+""#, r#"${1}"<semver>""#),
+        // The same two facts in a declared record: the reader's humanised
+        // size under its `header:`, and the script's wire number under its
+        // dotted key. Both are this host's memory, not the contract.
+        (
+            r"(?m)^(\s*(?:total|usable_host)\s+)[\d.]+ (?:bytes|[kMG]B)$",
+            "${1}<bytes>",
+        ),
+        (
+            "(?m)^(memory_budget\\.(?:total_bytes|usable_host_bytes)\t)\\d+$",
+            "${1}<bytes>",
+        ),
+        // The binary's own version, wherever a record shows it.
+        (r"(?m)^(version[ \t]+)\d+\.\d+\.\d+$", "${1}<semver>"),
     ] {
         out = regex::Regex::new(pattern)
             .expect("scrub pattern compiles")

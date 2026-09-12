@@ -860,13 +860,18 @@ fn remote_on_a_never_cloned_database_reports_null_origin() {
         "never-cloned database must report a null origin: {envelope}"
     );
 
+    // #3314 S3a: `remote` declares the origin record's fields, so a null
+    // origin is a miss — `(nil)` on stdout, exit 0, nothing for a script.
     let human = strata(&["--db", &db, "remote"]);
     assert_ok(&human, "remote (human mode)");
-    assert!(
-        stdout(&human).contains("origin"),
-        "human rendering names the origin field: {}",
-        stdout(&human)
+    assert_eq!(
+        stdout(&human),
+        "(nil)\n",
+        "a never-cloned database has no origin to show"
     );
+    let raw = strata(&["--db", &db, "--raw", "remote"]);
+    assert_ok(&raw, "remote (raw mode)");
+    assert_eq!(stdout(&raw), "", "a script reads the miss as no output");
 }
 
 /// #3112 S5: the loop the whole epic exists to enable — read history, take a

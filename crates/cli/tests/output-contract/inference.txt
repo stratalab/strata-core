@@ -1,39 +1,52 @@
 ### inference.cache_status · responses/v1/inference/cache_status.json · human
-{
-  "embedding_models": [],
-  "generation_models": [],
-  "ranking_models": []
-}
+generation_models  -
+embedding_models   -
+ranking_models     -
 ∎
 ### inference.cache_status · responses/v1/inference/cache_status.json · raw
-{"embedding_models":[],"generation_models":[],"ranking_models":[]}
+generation_models	[]
+embedding_models	[]
+ranking_models	[]
 ∎
 ### inference.capability · responses/v1/errors/inference/invalid_request.json · human
 inference.invalid_request: command failed∎
 ### inference.capability · responses/v1/errors/inference/invalid_request.json · raw
 inference.invalid_request: command failed∎
 ### inference.capability · responses/v1/inference/capability.json · human
-{
-  "availability": "ready",
-  "can_embed": false,
-  "can_generate": true,
-  "can_rank": false,
-  "can_tokenize": false,
-  "embedding_dim": 0,
-  "model": "claude-3-5-haiku-latest",
-  "network_enabled": true,
-  "provider": "anthropic",
-  "provider_feature_enabled": true,
-  "requires_api_key": true,
-  "requires_network": true,
-  "supports_json_object": true,
-  "supports_json_schema": false,
-  "supports_logprobs": false,
-  "supports_tools": false
-}
+provider                  anthropic
+model                     claude-3-5-haiku-latest
+availability              ready
+can_generate              true
+can_embed                 false
+can_rank                  false
+can_tokenize              false
+embedding_dim             0
+requires_api_key          true
+requires_network          true
+network_enabled           true
+provider_feature_enabled  true
+supports_tools            false
+supports_json_object      true
+supports_json_schema      false
+supports_logprobs         false
 ∎
 ### inference.capability · responses/v1/inference/capability.json · raw
-{"availability":"ready","can_embed":false,"can_generate":true,"can_rank":false,"can_tokenize":false,"embedding_dim":0,"model":"claude-3-5-haiku-latest","network_enabled":true,"provider":"anthropic","provider_feature_enabled":true,"requires_api_key":true,"requires_network":true,"supports_json_object":true,"supports_json_schema":false,"supports_logprobs":false,"supports_tools":false}
+provider	anthropic
+model	claude-3-5-haiku-latest
+availability	ready
+can_generate	true
+can_embed	false
+can_rank	false
+can_tokenize	false
+embedding_dim	0
+requires_api_key	true
+requires_network	true
+network_enabled	true
+provider_feature_enabled	true
+supports_tools	false
+supports_json_object	true
+supports_json_schema	false
+supports_logprobs	false
 ∎
 ### inference.detokenize · responses/v1/inference/text.json · human
 hello

@@ -60,23 +60,22 @@ true
 ### event.get · edge:found=false · raw
 ∎
 ### event.get · responses/v1/event/get_found.json · human
-{
-  "event": {
-    "event_type": "user.created",
-    "hash": "ef66c75b71e03746e96de6ecd282d9f60bc6047f024fd87a22bcbb9eacb2775d",
-    "payload": {
-      "name": "Ada"
-    },
-    "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-    "sequence": 0,
-    "timestamp": 1783742390446216
-  },
-  "timestamp": 3,
-  "version": 3
-}
+sequence       0
+event_type     user.created
+timestamp      2026-07-11 03:59:50.446216 UTC
+payload        {"name":"Ada"}
+hash           ef66c75b71e03746e96de6ecd282d9f60bc6047f024fd87a22bcbb9eacb2775d
+previous_hash  0000000000000000000000000000000000000000000000000000000000000000
+version        3
 ∎
 ### event.get · responses/v1/event/get_found.json · raw
-{"event":{"event_type":"user.created","hash":"ef66c75b71e03746e96de6ecd282d9f60bc6047f024fd87a22bcbb9eacb2775d","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390446216},"timestamp":3,"version":3}
+event.sequence	0
+event.event_type	user.created
+event.timestamp	1783742390446216
+event.payload	{"name":"Ada"}
+event.hash	ef66c75b71e03746e96de6ecd282d9f60bc6047f024fd87a22bcbb9eacb2775d
+event.previous_hash	0000000000000000000000000000000000000000000000000000000000000000
+version	3
 ∎
 ### event.list · edge:has_more=true · human
 SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD
@@ -181,13 +180,14 @@ user.created
 user.updated
 ∎
 ### event.verify_chain · responses/v1/event/verify_chain_valid.json · human
-{
-  "error": null,
-  "first_invalid": null,
-  "length": 2,
-  "valid": true
-}
+valid          true
+length         2
+first_invalid  -
+error          -
 ∎
 ### event.verify_chain · responses/v1/event/verify_chain_valid.json · raw
-{"error":null,"first_invalid":null,"length":2,"valid":true}
+valid	true
+length	2
+first_invalid	
+error	
 ∎

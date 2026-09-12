@@ -148,6 +148,12 @@ Every pointer, placeholder, filter and `as:` is resolved against the schema
 when `generate-cli`/`check-cli` runs, so a declaration that names a field the
 wire does not carry, points at the wrong type, or pairs a shape with a kind
 whose rule cannot render it fails there with the command id and the reason.
+
+An `as: table` field is authored as the pointer alone: `generate-cli` reads the
+row schema and writes the table's `columns` into the index — one per row
+property, in schema order, each with the presentation its type implies. The
+guard refuses a declaration that carries `columns` under a field, so the
+renderer's tables and the wire cannot drift apart.
 The declarations reach **only** `cli-command-index.json`; `generate`/`check`
 reject a `command-index.json` that carries a `display` or `render` key, because
 the Python SDK derives from the wire model and must never see the CLI layer.

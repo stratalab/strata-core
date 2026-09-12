@@ -4,9 +4,9 @@ use base64::Engine as _;
 use serde::Serialize;
 use serde_json::Value;
 use strata_executor::cli_metadata::{
-    CliDisplay, CliDisplayAs, CliDisplayDecl, CliDisplayField, CliDisplaySort, CliRenderRule,
-    CliWireEncoding, ReceiptFilter, ReceiptPlaceholder, ReceiptSegment, ReceiptTemplate,
-    ReceiptValue,
+    CliDisplay, CliDisplayAs, CliDisplayDecl, CliDisplayField, CliDisplayShape, CliDisplaySort,
+    CliRenderRule, CliWireEncoding, ReceiptFilter, ReceiptPlaceholder, ReceiptSegment,
+    ReceiptTemplate, ReceiptValue,
 };
 use strata_executor::{Command, Output};
 
@@ -68,9 +68,8 @@ pub struct Invocation {
 }
 
 /// A `display:` declaration parsed for the rule it renders under (output
-/// contract R2). The rules S3 and S5 have not reached (`optional`, the
-/// status rules, `batch`) still render through the family path and parse
-/// to nothing.
+/// contract R2). Only `batch` — the rule S3b owns — still renders through
+/// the family path and parses to nothing.
 #[derive(Clone, Debug)]
 enum Declared {
     /// `mutation_ack`: a receipt and an identity.
@@ -79,6 +78,11 @@ enum Declared {
     Rows(RowsDecl),
     /// `analytics`: a node-keyed map, as a two-column table.
     Map(MapDecl),
+    /// `optional`, `status_value`, `status_sections`: one record — a declared
+    /// value or a block of declared fields — and what absence looks like.
+    Record(RecordDecl),
+    /// `status_sections` for an action: one declared receipt.
+    Receipt(ReceiptDecl),
 }
 
 /// A parsed `mutation_ack` declaration (output contract R1/R2).
@@ -101,6 +105,9 @@ struct RowsDecl {
     /// Present under the `page` rule: the continuation and sample facts
     /// beside the rows decide what stderr says.
     page: Option<PageDecl>,
+    /// The `search` rule's block beside its rows — the index diagnostics —
+    /// shown to a reader under the table. A script reads the rows alone.
+    fields: Vec<Field>,
 }
 
 /// One declared column.
@@ -128,6 +135,64 @@ struct MapDecl {
     /// Header over the value column; the key column is always `NODE`.
     header: String,
     sort: CliDisplaySort,
+}
+
+/// A parsed record declaration: the commands whose answer is one record,
+/// whether they describe it as a single `value:` or a block of `fields:`.
+#[derive(Clone, Debug)]
+struct RecordDecl {
+    miss: Miss,
+    body: RecordBody,
+}
+
+/// How a command says there is nothing to show (output contract R1, Q9).
+#[derive(Clone, Debug)]
+enum Miss {
+    /// A status read always has an answer.
+    Never,
+    /// A `{found, value}` wire carries its own presence flag.
+    FoundFalse,
+    /// The record itself is null at this pointer.
+    NullAt(String),
+}
+
+/// What a record shows.
+#[derive(Clone, Debug)]
+enum RecordBody {
+    /// One value, and nothing around it: `kv get` prints the bytes.
+    Value {
+        pointer: String,
+        as_: Option<CliDisplayAs>,
+    },
+    /// A block of declared fields.
+    Fields(Vec<Field>),
+}
+
+/// One declared field of a record block.
+#[derive(Clone, Debug)]
+struct Field {
+    /// Pointer to the value on the envelope.
+    pointer: String,
+    /// The `--raw` key: the pointer relative to the record's root, one dot
+    /// per level (`memory_budget.total_bytes`). Wire names throughout — a
+    /// `header:` is a reader's label and never reaches a script (Q18).
+    key: String,
+    /// The reader's label: `header:` when authored, else the last pointer
+    /// segment as the wire spells it.
+    label: String,
+    as_: Option<CliDisplayAs>,
+    /// A nested record: its own block, under this field's label.
+    fields: Vec<Field>,
+    /// An `as: table` field's columns, resolved from the row schema by
+    /// `generate-cli` — never authored.
+    columns: Vec<Column>,
+}
+
+/// A parsed `receipt:` declaration under a status rule: an action's answer
+/// (output contract Q17).
+#[derive(Clone, Debug)]
+struct ReceiptDecl {
+    receipt: ReceiptTemplate,
 }
 
 impl Invocation {
@@ -186,12 +251,26 @@ impl Invocation {
                 Declared::Rows(RowsDecl::parse(display, None).map_err(invalid)?)
             }
             CliRenderRule::Analytics => Declared::Map(MapDecl::parse(display).map_err(invalid)?),
-            // S3 (`optional`, `status_value`, `status_sections`) and S5
-            // (`batch`) still render through the family path.
+            // The record rules read whichever shape the command declared:
+            // one value, a block of fields, a table, or an action's receipt.
             CliRenderRule::Optional
             | CliRenderRule::StatusValue
-            | CliRenderRule::StatusSections
-            | CliRenderRule::Batch => return Ok(Self::none()),
+            | CliRenderRule::StatusSections => match display.shape().map_err(invalid)? {
+                CliDisplayShape::Columns => {
+                    Declared::Rows(RowsDecl::parse(display, None).map_err(invalid)?)
+                }
+                CliDisplayShape::Receipt => {
+                    Declared::Receipt(ReceiptDecl::parse(display).map_err(invalid)?)
+                }
+                CliDisplayShape::Value | CliDisplayShape::Fields => Declared::Record(
+                    RecordDecl::parse(display, entry.render, entry.encoding).map_err(invalid)?,
+                ),
+                CliDisplayShape::Map => {
+                    return Err(invalid("a record rule declares no map".to_owned()))
+                }
+            },
+            // S3b: `batch` still renders through the family path.
+            CliRenderRule::Batch => return Ok(Self::none()),
         };
         Ok(Self {
             declared: Some(declared),
@@ -236,47 +315,29 @@ impl MutationAck {
     /// Whether any placeholder reads the request (`/request/…`) rather than
     /// the response envelope.
     fn quotes_request(&self) -> bool {
-        self.receipt
-            .placeholders()
-            .chain(&self.identity)
-            .any(|placeholder| match placeholder {
-                ReceiptPlaceholder::Value(value) => value.pointer.starts_with("/request/"),
-                ReceiptPlaceholder::Verb => false,
-            })
+        quotes_request(self.receipt.placeholders().chain(&self.identity))
     }
 }
 
+/// Whether any of these placeholders reads the request (`/request/…`)
+/// rather than the response envelope.
+fn quotes_request<'a>(mut placeholders: impl Iterator<Item = &'a ReceiptPlaceholder>) -> bool {
+    placeholders.any(|placeholder| match placeholder {
+        ReceiptPlaceholder::Value(value) => value.pointer.starts_with("/request/"),
+        ReceiptPlaceholder::Verb => false,
+    })
+}
+
 impl RowsDecl {
-    /// Parses a `columns:` display. Every column steps into the same row
-    /// array with one `/*` (`/data/items/*/version`); the text before it is
-    /// the row source and the text after it the cell's path within a row.
+    /// Parses a `columns:` display, plus the `search` rule's block beside
+    /// the rows.
     fn parse(display: &CliDisplay, page: Option<PageDecl>) -> Result<Self, String> {
-        let mut rows: Option<String> = None;
-        let mut columns = Vec::with_capacity(display.columns.len());
-        for field in &display.columns {
-            let (source, path) = field.field.split_once("/*").ok_or_else(|| {
-                format!("column `{}` does not step into a row array", field.field)
-            })?;
-            match &rows {
-                None => rows = Some(source.to_owned()),
-                Some(rows) if rows == source => {}
-                Some(rows) => {
-                    return Err(format!(
-                        "column `{}` reads rows at `{source}`, not `{rows}`",
-                        field.field
-                    ))
-                }
-            }
-            columns.push(Column {
-                path: path.to_owned(),
-                header: column_header(field),
-                as_: field.as_,
-            });
-        }
+        let (rows, columns) = parse_columns(&display.columns)?;
         Ok(Self {
-            rows: rows.ok_or_else(|| "a table declares at least one column".to_owned())?,
+            rows,
             columns,
             page,
+            fields: Field::parse_all(&display.fields, DATA)?,
         })
     }
 
@@ -284,6 +345,113 @@ impl RowsDecl {
     /// per line, with no header.
     fn is_scalar_list(&self) -> bool {
         matches!(self.columns.as_slice(), [column] if column.path.is_empty())
+    }
+}
+
+impl RecordDecl {
+    /// Parses a `value:` or `fields:` display for a record rule. The rule
+    /// and the wire encoding decide what a miss looks like: `optional` reads
+    /// a `{found, value}` flag when the wire carries one and a null record
+    /// otherwise, while a status read always has an answer.
+    fn parse(
+        display: &CliDisplay,
+        rule: CliRenderRule,
+        encoding: Option<CliWireEncoding>,
+    ) -> Result<Self, String> {
+        let optional = matches!(rule, CliRenderRule::Optional);
+        let found_value = encoding == Some(CliWireEncoding::FoundValue);
+        let miss = |root: &str| match (optional, found_value) {
+            (false, _) => Miss::Never,
+            (true, true) => Miss::FoundFalse,
+            (true, false) => Miss::NullAt(root.to_owned()),
+        };
+        if let Some(pointer) = &display.value {
+            return Ok(Self {
+                miss: miss(pointer),
+                body: RecordBody::Value {
+                    pointer: pointer.clone(),
+                    as_: display.as_,
+                },
+            });
+        }
+        if display.fields.is_empty() {
+            return Err("a record declares a value or at least one field".to_owned());
+        }
+        // A `{found, value}` wire wraps the record; anything else carries it
+        // wherever the declared fields agree it sits.
+        let root = if found_value {
+            FOUND_VALUE.to_owned()
+        } else {
+            common_parent(&display.fields)
+        };
+        Ok(Self {
+            miss: miss(&root),
+            body: RecordBody::Fields(Field::parse_all(&display.fields, &root)?),
+        })
+    }
+
+    /// Whether this response has no record to show.
+    fn is_miss(&self, envelope: &Value) -> bool {
+        match &self.miss {
+            Miss::Never => false,
+            Miss::FoundFalse => {
+                envelope.pointer("/data/found").and_then(Value::as_bool) != Some(true)
+            }
+            Miss::NullAt(pointer) => envelope.pointer(pointer).is_none_or(Value::is_null),
+        }
+    }
+}
+
+impl Field {
+    fn parse_all(fields: &[CliDisplayField], root: &str) -> Result<Vec<Self>, String> {
+        fields
+            .iter()
+            .map(|field| Self::parse(field, root))
+            .collect()
+    }
+
+    fn parse(field: &CliDisplayField, root: &str) -> Result<Self, String> {
+        let columns = if field.columns.is_empty() {
+            Vec::new()
+        } else {
+            let (rows, columns) = parse_columns(&field.columns)?;
+            if rows != field.field {
+                return Err(format!(
+                    "table `{}` reads its rows at `{rows}`",
+                    field.field
+                ));
+            }
+            columns
+        };
+        Ok(Self {
+            key: raw_key(&field.field, root),
+            label: field
+                .header
+                .clone()
+                .unwrap_or_else(|| last_segment(&field.field).to_owned()),
+            pointer: field.field.clone(),
+            as_: field.as_,
+            fields: Self::parse_all(&field.fields, root)?,
+            columns,
+        })
+    }
+}
+
+impl ReceiptDecl {
+    /// Parses a `receipt:` display for an action. An action reports what it
+    /// did, so its receipt reads the response; the `/request` root exists for
+    /// the two write acks whose wire carries no identity (Q15), and a status
+    /// rule has no such gap to fill.
+    fn parse(display: &CliDisplay) -> Result<Self, String> {
+        let receipt = display
+            .receipt
+            .as_deref()
+            .ok_or_else(|| "an action declares a receipt".to_owned())?;
+        let receipt = ReceiptTemplate::parse(receipt)?;
+        if quotes_request(receipt.placeholders()) {
+            return Err("an action receipt reads the response, not the request".to_owned());
+        }
+        Ok(Self { receipt })
     }
 }
 
@@ -302,6 +470,95 @@ impl MapDecl {
             sort: display.sort.unwrap_or(CliDisplaySort::Key),
         })
     }
+}
+
+/// Parses a `columns:` list. Every column steps into the same row array
+/// with one `/*` (`/data/items/*/version`); the text before it is the row
+/// source and the text after it the cell's path within a row.
+fn parse_columns(columns: &[CliDisplayField]) -> Result<(String, Vec<Column>), String> {
+    let mut rows: Option<String> = None;
+    let mut cells = Vec::with_capacity(columns.len());
+    for field in columns {
+        let (source, path) = field
+            .field
+            .split_once("/*")
+            .ok_or_else(|| format!("column `{}` does not step into a row array", field.field))?;
+        match &rows {
+            None => rows = Some(source.to_owned()),
+            Some(rows) if rows == source => {}
+            Some(rows) => {
+                return Err(format!(
+                    "column `{}` reads rows at `{source}`, not `{rows}`",
+                    field.field
+                ))
+            }
+        }
+        cells.push(Column {
+            path: path.to_owned(),
+            header: column_header(field),
+            as_: field.as_,
+        });
+    }
+    Ok((
+        rows.ok_or_else(|| "a table declares at least one column".to_owned())?,
+        cells,
+    ))
+}
+
+/// The envelope's payload, and the record inside a `{found, value}` payload.
+const DATA: &str = "/data";
+const FOUND_VALUE: &str = "/data/value";
+
+/// The last segment of a pointer (`/data/parent/name` → `name`).
+fn last_segment(pointer: &str) -> &str {
+    pointer.rsplit_once('/').map_or(pointer, |(_, last)| last)
+}
+
+/// A field's `--raw` key: its pointer relative to the record's root, one dot
+/// per level. Only a segment boundary is stripped, so a root that is a
+/// prefix of a longer name leaves the pointer alone.
+fn raw_key(pointer: &str, root: &str) -> String {
+    pointer
+        .strip_prefix(root)
+        .filter(|rest| rest.starts_with('/'))
+        .unwrap_or(pointer)
+        .trim_start_matches('/')
+        .replace('/', ".")
+}
+
+/// The deepest pointer every declared field sits under — the record's root
+/// on a wire that does not wrap it: `/data/origin` when every field reads
+/// `/data/origin/…`, `/data` when they spread out.
+fn common_parent(fields: &[CliDisplayField]) -> String {
+    fn parent(pointer: &str) -> Vec<&str> {
+        pointer
+            .rsplit_once('/')
+            .map_or("", |(parent, _)| parent)
+            .split('/')
+            .skip(1)
+            .collect()
+    }
+    let Some(first) = fields.first() else {
+        return DATA.to_owned();
+    };
+    let mut root = parent(&first.field);
+    for field in &fields[1..] {
+        let shared = root
+            .iter()
+            .zip(parent(&field.field))
+            .take_while(|(ours, theirs)| *ours == theirs)
+            .count();
+        root.truncate(shared);
+    }
+    let mut pointer = String::new();
+    for segment in root {
+        pointer.push('/');
+        pointer.push_str(segment);
+    }
+    if pointer.is_empty() {
+        return DATA.to_owned();
+    }
+    pointer
 }
 
 /// The header over a column: `header:` when authored, else the last pointer
@@ -339,6 +596,8 @@ pub fn render_output(
         Some(Declared::Ack(ack)) => return Ok(render_mutation_ack(&value, ack, format)),
         Some(Declared::Rows(rows)) => return Ok(render_rows(&value, rows, format)),
         Some(Declared::Map(map)) => return Ok(render_map(&value, map, format)),
+        Some(Declared::Record(record)) => return Ok(render_record(&value, record, format)),
+        Some(Declared::Receipt(receipt)) => return Ok(render_receipt(&value, receipt, format)),
         None => {}
     }
     // Human and raw formats show KV keys/values as text when possible. The
@@ -384,20 +643,18 @@ fn render_rows(envelope: &Value, decl: &RowsDecl, format: Format) -> Rendered {
             }
         }
         Some(rows) => {
-            let mut table = Table::new(decl.columns.iter().map(|c| c.header.clone()).collect());
-            for row in rows {
-                table.push(
-                    decl.columns
-                        .iter()
-                        .map(|column| cell(row.pointer(&column.path), column.as_, format))
-                        .collect(),
-                );
-            }
+            let table = rows_table(rows, &decl.columns, format);
             stdout = match format {
                 Format::Human => table.human(),
                 Format::Raw | Format::Json | Format::Pretty => table.raw(),
             };
         }
+    }
+    // What the search found, and how: the declared block under the rows,
+    // for a reader only — a script's rows stay one record per line.
+    if format == Format::Human && !decl.fields.is_empty() {
+        stdout.push('\n');
+        render_fields_human(envelope, &decl.fields, 0, &mut stdout);
     }
     let mut stderr = String::new();
     if let (Some(page), Format::Human) = (decl.page, format) {
@@ -481,6 +738,184 @@ fn render_map(envelope: &Value, decl: &MapDecl, format: Format) -> Rendered {
     Rendered::stdout(stdout)
 }
 
+/// Output contract R1 for a declared record: a reader gets `label  value`
+/// lines — a nested record as its own indented block, an `as: table` field
+/// as an indented table — and a script gets `key<TAB>value` lines under the
+/// wire's own names (Q16). A command that declares one `value:` prints that
+/// value alone. A miss prints `(nil)` for a reader and nothing for a script,
+/// exit 0 either way (Q9).
+fn render_record(envelope: &Value, decl: &RecordDecl, format: Format) -> Rendered {
+    if decl.is_miss(envelope) {
+        return Rendered::stdout(miss_line(format));
+    }
+    let mut stdout = String::new();
+    match &decl.body {
+        RecordBody::Value { pointer, as_ } => match envelope.pointer(pointer) {
+            Some(value) => stdout.push_str(&value_line(value, *as_, format)),
+            None => return Rendered::stdout(miss_line(format)),
+        },
+        RecordBody::Fields(fields) => match format {
+            Format::Human => render_fields_human(envelope, fields, 0, &mut stdout),
+            Format::Raw => render_fields_raw(envelope, fields, &mut stdout),
+            Format::Json | Format::Pretty => {}
+        },
+    }
+    Rendered::stdout(stdout)
+}
+
+/// What a command with nothing to show prints (Q9).
+fn miss_line(format: Format) -> String {
+    match format {
+        Format::Human => "(nil)\n".to_owned(),
+        Format::Raw | Format::Json | Format::Pretty => String::new(),
+    }
+}
+
+/// A declared `value:` as the whole answer. `json get` pretty-prints the
+/// document for a reader and hands a script the leaf, where a present JSON
+/// null stays `null` and a miss still prints nothing (#3064). Everything
+/// else prints under its declared presentation, unescaped: the value is the
+/// line, not a cell in one.
+fn value_line(value: &Value, as_: Option<CliDisplayAs>, format: Format) -> String {
+    let text = match (as_, format) {
+        (Some(CliDisplayAs::Json), Format::Human) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| raw_scalar(value))
+        }
+        (Some(CliDisplayAs::Json), _) => raw_json_leaf(value),
+        _ if value.is_null() => return miss_line(format),
+        _ => presented(value, as_, format).0,
+    };
+    let mut line = text;
+    line.push('\n');
+    line
+}
+
+/// Two spaces per level, so a nested block reads as inside its label.
+const INDENT: usize = 2;
+
+/// One `fields:` block for a reader: labels padded to the widest in this
+/// block, nested records and tables indented under their label. A field with
+/// nothing to show reads `-` rather than vanishing, so the block always says
+/// what the command declares.
+fn render_fields_human(envelope: &Value, fields: &[Field], indent: usize, out: &mut String) {
+    let width = fields
+        .iter()
+        .map(|field| field.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    for field in fields {
+        let value = envelope.pointer(&field.pointer);
+        if !field.fields.is_empty() {
+            if value.is_some_and(Value::is_object) {
+                push_label(out, indent, &field.label);
+                render_fields_human(envelope, &field.fields, indent + INDENT, out);
+            } else {
+                push_field(out, indent, &field.label, width, "-");
+            }
+            continue;
+        }
+        if !field.columns.is_empty() {
+            match value
+                .and_then(Value::as_array)
+                .filter(|rows| !rows.is_empty())
+            {
+                Some(rows) => {
+                    push_label(out, indent, &field.label);
+                    push_indented(
+                        out,
+                        &rows_table(rows, &field.columns, Format::Human).human(),
+                        indent + INDENT,
+                    );
+                }
+                None => push_field(out, indent, &field.label, width, "-"),
+            }
+            continue;
+        }
+        push_field(
+            out,
+            indent,
+            &field.label,
+            width,
+            &cell(value, field.as_, Format::Human).text,
+        );
+    }
+}
+
+/// The same block for a script: one `key<TAB>value` line per leaf, in
+/// declared order. A nested record contributes its leaves under dotted keys
+/// and no line of its own; a table or list is compact JSON, a hole is empty.
+fn render_fields_raw(envelope: &Value, fields: &[Field], out: &mut String) {
+    for field in fields {
+        if field.fields.is_empty() {
+            line!(
+                out,
+                "{}\t{}",
+                field.key,
+                cell(envelope.pointer(&field.pointer), field.as_, Format::Raw).text
+            );
+        } else {
+            render_fields_raw(envelope, &field.fields, out);
+        }
+    }
+}
+
+/// Output contract R1 for an action (Q17): a reader gets the declared
+/// one-line receipt, a script the action's whole record as `key<TAB>value`
+/// lines in the wire's own order — an action declares no fields to choose
+/// between, and its facts are what a script came for.
+fn render_receipt(envelope: &Value, decl: &ReceiptDecl, format: Format) -> Rendered {
+    let mut stdout = String::new();
+    match format {
+        Format::Human => {
+            stdout.push_str(&receipt_text(&decl.receipt, envelope, None, format));
+            stdout.push('\n');
+        }
+        // An action's payload is a record — the guard proved the receipt's
+        // pointers resolve inside it — so there is nothing else to print.
+        Format::Raw => {
+            if let Some(Value::Object(record)) = envelope.pointer(DATA) {
+                for (key, value) in record {
+                    line!(stdout, "{key}\t{}", cell(Some(value), None, format).text);
+                }
+            }
+        }
+        Format::Json | Format::Pretty => {}
+    }
+    Rendered::stdout(stdout)
+}
+
+/// A declared table: one row per element, one cell per declared column.
+fn rows_table(rows: &[Value], columns: &[Column], format: Format) -> Table {
+    let mut table = Table::new(columns.iter().map(|column| column.header.clone()).collect());
+    for row in rows {
+        table.push(
+            columns
+                .iter()
+                .map(|column| cell(row.pointer(&column.path), column.as_, format))
+                .collect(),
+        );
+    }
+    table
+}
+
+/// A label alone on its line: what follows is indented under it.
+fn push_label(out: &mut String, indent: usize, label: &str) {
+    line!(out, "{:indent$}{label}", "");
+}
+
+/// One `label  value` line, padded and never trailing whitespace.
+fn push_field(out: &mut String, indent: usize, label: &str, width: usize, text: &str) {
+    let line = format!("{:indent$}{label:<width$}  {text}", "");
+    line!(out, "{}", line.trim_end());
+}
+
+/// A rendered block, one level in.
+fn push_indented(out: &mut String, text: &str, indent: usize) {
+    for line in text.lines() {
+        line!(out, "{:indent$}{line}", "");
+    }
+}
+
 /// How two map values order: numerically when both are numbers, else by
 /// their scalar text.
 fn value_order(a: &Value, b: &Value) -> std::cmp::Ordering {
@@ -500,8 +935,29 @@ fn cell(value: Option<&Value>, as_: Option<CliDisplayAs>, format: Format) -> Cel
         }
         Some(value) => value,
     };
-    let text = |text: String| Cell::text(escape_cell(&text));
-    let number = |text: String| Cell::number(escape_cell(&text));
+    // An empty list or table has nothing to show a reader: the null cell says
+    // so, where `[]` would read as a value. A script still gets `[]`.
+    if format == Format::Human
+        && matches!(as_, Some(CliDisplayAs::List | CliDisplayAs::Table))
+        && value.as_array().is_some_and(Vec::is_empty)
+    {
+        return Cell::null("-");
+    }
+    let (text, numeric) = presented(value, as_, format);
+    let text = escape_cell(&text);
+    if numeric {
+        Cell::number(text)
+    } else {
+        Cell::text(text)
+    }
+}
+
+/// The text a declared value shows under its presentation (output contract
+/// R4), and whether it is a number for alignment. Unescaped: a table cell
+/// escapes it, a value that is the whole line prints as it is.
+fn presented(value: &Value, as_: Option<CliDisplayAs>, format: Format) -> (String, bool) {
+    let text = |text: String| (text, false);
+    let number = |text: String| (text, true);
     match as_ {
         None | Some(CliDisplayAs::Float) => match value {
             Value::Number(n) => number(number_text(n, format)),
@@ -591,16 +1047,7 @@ fn render_mutation_ack(envelope: &Value, ack: &MutationAck, format: Format) -> R
     }
     let mut out = String::new();
     match format {
-        Format::Human => {
-            for segment in ack.receipt.segments() {
-                match segment {
-                    ReceiptSegment::Literal(text) => out.push_str(text),
-                    ReceiptSegment::Placeholder(placeholder) => {
-                        out.push_str(&render_placeholder(placeholder, envelope, request, format));
-                    }
-                }
-            }
-        }
+        Format::Human => out.push_str(&receipt_text(&ack.receipt, envelope, request, format)),
         Format::Raw => {
             let identity = ack
                 .identity
@@ -614,6 +1061,26 @@ fn render_mutation_ack(envelope: &Value, ack: &MutationAck, format: Format) -> R
     }
     out.push('\n');
     Rendered::stdout(out)
+}
+
+/// One receipt, filled in: its literals as authored, its placeholders read
+/// off the response (or the request, when the template quotes it).
+fn receipt_text(
+    template: &ReceiptTemplate,
+    envelope: &Value,
+    request: Option<&Value>,
+    format: Format,
+) -> String {
+    let mut out = String::new();
+    for segment in template.segments() {
+        match segment {
+            ReceiptSegment::Literal(text) => out.push_str(text),
+            ReceiptSegment::Placeholder(placeholder) => {
+                out.push_str(&render_placeholder(placeholder, envelope, request, format));
+            }
+        }
+    }
+    out
 }
 
 /// A write that named a target and found nothing there: the applied signal
@@ -804,13 +1271,6 @@ fn render_human(value: &Value, out: &mut String) -> Result<(), CliError> {
                 "pong {}",
                 data.get("version").and_then(Value::as_str).unwrap_or("")
             ),
-            "bool" | "uint" => line!(out, "{}", scalar_summary(data)),
-            "event_count" => print_count(data, out),
-            "kv_versioned_value" => print_optional_data(data, out),
-            "vector_data" | "event_record" | "graph_node_result" | "graph_edge_result" => {
-                print_optional_record(data, out)?;
-            }
-            "json_value" | "json_versioned_value" => print_maybe_json(kind, data, out)?,
             "inference_generation" => print_inference_generation(data, true, out),
             "inference_text" => line!(out, "{}", data.as_str().unwrap_or_default()),
             "inference_token_ids" => print_token_ids(data, out),
@@ -877,24 +1337,6 @@ fn render_raw(value: &Value, out: &mut String) {
     }
 
     match kind {
-        "json_value" | "json_versioned_value" => {
-            let found = data.get("found").and_then(Value::as_bool).unwrap_or(false);
-            if let Some(leaf) = json_leaf(kind, data, found) {
-                line!(out, "{}", raw_json_leaf(leaf));
-            }
-            return;
-        }
-        "kv_versioned_value" => {
-            // The KV record nests the stored value under its own `value` field.
-            if let Some(value) = point_read_record(data).and_then(|record| record.get("value")) {
-                line!(out, "{}", raw_scalar(value));
-            }
-            return;
-        }
-        "event_count" => {
-            print_count(data, out);
-            return;
-        }
         "inference_generation" => {
             print_inference_generation(data, false, out);
             return;
@@ -1241,83 +1683,6 @@ fn print_model_pulled(data: &Value, out: &mut String) {
     line!(out, "pulled {model} -> {path}");
 }
 
-/// Unwraps a `{found, value}` point-read envelope to its record, or `None`
-/// when the record is absent.
-fn point_read_record(data: &Value) -> Option<&Value> {
-    match data.get("found").and_then(Value::as_bool) {
-        Some(true) => data.get("value"),
-        _ => None,
-    }
-}
-
-// The local `line!` macro expands to an inline block, which trips the pedantic
-// `single_match_else` lint on these Option matches where the std `println!`
-// macro (opaque to the lint) did not. The match form is intentional here.
-#[allow(clippy::single_match_else)]
-fn print_optional_data(data: &Value, out: &mut String) {
-    // KV point reads answer with a {found, value} envelope whose record nests
-    // the stored value under its own `value` field.
-    match point_read_record(data) {
-        None => line!(out, "(nil)"),
-        Some(record) => match record.get("value") {
-            Some(value) => line!(out, "{}", scalar_summary(value)),
-            None => line!(out, "{}", scalar_summary(record)),
-        },
-    }
-}
-
-fn print_optional_record(data: &Value, out: &mut String) -> Result<(), CliError> {
-    // Vector/event/graph point reads share the envelope but carry structured
-    // records; show the record itself, or `(nil)` when absent.
-    match point_read_record(data) {
-        None => line!(out, "(nil)"),
-        Some(record) => render_human_data(record, out)?,
-    }
-    Ok(())
-}
-
-#[allow(clippy::single_match_else)]
-fn print_maybe_json(kind: &str, data: &Value, out: &mut String) -> Result<(), CliError> {
-    let Some(found) = data.get("found").and_then(Value::as_bool) else {
-        line!(out, "{}", serde_json::to_string_pretty(data)?);
-        return Ok(());
-    };
-    match json_leaf(kind, data, found) {
-        // Human output shows the JSON encoding of the leaf value so `"null"`
-        // vs `null` and strings vs numbers stay unambiguous; raw output
-        // unwraps strings for scripting.
-        Some(leaf) => line!(out, "{}", serde_json::to_string(leaf)?),
-        None => line!(out, "(nil)"),
-    }
-    Ok(())
-}
-
-/// Extracts the leaf JSON value from a maybe-json envelope. The
-/// `json_versioned_value` shape nests the document value inside commit facts
-/// (`{found, value: {value, version, timestamp, document_version}}`), so the
-/// leaf sits one level deeper than in `json_value`.
-fn json_leaf<'a>(kind: &str, data: &'a Value, found: bool) -> Option<&'a Value> {
-    if !found {
-        return None;
-    }
-    let value = data.get("value")?;
-    if kind == "json_versioned_value" {
-        value.get("value")
-    } else {
-        Some(value)
-    }
-}
-
-/// `event_count` wraps its count in `{count}`; humans and scripts get the
-/// bare number, matching how `kv count` (a plain `uint`) renders.
-fn print_count(data: &Value, out: &mut String) {
-    line!(
-        out,
-        "{}",
-        data.get("count").map_or_else(String::new, scalar_summary)
-    );
-}
-
 fn print_items(items: &[Value], out: &mut String) {
     for item in items {
         line!(out, "{}", scalar_summary(item));
@@ -1422,7 +1787,9 @@ fn count_field(value: &Value, field: &str) -> u64 {
 
 /// Rewrites schema-declared `Bytes` fields from base64 to readable text for
 /// human/raw output on the family path. A declared command never comes
-/// here: its columns say `as: bytes` themselves (`bytes_text`).
+/// here: its columns say `as: bytes` themselves (`bytes_text`). Only
+/// `branch diff` and `branch merge` still arrive undeclared; S3b takes the
+/// first and this helper goes with the second.
 ///
 /// Driven by the typed `Output` variant, never by value shape, so a genuine
 /// string that merely looks like base64 is never touched — the defect that
@@ -1433,14 +1800,7 @@ fn humanize_kv_bytes(output: &Output, value: &mut Value) {
         return;
     };
     match output {
-        // The stored value sits inside the {found, value} point-read envelope,
-        // one level below `data`.
-        Output::KvVersionedValue(_) => {
-            if let Some(record) = data.get_mut("value") {
-                decode_bytes_fields(record, &["value"]);
-            }
-        }
-        // Branch diff/merge/preview identities (and values) are logical keys —
+        // Branch diff/merge identities (and values) are logical keys —
         // decode them like `kv history` does, so the one command whose job is
         // to be read by a human is readable (#3061).
         Output::BranchComparison(_) => {
@@ -1455,13 +1815,6 @@ fn humanize_kv_bytes(output: &Output, value: &mut Value) {
         Output::BranchMerge(_) => {
             decode_bytes_in_array(data, "applied", &["identity", "value"]);
             decode_bytes_in_array(data, "deleted", &["identity", "value"]);
-            decode_bytes_in_array(
-                data,
-                "conflicts",
-                &["identity", "source_value", "target_value"],
-            );
-        }
-        Output::BranchPreview(_) => {
             decode_bytes_in_array(
                 data,
                 "conflicts",
@@ -1612,12 +1965,12 @@ fn humanize_committed_at(value: &mut Value) {
 mod tests {
     use serde_json::json;
     use strata_executor::{
-        BranchComparisonItem, BranchItem, BranchParentItem, BranchPreviewItem, BranchStatus, Bytes,
-        CommitDurability, CommitReceipt, ComparedCapability, ComparedEntityItem, ConflictKind,
+        BranchComparisonItem, BranchItem, BranchParentItem, BranchStatus, Bytes, CommitDurability,
+        CommitReceipt, ComparedCapability, ComparedEntityItem, ConflictKind,
         ConflictStrategyResult, EventData, EventVersionedData, GraphBfsData, GraphPagerankData,
-        GraphWccData, HistoryItem, HistoryResult, JsonHistoryItem, Maybe, MutationEffect, Output,
+        GraphWccData, HistoryItem, HistoryResult, JsonHistoryItem, MutationEffect, Output,
         PageInfo, PreviewConflictItem, PromotedEntityItem, PromotionOutcomeItem, PromotionStrategy,
-        SampleItem, SpaceComparisonItem, VectorMatch, VersionedValue,
+        SampleItem, SpaceComparisonItem, VectorMatch,
     };
 
     use strata_executor::cli_metadata::{CliDisplay, CliDisplayAs, CliDisplayField};
@@ -1860,13 +2213,11 @@ mod tests {
         let unknown = Invocation::for_wire("no_such_wire", Format::Human, || Ok(json!({})))
             .expect("an unknown wire renders through the family path");
         assert!(!unknown.is_declared());
-        // The rules S3 and S5 own are declared in the catalog but not yet
-        // read: they still render through the family path.
-        for wire in ["kv_get", "admin_info", "kv_batch_get"] {
-            let pending = Invocation::for_wire(wire, Format::Human, || Ok(json!({})))
-                .expect("a declared command parses");
-            assert!(!pending.is_declared(), "{wire} waits for its slice");
-        }
+        // The rule S3b owns is declared in the catalog but not yet read: it
+        // still renders through the family path.
+        let batch = Invocation::for_wire("kv_batch_get", Format::Human, || Ok(json!({})))
+            .expect("a declared command parses");
+        assert!(!batch.is_declared(), "the batch rule waits for S3b");
     }
 
     #[test]
@@ -2454,6 +2805,7 @@ mod tests {
             header: None,
             as_: None,
             fields: Vec::new(),
+            columns: Vec::new(),
         };
         let disagree = CliDisplay {
             columns: vec![column("/data/items/*/a"), column("/data/rows/*/b")],
@@ -2677,12 +3029,7 @@ mod tests {
     }
 
     const RENDERED_TAGS: &[&str] = &[
-        "bool",
         "described",
-        "event_count",
-        "event_record",
-        "graph_edge_result",
-        "graph_node_result",
         "inference_embeddings",
         "inference_generation",
         "inference_model_pulled",
@@ -2692,12 +3039,7 @@ mod tests {
         "inference_text",
         "inference_token_ids",
         "inference_unload_result",
-        "json_value",
-        "json_versioned_value",
-        "kv_versioned_value",
         "pong",
-        "uint",
-        "vector_data",
     ];
 
     /// Extracts the string literals that head a `match` arm (`"tag" =>` or
@@ -2747,30 +3089,6 @@ mod tests {
              add or remove the tag in the list (and its rendering test)"
         );
     }
-
-    #[test]
-    fn kv_value_decodes_to_text_for_human_output() {
-        let output =
-            Output::KvVersionedValue(Maybe::found(VersionedValue::new(bytes("one"), 1, 10)));
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        assert_eq!(value["data"]["value"]["value"], json!("b25l"));
-        humanize_kv_bytes(&output, &mut value);
-        assert_eq!(value["data"]["value"]["value"], json!("one"));
-    }
-
-    #[test]
-    fn non_utf8_bytes_keep_their_base64_form() {
-        let output = Output::KvVersionedValue(Maybe::found(VersionedValue::new(
-            Bytes::new(vec![0xff, 0xfe]),
-            1,
-            10,
-        )));
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        humanize_kv_bytes(&output, &mut value);
-        assert_eq!(value["data"]["value"]["value"], json!("//4="));
-    }
-
-    // --- #3061: branch diff/merge/preview identities and values decode ---
 
     fn kv_comparison(entities: Vec<ComparedEntityItem>) -> Output {
         let space = SpaceComparisonItem::new(
@@ -2884,36 +3202,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_preview_conflict_identities_and_values_decode() {
-        let conflict = PreviewConflictItem::new(
-            ComparedCapability::Kv,
-            "default".to_owned(),
-            bytes("meta:survival_rate"),
-            Some(bytes("0.62")),
-            Some(bytes("0.5")),
-            ConflictKind::ValueDivergence,
-            ConflictStrategyResult::SourceWins,
-        );
-        let output = Output::BranchPreview(BranchPreviewItem::new(
-            "cleaned".to_owned(),
-            "default".to_owned(),
-            10,
-            PromotionStrategy::SourceWins,
-            vec![conflict],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ));
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        humanize_kv_bytes(&output, &mut value);
-        let rendered = &value["data"]["conflicts"][0];
-        assert_eq!(rendered["identity"], json!("meta:survival_rate"));
-        assert_eq!(rendered["source_value"], json!("0.62"));
-        assert_eq!(rendered["target_value"], json!("0.5"));
-    }
-
-    #[test]
     fn branch_diff_human_decodes_but_json_stays_wire_true() {
         // End-to-end at the call site: the human/raw formats decode, JSON stays
         // base64 (machine-consumable), matching the KV commands (#3061).
@@ -2933,36 +3221,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn missing_reads_are_untouched() {
-        let output = Output::KvVersionedValue(Maybe::missing());
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        humanize_kv_bytes(&output, &mut value);
-        assert_eq!(value["data"], json!({ "found": false, "value": null }));
-    }
-
-    #[test]
-    fn json_leaf_unwraps_the_versioned_envelope() {
-        let data = json!({
-            "found": true,
-            "value": {"value": {"name": "Ada"}, "version": 3, "timestamp": 30, "document_version": 1}
-        });
-        assert_eq!(
-            super::json_leaf("json_versioned_value", &data, true),
-            Some(&json!({"name": "Ada"}))
-        );
-    }
-
-    #[test]
-    fn json_leaf_reads_plain_values_directly_and_respects_found() {
-        let data = json!({"found": true, "value": null});
-        assert_eq!(
-            super::json_leaf("json_value", &data, true),
-            Some(&serde_json::Value::Null)
-        );
-        assert_eq!(super::json_leaf("json_value", &data, false), None);
-    }
-
     fn human(value: &serde_json::Value) -> String {
         let mut out = String::new();
         super::render_human(value, &mut out).expect("render_human");
@@ -2975,95 +3233,385 @@ mod tests {
         out
     }
 
-    #[test]
-    fn human_event_count_prints_bare_number() {
-        let value = json!({ "type": "event_count", "data": { "count": 5 } });
-        assert_eq!(human(&value), "5\n");
+    /// A wire record, read back into the typed `Output` the binary renders —
+    /// the same round trip the contract harness makes.
+    fn output(wire: serde_json::Value) -> Output {
+        serde_json::from_value(wire).expect("wire deserializes into Output")
     }
 
     #[test]
-    fn raw_event_count_prints_bare_number() {
-        let value = json!({ "type": "event_count", "data": { "count": 5 } });
-        assert_eq!(raw(&value), "5\n");
+    fn a_record_prints_its_declared_fields_and_a_script_gets_the_wire_names() {
+        let branch = output(json!({
+            "type": "branch",
+            "data": {
+                "branch_id": "dc42122c-83b7-5436-89bc-9ffa4299697c",
+                "created_at": 3,
+                "deleted_at": null,
+                "generation": 1,
+                "name": "feature",
+                "parent": null,
+                "state_revision": 0,
+                "status": "active"
+            }
+        }));
+        // Declared order, labels padded to the widest, `-` for a hole, and
+        // only the declared facts: `branch_id` and `state_revision` are on
+        // the wire and not in the block.
+        assert_eq!(
+            render_wire("branch_get", &branch, Format::Human),
+            only_stdout(concat!(
+                "name        feature\n",
+                "parent      -\n",
+                "status      active\n",
+                "generation  1\n",
+                "created_at  3\n",
+                "deleted_at  -\n",
+            ))
+        );
+        // The declared `header: parent` is a reader's label; a script reads
+        // the pointer's own name, relative to the record's root (Q18).
+        assert_eq!(
+            render_wire("branch_get", &branch, Format::Raw),
+            only_stdout(concat!(
+                "name\tfeature\n",
+                "parent.name\t\n",
+                "status\tactive\n",
+                "generation\t1\n",
+                "created_at\t3\n",
+                "deleted_at\t\n",
+            ))
+        );
     }
 
     #[test]
-    fn human_bool_and_uint_scalars() {
-        assert_eq!(human(&json!({ "type": "bool", "data": true })), "true\n");
-        assert_eq!(human(&json!({ "type": "uint", "data": 42 })), "42\n");
+    fn a_nested_record_is_a_block_under_its_label_and_dotted_keys_for_a_script() {
+        let info = output(json!({
+            "type": "database_info",
+            "data": {
+                "branch_count": 1,
+                "created": true,
+                "default_branch": "default",
+                "durable": false,
+                "memory_budget": {
+                    "source": "derived_from_host",
+                    "total_bytes": 536_870_912,
+                    "usable_host_bytes": 2_147_483_648_u64
+                },
+                "open": true,
+                "space_count": 1,
+                "target": "cache",
+                "version": "1.2.1"
+            }
+        }));
+        // The nested block has its own label width and its own indent, and
+        // its byte counts read as sizes under their declared headers.
+        assert_eq!(
+            render_wire("info", &info, Format::Human),
+            only_stdout(concat!(
+                "target          cache\n",
+                "version         1.2.1\n",
+                "durable         false\n",
+                "default_branch  default\n",
+                "branch_count    1\n",
+                "space_count     1\n",
+                "memory_budget\n",
+                "  source       derived_from_host\n",
+                "  total        537 MB\n",
+                "  usable_host  2.1 GB\n",
+            ))
+        );
+        // A script gets the wire's own names and numbers, one dot per level,
+        // and no line for the parent itself.
+        assert_eq!(
+            render_wire("info", &info, Format::Raw),
+            only_stdout(concat!(
+                "target\tcache\n",
+                "version\t1.2.1\n",
+                "durable\tfalse\n",
+                "default_branch\tdefault\n",
+                "branch_count\t1\n",
+                "space_count\t1\n",
+                "memory_budget.source\tderived_from_host\n",
+                "memory_budget.total_bytes\t536870912\n",
+                "memory_budget.usable_host_bytes\t2147483648\n",
+            ))
+        );
     }
 
     #[test]
-    fn human_kv_versioned_value_found_and_missing() {
-        let found = json!({
-            "type": "kv_versioned_value",
-            "data": { "found": true, "value": { "value": "hello", "version": 1, "timestamp": 10 } }
-        });
-        assert_eq!(human(&found), "hello\n");
-        let missing = json!({
+    fn a_declared_table_inside_a_record_is_indented_under_its_label() {
+        let preview = output(json!({
+            "type": "branch_preview",
+            "data": {
+                "branch_point": 3,
+                "capabilities_covered": ["kv"],
+                "capabilities_unsupported": [],
+                "conflicts": [{
+                    "capability": "kv",
+                    "identity": "YQ==",
+                    "kind": "value_divergence",
+                    "source_value": "dHdv",
+                    "space": "default",
+                    "strategy_result": "refused",
+                    "target_value": "dGhyZWU="
+                }],
+                "derived_state": [],
+                "source": "feature",
+                "spaces_covered": ["default"],
+                "strategy": "strict",
+                "target": "default"
+            }
+        }));
+        let human = render_wire("branch_preview", &preview, Format::Human).stdout;
+        assert!(
+            human.contains(concat!(
+                "conflicts\n",
+                "  CAPABILITY  IDENTITY  KIND              SOURCE_VALUE  SPACE    STRATEGY_RESULT  TARGET_VALUE\n",
+                "  kv          a         value_divergence  two           default  refused          three\n",
+            )),
+            "the table is indented under its label, with its declared byte \
+             columns decoded (Q20): {human}"
+        );
+        // An empty list or table has nothing to show: `-`, not `[]`.
+        assert!(
+            human.contains("capabilities_unsupported  -\n")
+                && human.contains("derived_state             -\n"),
+            "{human}"
+        );
+        let raw = render_wire("branch_preview", &preview, Format::Raw).stdout;
+        assert!(
+            raw.contains("derived_state\t[]\n") && raw.contains("capabilities_covered\t[\"kv\"]\n"),
+            "a script gets the wire array, compact: {raw}"
+        );
+    }
+
+    #[test]
+    fn a_record_with_nothing_to_show_is_nil_for_a_reader_and_silent_for_a_script() {
+        // A `{found, value}` wire says so itself.
+        let missing = output(json!({
             "type": "kv_versioned_value",
             "data": { "found": false, "value": null }
-        });
-        assert_eq!(human(&missing), "(nil)\n");
+        }));
+        assert_eq!(
+            render_wire("kv_get", &missing, Format::Human),
+            only_stdout("(nil)\n")
+        );
+        assert_eq!(
+            render_wire("kv_get", &missing, Format::Raw),
+            only_stdout("")
+        );
+        // A wire without one is a miss when the record itself is null — for
+        // `remote`, the record sits at `/data/origin`, which is where every
+        // declared field agrees it is.
+        let no_origin =
+            output(json!({ "type": "remote_origin_result", "data": { "origin": null } }));
+        assert_eq!(
+            render_wire("remote_get", &no_origin, Format::Human),
+            only_stdout("(nil)\n")
+        );
+        assert_eq!(
+            render_wire("remote_get", &no_origin, Format::Raw),
+            only_stdout("")
+        );
+        // A status read always has an answer, and `false` is one of them.
+        let exists = output(json!({ "type": "bool", "data": false }));
+        assert_eq!(
+            render_wire("kv_exists", &exists, Format::Human),
+            only_stdout("false\n")
+        );
+        assert_eq!(
+            render_wire("kv_exists", &exists, Format::Raw),
+            only_stdout("false\n")
+        );
     }
 
     #[test]
-    fn raw_kv_versioned_value_found() {
-        let found = json!({
-            "type": "kv_versioned_value",
-            "data": { "found": true, "value": { "value": "hello", "version": 1, "timestamp": 10 } }
-        });
-        assert_eq!(raw(&found), "hello\n");
-    }
-
-    #[test]
-    fn raw_json_get_distinguishes_a_present_null_from_a_miss() {
-        // #3064: a present JSON `null` must print the literal `null`, distinct
-        // from a miss (which emits nothing), so a `--raw` script can tell a
-        // field that is null from one that is absent.
-        let present_null = json!({
-            "type": "json_value",
-            "data": { "found": true, "value": null }
-        });
-        assert_eq!(raw(&present_null), "null\n");
-
-        let missing = json!({
-            "type": "json_value",
-            "data": { "found": false, "value": null }
-        });
-        assert_eq!(raw(&missing), "");
-
-        // A present non-null leaf stays unquoted/script-friendly.
-        let present_value = json!({
-            "type": "json_value",
-            "data": { "found": true, "value": 1 }
-        });
-        assert_eq!(raw(&present_value), "1\n");
-
-        // The versioned envelope's inner null is treated the same.
-        let versioned_null = json!({
-            "type": "json_versioned_value",
-            "data": { "found": true, "value": {
-                "value": null, "version": 3, "timestamp": 30, "document_version": 1
-            } }
-        });
-        assert_eq!(raw(&versioned_null), "null\n");
-    }
-
-    #[test]
-    fn human_json_value_and_versioned_value() {
-        let plain = json!({
-            "type": "json_value",
-            "data": { "found": true, "value": { "name": "Ada" } }
-        });
-        assert_eq!(human(&plain), "{\"name\":\"Ada\"}\n");
-        let versioned = json!({
+    fn a_declared_value_is_the_whole_answer() {
+        let stored = |value: &str| {
+            output(json!({
+                "type": "kv_versioned_value",
+                "data": { "found": true, "value": { "value": value, "version": 1, "timestamp": 10 } }
+            }))
+        };
+        // `as: bytes`: the text the bytes spell, labelled for a reader when
+        // they are not text at all.
+        assert_eq!(
+            render_wire("kv_get", &stored("aGVsbG8="), Format::Human),
+            only_stdout("hello\n")
+        );
+        assert_eq!(
+            render_wire("kv_get", &stored("/w=="), Format::Human),
+            only_stdout("base64:/w==\n")
+        );
+        // `as: json`: a reader gets the document laid out, a script the leaf.
+        let document = output(json!({
             "type": "json_versioned_value",
             "data": { "found": true, "value": {
                 "value": { "name": "Ada" }, "version": 3, "timestamp": 30, "document_version": 1
             } }
-        });
-        assert_eq!(human(&versioned), "{\"name\":\"Ada\"}\n");
+        }));
+        assert_eq!(
+            render_wire("json_get", &document, Format::Human),
+            only_stdout("{\n  \"name\": \"Ada\"\n}\n")
+        );
+        assert_eq!(
+            render_wire("json_get", &document, Format::Raw),
+            only_stdout("{\"name\":\"Ada\"}\n")
+        );
+        // #3064: a stored JSON null is a value, and says so in both formats —
+        // a miss is what prints nothing.
+        let stored_null = output(json!({
+            "type": "json_versioned_value",
+            "data": { "found": true, "value": {
+                "value": null, "version": 3, "timestamp": 30, "document_version": 1
+            } }
+        }));
+        assert_eq!(
+            render_wire("json_get", &stored_null, Format::Human),
+            only_stdout("null\n")
+        );
+        assert_eq!(
+            render_wire("json_get", &stored_null, Format::Raw),
+            only_stdout("null\n")
+        );
+    }
+
+    #[test]
+    fn an_action_prints_a_receipt_for_a_reader_and_its_record_for_a_script() {
+        let exported = output(json!({
+            "type": "arrow_export_result",
+            "data": {
+                "format": "csv",
+                "paths": ["kv_out.csv"],
+                "primitive": "kv",
+                "row_count": 3,
+                "size_bytes": 135
+            }
+        }));
+        assert_eq!(
+            render_wire("arrow_export", &exported, Format::Human),
+            only_stdout("exported 3 rows of kv to kv_out.csv (135 bytes)\n")
+        );
+        // Q17: an action declares no fields to choose between, so a script
+        // gets the whole record, in the wire's own order.
+        assert_eq!(
+            render_wire("arrow_export", &exported, Format::Raw),
+            only_stdout(concat!(
+                "format\tcsv\n",
+                "paths\t[\"kv_out.csv\"]\n",
+                "primitive\tkv\n",
+                "row_count\t3\n",
+                "size_bytes\t135\n",
+            ))
+        );
+    }
+
+    #[test]
+    fn a_declared_value_that_is_null_has_nothing_to_show() {
+        // Reachable only through a declaration whose pointer resolves to a
+        // null the rule does not call a miss; the answer is the same one a
+        // miss gives, not an empty line.
+        assert_eq!(
+            super::value_line(&Value::Null, None, Format::Human),
+            "(nil)\n"
+        );
+        assert_eq!(super::value_line(&Value::Null, None, Format::Raw), "");
+        // `as: json` is the exception: there, a null is the value (#3064).
+        assert_eq!(
+            super::value_line(&Value::Null, Some(CliDisplayAs::Json), Format::Human),
+            "null\n"
+        );
+    }
+
+    #[test]
+    fn an_action_receipt_that_reads_the_request_is_refused() {
+        // A write ack may quote the request when its wire carries no identity
+        // (Q15); an action reports what it did, and its response says what
+        // that was — so the two roots do not mix.
+        let display = CliDisplay {
+            receipt: Some("cloned {/request/dataset}".to_owned()),
+            ..CliDisplay::default()
+        };
+        let error = super::ReceiptDecl::parse(&display).expect_err("the request root is refused");
+        assert!(error.contains("reads the response"), "{error}");
+        super::ReceiptDecl::parse(&CliDisplay {
+            receipt: Some("cloned {/data/dataset}".to_owned()),
+            ..CliDisplay::default()
+        })
+        .expect("a receipt that reads the response parses");
+    }
+
+    #[test]
+    fn a_search_shows_its_diagnostics_to_a_reader_only() {
+        let found = output(json!({
+            "type": "vector_index_query",
+            "data": {
+                "matches": [{ "key": "doc-a", "score": 1.0, "metadata": null }],
+                "diagnostics": {
+                    "active_delta_count": 0,
+                    "active_delta_seal_threshold": 16,
+                    "active_delta_source_count": 0,
+                    "artifact_sources": [],
+                    "collection": "docs",
+                    "collection_exact_threshold": 64,
+                    "derived_bytes": 0,
+                    "exact_fallback_count": 0,
+                    "exact_source_count": 1,
+                    "filtered_underfill_fallback": false,
+                    "flat_source_count": 0,
+                    "hnsw_graph_builds": 0,
+                    "hnsw_memory_budget_bytes": 67_108_864,
+                    "hnsw_source_count": 0,
+                    "indexed_source_count": 0,
+                    "indexed_vector_count": 0,
+                    "last_query_fallback_reason": null,
+                    "last_query_used_index": false,
+                    "manifest_generation": null,
+                    "manifest_inherited_ref_count": 0,
+                    "manifest_owned_ref_count": 0,
+                    "manifest_ref_count": 0,
+                    "manifest_status": "missing",
+                    "overfetch_factor": 4,
+                    "policy_mode": "auto",
+                    "resolved_index_kind_summary": "exact",
+                    "source_candidate_limit": 64,
+                    "source_flat_threshold": 64,
+                    "source_hnsw_threshold": 64
+                }
+            }
+        }));
+        let human = render_wire("vector_index_query", &found, Format::Human).stdout;
+        assert!(
+            human.starts_with("KEY    SCORE  METADATA\ndoc-a    1.0  -\n\ndiagnostics\n"),
+            "the block follows the table after a blank line: {human}"
+        );
+        assert!(
+            human.contains("  artifact_sources              -\n")
+                && human.contains("  hnsw_memory_budget            67 MB\n"),
+            "{human}"
+        );
+        // A script's rows stay one record per line: the diagnostics are a
+        // reader's footer, not a column.
+        assert_eq!(
+            render_wire("vector_index_query", &found, Format::Raw),
+            only_stdout("doc-a\t1.0\t\n")
+        );
+    }
+
+    #[test]
+    fn a_raw_key_is_only_trimmed_at_a_segment_boundary() {
+        // The root of a record is an ancestor of its fields, so the trim is
+        // always a whole segment; a name that merely starts with the root's
+        // text keeps its pointer rather than losing three characters.
+        assert_eq!(
+            super::raw_key("/data/memory_budget/total_bytes", "/data"),
+            "memory_budget.total_bytes"
+        );
+        assert_eq!(
+            super::raw_key("/data/origin/dataset", "/data/origin"),
+            "dataset"
+        );
+        assert_eq!(super::raw_key("/database/name", "/data"), "database.name");
     }
 
     #[test]

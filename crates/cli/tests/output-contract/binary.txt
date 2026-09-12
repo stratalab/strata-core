@@ -290,21 +290,16 @@ already_exists.engine.branch: branch `exp` already exists (<reference_id>)
 ### 33 strata info · stderr
 ∎
 ### 33 strata info · stdout
-{
-  "branch_count": 4,
-  "created": false,
-  "default_branch": "default",
-  "durable": true,
-  "memory_budget": {
-    "source": "derived_from_host",
-    "total_bytes": <bytes>,
-    "usable_host_bytes": <bytes>
-  },
-  "open": true,
-  "space_count": 1,
-  "target": "durable_local",
-  "version": "<semver>"
-}
+target          durable_local
+version         <semver>
+durable         true
+default_branch  default
+branch_count    4
+space_count     1
+memory_budget
+  source       derived_from_host
+  total        <bytes>
+  usable_host  <bytes>
 ∎
 ### 34 strata --raw info · exit
 0
@@ -312,5 +307,13 @@ already_exists.engine.branch: branch `exp` already exists (<reference_id>)
 ### 34 strata --raw info · stderr
 ∎
 ### 34 strata --raw info · stdout
-{"branch_count":4,"created":false,"default_branch":"default","durable":true,"memory_budget":{"source":"derived_from_host","total_bytes":<bytes>,"usable_host_bytes":<bytes>},"open":true,"space_count":1,"target":"durable_local","version":"<semver>"}
+target	durable_local
+version	<semver>
+durable	true
+default_branch	default
+branch_count	4
+space_count	1
+memory_budget.source	derived_from_host
+memory_budget.total_bytes	<bytes>
+memory_budget.usable_host_bytes	<bytes>
 ∎

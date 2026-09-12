@@ -1,26 +1,20 @@
 ### arrow.export · responses/v1/arrow/export_kv_csv.json · human
-{
-  "format": "csv",
-  "paths": [
-    "kv_out.csv"
-  ],
-  "primitive": "kv",
-  "row_count": 3,
-  "size_bytes": 135
-}
+exported 3 rows of kv to kv_out.csv (135 bytes)
 ∎
 ### arrow.export · responses/v1/arrow/export_kv_csv.json · raw
-{"format":"csv","paths":["kv_out.csv"],"primitive":"kv","row_count":3,"size_bytes":135}
+format	csv
+paths	["kv_out.csv"]
+primitive	kv
+row_count	3
+size_bytes	135
 ∎
 ### arrow.import · responses/v1/arrow/import_kv_csv.json · human
-{
-  "batches_processed": 1,
-  "file_path": "input.csv",
-  "rows_imported": 3,
-  "rows_skipped": 0,
-  "target": "kv"
-}
+imported 3 rows into kv from input.csv (0 skipped)
 ∎
 ### arrow.import · responses/v1/arrow/import_kv_csv.json · raw
-{"batches_processed":1,"file_path":"input.csv","rows_imported":3,"rows_skipped":0,"target":"kv"}
+batches_processed	1
+file_path	input.csv
+rows_imported	3
+rows_skipped	0
+target	kv
 ∎

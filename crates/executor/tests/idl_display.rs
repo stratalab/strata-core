@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use strata_executor::cli_metadata::{CliDisplayDecl, CliRenderRule};
+use strata_executor::cli_metadata::{CliDisplayAs, CliDisplayDecl, CliRenderRule};
 use strata_executor::idl_tooling::{
     resolve_cli_index, resolve_default_cli_index, resolve_default_index, resolve_index,
     CliCommandIndex, IdlError,
@@ -29,7 +29,6 @@ use strata_executor::idl_tooling::{
 /// declaration is the default; this list only grows by a contract amendment.
 const BESPOKE: &[&str] = &[
     "admin.describe",
-    "admin.ipc_stop",
     "admin.ping",
     "branch.diff",
     "inference.detokenize",
@@ -760,6 +759,127 @@ fn as_table_needs_an_array_of_records() {
         &scratch,
         "admin.info",
         "`as: table` needs an array of records",
+    );
+}
+
+#[test]
+fn a_tables_columns_are_resolved_from_its_row_schema() {
+    let index = resolve_default_cli_index().expect("the real tree resolves");
+    let CliDisplayDecl::Declared(preview) = display_of(&index, "branch.preview") else {
+        panic!("branch.preview is declared");
+    };
+    let conflicts = preview
+        .fields
+        .iter()
+        .find(|field| field.field == "/data/conflicts")
+        .expect("branch.preview declares its conflicts table");
+    assert_eq!(conflicts.as_, Some(CliDisplayAs::Table));
+    // One column per row property, named by the schema, none authored.
+    let schema: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("idl/v1/generated/schemas/branch.preview.json"),
+        )
+        .expect("branch.preview schema reads"),
+    )
+    .expect("branch.preview schema parses");
+    let row_properties: Vec<String> = schema["$defs"]["PreviewConflictItem"]["properties"]
+        .as_object()
+        .expect("the conflict row is a record")
+        .keys()
+        .cloned()
+        .collect();
+    let columns: Vec<&str> = conflicts
+        .columns
+        .iter()
+        .map(|column| column.field.as_str())
+        .collect();
+    let expected: Vec<String> = row_properties
+        .iter()
+        .map(|name| format!("/data/conflicts/*/{name}"))
+        .collect();
+    assert_eq!(columns, expected);
+    assert!(
+        conflicts
+            .columns
+            .iter()
+            .all(|column| column.header.is_none()
+                && column.fields.is_empty()
+                && column.columns.is_empty()),
+        "a resolved column carries only its pointer and presentation"
+    );
+    // The presentation follows the property's type: a base64 identity (and
+    // the nullable base64 values) decode as bytes, an enum is bare text.
+    let as_of = |name: &str| {
+        conflicts
+            .columns
+            .iter()
+            .find(|column| column.field == format!("/data/conflicts/*/{name}"))
+            .expect("column resolved")
+            .as_
+    };
+    assert_eq!(as_of("identity"), Some(CliDisplayAs::Bytes));
+    assert_eq!(as_of("source_value"), Some(CliDisplayAs::Bytes));
+    assert_eq!(as_of("target_value"), Some(CliDisplayAs::Bytes));
+    assert_eq!(as_of("capability"), None);
+    assert_eq!(as_of("kind"), None);
+}
+
+#[test]
+fn a_table_nested_under_a_record_field_is_resolved_too() {
+    let index = resolve_default_cli_index().expect("the real tree resolves");
+    let CliDisplayDecl::Declared(query) = display_of(&index, "vector.index.query") else {
+        panic!("vector.index.query is declared");
+    };
+    let sources = query
+        .fields
+        .iter()
+        .find(|field| field.field == "/data/diagnostics")
+        .expect("the diagnostics block")
+        .fields
+        .iter()
+        .find(|field| field.field == "/data/diagnostics/artifact_sources")
+        .expect("the artifact sources table");
+    assert_eq!(sources.as_, Some(CliDisplayAs::Table));
+    assert!(
+        !sources.columns.is_empty(),
+        "a table one level down resolves its columns as a top-level one does"
+    );
+    assert!(sources.columns.iter().all(|column| column
+        .field
+        .starts_with("/data/diagnostics/artifact_sources/*/")));
+}
+
+#[test]
+fn authored_table_columns_are_refused() {
+    let scratch = Scratch::new();
+    scratch.set_display(
+        "branch.yaml",
+        "branch.preview",
+        "    display:\n      fields:\n        - field: /data/conflicts\n          as: table\n          columns:\n            - field: /data/conflicts/*/identity\n",
+    );
+
+    assert_rejects(
+        &scratch,
+        "branch.preview",
+        "field `/data/conflicts` carries `columns`; a table's columns are resolved from the schema",
+    );
+}
+
+#[test]
+fn a_table_whose_rows_have_no_fields_is_refused() {
+    let scratch = Scratch::new();
+    // A row record the schema gives no properties: nothing to make a column of.
+    scratch.replace_in(
+        "generated/schemas/branch.preview.json",
+        "\"$ref\": \"#/$defs/PreviewConflictItem\"",
+        "\"type\": \"object\"",
+    );
+
+    assert_rejects(
+        &scratch,
+        "branch.preview",
+        "`as: table` on `/data/conflicts` has a row with no fields",
     );
 }
 

@@ -94,7 +94,7 @@ Evidence for Roots A–C of the contract, all reproduced from the replay corpus:
 | Family | Kinds | Commands | Rule |
 |---|---|---|---|
 | Writes | `mutation.put`, `mutation.create`, `mutation.delete`, `mutation.bulk_delete`, `mutation.metadata_update`, `mutation.merge` | 36 | One receipt line on stdout: `<verb> <identity>`, verb from `effect.kind` (`created` / `updated` / `deleted` / `unchanged`), identity from the declared fields. Nothing else. A delete of something that is not there is **idempotent**: `no such <noun>: <identity>` on **stderr** as feedback, empty stdout, exit **0** (Q2, revised on review 2026-09-11 — redis `DEL` / SQL `DELETE` semantics; `--require-existing` can add the assertive form later). Bulk deletes report the count (Q14). `--raw` prints the identity only (nothing on a miss, same stderr). Acks without an `effect` (branch create/fork/merge, bulk insert, ontology freeze, index create, collection create) use a fixed receipt template. `bool` acks (`json index drop`, `vector collection delete`) take the identity from the request because the wire carries none (Q15). |
-| Reads: single value or record | `read.get` | 11 | `kv get` prints the bytes (UTF-8 verbatim, else `base64:…`); `json get` prints the JSON value (pretty for objects and arrays, the literal for scalars). Records print `field  value` lines, labels are the wire field names, nested objects are one indented block, JSON-valued fields are compact JSON. A miss prints `(nil)` on stdout and exits 0 (Q9). One rule for `--raw`, derived from the declaration: a command that declares a **value** (`kv get`, `json get`, `config <key>`) prints that value verbatim (bytes / compact JSON / the scalar); a command that declares **fields** (a record — vector, event, graph node/edge, graph meta, ontology) prints `key<TAB>value` lines of the same fields, exactly as a status object does (Q16). No per-command raw projection; nothing for a miss. |
+| Reads: single value or record | `read.get` | 11 | `kv get` prints the bytes (UTF-8 verbatim, else `base64:…`); `json get` prints the JSON value (pretty for objects and arrays, the literal for scalars). Records print `field  value` lines, labels are the wire field names, nested objects are one indented block, JSON-valued fields are compact JSON. A miss prints `(nil)` on stdout and exits 0 (Q9). One rule for `--raw`, derived from the declaration: a command that declares a **value** (`kv get`, `json get`, `config <key>`) prints that value verbatim (bytes / compact JSON / the scalar); a command that declares **fields** (a record — vector, event, graph node/edge, graph meta, ontology) prints `key<TAB>value` lines of the same fields, exactly as a status object does (Q16). No per-command raw projection; nothing for a miss. A raw key is the field's pointer relative to the record's root with one dot per level (`event.sequence`, `data.embedding`), wire names throughout — a `header:` is a reader's label and never reaches a script (Q18, as built at S3a). |
 | Reads: history | `read.history` | 3 | A table, newest first as the wire orders it: `VERSION  COMMITTED_AT  VALUE` (+ `DOCUMENT_VERSION` / `VECTOR_REVISION`). A tombstone row shows `(deleted)` in the value column. `committed_at` is the only date and it lives in a cell: `2026-09-11 04:57:45 UTC`, `-` when unknown (R3). `--raw` is the same columns as TSV, no header, epoch microseconds; a tombstone row has an empty VALUE cell (the `tombstone` flag itself is in `--json`). |
 | Reads: pages, samples, search | `read.page`, `read.sample`, `read.search`, `read.diagnostics` | 25 | Pages of scalars print one per line (unchanged). Pages of records print a kubectl-style table: UPPERCASE headers named after the wire fields, two-space gutter, no borders, numbers right-aligned; logical `timestamp` is omitted (it duplicates `version`). `has_more` → stderr `-- more: add --cursor <c> to the same command`; a sample adds stderr `-- sampled N of <total_count>` only when N < total_count (a sample that returned everything needs no notice); an empty page prints `(empty)`. `--raw` is TSV of the same columns, no header. |
 | Reads: graph analytics | `read.analytics` | 6 | `NODE` plus the declared value column, sorted so the answer reads top-down (rank descending, distance / depth ascending, otherwise by node). Input echoes (`graph`, `source`, `iterations`, `personalized`, `direction`) are not repeated — they are in `--json`. `bfs` adds stderr `-- truncated` when the traversal was cut. `--raw` is `node<TAB>value`. |
@@ -951,7 +951,7 @@ invalid_argument.engine.branch_point: The request contains invalid input. (err_�
 
 ### 6.2 Reads: single value or record (11 commands)
 
-`kv get` prints the bytes (UTF-8 verbatim, else `base64:…`); `json get` prints the JSON value (pretty for objects and arrays, the literal for scalars). Records print `field  value` lines, labels are the wire field names, nested objects are one indented block, JSON-valued fields are compact JSON. A miss prints `(nil)` on stdout and exits 0 (Q9). One rule for `--raw`, derived from the declaration: a command that declares a **value** (`kv get`, `json get`, `config <key>`) prints that value verbatim (bytes / compact JSON / the scalar); a command that declares **fields** (a record — vector, event, graph node/edge, graph meta, ontology) prints `key<TAB>value` lines of the same fields, exactly as a status object does (Q16). No per-command raw projection; nothing for a miss.
+`kv get` prints the bytes (UTF-8 verbatim, else `base64:…`); `json get` prints the JSON value (pretty for objects and arrays, the literal for scalars). Records print `field  value` lines, labels are the wire field names, nested objects are one indented block, JSON-valued fields are compact JSON. A miss prints `(nil)` on stdout and exits 0 (Q9). One rule for `--raw`, derived from the declaration: a command that declares a **value** (`kv get`, `json get`, `config <key>`) prints that value verbatim (bytes / compact JSON / the scalar); a command that declares **fields** (a record — vector, event, graph node/edge, graph meta, ontology) prints `key<TAB>value` lines of the same fields, exactly as a status object does (Q16). No per-command raw projection; nothing for a miss. A raw key is the field's pointer relative to the record's root with one dot per level (`event.sequence`, `data.embedding`), wire names throughout — a `header:` is a reader's label and never reaches a script (Q18, as built at S3a).
 
 #### `admin.config_key` — `strata config get-key`
 
@@ -1020,12 +1020,12 @@ human proposed      sequence       0
                     previous_hash  0000000000000000000000000000000000000000000000000000000000000000
                     version        3
 raw today           {"event":{"event_type":"user.created","hash":"568c2ccd449f9ddf56f8c00d917af4fe762380ffaa43b7df10a2305b3704ead9","payload":{"id":1},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1789102665414786},"timestamp":3,"version":3}
-raw proposed        sequence⇥0
-                    event_type⇥user.created
-                    timestamp⇥1789102665414786
-                    payload⇥{"id":1}
-                    hash⇥568c2ccd449f9ddf56f8c00d917af4fe762380ffaa43b7df10a2305b3704ead9
-                    previous_hash⇥0000000000000000000000000000000000000000000000000000000000000000
+raw proposed        event.sequence⇥0
+                    event.event_type⇥user.created
+                    event.timestamp⇥1789102665414786
+                    event.payload⇥{"id":1}
+                    event.hash⇥568c2ccd449f9ddf56f8c00d917af4fe762380ffaa43b7df10a2305b3704ead9
+                    event.previous_hash⇥0000000000000000000000000000000000000000000000000000000000000000
                     version⇥3
 --json (unchanged)  {"data":{"found":true,"value":{"event":{"event_type":"user.created","hash":"568c2ccd449f9ddf56f8c00d917af4fe762380ffaa43b7df10a2305b3704ead9","payload":{"id":1},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1789102665414786},"timestamp":3,"version":3}},"type":"event_record"}
 ```
@@ -1169,13 +1169,15 @@ human proposed      graph         g
                     status        draft
                     version       4
                     object_types
-                      NAME
-                      person
+                      NAME    PROPERTIES
+                      person  -
+                    link_types    -
 raw today           {"graph":"g","object_types":[{"name":"person"}],"status":"draft","timestamp":4,"version":4}
 raw proposed        graph⇥g
                     status⇥draft
                     version⇥4
                     object_types⇥[{"name":"person"}]
+                    link_types⇥
 --json (unchanged)  {"data":{"graph":"g","object_types":[{"name":"person"}],"status":"draft","timestamp":4,"version":4},"type":"graph_ontology_result"}
 ```
 
@@ -1202,13 +1204,15 @@ human proposed      graph         g
                     status        draft
                     version       4
                     object_types
-                      NAME    NODE_COUNT
-                      person           0
+                      NAME    NODE_COUNT  PROPERTIES
+                      person           0  -
+                    link_types    -
 raw today           {"graph":"g","object_types":[{"name":"person","node_count":0}],"status":"draft","timestamp":4,"version":4}
 raw proposed        graph⇥g
                     status⇥draft
                     version⇥4
                     object_types⇥[{"name":"person","node_count":0}]
+                    link_types⇥
 --json (unchanged)  {"data":{"graph":"g","object_types":[{"name":"person","node_count":0}],"status":"draft","timestamp":4,"version":4},"type":"graph_ontology_summary_result"}
 ```
 
@@ -1304,8 +1308,8 @@ raw today           {"data":{"embedding":[1.0,0.0,0.0]},"key":"a","timestamp":4,
 raw proposed        key⇥a
                     vector_revision⇥1
                     version⇥4
-                    embedding⇥[1.0,0.0,0.0]
-                    metadata⇥
+                    data.embedding⇥[1.0,0.0,0.0]
+                    data.metadata⇥
 --json (unchanged)  {"data":{"found":true,"value":{"data":{"embedding":[1.0,0.0,0.0]},"key":"a","timestamp":4,"vector_revision":1,"version":4}},"type":"vector_data"}
 ```
 ```text
@@ -2180,7 +2184,7 @@ human proposed      name        feature
                     deleted_at  -
 raw today           {"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
 raw proposed        name⇥feature
-                    parent⇥
+                    parent.name⇥
                     status⇥active
                     generation⇥1
                     created_at⇥3
@@ -2229,15 +2233,15 @@ human proposed      source                    experiment
                     conflicts                 -
                     derived_state             -
 raw today           {"branch_point":3,"capabilities_covered":["kv","json","vector"],"capabilities_unsupported":["vector_collection","event","graph_metadata","graph_node","graph_edge","graph_ontology"],"conflicts":[],"derived_state":[],"source":"experiment","spaces_covered":["default"],"strategy":"strict","target":"default"}
-raw proposed        branch_point⇥3
+raw proposed        source⇥experiment
+                    target⇥default
+                    strategy⇥strict
+                    branch_point⇥3
+                    spaces_covered⇥["default"]
                     capabilities_covered⇥["kv","json","vector"]
                     capabilities_unsupported⇥["vector_collection","event","graph_metadata","graph_node","graph_edge","graph_ontology"]
                     conflicts⇥[]
                     derived_state⇥[]
-                    source⇥experiment
-                    spaces_covered⇥["default"]
-                    strategy⇥strict
-                    target⇥default
 --json (unchanged)  {"data":{"branch_point":3,"capabilities_covered":["kv","json","vector"],"capabilities_unsupported":["vector_collection","event","graph_metadata","graph_node","graph_edge","graph_ontology"],"conflicts":[],"derived_state":[],"source":"experiment","spaces_covered":["default"],"strategy":"strict","target":"default"},"type":"branch_preview"}
 ```
 
@@ -2837,11 +2841,13 @@ human today         {
                     }
 human proposed      dataset         titanic
                     default_branch  main
-                    
-                    BRANCH  LAST_UPDATED          MANIFEST_HASH
-                    main    2026-09-02T00:00:00Z  blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+                    refs
+                      BRANCH  LAST_UPDATED          MANIFEST_HASH
+                      main    2026-09-02T00:00:00Z  blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 raw today           {"dataset":"titanic","default_branch":"main","refs":[{"branch":"main","last_updated":"2026-09-02T00:00:00Z","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]}
-raw proposed        main⇥2026-09-02T00:00:00Z⇥blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+raw proposed        dataset⇥titanic
+                    default_branch⇥main
+                    refs⇥[{"branch":"main","last_updated":"2026-09-02T00:00:00Z","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]
 --json (unchanged)  {"data":{"dataset":"titanic","default_branch":"main","refs":[{"branch":"main","last_updated":"2026-09-02T00:00:00Z","manifest_hash":"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]},"type":"hub_refs"}
 ```
 

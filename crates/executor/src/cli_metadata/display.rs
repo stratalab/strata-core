@@ -222,6 +222,12 @@ pub struct CliDisplayField {
     /// Same rule one level down: the declaration decides which facts appear.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<CliDisplayField>,
+    /// Columns of an `as: table` field, resolved from the row schema by
+    /// `generate-cli` (one per row property, in schema order, with the
+    /// presentation the property's type implies). Never authored: the
+    /// guard refuses a declaration that carries them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<CliDisplayField>,
 }
 
 /// Presentation of a value beyond its scalar text.

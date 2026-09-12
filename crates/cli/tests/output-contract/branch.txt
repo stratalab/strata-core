@@ -66,19 +66,20 @@ forked feature-fork from default at version 3
 feature-fork
 ∎
 ### branch.get · responses/v1/branches/get.json · human
-{
-  "branch_id": "dc42122c-83b7-5436-89bc-9ffa4299697c",
-  "created_at": 3,
-  "deleted_at": null,
-  "generation": 1,
-  "name": "feature",
-  "parent": null,
-  "state_revision": 0,
-  "status": "active"
-}
+name        feature
+parent      -
+status      active
+generation  1
+created_at  3
+deleted_at  -
 ∎
 ### branch.get · responses/v1/branches/get.json · raw
-{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+name	feature
+parent.name	
+status	active
+generation	1
+created_at	3
+deleted_at	
 ∎
 ### branch.list · edge:has_more=true · human
 NAME     PARENT  STATUS  GENERATION
@@ -121,43 +122,28 @@ invalid_argument.engine.branch_point: command failed∎
 ### branch.merge · responses/v1/errors/branches/merge_unrelated.json · raw
 invalid_argument.engine.branch_point: command failed∎
 ### branch.preview · responses/v1/branches/preview.json · human
-{
-  "branch_point": 3,
-  "capabilities_covered": [
-    "kv",
-    "json",
-    "vector"
-  ],
-  "capabilities_unsupported": [
-    "vector_collection",
-    "event",
-    "graph_metadata",
-    "graph_node",
-    "graph_edge",
-    "graph_ontology"
-  ],
-  "conflicts": [
-    {
-      "capability": "kv",
-      "identity": "a",
-      "kind": "value_divergence",
-      "source_value": "two",
-      "space": "default",
-      "strategy_result": "refused",
-      "target_value": "three"
-    }
-  ],
-  "derived_state": [],
-  "source": "feature-fork",
-  "spaces_covered": [
-    "default"
-  ],
-  "strategy": "strict",
-  "target": "default"
-}
+source                    feature-fork
+target                    default
+strategy                  strict
+branch_point              3
+spaces_covered            default
+capabilities_covered      kv json vector
+capabilities_unsupported  vector_collection event graph_metadata graph_node graph_edge graph_ontology
+conflicts
+  CAPABILITY  IDENTITY  KIND              SOURCE_VALUE  SPACE    STRATEGY_RESULT  TARGET_VALUE
+  kv          a         value_divergence  two           default  refused          three
+derived_state             -
 ∎
 ### branch.preview · responses/v1/branches/preview.json · raw
-{"branch_point":3,"capabilities_covered":["kv","json","vector"],"capabilities_unsupported":["vector_collection","event","graph_metadata","graph_node","graph_edge","graph_ontology"],"conflicts":[{"capability":"kv","identity":"a","kind":"value_divergence","source_value":"two","space":"default","strategy_result":"refused","target_value":"three"}],"derived_state":[],"source":"feature-fork","spaces_covered":["default"],"strategy":"strict","target":"default"}
+source	feature-fork
+target	default
+strategy	strict
+branch_point	3
+spaces_covered	["default"]
+capabilities_covered	["kv","json","vector"]
+capabilities_unsupported	["vector_collection","event","graph_metadata","graph_node","graph_edge","graph_ontology"]
+conflicts	[{"capability":"kv","identity":"YQ==","kind":"value_divergence","source_value":"dHdv","space":"default","strategy_result":"refused","target_value":"dGhyZWU="}]
+derived_state	[]
 ∎
 ### branch.preview · responses/v1/errors/branches/merge_unrelated.json · human
 invalid_argument.engine.branch_point: command failed∎

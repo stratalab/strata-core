@@ -224,21 +224,20 @@ alice	follows	bob
 ### graph.edge.get · edge:found=false · raw
 ∎
 ### graph.edge.get · responses/v1/graph/edge_get_found.json · human
-{
-  "dst": "bob",
-  "edge_type": "follows",
-  "graph": "social",
-  "properties": {
-    "since": 2021
-  },
-  "src": "alice",
-  "timestamp": 6,
-  "version": 6,
-  "weight": 1.0
-}
+src        alice
+edge_type  follows
+dst        bob
+graph      social
+weight     1.0
+version    6
 ∎
 ### graph.edge.get · responses/v1/graph/edge_get_found.json · raw
-{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":6,"version":6,"weight":1.0}
+src	alice
+edge_type	follows
+dst	bob
+graph	social
+weight	1.0
+version	6
 ∎
 ### graph.edge.remove · edge:applied=false · human
 ∎
@@ -283,18 +282,18 @@ social
 social
 ∎
 ### graph.meta · responses/v1/graph/meta_found.json · human
-{
-  "created_timestamp": 3,
-  "created_version": 3,
-  "edge_count": 1,
-  "graph": "social",
-  "node_count": 2,
-  "updated_timestamp": 6,
-  "updated_version": 6
-}
+graph            social
+node_count       2
+edge_count       1
+created_version  3
+updated_version  6
 ∎
 ### graph.meta · responses/v1/graph/meta_found.json · raw
-{"created_timestamp":3,"created_version":3,"edge_count":1,"graph":"social","node_count":2,"updated_timestamp":6,"updated_version":6}
+graph	social
+node_count	2
+edge_count	1
+created_version	3
+updated_version	6
 ∎
 ### graph.neighbors · edge:has_more=true · human
 NODE_ID  DIRECTION  EDGE_TYPE  SRC    DST    WEIGHT
@@ -350,20 +349,18 @@ alice
 ### graph.node.get · edge:found=false · raw
 ∎
 ### graph.node.get · responses/v1/graph/node_get_found.json · human
-{
-  "graph": "social",
-  "node_id": "alice",
-  "object_type": "Person",
-  "properties": {
-    "name": "Alice",
-    "role": "eng"
-  },
-  "timestamp": 4,
-  "version": 4
-}
+node_id      alice
+graph        social
+object_type  Person
+properties   {"name":"Alice","role":"eng"}
+version      4
 ∎
 ### graph.node.get · responses/v1/graph/node_get_found.json · raw
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
+node_id	alice
+graph	social
+object_type	Person
+properties	{"name":"Alice","role":"eng"}
+version	4
 ∎
 ### graph.node.list · edge:items=[] · human
 (empty)
@@ -522,74 +519,40 @@ froze ontology of social (1 object type, 1 link type)
 social
 ∎
 ### graph.ontology.get · responses/v1/graph/ontology_get_frozen.json · human
-{
-  "graph": "social",
-  "link_types": [
-    {
-      "cardinality": "many-to-many",
-      "name": "follows",
-      "source": "Person",
-      "target": "Person"
-    }
-  ],
-  "object_types": [
-    {
-      "name": "Person",
-      "properties": {
-        "level": {
-          "required": false,
-          "value_type": "integer"
-        },
-        "name": {
-          "required": true,
-          "value_type": "string"
-        }
-      }
-    }
-  ],
-  "status": "frozen",
-  "timestamp": 6,
-  "version": 6
-}
+graph         social
+status        frozen
+version       6
+object_types
+  NAME    PROPERTIES
+  Person  {"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}
+link_types
+  CARDINALITY   NAME     PROPERTIES  SOURCE  TARGET
+  many-to-many  follows  -           Person  Person
 ∎
 ### graph.ontology.get · responses/v1/graph/ontology_get_frozen.json · raw
-{"graph":"social","link_types":[{"cardinality":"many-to-many","name":"follows","source":"Person","target":"Person"}],"object_types":[{"name":"Person","properties":{"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}}],"status":"frozen","timestamp":6,"version":6}
+graph	social
+status	frozen
+version	6
+object_types	[{"name":"Person","properties":{"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}}]
+link_types	[{"cardinality":"many-to-many","name":"follows","source":"Person","target":"Person"}]
 ∎
 ### graph.ontology.summary · responses/v1/graph/ontology_summary_found.json · human
-{
-  "graph": "social",
-  "link_types": [
-    {
-      "cardinality": "many-to-many",
-      "edge_count": 0,
-      "name": "follows",
-      "source": "Person",
-      "target": "Person"
-    }
-  ],
-  "object_types": [
-    {
-      "name": "Person",
-      "node_count": 2,
-      "properties": {
-        "level": {
-          "required": false,
-          "value_type": "integer"
-        },
-        "name": {
-          "required": true,
-          "value_type": "string"
-        }
-      }
-    }
-  ],
-  "status": "draft",
-  "timestamp": 5,
-  "version": 5
-}
+graph         social
+status        draft
+version       5
+object_types
+  NAME    NODE_COUNT  PROPERTIES
+  Person           2  {"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}
+link_types
+  CARDINALITY   EDGE_COUNT  NAME     PROPERTIES  SOURCE  TARGET
+  many-to-many           0  follows  -           Person  Person
 ∎
 ### graph.ontology.summary · responses/v1/graph/ontology_summary_found.json · raw
-{"graph":"social","link_types":[{"cardinality":"many-to-many","edge_count":0,"name":"follows","source":"Person","target":"Person"}],"object_types":[{"name":"Person","node_count":2,"properties":{"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}}],"status":"draft","timestamp":5,"version":5}
+graph	social
+status	draft
+version	5
+object_types	[{"name":"Person","node_count":2,"properties":{"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}}]
+link_types	[{"cardinality":"many-to-many","edge_count":0,"name":"follows","source":"Person","target":"Person"}]
 ∎
 ### graph.sample · edge:has_more=true · human
 NODE_ID  OBJECT_TYPE  VERSION
