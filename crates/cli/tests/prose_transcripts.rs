@@ -105,15 +105,26 @@ fn fences(text: &str) -> Vec<Fence> {
     let mut fences = Vec::new();
     let mut index = 0;
     while index < lines.len() {
-        if !lines[index].starts_with("```") {
+        if !lines[index].trim_start().starts_with("```") {
             index += 1;
             continue;
         }
         let opened_at = index;
+        // A fence nested in a list item is indented, and so is everything in
+        // it. Reading it at column zero would leave every line prefixed with
+        // that indent, matching no capture — a transcript that quietly opts out
+        // of this guard by being one bullet deep.
+        let indent =
+            &lines[opened_at][..lines[opened_at].len() - lines[opened_at].trim_start().len()];
         let mut body = Vec::new();
         index += 1;
-        while index < lines.len() && !lines[index].starts_with("```") {
-            body.push(lines[index].to_owned());
+        while index < lines.len() && !lines[index].trim_start().starts_with("```") {
+            body.push(
+                lines[index]
+                    .strip_prefix(indent)
+                    .unwrap_or(lines[index])
+                    .to_owned(),
+            );
             index += 1;
         }
         fences.push(Fence {
@@ -290,6 +301,19 @@ mod tests {
             "NAME".to_owned(),
         ]);
         assert_eq!(parsed[0].input, "strata branch list");
+    }
+
+    #[test]
+    fn a_fence_indented_under_a_list_item_is_read_at_its_own_margin() {
+        let nested =
+            fences("1. Try it:\n\n   ```console\n   $ strata kv get greeting\n   hello\n   ```\n");
+        assert_eq!(nested.len(), 1);
+        let parsed = exchanges(&nested[0].body);
+        assert_eq!(parsed[0].input, "strata kv get greeting");
+        assert_eq!(
+            parsed[0].output, "hello",
+            "the indent is the list's, not the output's"
+        );
     }
 
     #[test]
