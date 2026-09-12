@@ -263,6 +263,13 @@ jobs:
         # viable"), and a lane with no mutants at all never says it, so that
         # line is the signal. Loud beats silent: a gate that proved nothing
         # must not read the same as one that proved everything.
+        #
+        # But that line is emitted per *invocation*, which is per shard slice,
+        # so a shard cannot tell the lane-wide failure from its own eighth of
+        # a small diff happening to hold one mutant that does not compile
+        # (#3349). Each shard therefore only records a verdict per lane; the
+        # `mutation-vacuity` job below judges the lane once the whole run's
+        # evidence is in.
         run: |
           set +e
           git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
@@ -270,12 +277,18 @@ jobs:
                   --shard ${{ matrix.shard }}/8 --sharding round-robin)
           check() {
             cat "mutants-$1.log"
+            # Recorded before any exit: a shard that stops on a missed mutant
+            # has still judged its lane, and leaving without saying so would
+            # let `mutation-vacuity` report that lane as having judged nothing.
+            if grep -q "No mutants were viable" "mutants-$1.log"; then
+              echo "$1 unviable" >> lane-verdicts.txt
+            elif grep -qE "^Found [1-9]" "mutants-$1.log"; then
+              echo "$1 viable" >> lane-verdicts.txt
+            else
+              echo "$1 none" >> lane-verdicts.txt
+            fi
             if [ "$2" -ne 0 ] && [ "$2" -ne 3 ]; then
               exit "$2"
-            fi
-            if grep -q "No mutants were viable" "mutants-$1.log"; then
-              echo "::error::lane $1 built mutants and none of them compiled, so this shard judged nothing (#3337). Spell the return type out as Result<T, E> rather than a crate alias, or add a reasoned exclusion to that lane's config."
-              exit 1
             fi
           }
           cargo mutants "${common[@]}" > mutants-a.log 2>&1
@@ -297,6 +310,55 @@ jobs:
           name: mutants-report-${{ github.run_id }}-shard-${{ matrix.shard }}
           path: mutants.out
           retention-days: 30
+      - name: Upload lane verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-lane-verdicts-${{ github.run_id }}-shard-${{ matrix.shard }}
+          path: lane-verdicts.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  mutation-vacuity:
+    # The half of the #3337 guard that only the whole run can decide: a lane
+    # that generated mutants and found not one of them viable judged nothing,
+    # however green its shards look. A single shard cannot tell that from its
+    # own slice being one mutant that does not compile (#3349), so the verdict
+    # is taken here, where every shard's evidence is present.
+    #
+    # `always()` so a lane cannot escape judgment by having one shard fail for
+    # an unrelated reason; a missed mutant still fails in the shard that found
+    # it, and this job stays silent about it.
+    if: always() && github.event_name == 'pull_request'
+    needs: mutation-on-diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-lane-verdicts-${{ github.run_id }}-shard-*
+          merge-multiple: false
+          path: verdicts
+      - name: Judge each lane across every shard
+        run: |
+          set -euo pipefail
+          if [ ! -d verdicts ]; then
+            echo "no shard reported a verdict; the shards did not get far enough to judge"
+            exit 0
+          fi
+          cat verdicts/*/lane-verdicts.txt > all-verdicts.txt || true
+          sort -u all-verdicts.txt || true
+          failed=0
+          for lane in a b c; do
+            if grep -qx "$lane viable" all-verdicts.txt; then
+              echo "lane $lane: judged at least one viable mutant"
+            elif grep -qx "$lane unviable" all-verdicts.txt; then
+              echo "::error::lane $lane generated mutants for this diff and not one of them compiled, so the lane judged nothing (#3337). Spell the return type out as Result<T, E> rather than a crate alias, or add a reasoned exclusion to that lane's config."
+              failed=1
+            else
+              echo "lane $lane: no mutants in this diff"
+            fi
+          done
+          exit "$failed"
 
   wasm:
     needs: check
