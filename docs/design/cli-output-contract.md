@@ -3,7 +3,8 @@
 **Status:** accepted 2026-09-11 after three review rounds; S0 complete
 (S0a landed the §5 matrix, S0b the declarations and their guard, S0c the
 family ⇔ schema check), #3312 and #3327 landed, S1 landed (the renderer
-reads `mutation_ack`). Tracking issue **#3314** (slices S0–S5). Every
+reads `mutation_ack`), #3326 + #3328 landed (one line reader). Tracking
+issue **#3314** (slices S0–S5). Every
 file:line below was read on `main` at `60db96ac`. Follows the shape of `inference-model-resolution.md`: name the
 mechanism, replace it, leave an executable contract behind.
 
@@ -152,22 +153,36 @@ under this plan.
 
 `crates/wasm/src/lib.rs` `execute_cli` is `strata_cli::run_line`: it parses
 the line with the real clap grammar via `command_from_line`, which returns
-the executor `Command` *and* the `Format` the line's flags chose, executes,
-and renders in that format — the binary's stdout then its stderr, as one
-string. (Before #3312 the format was dropped and every result rendered
-human.) There is no stderr and no exit code in the browser, so whatever the
-human contract says about channels must also read correctly when both
-channels are one stream.
+the executor `Command` *and* the `Format` the line's flags chose (`None`
+when they chose nothing), executes, and renders in that format — the
+binary's stdout then its stderr, as one string. (Before #3312 the format
+was dropped and every result rendered human.) There is no stderr and no
+exit code in the browser, so whatever the human contract says about
+channels must also read correctly when both channels are one stream.
 
-Both line readers — this one and the REPL's `parse_line` — parse a line with
-the binary's whole top-level grammar, which accepts the *session* arguments
-(the positional database path, `--db`, `--cache`, `--durability`, `--ipc`,
-`--read-only`) as readily as a command's own flags. A line cannot change the
-session it runs in, so `Cli::line_refusal` refuses such a line by name (a
-lone word the grammar could only read as a database path is reported as
-"not a strata command") and the command behind it never runs; before #3327
-each reader picked the fields it wanted and answered `--db /elsewhere kv get
-k` from the current database.
+A line typed at the REPL, piped to it, or sent from the playground is the
+binary's argv without the leading `strata`, so it parses with the whole
+top-level grammar — the *session* arguments (the positional database path,
+`--db`, `--cache`, `--durability`, `--ipc`, `--read-only`) as readily as
+the global flags and the command's own. Each reader used to run that parse
+itself and pick the fields it wanted off `Cli`; whatever it forgot was
+parsed and dropped: the playground's format (#3312), the REPL's format
+(#3326), the session arguments on both (#3327). Since #3326 there is one
+reader, `crates/cli/src/line.rs` `SessionLine::parse`, and both surfaces
+call it: it refuses a session argument by name through `Cli::line_refusal`
+(a lone word the grammar could only read as a database path is "not a
+strata command"), refuses a line of flags with no command behind them, and
+carries the line's `--branch` / `--space` / format as `Option`s — `None`
+is "the line chose nothing", which the surface resolves against its
+session (`line.format.unwrap_or(session_format)`), never against a
+default of its own. It destructures `Cli` field by field, so a flag added
+there does not compile until it is carried on the line or refused. The
+REPL keeps only its own verbs (`exit`, `clear`, a lone `help`, `use`) in
+front of it, and one function, `handle_line`, runs and reports a line for
+the interactive and the piped loop alike, in the format the line resolved
+to — which is also what makes a failed pipe line report once (#3328: the
+pipe loop used to prefix `error:` onto a clap error that already began
+with it).
 
 ### 2.5 What the tests reach
 
@@ -677,6 +692,7 @@ a visible CLI change and carries release notes in the PR body.
 | **S0** (three PRs under the ≤1,500-LOC rule) | **S0a** — the matrix (§5.2: in-process, binary, examples cross-check; playground cells come with #3312), blessed on today's output; the three plants; both design documents committed. **S0b** — `render:` per kind in `kinds.yaml` and `display:` per command in `commands/*.yaml` (R2 as amended: `receipt`/`identity`/`noun`, `value`, `fields`, `columns`, `map`, `header`, `as`, `sort`, or `bespoke`), resolved into `cli-command-index.json` and **declared and guarded but not yet read** by the renderer (so the declaration review happens on a PR that changes no output), with the guard that `command-index.json` never carries it (the SDK boundary). **S0c** — the #3313 `check` guard (family ⇔ schema) with its shrink-only `response-model-divergences.yaml`, `wire_status: transitional` on the divergent rows, and the declarations that are simply wrong corrected (Q13) — a docs-only change to `Returns:` | none (docs `Returns:` lines change in S0c) | #3313 asks 1–2 |
 | **#3312** (its own small PR, before S1) | `command_from_line` returns the format with the command; `execute_cli` renders with it; playground cells added | none | #3312 |
 | **#3327** (its own small PR, before S1) | session arguments on a REPL/playground line are refused by name from one shared `Cli::line_refusal`; a typo'd lone verb is "not a strata command" instead of silently ignored | none (CLI text; a refused pipe line exits 1 as any pipe error does; release note) | #3327 |
+| **#3326 + #3328** (one small PR, after S1) | one line reader, `SessionLine::parse`, for the REPL, the pipe and the playground; a line's `--json` / `--raw` / `--output-format` wins over the session's format for its answer and its error alike; a line of flags with no command is refused, not dropped; the REPL's `handle_line` is the one place a line is run and reported, so a failed pipe line reports once and in the same shape as an interactive one (code-led line or JSON envelope, not a bare `error: <message>`) | none (CLI text; exit codes unchanged; release note) | #3326, #3328 |
 | **S1** (landed 2026-09-11) | R1 `mutation_ack` rule from the declaration; R5 stderr line for a `not_found` miss (exit stays 0; `unchanged` is a hit); R4 raw identity for writes and the `--raw` help text rewritten to "shell-composable"; `mutation_summary` deleted; the harness snapshots stderr as its own cell | none (CLI text; exit codes unchanged; release note) | #3306 (writes, `--raw` writes) |
 | **S2** | R1-table; `page`, `history`, `search`, `analytics` rules from `display.columns`; R3 dates in cells; hint to stderr; raw identities | none (release note) | #3306 (lists, dates), #3205 §3/§5 |
 | **S3** | `status_sections` for `StatusResponse` and record `Maybe`; `batch` rule; `render_human_data` and the JSON fallback **deleted**; `check` refuses an undeclared shape | none (release note) | #3306 (admin), #3205 §1/§2/§4 |
