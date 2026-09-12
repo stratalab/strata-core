@@ -17,8 +17,16 @@ Read many documents at once.
 
 ```console
 $ strata command run --command-json '{"entries":[{"key":"a","path":"$","value":{"v":1}},{"key":"b","path":"$","value":{"v":2}}],"type":"json_batch_set"}'
+#  STATUS  EFFECT   DOCUMENT_VERSION
+0  ok      created                 …
+1  ok      created                 …
 $ strata command run --command-json '{"entries":[{"key":"a","path":"$"},{"key":"b","path":"$"}],"type":"json_batch_get"}'
+#  STATUS  DOCUMENT_VERSION  VERSION  VALUE
+0  ok                     …        …  {"v":1}
+1  ok                     …        …  {"v":2}
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

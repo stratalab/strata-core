@@ -606,17 +606,28 @@ TTY may add, and it is out of scope here.
 
 ### R7 — prose derives
 
-- `command-examples.json` stays the derived transcript artifact; after S2 its
-  `reproducible: false` count is a number to drive down, not a fact of life.
+- `command-examples.json` stays the derived transcript artifact; its
+  `reproducible: false` count is a number to drive down, not a fact of life,
+  and is asserted shrink-only (50 as of S5).
 - `generate-docs` emits each command's human transcript (from
   `command-examples.json`) onto its reference page beside the wire example,
-  so the site's per-command pages show what a person sees.
+  so the site's per-command pages show what a person sees. The page renders
+  each `$` line itself and holds it equal to the captured one, so the two
+  artifacts — written by two crates, committed separately — cannot describe
+  different examples.
+- A step whose output exposes a run- or machine-dependent value is not
+  published as captured: the masked renders differ exactly where such a value
+  reached the output, so each token that differs is elided to `…` under a
+  legend. Publishing the sentinel instead (`masked`, an epoch-0 date) would
+  assert output the binary never printed, which is what R7 exists to stop.
 - README, the agents skill (`agents_skill.md`) and `docs/` fenced
   `$ strata …` transcripts that show *output* are guarded: every shown
   output line must equal the matrix cell for that command and fixture, or
   the fence is marked `<!-- illustrative -->`. The clap-parse guard (S4a of
   the resolver plan) already proves the *inputs* parse; this is the output
-  half.
+  half. A version quoted in an output comment (`# pong 1.2.1`) is held to the
+  version being built — the README ships inside every binary tarball, and a
+  stale one shipped at v1.1.0.
 - stratadb.org's hero script and `verify-transcripts.mjs` are regenerated at
   the release that ships S1–S3, in the release PR, from the same cells.
 
@@ -719,7 +730,8 @@ a visible CLI change and carries release notes in the PR body.
 | **S3a** (landed 2026-09-12) | `optional`, `status_value` and `status_sections` from `value` / `fields` / `columns` / `receipt`: label-and-value blocks, nested records one level in, an `as: table` field as an indented table whose columns `generate-cli` resolves from the row schema, and an action's one-line receipt (raw: the action's record). The `search` rule's declared `fields` block renders under its table (human only). `admin.ipc_stop` moves from bespoke to a declared record; the optional/status tag arms, their helpers and the KV/preview byte pre-pass arms are **deleted** | none (release note) | — |
 | **S3b** (landed 2026-09-12) | `batch` rule from `columns` plus the cells every batch shows (`#`, `STATUS`, `EFFECT` for a write, `ERROR` when an item failed) and the stderr tally; `branch diff`'s hand-written arm (its rows sit two `*` deep, so no `columns:` pointer can describe them); `ping --raw` is the version; `humanize_kv_bytes`, `humanize_committed_at`, `format_instant` and the `items`/`found`/`value` sniffs **deleted**; an output with neither a declaration nor an arm is now reported, not guessed at | none (release note) | #3306 (admin), #3205 §1/§2/§4 |
 | **S4** (landed 2026-09-12) | R4 raw bytes verbatim: `Rendered`'s stdout becomes `Answer::Text | Answer::Bytes`, and a `--raw` read of a declared `as: bytes` value answers with the stored bytes and no newline of the renderer's own, so `strata --raw kv get k > payload.bin` is the file `kv put --file` stored. A shared stream (the REPL, a pipe) adds the separator a file must not have — `print_output` takes a `Channel`. Where bytes cannot travel (a snapshot cell, the playground transcript) `Answer::text()` escapes them as `<bytes:0001ff>`. Q5: `Pretty` and the hidden `--output-format` deleted | none on the wire (CLI text; release note) | #3116 |
-| **S5** | R7: `generate-docs` human transcript block; README / agents-skill / docs output-fence guard; site hero + `verify-transcripts.mjs` regenerated in the release PR; `command-examples.json` `reproducible: false` count asserted ≤ the post-S3 number (shrink-only) | none | #3205 acceptance criteria |
+| **S5 core** (landed 2026-09-12) | R7 in this repo: every reference page's CLI tab is a transcript, each step's captured output under its command, checked against the page's own rendering so a stale `command-examples.json` fails `generate-docs` instead of publishing an older binary's output; a non-reproducible step is elided to `…` per varying token (the two masked renders differ exactly where a volatile value reached the output) rather than publishing the sentinel — no `masked`, no 1970 dates — under a legend; `crates/cli/tests/prose_transcripts.rs` holds README / `agents_skill.md` / `docs/**` fenced transcripts to the captures or to an explicit `<!-- illustrative -->`, and a version in an output comment to the version being built; `reproducible: false` asserted shrink-only at 50 | none | #3205 acceptance criteria |
+| **S5 site** (at the release) | stratadb.org's hero script and `verify-transcripts.mjs` regenerated from the same captures, and the JSON-shaped output in its learn/get-started pages replaced | none | stratadb.org #5–#8 |
 
 Sequencing: S0 → #3312 → S1 → S2 → S3a → S3b → S4 → S5, each depending on
 the declaration the previous one made the renderer read. S1–S3 can ship in one

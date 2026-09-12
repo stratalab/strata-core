@@ -17,10 +17,19 @@ A representative sample plus the total population size.
 
 ```console
 $ strata kv put a 1
+created a
 $ strata kv put b 2
+created b
 $ strata kv put c 3
+created c
 $ strata kv sample
+KEY  VERSION  VALUE
+a          …  1
+b          …  2
+c          …  3
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

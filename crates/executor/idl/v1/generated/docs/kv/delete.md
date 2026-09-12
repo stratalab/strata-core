@@ -17,8 +17,11 @@ Delete a key; it is no longer visible afterward.
 
 ```console
 $ strata kv put temp scratch
+created temp
 $ strata kv delete temp
+deleted temp
 $ strata kv exists temp
+false
 ```
 
 ### Wire

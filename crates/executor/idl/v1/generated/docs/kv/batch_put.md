@@ -17,8 +17,16 @@ Write many entries in one commit.
 
 ```console
 $ strata command run --command-json '{"entries":[{"key":"YQ==","value":"MQ=="},{"key":"Yg==","value":"Mg=="}],"type":"kv_batch_put"}'
+#  STATUS  EFFECT   KEY
+0  ok      created  a
+1  ok      created  b
 $ strata command run --command-json '{"keys":["YQ==","Yg=="],"type":"kv_batch_get"}'
+#  STATUS  KEY  VERSION  VALUE
+0  ok      a          …  1
+1  ok      b          …  2
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

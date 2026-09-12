@@ -17,8 +17,12 @@ List the distinct event types seen in the log.
 
 ```console
 $ strata event append user.created {"id":1}
+appended user.created #0
 $ strata event append user.updated {"id":2}
+appended user.updated #1
 $ strata event types
+user.created
+user.updated
 ```
 
 ### Wire

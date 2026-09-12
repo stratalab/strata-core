@@ -17,9 +17,14 @@ List keys under a prefix, in key order.
 
 ```console
 $ strata kv put user:1 a
+created user:1
 $ strata kv put user:2 b
+created user:2
 $ strata kv put other c
+created other
 $ strata kv list --prefix user:
+user:1
+user:2
 ```
 
 ### Wire

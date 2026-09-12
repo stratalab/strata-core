@@ -17,9 +17,14 @@ List keys in a collection, in key order.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata vector upsert docs a [1.0,0.0,0.0]
+created a in docs
 $ strata vector upsert docs b [0.0,1.0,0.0]
+created b in docs
 $ strata vector keys docs
+a
+b
 ```
 
 ### Wire

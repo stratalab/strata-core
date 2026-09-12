@@ -17,7 +17,10 @@ Create a product space.
 
 ```console
 $ strata space create app
+created space app
 $ strata space list
+app
+default
 ```
 
 ### Wire

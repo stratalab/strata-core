@@ -17,7 +17,13 @@ Describe the database.
 
 ```console
 $ strata describe
+StrataDB … · cache
+branch default · branches: default · spaces: default
+capabilities: arrow event graph_core inference json kv vector vector_index
+kv 0 · json 0 · events 0
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

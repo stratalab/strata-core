@@ -17,7 +17,9 @@ List graphs.
 
 ```console
 $ strata graph create social
+created graph social
 $ strata graph list
+social
 ```
 
 ### Wire

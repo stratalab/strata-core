@@ -29,9 +29,21 @@ Preview promoting a fork into the branch it came from.
 
 ```console
 $ strata kv put config base
+created config
 $ strata branch fork default experiment
+forked experiment from default
 $ strata command run --command-json '{"branch":"experiment","key":"Y29uZmln","type":"kv_put","value":"dHVuZWQ="}'  # change on the fork
+updated config
 $ strata branch preview experiment default --strategy strict  # a clean preview — no conflicting changes on default
+source                    experiment
+target                    default
+strategy                  strict
+branch_point              3
+spaces_covered            default
+capabilities_covered      kv json vector
+capabilities_unsupported  vector_collection event graph_metadata graph_node graph_edge graph_ontology
+conflicts                 -
+derived_state             -
 ```
 
 ### Wire

@@ -17,9 +17,16 @@ Scan documents from the start, in key order.
 
 ```console
 $ strata json set a $ {"v":1}
+created a
 $ strata json set b $ {"v":2}
+created b
 $ strata json scan
+KEY  VERSION  VALUE
+a          …  {"v":1}
+b          …  {"v":2}
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

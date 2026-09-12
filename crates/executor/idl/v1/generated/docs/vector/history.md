@@ -17,7 +17,9 @@ A key that never existed has no history.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata vector history docs absent
+(nil)
 ```
 
 ### Wire

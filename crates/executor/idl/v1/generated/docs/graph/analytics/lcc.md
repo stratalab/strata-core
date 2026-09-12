@@ -17,12 +17,22 @@ Local clustering coefficient per node.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph add-node g a
+created node a in g
 $ strata graph add-node g b
+created node b in g
 $ strata graph add-node g c
+created node c in g
 $ strata graph add-edge g a knows b
+created edge a -[knows]-> b in g
 $ strata graph add-edge g b knows c
+created edge b -[knows]-> c in g
 $ strata graph lcc g
+NODE  COEFFICIENT
+a             0.0
+b             0.0
+c             0.0
 ```
 
 ### Wire

@@ -17,6 +17,7 @@ A key that never existed has no history.
 
 ```console
 $ strata kv history absent
+(nil)
 ```
 
 ### Wire

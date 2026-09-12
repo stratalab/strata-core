@@ -17,8 +17,15 @@ Check existence for many document keys at once.
 
 ```console
 $ strata command run --command-json '{"entries":[{"key":"a","path":"$","value":{"v":1}}],"type":"json_batch_set"}'
+#  STATUS  EFFECT   DOCUMENT_VERSION
+0  ok      created                 …
 $ strata command run --command-json '{"keys":["a","missing"],"type":"json_batch_exists"}'
+#  STATUS  EXISTS
+0  ok      true
+1  ok      false
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

@@ -17,9 +17,13 @@ Remove a node.
 
 ```console
 $ strata graph create social
+created graph social
 $ strata graph add-node social alice
+created node alice in social
 $ strata graph remove-node social alice
+deleted node alice in social
 $ strata graph get-node social alice
+(nil)
 ```
 
 ### Wire

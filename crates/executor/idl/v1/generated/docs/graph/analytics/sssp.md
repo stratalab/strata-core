@@ -17,12 +17,22 @@ Single-source shortest paths from a source node.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph add-node g a
+created node a in g
 $ strata graph add-node g b
+created node b in g
 $ strata graph add-node g c
+created node c in g
 $ strata graph add-edge g a knows b
+created edge a -[knows]-> b in g
 $ strata graph add-edge g b knows c
+created edge b -[knows]-> c in g
 $ strata graph sssp g a
+NODE  DISTANCE
+a          0.0
+b          1.0
+c          2.0
 ```
 
 ### Wire

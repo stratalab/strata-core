@@ -17,6 +17,7 @@ Stop hosting the multi-process broker socket.
 
 ```console
 $ strata ipc stop
+stopped  false
 ```
 
 ### Wire

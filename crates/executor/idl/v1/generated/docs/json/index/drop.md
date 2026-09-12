@@ -17,8 +17,11 @@ Drop a secondary index.
 
 ```console
 $ strata json index create by_name $.name --index-type tag
+created index by_name on name (tag)
 $ strata json index drop by_name
+dropped index by_name
 $ strata json index list
+(empty)
 ```
 
 ### Wire

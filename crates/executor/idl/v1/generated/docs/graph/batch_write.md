@@ -19,8 +19,18 @@ Apply several node and edge mutations in one atomic commit.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata command run --command-json '{"graph":"g","operations":[{"data":{"object_type":"person"},"node_id":"a","type":"upsert_node"},{"data":{"object_type":"person"},"node_id":"b","type":"upsert_node"},{"data":{},"dst":"b","edge_type":"knows","src":"a","type":"upsert_edge"}],"type":"graph_batch_write"}'  # All operations land in one engine commit, or none do.
+#  STATUS  EFFECT   OPERATION    CREATED
+0  ok      created  upsert_node  true
+1  ok      created  upsert_node  true
+2  ok      created  upsert_edge  true
 $ strata graph meta g
+graph            g
+node_count       2
+edge_count       1
+created_version  3
+updated_version  4
 ```
 
 ### Wire

@@ -218,6 +218,10 @@ R="cargo run --locked -p strata-executor $F --bin strata-idl --"
 
 $R generate         # command-index.json + generated/schemas/
 $R generate-cli     # cli-command-index.json
+# generated/command-examples.json — each example step replayed and RENDERED,
+# which only strata-cli can do; `generate-docs` reads it for the transcripts on
+# the reference pages, so it runs BEFORE generate-docs and fails it when stale.
+cargo test --locked -p strata-cli --lib command_examples -- --ignored regenerate
 $R generate-docs    # generated/docs/** + llms.txt
 $R generate-tests   # crates/executor/tests/generated/conformance_cases.rs (TCP4.1)
 $R check            # all of the above are fresh (CI gate)

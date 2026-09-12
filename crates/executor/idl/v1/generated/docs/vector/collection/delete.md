@@ -17,8 +17,11 @@ Delete a collection.
 
 ```console
 $ strata vector collection create temp 3 --metric cosine
+created collection temp (3 dimensions, cosine)
 $ strata vector collection delete temp
+deleted collection temp
 $ strata vector collection list
+(empty)
 ```
 
 ### Wire

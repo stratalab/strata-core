@@ -17,8 +17,11 @@ Check whether a product space exists.
 
 ```console
 $ strata space create app
+created space app
 $ strata space exists app
+true
 $ strata space exists nope
+false
 ```
 
 ### Wire

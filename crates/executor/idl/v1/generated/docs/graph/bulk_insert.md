@@ -17,8 +17,15 @@ Insert many nodes and edges in one commit.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata command run --command-json '{"edges":[{"dst":"b","edge_type":"knows","src":"a"}],"graph":"g","nodes":[{"node_id":"a","object_type":"person"},{"node_id":"b","object_type":"person"}],"type":"graph_bulk_insert"}'
+inserted 2 nodes, 1 edge into g
 $ strata graph meta g
+graph            g
+node_count       2
+edge_count       1
+created_version  3
+updated_version  5
 ```
 
 ### Wire

@@ -17,8 +17,11 @@ Check whether a key currently has a visible value.
 
 ```console
 $ strata kv put k v
+created k
 $ strata kv exists k
+true
 $ strata kv exists absent
+false
 ```
 
 ### Wire

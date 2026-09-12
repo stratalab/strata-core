@@ -17,12 +17,22 @@ Compute PageRank importance scores.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph add-node g a
+created node a in g
 $ strata graph add-node g b
+created node b in g
 $ strata graph add-node g c
+created node c in g
 $ strata graph add-edge g a knows b
+created edge a -[knows]-> b in g
 $ strata graph add-edge g b knows c
+created edge b -[knows]-> c in g
 $ strata graph pagerank g
+NODE  RANK
+c     0.474412
+b     0.341171
+a     0.184417
 ```
 
 ### Wire

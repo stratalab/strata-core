@@ -23,7 +23,19 @@ Check what this build can do before running an inference command.
 
 ```console
 $ strata inference status  # reports build, providers, keys, and on-disk models without attempting a call
+build	cloud providers only
+	local models: this build runs cloud models only, and a bare model name means a local model. Either name a cloud model instead — `openai:<model>`, `google:<model>` or `anthropic:<model>` — or run `strata inference install-local` to add local execution.
+
+providers
+  openai	no key -- `strata config set openai.api_key <key>`, or export OPENAI_API_KEY
+  anthropic	no key -- `strata config set anthropic.api_key <key>`, or export ANTHROPIC_API_KEY
+  google	no key -- `strata config set google.api_key <key>`, or export GOOGLE_API_KEY
+  local	not in this build
+
+models	…
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 
