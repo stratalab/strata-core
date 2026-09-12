@@ -17,9 +17,16 @@ Scan full rows from the start, in key order.
 
 ```console
 $ strata kv put a 1
+created a
 $ strata kv put b 2
+created b
 $ strata kv scan
+KEY  VERSION  VALUE
+a          …  1
+b          …  2
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

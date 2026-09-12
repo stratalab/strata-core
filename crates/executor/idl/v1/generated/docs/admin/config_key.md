@@ -17,6 +17,7 @@ Read one configuration value by key, or nothing if unknown.
 
 ```console
 $ strata config get-key missing
+(nil)
 ```
 
 ### Wire

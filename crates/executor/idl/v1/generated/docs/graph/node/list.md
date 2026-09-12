@@ -17,10 +17,18 @@ List node ids in a graph, in id order.
 
 ```console
 $ strata graph create social
+created graph social
 $ strata graph add-node social alice
+created node alice in social
 $ strata graph add-node social bob
+created node bob in social
 $ strata graph list-nodes social
+NODE_ID  OBJECT_TYPE  VERSION
+alice    -                  …
+bob      -                  …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

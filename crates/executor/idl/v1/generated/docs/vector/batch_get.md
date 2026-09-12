@@ -17,9 +17,18 @@ Read many vectors at once.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata command run --command-json '{"collection":"docs","entries":[{"key":"a","vector":[1.0,0.0,0.0]},{"key":"b","vector":[0.0,1.0,0.0]}],"type":"vector_batch_upsert"}'
+#  STATUS  EFFECT   VECTOR_REVISION
+0  ok      created                1
+1  ok      created                1
 $ strata command run --command-json '{"collection":"docs","keys":["a","b"],"type":"vector_batch_get"}'
+#  STATUS  KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA
+0  ok      a          …                1  [1.0,0.0,0.0]  -
+1  ok      b          …                1  [0.0,1.0,0.0]  -
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

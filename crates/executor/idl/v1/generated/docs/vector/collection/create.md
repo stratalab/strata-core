@@ -17,7 +17,10 @@ Create a vector collection, then confirm its dimension.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata vector collection stats docs
+NAME  DIMENSION  METRIC  COUNT  EMBEDDING_MODEL
+docs          3  cosine      0  -
 ```
 
 ### Wire

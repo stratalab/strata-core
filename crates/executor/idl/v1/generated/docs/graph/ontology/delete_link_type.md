@@ -17,9 +17,13 @@ Remove a link type from the ontology.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph ontology define-object-type g person
+created object type person in g
 $ strata graph ontology define-link-type g knows person person
+created link type knows in g
 $ strata graph ontology delete-link-type g knows
+deleted link type knows in g
 ```
 
 ### Wire

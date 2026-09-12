@@ -17,9 +17,16 @@ List events in sequence order.
 
 ```console
 $ strata event append user.created {"id":1}
+appended user.created #0
 $ strata event append user.updated {"id":2}
+appended user.updated #1
 $ strata event list
+SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD
+       0  user.created  …          …               UTC  {"id":1}
+       1  user.updated  …          …               UTC  {"id":2}
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

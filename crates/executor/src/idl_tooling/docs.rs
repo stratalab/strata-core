@@ -117,6 +117,7 @@ fn render_all(repo_root: &Path) -> Result<BTreeMap<PathBuf, String>> {
     let example_specs = examples::load_examples(repo_root)?;
     examples::validate_examples(repo_root, &index, &documents, &example_specs)?;
     let arg_spec = examples::load_arg_spec(repo_root)?;
+    let transcripts = examples::load_transcripts(repo_root)?;
     let docs_dir = docs_dir_path(repo_root);
     let stamp = source_stamp();
 
@@ -142,6 +143,7 @@ fn render_all(repo_root: &Path) -> Result<BTreeMap<PathBuf, String>> {
                 &documents,
                 example_specs.get(&entry.id),
                 &arg_spec,
+                transcripts.get(&entry.id).map_or(&[][..], Vec::as_slice),
             )?,
         );
     }
@@ -176,6 +178,7 @@ fn render_page(
     schemas: &BTreeMap<String, Value>,
     example: Option<&Example>,
     arg_spec: &examples::CliArgSpec,
+    transcript: &[examples::TranscriptStep],
 ) -> Result<String> {
     let mut out = String::new();
     out.push_str("---\n");
@@ -189,7 +192,9 @@ fn render_page(
     out.push_str("\n\n");
 
     if let Some(example) = example {
-        out.push_str(&examples::render_section(by_id, schemas, example, arg_spec));
+        out.push_str(&examples::render_section(
+            &entry.id, by_id, schemas, example, arg_spec, transcript,
+        )?);
     }
 
     out.push_str(&render_parameters(schema));

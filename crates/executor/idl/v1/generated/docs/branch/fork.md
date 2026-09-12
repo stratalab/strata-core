@@ -19,8 +19,14 @@ Fork a branch from another branch's head.
 
 ```console
 $ strata branch fork default experiment
+forked experiment from default
 $ strata branch list
+NAME        PARENT   STATUS  GENERATION
+default     -        active           …
+experiment  default  active           …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

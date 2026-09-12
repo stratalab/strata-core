@@ -17,8 +17,14 @@ Create a new empty branch.
 
 ```console
 $ strata branch create feature
+created branch feature
 $ strata branch list
+NAME     PARENT  STATUS  GENERATION
+default  -       active           …
+feature  -       active           …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

@@ -17,7 +17,12 @@ Check existence for many keys at once.
 
 ```console
 $ strata command run --command-json '{"entries":[{"key":"YQ==","value":"MQ=="}],"type":"kv_batch_put"}'
+#  STATUS  EFFECT   KEY
+0  ok      created  a
 $ strata command run --command-json '{"keys":["YQ==","bWlzc2luZw=="],"type":"kv_batch_exists"}'
+#  STATUS  KEY      EXISTS
+0  ok      a        true
+1  ok      missing  false
 ```
 
 ### Wire

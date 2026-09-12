@@ -19,10 +19,16 @@ Fork a branch at an earlier commit version — a snapshot of history.
 
 ```console
 $ strata kv put greeting original  # The receipt carries this commit's version.
+created greeting
 $ strata kv put greeting updated
+updated greeting
 $ strata command run --command-json '{"branch":"snapshot","source":"default","type":"branch_fork_at_version","version":3}'  # snapshot forks default's history at that version.
+forked snapshot from default at version …
 $ strata command run --command-json '{"branch":"snapshot","key":"Z3JlZXRpbmc=","type":"kv_get"}'
+original
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

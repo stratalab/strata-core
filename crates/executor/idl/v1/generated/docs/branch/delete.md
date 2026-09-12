@@ -17,9 +17,15 @@ Delete a branch.
 
 ```console
 $ strata branch create temp
+created branch temp
 $ strata branch delete temp
+deleted branch temp
 $ strata branch list
+NAME     PARENT  STATUS  GENERATION
+default  -       active           …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

@@ -17,9 +17,16 @@ Read a whole document, a value at a JSON path, or nothing.
 
 ```console
 $ strata json set user $ {"age":30,"name":"alice"}
+created user
 $ strata json get user $
+{
+  "age": 30,
+  "name": "alice"
+}
 $ strata json get user $.name
+"alice"
 $ strata json get absent $
+(nil)
 ```
 
 ### Wire

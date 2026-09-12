@@ -17,6 +17,13 @@ Read control-plane health.
 
 ```console
 $ strata health
+status          healthy
+identity        healthy
+registry        healthy
+branch_catalog  healthy
+space_catalog   healthy
+default_branch  default
+branch_count    1
 ```
 
 ### Wire

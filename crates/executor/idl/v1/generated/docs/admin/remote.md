@@ -17,6 +17,7 @@ Read where this database was cloned from (a local database has no origin).
 
 ```console
 $ strata remote
+(nil)
 ```
 
 ### Wire

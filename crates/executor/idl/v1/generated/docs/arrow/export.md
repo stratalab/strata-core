@@ -17,11 +17,18 @@ Export a primitive to a Parquet file, then import it back.
 
 ```console
 $ strata kv put greeting hello
+created greeting
 $ strata command run --command-json '{"format":"parquet","path":"/tmp/exports/kv.parquet","primitive":"kv","type":"arrow_export"}'  # One file per primitive; Parquet by default.
+exported 1 row of kv to … (1.9 kB)
 $ strata kv delete greeting
+deleted greeting
 $ strata arrow import /tmp/exports/kv.parquet --target kv
+imported 1 row into kv from … (0 skipped)
 $ strata kv get greeting
+hello
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

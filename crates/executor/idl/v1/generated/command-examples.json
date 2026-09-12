@@ -17,7 +17,7 @@
     "admin.describe": [
       {
         "in": "strata describe",
-        "out": "StrataDB masked · cache\nbranch default · branches: default · spaces: default\ncapabilities: arrow event graph_core inference json kv vector vector_index\nkv 0 · json 0 · events 0",
+        "out": "StrataDB … · cache\nbranch default · branches: default · spaces: default\ncapabilities: arrow event graph_core inference json kv vector vector_index\nkv 0 · json 0 · events 0",
         "reproducible": false
       }
     ],
@@ -31,7 +31,7 @@
     "admin.info": [
       {
         "in": "strata info",
-        "out": "target          cache\nversion         masked\ndurable         false\ndefault_branch  default\nbranch_count    1\nspace_count     1\nmemory_budget\n  source       derived_from_host\n  total        0 B\n  usable_host  0 B",
+        "out": "target          cache\nversion         …\ndurable         false\ndefault_branch  default\nbranch_count    1\nspace_count     1\nmemory_budget\n  source       derived_from_host\n  total        … …\n  usable_host  … …",
         "reproducible": false
       }
     ],
@@ -59,7 +59,7 @@
     "admin.ping": [
       {
         "in": "strata ping",
-        "out": "pong masked",
+        "out": "pong …",
         "reproducible": false
       }
     ],
@@ -78,7 +78,7 @@
       },
       {
         "in": "strata command run --command-json '{\"format\":\"parquet\",\"path\":\"/tmp/exports/kv.parquet\",\"primitive\":\"kv\",\"type\":\"arrow_export\"}'",
-        "out": "exported 1 row of kv to masked (1.9 kB)",
+        "out": "exported 1 row of kv to … (1.9 kB)",
         "reproducible": false,
         "note": "One file per primitive; Parquet by default."
       },
@@ -89,7 +89,7 @@
       },
       {
         "in": "strata arrow import /tmp/exports/kv.parquet --target kv",
-        "out": "imported 1 row into kv from masked (0 skipped)",
+        "out": "imported 1 row into kv from … (0 skipped)",
         "reproducible": false
       },
       {
@@ -106,7 +106,7 @@
       },
       {
         "in": "strata command run --command-json '{\"format\":\"parquet\",\"path\":\"/tmp/exports/kv.parquet\",\"primitive\":\"kv\",\"type\":\"arrow_export\"}'",
-        "out": "exported 1 row of kv to masked (1.9 kB)",
+        "out": "exported 1 row of kv to … (1.9 kB)",
         "reproducible": false
       },
       {
@@ -116,7 +116,7 @@
       },
       {
         "in": "strata arrow import /tmp/exports/kv.parquet --target kv",
-        "out": "imported 1 row into kv from masked (0 skipped)",
+        "out": "imported 1 row into kv from … (0 skipped)",
         "reproducible": false,
         "note": "Rows are keyed by their source column; kv restores greeting=hello."
       },
@@ -134,7 +134,7 @@
       },
       {
         "in": "strata branch list",
-        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           0\nfeature  -       active           0",
+        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           …\nfeature  -       active           …",
         "reproducible": false
       }
     ],
@@ -151,7 +151,7 @@
       },
       {
         "in": "strata branch list",
-        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           0",
+        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           …",
         "reproducible": false
       }
     ],
@@ -185,7 +185,7 @@
       },
       {
         "in": "strata branch diff default experiment",
-        "out": "branch_a  default\nbranch_b  experiment\n\nSPACE    CAPABILITY  CHANGE    IDENTITY   VERSION\ndefault  kv          modified  config           0\ndefault  vector      added     \u0000\u0005notesn1        0",
+        "out": "branch_a  default\nbranch_b  experiment\n\nSPACE    CAPABILITY  CHANGE    IDENTITY   VERSION\ndefault  kv          modified  config           …\ndefault  vector      added     \u0000\u0005notesn1        …",
         "reproducible": false,
         "note": "reports the key-value change and the new vector, grouped by capability"
       }
@@ -198,7 +198,7 @@
       },
       {
         "in": "strata branch list",
-        "out": "NAME        PARENT   STATUS  GENERATION\ndefault     -        active           0\nexperiment  default  active           0",
+        "out": "NAME        PARENT   STATUS  GENERATION\ndefault     -        active           …\nexperiment  default  active           …",
         "reproducible": false
       }
     ],
@@ -240,7 +240,7 @@
       },
       {
         "in": "strata command run --command-json '{\"branch\":\"snapshot\",\"source\":\"default\",\"type\":\"branch_fork_at_version\",\"version\":3}'",
-        "out": "forked snapshot from default at version 0",
+        "out": "forked snapshot from default at version …",
         "reproducible": false,
         "note": "snapshot forks default's history at that version."
       },
@@ -258,7 +258,7 @@
       },
       {
         "in": "strata branch get feature",
-        "out": "name        feature\nparent      -\nstatus      active\ngeneration  0\ncreated_at  0\ndeleted_at  -",
+        "out": "name        feature\nparent      -\nstatus      active\ngeneration  …\ncreated_at  …\ndeleted_at  -",
         "reproducible": false
       }
     ],
@@ -270,7 +270,7 @@
       },
       {
         "in": "strata branch list",
-        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           0\nfeature  -       active           0",
+        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           …\nfeature  -       active           …",
         "reproducible": false
       }
     ],
@@ -388,7 +388,7 @@
       },
       {
         "in": "strata event get 0",
-        "out": "sequence       0\nevent_type     user.created\ntimestamp      1970-01-01 00:00:00.000000 UTC\npayload        {\"id\":1}\nhash           masked\nprevious_hash  masked\nversion        0",
+        "out": "sequence       0\nevent_type     user.created\ntimestamp      …          …               UTC\npayload        {\"id\":1}\nhash           …\nprevious_hash  …\nversion        …",
         "reproducible": false
       },
       {
@@ -410,7 +410,7 @@
       },
       {
         "in": "strata event list",
-        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  1970-01-01 00:00:00.000000 UTC  {\"id\":1}\n       1  user.updated  1970-01-01 00:00:00.000000 UTC  {\"id\":2}",
+        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  …          …               UTC  {\"id\":1}\n       1  user.updated  …          …               UTC  {\"id\":2}",
         "reproducible": false
       }
     ],
@@ -427,7 +427,7 @@
       },
       {
         "in": "strata event range 0 --direction forward",
-        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  1970-01-01 00:00:00.000000 UTC  {\"id\":1}\n       1  user.updated  1970-01-01 00:00:00.000000 UTC  {\"id\":2}",
+        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  …          …               UTC  {\"id\":1}\n       1  user.updated  …          …               UTC  {\"id\":2}",
         "reproducible": false
       }
     ],
@@ -444,7 +444,7 @@
       },
       {
         "in": "strata event range-time 0 --direction forward",
-        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  1970-01-01 00:00:00.000000 UTC  {\"id\":1}\n       1  user.updated  1970-01-01 00:00:00.000000 UTC  {\"id\":2}",
+        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  …          …               UTC  {\"id\":1}\n       1  user.updated  …          …               UTC  {\"id\":2}",
         "reproducible": false
       }
     ],
@@ -754,7 +754,7 @@
       },
       {
         "in": "strata command run --command-json '{\"target\":{\"key\":\"user:1\",\"primitive\":\"kv\",\"space\":\"default\"},\"type\":\"graph_bindings_for_entity\"}'",
-        "out": "GRAPH  NODE_ID  PRIMITIVE  SPACE    KEY     VERSION\nkb     ada      kv         default  user:1        0",
+        "out": "GRAPH  NODE_ID  PRIMITIVE  SPACE    KEY     VERSION\nkb     ada      kv         default  user:1        …",
         "reproducible": false
       }
     ],
@@ -827,7 +827,7 @@
       },
       {
         "in": "strata graph get-edge social alice knows bob",
-        "out": "src        alice\nedge_type  knows\ndst        bob\ngraph      social\nweight     1.0\nversion    0",
+        "out": "src        alice\nedge_type  knows\ndst        bob\ngraph      social\nweight     1.0\nversion    …",
         "reproducible": false
       }
     ],
@@ -854,7 +854,7 @@
       },
       {
         "in": "strata graph get-edge social alice knows bob",
-        "out": "src        alice\nedge_type  knows\ndst        bob\ngraph      social\nweight     1.0\nversion    0",
+        "out": "src        alice\nedge_type  knows\ndst        bob\ngraph      social\nweight     1.0\nversion    …",
         "reproducible": false
       },
       {
@@ -969,7 +969,7 @@
       },
       {
         "in": "strata graph get-node social alice",
-        "out": "node_id      alice\ngraph        social\nobject_type  person\nproperties   {\"age\":30}\nversion      0",
+        "out": "node_id      alice\ngraph        social\nobject_type  person\nproperties   {\"age\":30}\nversion      …",
         "reproducible": false
       }
     ],
@@ -986,7 +986,7 @@
       },
       {
         "in": "strata graph get-node social alice",
-        "out": "node_id      alice\ngraph        social\nobject_type  person\nproperties   {\"age\":30}\nversion      0",
+        "out": "node_id      alice\ngraph        social\nobject_type  person\nproperties   {\"age\":30}\nversion      …",
         "reproducible": false
       },
       {
@@ -1013,7 +1013,7 @@
       },
       {
         "in": "strata graph list-nodes social",
-        "out": "NODE_ID  OBJECT_TYPE  VERSION\nalice    -                  0\nbob      -                  0",
+        "out": "NODE_ID  OBJECT_TYPE  VERSION\nalice    -                  …\nbob      -                  …",
         "reproducible": false
       }
     ],
@@ -1057,7 +1057,7 @@
       },
       {
         "in": "strata graph nodes-by-type g person",
-        "out": "NODE_ID  OBJECT_TYPE  VERSION\na        person             0\nb        person             0",
+        "out": "NODE_ID  OBJECT_TYPE  VERSION\na        person             …\nb        person             …",
         "reproducible": false
       }
     ],
@@ -1079,7 +1079,7 @@
       },
       {
         "in": "strata graph ontology get g",
-        "out": "graph         g\nstatus        draft\nversion       0\nobject_types\n  NAME    PROPERTIES\n  person  -\nlink_types\n  CARDINALITY  NAME   PROPERTIES  SOURCE  TARGET\n  -            knows  -           person  person",
+        "out": "graph         g\nstatus        draft\nversion       …\nobject_types\n  NAME    PROPERTIES\n  person  -\nlink_types\n  CARDINALITY  NAME   PROPERTIES  SOURCE  TARGET\n  -            knows  -           person  person",
         "reproducible": false
       }
     ],
@@ -1096,7 +1096,7 @@
       },
       {
         "in": "strata graph ontology summary g",
-        "out": "graph         g\nstatus        draft\nversion       0\nobject_types\n  NAME    NODE_COUNT  PROPERTIES\n  person           0  -\nlink_types    -",
+        "out": "graph         g\nstatus        draft\nversion       …\nobject_types\n  NAME    NODE_COUNT  PROPERTIES\n  person           0  -\nlink_types    -",
         "reproducible": false
       }
     ],
@@ -1145,7 +1145,7 @@
       },
       {
         "in": "strata graph ontology summary g",
-        "out": "graph         g\nstatus        draft\nversion       0\nobject_types\n  NAME    NODE_COUNT  PROPERTIES\n  person           0  -\nlink_types    -",
+        "out": "graph         g\nstatus        draft\nversion       …\nobject_types\n  NAME    NODE_COUNT  PROPERTIES\n  person           0  -\nlink_types    -",
         "reproducible": false
       }
     ],
@@ -1167,7 +1167,7 @@
       },
       {
         "in": "strata graph ontology get g",
-        "out": "graph         g\nstatus        frozen\nversion       0\nobject_types\n  NAME    PROPERTIES\n  person  -\nlink_types    -",
+        "out": "graph         g\nstatus        frozen\nversion       …\nobject_types\n  NAME    PROPERTIES\n  person  -\nlink_types    -",
         "reproducible": false
       }
     ],
@@ -1184,7 +1184,7 @@
       },
       {
         "in": "strata graph ontology get g",
-        "out": "graph         g\nstatus        draft\nversion       0\nobject_types\n  NAME    PROPERTIES\n  person  -\nlink_types    -",
+        "out": "graph         g\nstatus        draft\nversion       …\nobject_types\n  NAME    PROPERTIES\n  person  -\nlink_types    -",
         "reproducible": false
       }
     ],
@@ -1201,7 +1201,7 @@
       },
       {
         "in": "strata graph ontology summary g",
-        "out": "graph         g\nstatus        draft\nversion       0\nobject_types\n  NAME    NODE_COUNT  PROPERTIES\n  person           0  -\nlink_types    -",
+        "out": "graph         g\nstatus        draft\nversion       …\nobject_types\n  NAME    NODE_COUNT  PROPERTIES\n  person           0  -\nlink_types    -",
         "reproducible": false
       }
     ],
@@ -1223,7 +1223,7 @@
       },
       {
         "in": "strata graph sample g",
-        "out": "NODE_ID  OBJECT_TYPE  VERSION\na        -                  0\nb        -                  0",
+        "out": "NODE_ID  OBJECT_TYPE  VERSION\na        -                  …\nb        -                  …",
         "reproducible": false
       }
     ],
@@ -1252,7 +1252,7 @@
     "inference.status": [
       {
         "in": "strata inference status",
-        "out": "build\tcloud providers only\n\tlocal models: this build runs cloud models only, and a bare model name means a local model. Either name a cloud model instead — `openai:<model>`, `google:<model>` or `anthropic:<model>` — or run `strata inference install-local` to add local execution.\n\nproviders\n  openai\tno key -- `strata config set openai.api_key <key>`, or export OPENAI_API_KEY\n  anthropic\tno key -- `strata config set anthropic.api_key <key>`, or export ANTHROPIC_API_KEY\n  google\tno key -- `strata config set google.api_key <key>`, or export GOOGLE_API_KEY\n  local\tnot in this build\n\nmodels\tmasked (shared by every database)\n  downloaded\t0 of 11 catalogued\n\tthis build cannot download models -- `strata inference install-local` adds downloading along with local execution",
+        "out": "build\tcloud providers only\n\tlocal models: this build runs cloud models only, and a bare model name means a local model. Either name a cloud model instead — `openai:<model>`, `google:<model>` or `anthropic:<model>` — or run `strata inference install-local` to add local execution.\n\nproviders\n  openai\tno key -- `strata config set openai.api_key <key>`, or export OPENAI_API_KEY\n  anthropic\tno key -- `strata config set anthropic.api_key <key>`, or export ANTHROPIC_API_KEY\n  google\tno key -- `strata config set google.api_key <key>`, or export GOOGLE_API_KEY\n  local\tnot in this build\n\nmodels\t…",
         "reproducible": false,
         "note": "reports build, providers, keys, and on-disk models without attempting a call"
       }
@@ -1267,7 +1267,7 @@
     "json.batch_delete": [
       {
         "in": "strata command run --command-json '{\"entries\":[{\"key\":\"a\",\"path\":\"$\",\"value\":{\"v\":1}}],\"type\":\"json_batch_set\"}'",
-        "out": "#  STATUS  EFFECT   DOCUMENT_VERSION\n0  ok      created                 0",
+        "out": "#  STATUS  EFFECT   DOCUMENT_VERSION\n0  ok      created                 …",
         "reproducible": false
       },
       {
@@ -1284,7 +1284,7 @@
     "json.batch_exists": [
       {
         "in": "strata command run --command-json '{\"entries\":[{\"key\":\"a\",\"path\":\"$\",\"value\":{\"v\":1}}],\"type\":\"json_batch_set\"}'",
-        "out": "#  STATUS  EFFECT   DOCUMENT_VERSION\n0  ok      created                 0",
+        "out": "#  STATUS  EFFECT   DOCUMENT_VERSION\n0  ok      created                 …",
         "reproducible": false
       },
       {
@@ -1296,24 +1296,24 @@
     "json.batch_get": [
       {
         "in": "strata command run --command-json '{\"entries\":[{\"key\":\"a\",\"path\":\"$\",\"value\":{\"v\":1}},{\"key\":\"b\",\"path\":\"$\",\"value\":{\"v\":2}}],\"type\":\"json_batch_set\"}'",
-        "out": "#  STATUS  EFFECT   DOCUMENT_VERSION\n0  ok      created                 0\n1  ok      created                 0",
+        "out": "#  STATUS  EFFECT   DOCUMENT_VERSION\n0  ok      created                 …\n1  ok      created                 …",
         "reproducible": false
       },
       {
         "in": "strata command run --command-json '{\"entries\":[{\"key\":\"a\",\"path\":\"$\"},{\"key\":\"b\",\"path\":\"$\"}],\"type\":\"json_batch_get\"}'",
-        "out": "#  STATUS  DOCUMENT_VERSION  VERSION  VALUE\n0  ok                     0        0  {\"v\":1}\n1  ok                     0        0  {\"v\":2}",
+        "out": "#  STATUS  DOCUMENT_VERSION  VERSION  VALUE\n0  ok                     …        …  {\"v\":1}\n1  ok                     …        …  {\"v\":2}",
         "reproducible": false
       }
     ],
     "json.batch_set": [
       {
         "in": "strata command run --command-json '{\"entries\":[{\"key\":\"a\",\"path\":\"$\",\"value\":{\"v\":1}},{\"key\":\"b\",\"path\":\"$\",\"value\":{\"v\":2}}],\"type\":\"json_batch_set\"}'",
-        "out": "#  STATUS  EFFECT   DOCUMENT_VERSION\n0  ok      created                 0\n1  ok      created                 0",
+        "out": "#  STATUS  EFFECT   DOCUMENT_VERSION\n0  ok      created                 …\n1  ok      created                 …",
         "reproducible": false
       },
       {
         "in": "strata command run --command-json '{\"entries\":[{\"key\":\"a\",\"path\":\"$\"},{\"key\":\"b\",\"path\":\"$\"}],\"type\":\"json_batch_get\"}'",
-        "out": "#  STATUS  DOCUMENT_VERSION  VERSION  VALUE\n0  ok                     0        0  {\"v\":1}\n1  ok                     0        0  {\"v\":2}",
+        "out": "#  STATUS  DOCUMENT_VERSION  VERSION  VALUE\n0  ok                     …        …  {\"v\":1}\n1  ok                     …        …  {\"v\":2}",
         "reproducible": false
       }
     ],
@@ -1478,7 +1478,7 @@
       },
       {
         "in": "strata json sample",
-        "out": "KEY  VERSION  VALUE\na          0  {\"v\":1}\nb          0  {\"v\":2}\nc          0  {\"v\":3}",
+        "out": "KEY  VERSION  VALUE\na          …  {\"v\":1}\nb          …  {\"v\":2}\nc          …  {\"v\":3}",
         "reproducible": false
       }
     ],
@@ -1495,7 +1495,7 @@
       },
       {
         "in": "strata json scan",
-        "out": "KEY  VERSION  VALUE\na          0  {\"v\":1}\nb          0  {\"v\":2}",
+        "out": "KEY  VERSION  VALUE\na          …  {\"v\":1}\nb          …  {\"v\":2}",
         "reproducible": false
       }
     ],
@@ -1548,7 +1548,7 @@
       },
       {
         "in": "strata command run --command-json '{\"keys\":[\"YQ==\",\"Yg==\",\"bWlzc2luZw==\"],\"type\":\"kv_batch_get\"}'",
-        "out": "#  STATUS  KEY      VERSION  VALUE\n0  ok      a              0  1\n1  ok      b              0  2\n2  miss    missing        -  -\n-- itemwise: 2 ok, 1 miss",
+        "out": "#  STATUS  KEY      VERSION  VALUE\n0  ok      a              …  1\n1  ok      b              …  2\n2  miss    missing        -  -\n-- itemwise: 2 ok, 1 miss",
         "reproducible": false
       }
     ],
@@ -1560,7 +1560,7 @@
       },
       {
         "in": "strata command run --command-json '{\"keys\":[\"YQ==\",\"Yg==\"],\"type\":\"kv_batch_get\"}'",
-        "out": "#  STATUS  KEY  VERSION  VALUE\n0  ok      a          0  1\n1  ok      b          0  2",
+        "out": "#  STATUS  KEY  VERSION  VALUE\n0  ok      a          …  1\n1  ok      b          …  2",
         "reproducible": false
       }
     ],
@@ -1697,7 +1697,7 @@
       },
       {
         "in": "strata kv sample",
-        "out": "KEY  VERSION  VALUE\na          0  1\nb          0  2\nc          0  3",
+        "out": "KEY  VERSION  VALUE\na          …  1\nb          …  2\nc          …  3",
         "reproducible": false
       }
     ],
@@ -1714,7 +1714,7 @@
       },
       {
         "in": "strata kv scan",
-        "out": "KEY  VERSION  VALUE\na          0  1\nb          0  2",
+        "out": "KEY  VERSION  VALUE\na          …  1\nb          …  2",
         "reproducible": false
       }
     ],
@@ -1828,7 +1828,7 @@
       },
       {
         "in": "strata command run --command-json '{\"collection\":\"docs\",\"keys\":[\"a\",\"b\"],\"type\":\"vector_batch_get\"}'",
-        "out": "#  STATUS  KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA\n0  ok      a          0                1  [1.0,0.0,0.0]  -\n1  ok      b          0                1  [0.0,1.0,0.0]  -",
+        "out": "#  STATUS  KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA\n0  ok      a          …                1  [1.0,0.0,0.0]  -\n1  ok      b          …                1  [0.0,1.0,0.0]  -",
         "reproducible": false
       }
     ],
@@ -2043,7 +2043,7 @@
       },
       {
         "in": "strata vector get docs a",
-        "out": "key              a\nvector_revision  1\nversion          0\nembedding        [1.0,0.0,0.0]\nmetadata         -",
+        "out": "key              a\nvector_revision  1\nversion          …\nembedding        [1.0,0.0,0.0]\nmetadata         -",
         "reproducible": false
       },
       {
@@ -2126,7 +2126,7 @@
       },
       {
         "in": "strata vector get docs a",
-        "out": "key              a\nvector_revision  2\nversion          0\nembedding        [1.0,0.0,0.0]\nmetadata         {\"tag\":\"z\"}",
+        "out": "key              a\nvector_revision  2\nversion          …\nembedding        [1.0,0.0,0.0]\nmetadata         {\"tag\":\"z\"}",
         "reproducible": false
       }
     ],
@@ -2170,7 +2170,7 @@
       },
       {
         "in": "strata vector sample docs",
-        "out": "KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA\na          0                1  [1.0,0.0,0.0]  -\nb          0                1  [0.0,1.0,0.0]  -",
+        "out": "KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA\na          …                1  [1.0,0.0,0.0]  -\nb          …                1  [0.0,1.0,0.0]  -",
         "reproducible": false
       }
     ],
@@ -2192,7 +2192,7 @@
       },
       {
         "in": "strata vector scan docs",
-        "out": "KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA\na          0                1  [1.0,0.0,0.0]  -\nb          0                1  [0.0,1.0,0.0]  -",
+        "out": "KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA\na          …                1  [1.0,0.0,0.0]  -\nb          …                1  [0.0,1.0,0.0]  -",
         "reproducible": false
       }
     ],

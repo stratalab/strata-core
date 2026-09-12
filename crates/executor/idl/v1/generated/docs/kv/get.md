@@ -17,8 +17,11 @@ Read a value back; a missing key returns nothing.
 
 ```console
 $ strata kv put greeting hello
+created greeting
 $ strata kv get greeting
+hello
 $ strata kv get absent
+(nil)
 ```
 
 ### Wire

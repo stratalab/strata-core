@@ -17,9 +17,20 @@ Read the ontology's status.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph ontology define-object-type g person
+created object type person in g
 $ strata graph ontology get g
+graph         g
+status        draft
+version       …
+object_types
+  NAME    PROPERTIES
+  person  -
+link_types    -
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

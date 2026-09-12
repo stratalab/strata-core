@@ -300,6 +300,7 @@ install.sh and brew caveats. One source generates all of these strings (§7).
 
 One command an agent or human runs when anything is off:
 
+<!-- illustrative -->
 ```
 $ strata doctor --json
 { "binary": "1.0.0", "platform": "linux-x86_64", "home": "~/.strata", "path_ok": true,

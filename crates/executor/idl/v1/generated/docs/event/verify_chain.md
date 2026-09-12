@@ -17,7 +17,12 @@ Verify the integrity of the event hash chain.
 
 ```console
 $ strata event append user.created {"id":1}
+appended user.created #0
 $ strata event verify-chain
+valid          true
+length         1
+first_invalid  -
+error          -
 ```
 
 ### Wire

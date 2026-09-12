@@ -9,12 +9,13 @@
 //! with a *different* sentinel substituted for the context-dependent fields
 //! (versions, timestamps, ids, host memory, tempdir paths, model-cache state).
 //! If the two renders agree, none of those fields reached the output — it is
-//! reproducible, and the render equals the real one. The stored text is always
-//! the first masked render, so the artifact is byte-identical on every machine
-//! and run; the `reproducible` flag tells a consumer whether that text is the
-//! literal output or a shape with placeholders it should not treat as exact. A
-//! guard keeps the committed file in lockstep with a fresh replay; an `--ignored`
-//! test writes it.
+//! reproducible, and the stored text is that render, equal to the real one.
+//! When they disagree, the spans where they disagree are exactly the volatile
+//! values, so the stored text is the render with those spans elided to `…`
+//! (#3314 S5) and `reproducible` is false. Either way the artifact is
+//! byte-identical on every machine and run, and nothing in it claims to be
+//! output the binary never printed. A guard keeps the committed file in
+//! lockstep with a fresh replay; an `--ignored` test writes it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -158,14 +159,29 @@ fn mask_volatile(value: &mut Value, variant: u8) {
 /// differently between them — the signal `render_step` reads. The two must
 /// stay different through every presentation a declaration can apply, and a
 /// presentation may drop precision (a size rounds to its unit; a date once
-/// showed whole seconds), so the numeric sentinels sit a million apart rather
-/// than one unit — `0` and `1` micros both read `1970-01-01 00:00:00 UTC`
-/// under that date form, which passed an event list off as reproducible.
+/// showed whole seconds), so the numeric sentinels sit far apart rather than
+/// one unit — `0` and `1` micros both read `1970-01-01 00:00:00 UTC` under
+/// that date form, which passed an event list off as reproducible.
 fn mask_leaf(value: &mut Value, variant: u8) {
     match value {
-        Value::Number(_) => *value = Value::from(u64::from(variant) * 1_000_000),
+        // The pair is chosen so that a value which *does* reach the output
+        // renders wholly differently, not a character apart: as a count the
+        // digits differ and so does their number, as an instant both the date
+        // and the time differ, as a byte size both the number and the unit do,
+        // as a string not one token survives. A closer pair (0 and 1, say)
+        // still decides reproducibility correctly, but leaves the elision in
+        // `render_step` with only one differing character to go on — and the
+        // rest of the sentinel, a 1970 date or the word `masked`, would stand
+        // in the docs as though the binary had printed it (#3314 S5).
+        Value::Number(_) => {
+            *value = Value::from(if variant == 0 {
+                0
+            } else {
+                1_700_000_000_000_000_u64
+            });
+        }
         Value::String(_) => {
-            *value = Value::from(if variant == 0 { "masked" } else { "masked-alt" });
+            *value = Value::from(if variant == 0 { "masked" } else { "elided" });
         }
         Value::Bool(_) => *value = Value::from(variant != 0),
         Value::Array(items) => items.iter_mut().for_each(|item| mask_leaf(item, variant)),
@@ -187,8 +203,130 @@ fn render_step(step: &CapturedStep) -> (String, bool) {
     let mut variant_b = step.wire_output.clone();
     mask_volatile(&mut variant_b, 1);
     let render_a = render_output(step, &variant_a);
-    let reproducible = render_a == render_output(step, &variant_b);
-    (render_a, reproducible)
+    let render_b = render_output(step, &variant_b);
+    if render_a == render_b {
+        return (render_a, true);
+    }
+    (elide_varying(&render_a, &render_b), false)
+}
+
+/// The placeholder standing in for a value that varies by run or by machine.
+/// One character, so it costs a column instead of a line, and visibly not
+/// something the binary prints (#3314 S5) — the alternative is publishing a
+/// sentinel (`masked`, an epoch-0 date, version `0`) as though it were real
+/// output, which is the exact failure R7 exists to prevent.
+const VARIES: char = '…';
+
+/// Elides the text that differs between the two masked renders. Because the
+/// two renders differ *only* where a volatile field reached the output, what
+/// differs is precisely what a consumer must not treat as exact — no guessing,
+/// no pattern matching against the values themselves. Line-wise while the two
+/// renders agree on line count (the common case: a table whose cells vary),
+/// whole-string when a volatile value changed the shape itself.
+fn elide_varying(a: &str, b: &str) -> String {
+    let a_lines: Vec<&str> = a.lines().collect();
+    let b_lines: Vec<&str> = b.lines().collect();
+    if a_lines.len() != b_lines.len() {
+        return elide_span(a, b);
+    }
+    a_lines
+        .iter()
+        .zip(&b_lines)
+        .map(|(x, y)| elide_line(x, y))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One line: keeps every token the two renders agree on and replaces each
+/// token they disagree on with [`VARIES`], padded to the width it replaced.
+/// The unit is the whitespace-delimited token because that is the human
+/// renderer's own unit — a table cell, a label, a value — so a varying field
+/// never leaves half a sentinel behind the way a character-span diff does
+/// (two instants a second apart share every character but one). Spacing comes
+/// from `a`: a sentinel's width shifts the padding of every column after it,
+/// and that shift is an artifact of masking, not information.
+fn elide_line(a: &str, b: &str) -> String {
+    let (a_tokens, b_tokens) = (split_tokens(a), split_tokens(b));
+    if a_tokens.len() != b_tokens.len() {
+        return elide_span(a, b);
+    }
+    // A column-aligned line (one a table or a label/value pair produced) holds
+    // its alignment: the elision is padded to the width it replaced so the
+    // columns after it stay put. A prose line has nothing to align to, so its
+    // elision closes up rather than leaving a gap mid-sentence.
+    let aligned = a_tokens
+        .iter()
+        .skip(1)
+        .any(|(separator, _)| separator.chars().count() >= 2);
+    let mut out = String::with_capacity(a.len());
+    for ((separator, a_token), (_, b_token)) in a_tokens.iter().zip(&b_tokens) {
+        out.push_str(separator);
+        if a_token == b_token {
+            out.push_str(a_token);
+        } else {
+            out.push(VARIES);
+            if aligned {
+                out.extend(std::iter::repeat_n(
+                    ' ',
+                    a_token.chars().count().saturating_sub(1),
+                ));
+            }
+        }
+    }
+    // The renderer never emits trailing whitespace, so padding that runs to the
+    // end of a line is padding this function added.
+    out.trim_end().to_owned()
+}
+
+/// Splits a line into (leading whitespace, token) pairs. Rebuilding from them
+/// in order reproduces the line exactly, which is what lets [`elide_line`]
+/// swap one token without disturbing the rest.
+fn split_tokens(line: &str) -> Vec<(&str, &str)> {
+    let mut tokens = Vec::new();
+    let mut rest = line;
+    while !rest.is_empty() {
+        let break_at = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        let (separator, after) = rest.split_at(break_at);
+        if after.is_empty() {
+            break;
+        }
+        let break_at = after.find(char::is_whitespace).unwrap_or(after.len());
+        let (token, remainder) = after.split_at(break_at);
+        tokens.push((separator, token));
+        rest = remainder;
+    }
+    tokens
+}
+
+/// The fallback when the two renders do not line up token for token — a
+/// volatile value that changed the output's shape, not just a cell. Keeps what
+/// they share at each end and elides everything between, which over-elides
+/// rather than claiming text it cannot prove is stable.
+fn elide_span(a: &str, b: &str) -> String {
+    if a == b {
+        return a.to_owned();
+    }
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let prefix = a_chars
+        .iter()
+        .zip(&b_chars)
+        .take_while(|(x, y)| x == y)
+        .count();
+    let headroom = a_chars.len().min(b_chars.len()) - prefix;
+    let suffix = a_chars
+        .iter()
+        .rev()
+        .zip(b_chars.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count()
+        .min(headroom);
+    let mut out: String = a_chars[..prefix].iter().collect();
+    out.push(VARIES);
+    out.extend(&a_chars[a_chars.len() - suffix..]);
+    out.trim_end().to_owned()
 }
 
 fn build() -> CommandExamples {
@@ -236,6 +374,136 @@ mod tests {
             "command-examples.json is stale; regenerate with \
              `cargo test -p strata-cli --lib command_examples -- --ignored regenerate`"
         );
+    }
+
+    /// The number of example steps whose output exposes a run- or
+    /// machine-dependent value. Shrink-only (#3314 S5): a step that starts
+    /// exposing one is a regression in what the docs can show exactly, and a
+    /// step that stops exposing one lowers the ceiling in the same PR. Nothing
+    /// derives this number, so it is written down — but only here, and the
+    /// assertion below names both directions.
+    const NON_REPRODUCIBLE_CEILING: usize = 50;
+
+    fn non_reproducible(examples: &CommandExamples) -> usize {
+        examples
+            .commands
+            .values()
+            .flatten()
+            .filter(|line| !line.reproducible)
+            .count()
+    }
+
+    #[test]
+    fn non_reproducible_examples_only_ever_shrink() {
+        let committed: CommandExamples = serde_json::from_str(
+            &std::fs::read_to_string(spec_path()).expect("command-examples.json exists"),
+        )
+        .expect("command-examples.json parses");
+        let count = non_reproducible(&committed);
+        assert!(
+            count <= NON_REPRODUCIBLE_CEILING,
+            "{count} example steps expose a run- or machine-dependent value, up from \
+             {NON_REPRODUCIBLE_CEILING}; a step whose output the docs could show exactly \
+             no longer can — mask the field or drop it from the output, do not raise the ceiling"
+        );
+        assert_eq!(
+            count, NON_REPRODUCIBLE_CEILING,
+            "only {count} example steps are non-reproducible now — lower \
+             NON_REPRODUCIBLE_CEILING to {count} in this PR so the gain is held"
+        );
+    }
+
+    #[test]
+    fn renders_that_agree_are_kept_character_for_character() {
+        assert_eq!(
+            elide_line("created config", "created config"),
+            "created config"
+        );
+        assert_eq!(
+            elide_varying("a\nb\nc", "a\nb\nc"),
+            "a\nb\nc",
+            "nothing varies, so nothing is elided"
+        );
+    }
+
+    #[test]
+    fn a_varying_cell_keeps_the_width_of_the_column_it_replaces() {
+        let a = "a          0  1";
+        let elided = elide_line(a, "a          1700000000000000  1");
+        assert_eq!(elided, "a          …  1", "the VALUE column must not shift");
+        assert_eq!(elided.chars().count(), a.chars().count());
+    }
+
+    #[test]
+    fn every_part_of_an_instant_is_elided_not_just_the_digit_that_moved() {
+        // The whole point of the widely-separated sentinel pair: a reader must
+        // not be shown `1970-01-01` as though the binary printed it.
+        let elided = elide_line(
+            "committed  1970-01-01 00:00:00.000000 UTC",
+            "committed  2023-11-14 22:13:20.000000 UTC",
+        );
+        assert_eq!(elided, "committed  …          …               UTC");
+        assert!(!elided.contains("1970") && !elided.contains("00:00"));
+    }
+
+    #[test]
+    fn a_column_that_only_moved_because_of_masking_is_left_alone() {
+        // The sentinel is 16 digits wide, so variant B's table is wider. That
+        // shift is an artifact of masking; every token still agrees.
+        assert_eq!(
+            elide_line("KEY  VERSION  VALUE", "KEY  VERSION           VALUE"),
+            "KEY  VERSION  VALUE"
+        );
+    }
+
+    #[test]
+    fn a_value_at_the_end_of_a_line_leaves_no_trailing_padding() {
+        assert_eq!(
+            elide_line("version  masked", "version  elided"),
+            "version  …"
+        );
+        assert_eq!(
+            elide_line(
+                "exported 1 row to masked (1.9 kB)",
+                "exported 1 row to elided (1.9 kB)"
+            ),
+            "exported 1 row to … (1.9 kB)",
+            "prose closes up; only a column-aligned line keeps the width"
+        );
+    }
+
+    #[test]
+    fn each_varying_token_is_elided_on_its_own() {
+        assert_eq!(
+            elide_line("branch a  active  gen 1", "branch b  active  gen 2"),
+            "branch …  active  gen …",
+            "`active` is the same in both renders, so it is not a guess"
+        );
+    }
+
+    #[test]
+    fn a_volatile_value_that_changed_the_shape_elides_across_lines() {
+        assert_eq!(
+            elide_varying("paths\n  /tmp/a\n  /tmp/b", "paths\n  /tmp/c"),
+            "paths\n  /tmp/…"
+        );
+    }
+
+    #[test]
+    fn a_line_whose_token_count_moved_falls_back_to_a_span() {
+        assert_eq!(elide_line("branch a", "branch a b"), "branch a…");
+    }
+
+    #[test]
+    fn a_size_elides_its_unit_along_with_its_number() {
+        assert_eq!(elide_line("size 1 B", "size 1.7 PB"), "size … …");
+    }
+
+    #[test]
+    fn eliding_respects_character_boundaries() {
+        assert_eq!(elide_line("café 1", "café 2"), "café …");
+        assert_eq!(elide_line("1 café", "2 café"), "… café");
+        assert_eq!(elide_span("café 1", "café 2"), "café …");
     }
 
     #[test]

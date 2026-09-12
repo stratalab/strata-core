@@ -17,10 +17,24 @@ Define a link (edge) type between two object types.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph ontology define-object-type g person
+created object type person in g
 $ strata graph ontology define-link-type g knows person person
+created link type knows in g
 $ strata graph ontology get g
+graph         g
+status        draft
+version       …
+object_types
+  NAME    PROPERTIES
+  person  -
+link_types
+  CARDINALITY  NAME   PROPERTIES  SOURCE  TARGET
+  -            knows  -           person  person
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

@@ -17,11 +17,17 @@ Remove an edge.
 
 ```console
 $ strata graph create social
+created graph social
 $ strata graph add-node social alice
+created node alice in social
 $ strata graph add-node social bob
+created node bob in social
 $ strata graph add-edge social alice knows bob
+created edge alice -[knows]-> bob in social
 $ strata graph remove-edge social alice knows bob
+deleted edge alice -[knows]-> bob in social
 $ strata graph get-edge social alice knows bob
+(nil)
 ```
 
 ### Wire

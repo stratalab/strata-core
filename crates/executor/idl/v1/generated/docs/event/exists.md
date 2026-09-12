@@ -17,8 +17,11 @@ Check whether an event sequence exists.
 
 ```console
 $ strata event append user.created {"id":1}
+appended user.created #0
 $ strata event exists 0
+true
 $ strata event exists 999
+false
 ```
 
 ### Wire

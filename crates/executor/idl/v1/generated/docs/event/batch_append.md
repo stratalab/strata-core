@@ -17,7 +17,11 @@ Append many events in one commit.
 
 ```console
 $ strata command run --command-json '{"entries":[{"event_type":"user.created","payload":{"id":1}},{"event_type":"user.updated","payload":{"id":2}}],"type":"event_batch_append"}'
+#  STATUS  EFFECT   EVENT_TYPE    SEQUENCE
+0  ok      created  user.created         0
+1  ok      created  user.updated         1
 $ strata event count
+2
 ```
 
 ### Wire

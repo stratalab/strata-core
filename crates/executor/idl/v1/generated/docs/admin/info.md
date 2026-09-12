@@ -17,7 +17,19 @@ Read database identity and catalog counts.
 
 ```console
 $ strata info
+target          cache
+version         …
+durable         false
+default_branch  default
+branch_count    1
+space_count     1
+memory_budget
+  source       derived_from_host
+  total        … …
+  usable_host  … …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 
