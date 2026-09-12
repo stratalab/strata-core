@@ -415,13 +415,7 @@ fn render_wire(wire: &Wire, cells: &mut Cells, invariants: &mut Vec<String>) {
         cells.insert(key("human"), render(Format::Human));
         cells.insert(key("raw"), render(Format::Raw));
         let expected = serde_json::json!({ "error": wire.value });
-        check_envelopes(
-            &key,
-            &render(Format::Json),
-            &render(Format::Pretty),
-            &expected,
-            invariants,
-        );
+        check_envelopes(&key, &render(Format::Json), &expected, invariants);
         return;
     }
     let output = typed(&wire.command, &wire.fixture, &wire.value);
@@ -442,24 +436,24 @@ fn render_wire(wire: &Wire, cells: &mut Cells, invariants: &mut Vec<String>) {
     if wire.declared {
         for (name, format) in [("human", Format::Human), ("raw", Format::Raw)] {
             let rendered = render(format);
-            cells.insert(key(name), rendered.stdout);
+            // A cell is text: a `--raw` read of bytes that are not text
+            // reaches a UTF-8 file, and the playground, as its escape (#3116).
+            cells.insert(key(name), rendered.stdout.text());
             if !rendered.stderr.is_empty() {
                 cells.insert(key(&format!("{name} · stderr")), rendered.stderr);
             }
         }
     }
     let json = render(Format::Json);
-    let pretty = render(Format::Pretty);
-    for (name, rendered) in [("json", &json), ("pretty", &pretty)] {
-        if !rendered.stderr.is_empty() {
-            invariants.push(format!("{}: wrote to stderr", key(name)));
-        }
+    if !json.stderr.is_empty() {
+        invariants.push(format!("{}: wrote to stderr", key("json")));
     }
     // The binary newline-terminates an envelope; the invariant is about the
     // envelope itself.
     let envelope = |rendered: &strata_cli::Rendered| {
         rendered
             .stdout
+            .text()
             .strip_suffix('\n')
             .unwrap_or_else(|| panic!("{}: not newline-terminated", key("json")))
             .to_owned()
@@ -467,7 +461,6 @@ fn render_wire(wire: &Wire, cells: &mut Cells, invariants: &mut Vec<String>) {
     check_envelopes(
         &key,
         &envelope(&json),
-        &envelope(&pretty),
         &serde_json::to_value(&output).expect("output serializes"),
         invariants,
     );
@@ -478,19 +471,12 @@ fn render_wire(wire: &Wire, cells: &mut Cells, invariants: &mut Vec<String>) {
 fn check_envelopes(
     key: &dyn Fn(&str) -> String,
     json: &str,
-    pretty: &str,
     expected: &Value,
     invariants: &mut Vec<String>,
 ) {
     let parsed: Value = serde_json::from_str(json).expect("json cell parses");
     if &parsed != expected || json.contains('\n') {
         invariants.push(format!("{}: not the compact wire record", key("json")));
-    }
-    if pretty != serde_json::to_string_pretty(expected).expect("wire pretty-prints") {
-        invariants.push(format!(
-            "{}: not the pretty-printed wire record",
-            key("pretty")
-        ));
     }
 }
 

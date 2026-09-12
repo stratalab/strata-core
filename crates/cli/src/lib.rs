@@ -293,7 +293,13 @@ fn execute(cli: Cli) -> Result<i32, CliError> {
         }
 
         let scope = context.scope_with_overrides(None, None);
-        execute_parsed_command(&connection, command, &scope, format)?;
+        execute_parsed_command(
+            &connection,
+            command,
+            &scope,
+            format,
+            render::Channel::OneShot,
+        )?;
         connection.close()?;
         return Ok(0);
     }
@@ -384,8 +390,13 @@ fn run_clone(args: options::CloneArgs, format: options::Format) -> Result<i32, C
             let mut progress_error = None;
             let mut on_progress = |event| {
                 if progress_error.is_none() {
-                    progress_error =
-                        print_output(&event, &Invocation::none(), options::Format::Json).err();
+                    progress_error = print_output(
+                        &event,
+                        &Invocation::none(),
+                        options::Format::Json,
+                        render::Channel::OneShot,
+                    )
+                    .err();
                 }
             };
             let output = executor.execute_hub_clone_with_progress(
@@ -412,7 +423,7 @@ fn run_clone(args: options::CloneArgs, format: options::Format) -> Result<i32, C
             (invocation, executor.execute(command)?)
         }
     };
-    print_output(&output, &invocation, format)?;
+    print_output(&output, &invocation, format, render::Channel::OneShot)?;
     executor.close()?;
     Ok(0)
 }
@@ -448,7 +459,7 @@ fn run_hub(args: options::HubArgs, format: options::Format) -> Result<i32, CliEr
     };
     let invocation = Invocation::of(&command, format)?;
     let output = executor.execute(command)?;
-    print_output(&output, &invocation, format)?;
+    print_output(&output, &invocation, format, render::Channel::OneShot)?;
     executor.close()?;
     Ok(0)
 }
@@ -558,7 +569,7 @@ fn run_ipc_stop(
     let command = Command::IpcStop {};
     let invocation = Invocation::of(&command, format)?;
     let output = connection.execute(command)?;
-    print_output(&output, &invocation, format)?;
+    print_output(&output, &invocation, format, render::Channel::OneShot)?;
     connection.close()?;
     Ok(0)
 }
@@ -620,6 +631,7 @@ pub(crate) fn execute_parsed_command(
     command: options::TopCommand,
     scope: &Scope,
     format: options::Format,
+    channel: render::Channel,
 ) -> Result<(), CliError> {
     if let Some(name) = deferred_top_command(&command) {
         return Err(deferred_command(name));
@@ -742,7 +754,7 @@ pub(crate) fn execute_parsed_command(
         }
     };
 
-    print_output(&output, &invocation, format)?;
+    print_output(&output, &invocation, format, channel)?;
     Ok(())
 }
 
@@ -3347,10 +3359,8 @@ mod tests {
         assert_eq!(format("--json kv get k"), Some(Format::Json));
         assert_eq!(format("kv get k --json"), Some(Format::Json));
         assert_eq!(format("--raw kv get k"), Some(Format::Raw));
-        assert_eq!(
-            format("--output-format pretty kv get k"),
-            Some(Format::Pretty)
-        );
+        // Q5 (#3314 S4): the hidden flag is gone; so is the format it named.
+        assert!(command_from_line("--output-format pretty kv get k", None, None).is_err());
         // Conflicting flags are a parse error, as on the command line.
         assert!(command_from_line("--json --raw kv get k", None, None).is_err());
     }
@@ -3395,7 +3405,6 @@ mod tests {
             "--space s kv get k",
             "--json kv get k",
             "--raw kv get k",
-            "--output-format pretty kv get k",
             "--json",
         ] {
             assert_eq!(refusal(line), None, "{line} must not be refused");
@@ -3485,7 +3494,10 @@ mod tests {
             run(&mut executor, "kv put greeting hello"),
             "created greeting\n"
         );
-        assert_eq!(run(&mut executor, "--raw kv get greeting"), "hello\n");
+        // #3116: the stored value and nothing else — `run_line` answers one
+        // command the way the binary does, and a file must hold the bytes
+        // alone. A shared stream (the REPL, a pipe) adds its own separator.
+        assert_eq!(run(&mut executor, "--raw kv get greeting"), "hello");
         // A missed write is its stderr feedback line after an empty stdout,
         // in human and raw alike; `--json` keeps the envelope on stdout.
         assert_eq!(run(&mut executor, "kv delete nope"), "no such key: nope\n");
@@ -3645,7 +3657,7 @@ mod tests {
 
         // Machine-readable output: a prompt would corrupt the stream even with
         // a human watching.
-        for format in [Format::Json, Format::Pretty, Format::Raw] {
+        for format in [Format::Json, Format::Raw] {
             assert_eq!(
                 offerable_download(true, format, &tokenize, Some(&not_downloaded)),
                 None,
@@ -3849,7 +3861,8 @@ mod tests {
             Format::Human,
         )
         .expect("renders")
-        .stdout;
+        .stdout
+        .text();
         let size = table.trim_end().rsplit('\t').next().expect("a size column");
         assert!(
             size.ends_with(" MB"),

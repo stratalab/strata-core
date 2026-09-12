@@ -49,15 +49,12 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) space: Option<String>,
     /// Emit compact JSON.
-    #[arg(long, global = true, conflicts_with_all = ["raw", "format"])]
+    #[arg(long, global = true, conflicts_with = "raw")]
     pub(crate) json: bool,
     /// Shell-composable output: bare values, one per line, tab-separated
     /// fields; no header, hint or summary (a write prints its identity).
-    #[arg(long, global = true, conflicts_with_all = ["json", "format"])]
+    #[arg(long, global = true, conflicts_with = "json")]
     pub(crate) raw: bool,
-    /// Transitional output format flag.
-    #[arg(long = "output-format", value_enum, global = true, hide = true)]
-    pub(crate) format: Option<Format>,
     /// Command to run.
     #[command(subcommand)]
     pub(crate) command: Option<TopCommand>,
@@ -109,8 +106,6 @@ pub enum Format {
     Human,
     /// Compact JSON.
     Json,
-    /// Pretty-printed JSON.
-    Pretty,
     /// Script-friendly raw output.
     Raw,
 }
@@ -125,7 +120,7 @@ impl Cli {
         } else if self.json {
             Some(Format::Json)
         } else {
-            self.format
+            None
         }
     }
 

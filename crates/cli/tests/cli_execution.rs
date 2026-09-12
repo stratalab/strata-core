@@ -73,6 +73,61 @@ fn pipe(args: &[&str], script: &[u8]) -> Output {
 
 /// #3339: the CLI's own reports are not commands and have no declaration, so
 /// their rendering is only proven through the binary that prints them.
+/// #3116: bytes written through the CLI come back through the CLI.
+///
+/// The issue's own repro: three bytes that are not text, stored with
+/// `--file` and read back with `--raw`. Before S4 every output mode answered
+/// with base64 and nothing said so, which left no correct behaviour available
+/// to a caller — decode everything and genuine text corrupts, decode nothing
+/// and binary does.
+#[test]
+fn raw_reads_return_the_stored_bytes_verbatim() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db = db_arg(dir.path());
+    let payload = dir.path().join("payload.bin");
+    let bytes: [u8; 4] = [0x00, 0x01, 0xff, 0x0a];
+    std::fs::write(&payload, bytes).expect("write payload");
+
+    assert_ok(
+        &strata(&[
+            "--db",
+            &db,
+            "kv",
+            "put",
+            "raw",
+            "--file",
+            &payload.display().to_string(),
+        ]),
+        "kv put --file",
+    );
+
+    let read = strata(&["--db", &db, "--raw", "kv", "get", "raw"]);
+    assert_ok(&read, "--raw kv get");
+    assert_eq!(
+        read.stdout, bytes,
+        "the stored bytes, and nothing of the renderer's own"
+    );
+
+    // A reader still gets a labelled rendering, never a mangled one.
+    let human = strata(&["--db", &db, "kv", "get", "raw"]);
+    assert_ok(&human, "kv get");
+    assert_eq!(stdout(&human), "base64:AAH/Cg==\n");
+
+    // Text keeps working as a shell idiom: the value, with no newline added.
+    assert_ok(
+        &strata(&["--db", &db, "kv", "put", "greeting", "hello"]),
+        "kv put",
+    );
+    let text = strata(&["--db", &db, "--raw", "kv", "get", "greeting"]);
+    assert_ok(&text, "--raw kv get text");
+    assert_eq!(text.stdout, b"hello");
+
+    // A miss still writes nothing at all, and still exits 0 (Q9).
+    let missing = strata(&["--db", &db, "--raw", "kv", "get", "absent"]);
+    assert_ok(&missing, "--raw kv get absent");
+    assert!(missing.stdout.is_empty(), "{:?}", missing.stdout);
+}
+
 #[test]
 fn a_cli_report_prints_lines_not_json() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -190,7 +245,9 @@ fn raw_output_is_script_friendly() {
     );
     let get = strata(&["--db", &db, "--raw", "kv", "get", "r"]);
     assert_ok(&get, "raw get");
-    assert_eq!(stdout(&get), "v\n", "raw get must emit exactly the value");
+    // #3116: exactly the value — no newline of the renderer's own, so
+    // `--raw kv get k > file` is the file that was put.
+    assert_eq!(stdout(&get), "v", "raw get must emit exactly the value");
 }
 
 #[test]
@@ -471,9 +528,10 @@ fn piped_repl_refuses_session_arguments_on_a_line() {
 
 #[test]
 fn piped_repl_renders_each_line_in_the_format_its_flags_chose() {
-    // #3326: a line's `--json` / `--raw` / `--output-format` parsed and was
-    // dropped, every line rendering in the session's format. Each line now
-    // renders exactly what a one-shot with the same flags prints.
+    // #3326: a line's `--json` / `--raw` parsed and was dropped, every line
+    // rendering in the session's format. Each line now renders exactly what a
+    // one-shot with the same flags prints. (`--output-format` went with Q5 in
+    // #3314 S4: one way to choose a format, not two.)
     let dir = tempfile::tempdir().expect("tmp");
     let db = db_arg(dir.path());
     assert_ok(
@@ -488,17 +546,19 @@ fn piped_repl_renders_each_line_in_the_format_its_flags_chose() {
         assert_ok(&output, "one-shot read");
         stdout(&output)
     };
+    // A one-shot's raw answer is the stored value alone (#3116); a stream of
+    // lines separates its answers, so the raw line carries a newline the
+    // one-shot does not.
     let expected = [
         one_shot(&["--json"]),
-        one_shot(&["--raw"]),
+        format!("{}\n", one_shot(&["--raw"])),
         one_shot(&[]),
-        one_shot(&["--output-format", "pretty"]),
     ]
     .concat();
 
     let output = pipe(
         &["--db", &db],
-        b"--json kv get greeting\n--raw kv get greeting\nkv get greeting\n--output-format pretty kv get greeting\n",
+        b"--json kv get greeting\n--raw kv get greeting\nkv get greeting\n",
     );
     assert_ok(&output, "a format flag on a line is honoured, not an error");
     assert_eq!(stdout(&output), expected);
@@ -507,9 +567,11 @@ fn piped_repl_renders_each_line_in_the_format_its_flags_chose() {
 
 #[test]
 fn piped_repl_line_format_overrides_a_json_session() {
-    // #3326, the inverse: under `--json`, a line that asks for human or raw
-    // output gets it — for its answer and for its error alike — while lines
-    // that choose nothing keep the session's JSON.
+    // #3326, the inverse: under `--json`, a line that asks for raw output
+    // gets it — for its answer and for its error alike — while lines that
+    // choose nothing keep the session's JSON. (Since Q5 in #3314 S4 a line
+    // chooses `--json` or `--raw`; the hidden `--output-format`, and with it
+    // the only way to ask a line for human output, is gone.)
     let dir = tempfile::tempdir().expect("tmp");
     let db = db_arg(dir.path());
     assert_ok(
@@ -521,23 +583,25 @@ fn piped_repl_line_format_overrides_a_json_session() {
 
     let output = pipe(
         &["--db", &db, "--json"],
-        b"--output-format human kv get greeting\n--raw kv get greeting\nkv get greeting\n--output-format human branch get nope\nbranch get nope\n",
+        b"--raw kv get greeting\n--raw kv get greeting\nkv get greeting\n--raw branch get nope\nbranch get nope\n",
     );
     assert_eq!(
         output.status.code(),
         Some(1),
         "a failed line is a pipe error: {output:?}"
     );
+    // The two raw lines answer with the stored value; the stream separates
+    // them (#3116), and the session's JSON line keeps its envelope.
     assert_eq!(
         stdout(&output),
         format!("hello\nhello\n{}", stdout(&json_read))
     );
     let err = stderr(&output);
     let mut lines = err.lines();
-    let human = lines.next().expect("the human line's error");
+    let raw = lines.next().expect("the raw line's error");
     assert!(
-        human.starts_with("not_found.engine.branch:"),
-        "a human line's error is the human error line: {err}"
+        raw.starts_with("not_found.engine.branch:"),
+        "a raw line's error is the code-led line, not an envelope: {err}"
     );
     let envelope: serde_json::Value = serde_json::from_str(
         lines.last().expect("the json line's error"),
