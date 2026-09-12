@@ -134,7 +134,7 @@
       },
       {
         "in": "strata branch list",
-        "out": "{\"branch_id\":\"masked\",\"created_at\":null,\"deleted_at\":null,\"generation\":0,\"name\":\"default\",\"parent\":null,\"state_revision\":0,\"status\":\"active\"}\n{\"branch_id\":\"masked\",\"created_at\":0,\"deleted_at\":null,\"generation\":0,\"name\":\"feature\",\"parent\":null,\"state_revision\":0,\"status\":\"active\"}",
+        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           0\nfeature  -       active           0",
         "reproducible": false
       }
     ],
@@ -151,7 +151,7 @@
       },
       {
         "in": "strata branch list",
-        "out": "{\"branch_id\":\"masked\",\"created_at\":null,\"deleted_at\":null,\"generation\":0,\"name\":\"default\",\"parent\":null,\"state_revision\":0,\"status\":\"active\"}",
+        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           0",
         "reproducible": false
       }
     ],
@@ -198,7 +198,7 @@
       },
       {
         "in": "strata branch list",
-        "out": "{\"branch_id\":\"masked\",\"created_at\":null,\"deleted_at\":null,\"generation\":0,\"name\":\"default\",\"parent\":null,\"state_revision\":0,\"status\":\"active\"}\n{\"branch_id\":\"masked\",\"created_at\":0,\"deleted_at\":null,\"generation\":0,\"name\":\"experiment\",\"parent\":{\"branch_id\":\"masked\",\"fork_timestamp\":null,\"fork_version\":0,\"generation\":0,\"name\":\"default\"},\"state_revision\":0,\"status\":\"active\"}",
+        "out": "NAME        PARENT   STATUS  GENERATION\ndefault     -        active           0\nexperiment  default  active           0",
         "reproducible": false
       }
     ],
@@ -270,7 +270,7 @@
       },
       {
         "in": "strata branch list",
-        "out": "{\"branch_id\":\"masked\",\"created_at\":null,\"deleted_at\":null,\"generation\":0,\"name\":\"default\",\"parent\":null,\"state_revision\":0,\"status\":\"active\"}\n{\"branch_id\":\"masked\",\"created_at\":0,\"deleted_at\":null,\"generation\":0,\"name\":\"feature\",\"parent\":null,\"state_revision\":0,\"status\":\"active\"}",
+        "out": "NAME     PARENT  STATUS  GENERATION\ndefault  -       active           0\nfeature  -       active           0",
         "reproducible": false
       }
     ],
@@ -410,7 +410,7 @@
       },
       {
         "in": "strata event list",
-        "out": "{\"event\":{\"event_type\":\"user.created\",\"hash\":\"masked\",\"payload\":{\"id\":1},\"previous_hash\":\"masked\",\"sequence\":0,\"timestamp\":0},\"timestamp\":0,\"version\":0}\n{\"event\":{\"event_type\":\"user.updated\",\"hash\":\"masked\",\"payload\":{\"id\":2},\"previous_hash\":\"masked\",\"sequence\":1,\"timestamp\":0},\"timestamp\":0,\"version\":0}",
+        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  1970-01-01 00:00:00.000000 UTC  {\"id\":1}\n       1  user.updated  1970-01-01 00:00:00.000000 UTC  {\"id\":2}",
         "reproducible": false
       }
     ],
@@ -427,7 +427,7 @@
       },
       {
         "in": "strata event range 0 --direction forward",
-        "out": "{\"event\":{\"event_type\":\"user.created\",\"hash\":\"masked\",\"payload\":{\"id\":1},\"previous_hash\":\"masked\",\"sequence\":0,\"timestamp\":0},\"timestamp\":0,\"version\":0}\n{\"event\":{\"event_type\":\"user.updated\",\"hash\":\"masked\",\"payload\":{\"id\":2},\"previous_hash\":\"masked\",\"sequence\":1,\"timestamp\":0},\"timestamp\":0,\"version\":0}",
+        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  1970-01-01 00:00:00.000000 UTC  {\"id\":1}\n       1  user.updated  1970-01-01 00:00:00.000000 UTC  {\"id\":2}",
         "reproducible": false
       }
     ],
@@ -444,7 +444,7 @@
       },
       {
         "in": "strata event range-time 0 --direction forward",
-        "out": "{\"event\":{\"event_type\":\"user.created\",\"hash\":\"masked\",\"payload\":{\"id\":1},\"previous_hash\":\"masked\",\"sequence\":0,\"timestamp\":0},\"timestamp\":0,\"version\":0}\n{\"event\":{\"event_type\":\"user.updated\",\"hash\":\"masked\",\"payload\":{\"id\":2},\"previous_hash\":\"masked\",\"sequence\":1,\"timestamp\":0},\"timestamp\":0,\"version\":0}",
+        "out": "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n       0  user.created  1970-01-01 00:00:00.000000 UTC  {\"id\":1}\n       1  user.updated  1970-01-01 00:00:00.000000 UTC  {\"id\":2}",
         "reproducible": false
       }
     ],
@@ -510,7 +510,7 @@
       },
       {
         "in": "strata graph bfs g a",
-        "out": "{\n  \"depths\": {\n    \"a\": 0,\n    \"b\": 1,\n    \"c\": 2\n  },\n  \"edges\": [\n    {\n      \"dst\": \"b\",\n      \"edge_type\": \"knows\",\n      \"src\": \"a\",\n      \"weight\": 1.0\n    },\n    {\n      \"dst\": \"c\",\n      \"edge_type\": \"knows\",\n      \"src\": \"b\",\n      \"weight\": 1.0\n    }\n  ],\n  \"graph\": \"g\",\n  \"start\": \"a\",\n  \"truncated\": false,\n  \"visited\": [\n    \"a\",\n    \"b\",\n    \"c\"\n  ]\n}",
+        "out": "NODE  DEPTH\na         0\nb         1\nc         2",
         "reproducible": true
       }
     ],
@@ -547,7 +547,7 @@
       },
       {
         "in": "strata graph cdlp g",
-        "out": "{\n  \"graph\": \"g\",\n  \"labels\": {\n    \"a\": \"a\",\n    \"b\": \"b\",\n    \"c\": \"a\"\n  }\n}",
+        "out": "NODE  LABEL\na     a\nb     b\nc     a",
         "reproducible": true
       }
     ],
@@ -584,7 +584,7 @@
       },
       {
         "in": "strata graph lcc g",
-        "out": "{\n  \"coefficients\": {\n    \"a\": 0.0,\n    \"b\": 0.0,\n    \"c\": 0.0\n  },\n  \"graph\": \"g\"\n}",
+        "out": "NODE  COEFFICIENT\na             0.0\nb             0.0\nc             0.0",
         "reproducible": true
       }
     ],
@@ -621,7 +621,7 @@
       },
       {
         "in": "strata graph pagerank g",
-        "out": "{\n  \"graph\": \"g\",\n  \"iterations\": 20,\n  \"personalized\": false,\n  \"ranks\": {\n    \"a\": 0.18441687554671377,\n    \"b\": 0.3411710064820743,\n    \"c\": 0.4744121179712114\n  }\n}",
+        "out": "NODE  RANK\nc     0.474412\nb     0.341171\na     0.184417",
         "reproducible": true
       }
     ],
@@ -658,7 +658,7 @@
       },
       {
         "in": "strata graph sssp g a",
-        "out": "{\n  \"direction\": \"outgoing\",\n  \"distances\": {\n    \"a\": 0.0,\n    \"b\": 1.0,\n    \"c\": 2.0\n  },\n  \"graph\": \"g\",\n  \"source\": \"a\"\n}",
+        "out": "NODE  DISTANCE\na          0.0\nb          1.0\nc          2.0",
         "reproducible": true
       }
     ],
@@ -695,7 +695,7 @@
       },
       {
         "in": "strata graph wcc g",
-        "out": "{\n  \"component_count\": 1,\n  \"components\": {\n    \"a\": \"a\",\n    \"b\": \"a\",\n    \"c\": \"a\"\n  },\n  \"graph\": \"g\"\n}",
+        "out": "NODE  COMPONENT\na     a\nb     a\nc     a",
         "reproducible": true
       }
     ],
@@ -754,7 +754,7 @@
       },
       {
         "in": "strata command run --command-json '{\"target\":{\"key\":\"user:1\",\"primitive\":\"kv\",\"space\":\"default\"},\"type\":\"graph_bindings_for_entity\"}'",
-        "out": "{\"binding\":{\"target\":{\"key\":\"user:1\",\"primitive\":\"kv\",\"space\":\"default\"}},\"graph\":\"kb\",\"node_id\":\"ada\",\"timestamp\":0,\"version\":0}",
+        "out": "GRAPH  NODE_ID  PRIMITIVE  SPACE    KEY     VERSION\nkb     ada      kv         default  user:1        0",
         "reproducible": false
       }
     ],
@@ -952,8 +952,8 @@
       },
       {
         "in": "strata graph neighbors social alice --direction outgoing",
-        "out": "{\"direction\":\"outgoing\",\"dst\":\"bob\",\"edge\":{\"dst\":\"bob\",\"edge_type\":\"knows\",\"graph\":\"social\",\"src\":\"alice\",\"timestamp\":0,\"version\":0,\"weight\":1.0},\"edge_type\":\"knows\",\"graph\":\"social\",\"node\":{\"graph\":\"social\",\"node_id\":\"bob\",\"timestamp\":0,\"version\":0},\"node_id\":\"bob\",\"src\":\"alice\"}",
-        "reproducible": false
+        "out": "NODE_ID  DIRECTION  EDGE_TYPE  SRC    DST  WEIGHT\nbob      outgoing   knows      alice  bob     1.0",
+        "reproducible": true
       }
     ],
     "graph.node.add": [
@@ -1013,7 +1013,7 @@
       },
       {
         "in": "strata graph list-nodes social",
-        "out": "{\"graph\":\"social\",\"node_id\":\"alice\",\"timestamp\":0,\"version\":0}\n{\"graph\":\"social\",\"node_id\":\"bob\",\"timestamp\":0,\"version\":0}",
+        "out": "NODE_ID  OBJECT_TYPE  VERSION\nalice    -                  0\nbob      -                  0",
         "reproducible": false
       }
     ],
@@ -1057,7 +1057,7 @@
       },
       {
         "in": "strata graph nodes-by-type g person",
-        "out": "{\"graph\":\"g\",\"node_id\":\"a\",\"object_type\":\"person\",\"timestamp\":0,\"version\":0}\n{\"graph\":\"g\",\"node_id\":\"b\",\"object_type\":\"person\",\"timestamp\":0,\"version\":0}",
+        "out": "NODE_ID  OBJECT_TYPE  VERSION\na        person             0\nb        person             0",
         "reproducible": false
       }
     ],
@@ -1223,7 +1223,7 @@
       },
       {
         "in": "strata graph sample g",
-        "out": "{\"graph\":\"g\",\"node_id\":\"a\",\"timestamp\":0,\"version\":0}\n{\"graph\":\"g\",\"node_id\":\"b\",\"timestamp\":0,\"version\":0}",
+        "out": "NODE_ID  OBJECT_TYPE  VERSION\na        -                  0\nb        -                  0",
         "reproducible": false
       }
     ],
@@ -1405,7 +1405,7 @@
       },
       {
         "in": "strata json index list",
-        "out": "{\"created_timestamp\":3,\"created_version\":3,\"field_path\":\"name\",\"index_type\":\"tag\",\"name\":\"by_name\",\"space\":\"default\"}",
+        "out": "NAME     FIELD_PATH  INDEX_TYPE  SPACE    CREATED_VERSION\nby_name  name        tag         default                3",
         "reproducible": true
       }
     ],
@@ -1434,7 +1434,7 @@
       },
       {
         "in": "strata json index list",
-        "out": "{\"created_timestamp\":3,\"created_version\":3,\"field_path\":\"name\",\"index_type\":\"tag\",\"name\":\"by_name\",\"space\":\"default\"}",
+        "out": "NAME     FIELD_PATH  INDEX_TYPE  SPACE    CREATED_VERSION\nby_name  name        tag         default                3",
         "reproducible": true
       }
     ],
@@ -1478,7 +1478,7 @@
       },
       {
         "in": "strata json sample",
-        "out": "{\"document_version\":0,\"key\":\"a\",\"timestamp\":0,\"value\":{\"v\":1},\"version\":0}\n{\"document_version\":0,\"key\":\"b\",\"timestamp\":0,\"value\":{\"v\":2},\"version\":0}\n{\"document_version\":0,\"key\":\"c\",\"timestamp\":0,\"value\":{\"v\":3},\"version\":0}",
+        "out": "KEY  VERSION  VALUE\na          0  {\"v\":1}\nb          0  {\"v\":2}\nc          0  {\"v\":3}",
         "reproducible": false
       }
     ],
@@ -1495,7 +1495,7 @@
       },
       {
         "in": "strata json scan",
-        "out": "{\"document_version\":0,\"key\":\"a\",\"timestamp\":0,\"value\":{\"v\":1},\"version\":0}\n{\"document_version\":0,\"key\":\"b\",\"timestamp\":0,\"value\":{\"v\":2},\"version\":0}",
+        "out": "KEY  VERSION  VALUE\na          0  {\"v\":1}\nb          0  {\"v\":2}",
         "reproducible": false
       }
     ],
@@ -1697,7 +1697,7 @@
       },
       {
         "in": "strata kv sample",
-        "out": "{\"key\":\"a\",\"timestamp\":0,\"value\":\"1\",\"version\":0}\n{\"key\":\"b\",\"timestamp\":0,\"value\":\"2\",\"version\":0}\n{\"key\":\"c\",\"timestamp\":0,\"value\":\"3\",\"version\":0}",
+        "out": "KEY  VERSION  VALUE\na          0  1\nb          0  2\nc          0  3",
         "reproducible": false
       }
     ],
@@ -1714,7 +1714,7 @@
       },
       {
         "in": "strata kv scan",
-        "out": "{\"key\":\"a\",\"timestamp\":0,\"value\":\"1\",\"version\":0}\n{\"key\":\"b\",\"timestamp\":0,\"value\":\"2\",\"version\":0}",
+        "out": "KEY  VERSION  VALUE\na          0  1\nb          0  2",
         "reproducible": false
       }
     ],
@@ -1886,7 +1886,7 @@
       },
       {
         "in": "strata vector collection list",
-        "out": "{\"count\":0,\"dimension\":3,\"metric\":\"cosine\",\"name\":\"docs\"}",
+        "out": "NAME  DIMENSION  METRIC  COUNT  EMBEDDING_MODEL\ndocs          3  cosine      0  -",
         "reproducible": true
       }
     ],
@@ -2082,7 +2082,7 @@
       },
       {
         "in": "strata command run --command-json '{\"collection\":\"docs\",\"k\":2,\"query\":[1.0,0.0,0.0],\"type\":\"vector_index_query\"}'",
-        "out": "a\t1.0\nb\t0.0",
+        "out": "KEY  SCORE  METADATA\na      1.0  -\nb      0.0  -",
         "reproducible": true
       }
     ],
@@ -2148,7 +2148,7 @@
       },
       {
         "in": "strata vector query docs [1.0,0.0,0.0] --k 2",
-        "out": "a\t1.0\nb\t0.0",
+        "out": "KEY  SCORE  METADATA\na      1.0  -\nb      0.0  -",
         "reproducible": true
       }
     ],
@@ -2170,7 +2170,7 @@
       },
       {
         "in": "strata vector sample docs",
-        "out": "{\"data\":{\"embedding\":[1.0,0.0,0.0]},\"key\":\"a\",\"timestamp\":0,\"vector_revision\":1,\"version\":0}\n{\"data\":{\"embedding\":[0.0,1.0,0.0]},\"key\":\"b\",\"timestamp\":0,\"vector_revision\":1,\"version\":0}",
+        "out": "KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA\na          0                1  [1.0,0.0,0.0]  -\nb          0                1  [0.0,1.0,0.0]  -",
         "reproducible": false
       }
     ],
@@ -2192,7 +2192,7 @@
       },
       {
         "in": "strata vector scan docs",
-        "out": "{\"data\":{\"embedding\":[1.0,0.0,0.0]},\"key\":\"a\",\"timestamp\":0,\"vector_revision\":1,\"version\":0}\n{\"data\":{\"embedding\":[0.0,1.0,0.0]},\"key\":\"b\",\"timestamp\":0,\"vector_revision\":1,\"version\":0}",
+        "out": "KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA\na          0                1  [1.0,0.0,0.0]  -\nb          0                1  [0.0,1.0,0.0]  -",
         "reproducible": false
       }
     ],

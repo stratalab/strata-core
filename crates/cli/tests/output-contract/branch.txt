@@ -81,27 +81,30 @@ feature-fork
 {"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
 ∎
 ### branch.list · edge:has_more=true · human
-{"branch_id":"00000000-0000-0000-0000-000000000000","created_at":null,"deleted_at":null,"generation":1,"name":"default","parent":null,"state_revision":0,"status":"active"}
-{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+NAME     PARENT  STATUS  GENERATION
+default  -       active           1
+feature  -       active           1
+∎
+### branch.list · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### branch.list · edge:has_more=true · raw
-{"branch_id":"00000000-0000-0000-0000-000000000000","created_at":null,"deleted_at":null,"generation":1,"name":"default","parent":null,"state_revision":0,"status":"active"}
-{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+default		active	1
+feature		active	1
 ∎
 ### branch.list · edge:items=[] · human
 (empty)
 ∎
 ### branch.list · edge:items=[] · raw
-(empty)
 ∎
 ### branch.list · responses/v1/branches/list.json · human
-{"branch_id":"00000000-0000-0000-0000-000000000000","created_at":null,"deleted_at":null,"generation":1,"name":"default","parent":null,"state_revision":0,"status":"active"}
-{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+NAME     PARENT  STATUS  GENERATION
+default  -       active           1
+feature  -       active           1
 ∎
 ### branch.list · responses/v1/branches/list.json · raw
-{"branch_id":"00000000-0000-0000-0000-000000000000","created_at":null,"deleted_at":null,"generation":1,"name":"default","parent":null,"state_revision":0,"status":"active"}
-{"branch_id":"dc42122c-83b7-5436-89bc-9ffa4299697c","created_at":3,"deleted_at":null,"generation":1,"name":"feature","parent":null,"state_revision":0,"status":"active"}
+default		active	1
+feature		active	1
 ∎
 ### branch.merge · responses/v1/branches/merge.json · human
 merged feature-fork into default: 1 applied, 0 deleted, 0 conflicts (version 9)

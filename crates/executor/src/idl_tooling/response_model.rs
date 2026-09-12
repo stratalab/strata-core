@@ -609,8 +609,8 @@ fn names_a_def(payload: &str, defs: Option<&Map<String, Value>>) -> bool {
     PRIMITIVES.contains(&base) || defs.is_some_and(|defs| defs.contains_key(base))
 }
 
-/// The spelling the CLI renderer needs for an optional or history value;
-/// `None` for every other shape.
+/// The spelling the CLI renderer needs for an optional, history or page
+/// value; `None` for every other shape.
 pub(super) fn encoding(shape: &WireShape) -> Option<CliWireEncoding> {
     match shape {
         WireShape::FoundValue => Some(CliWireEncoding::FoundValue),
@@ -619,6 +619,8 @@ pub(super) fn encoding(shape: &WireShape) -> Option<CliWireEncoding> {
             WireShape::Array => CliWireEncoding::Array,
             _ => CliWireEncoding::Nullable,
         }),
+        WireShape::Page => Some(CliWireEncoding::Page),
+        WireShape::SamplePage => Some(CliWireEncoding::SamplePage),
         _ => None,
     }
 }
@@ -1273,11 +1275,17 @@ mod tests {
             encoding(&nullable(WireShape::Array)),
             Some(CliWireEncoding::Array)
         );
+        assert_eq!(encoding(&WireShape::Page), Some(CliWireEncoding::Page));
+        assert_eq!(
+            encoding(&WireShape::SamplePage),
+            Some(CliWireEncoding::SamplePage)
+        );
         for shape in [
             WireShape::Scalar("boolean".into()),
             WireShape::Array,
             WireShape::MutationAck,
-            WireShape::Page,
+            WireShape::Batch,
+            WireShape::Diagnostics,
             WireShape::Items,
             WireShape::Record,
         ] {

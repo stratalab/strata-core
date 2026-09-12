@@ -122,44 +122,47 @@ one
 one
 ∎
 ### kv.history · edge:committed_at=fixed · human
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","timestamp":4,"tombstone":false,"value":"two","version":4}
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","timestamp":3,"tombstone":false,"value":"one","version":3}
+VERSION  COMMITTED_AT                    VALUE
+      4  2026-09-10 20:19:44.000000 UTC  two
+      3  2026-09-10 20:19:44.000000 UTC  one
 ∎
 ### kv.history · edge:committed_at=fixed · raw
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","timestamp":4,"tombstone":false,"value":"two","version":4}
-{"committed_at":"2026-09-10 20:19:44.000000 +00:00","timestamp":3,"tombstone":false,"value":"one","version":3}
+4	1789071584000000	two
+3	1789071584000000	one
 ∎
 ### kv.history · edge:items=[] · human
 (empty)
 ∎
 ### kv.history · edge:items=[] · raw
-(empty)
 ∎
 ### kv.history · edge:value=non-utf8 · human
-{"timestamp":4,"tombstone":false,"value":"/w==","version":4}
-{"timestamp":3,"tombstone":false,"value":"/w==","version":3}
+VERSION  COMMITTED_AT  VALUE
+      4  -             base64:/w==
+      3  -             base64:/w==
 ∎
 ### kv.history · edge:value=non-utf8 · raw
-{"timestamp":4,"tombstone":false,"value":"/w==","version":4}
-{"timestamp":3,"tombstone":false,"value":"/w==","version":3}
+4		/w==
+3		/w==
 ∎
 ### kv.history · responses/v1/kv/history_found.json · human
-{"timestamp":4,"tombstone":false,"value":"two","version":4}
-{"timestamp":3,"tombstone":false,"value":"one","version":3}
+VERSION  COMMITTED_AT  VALUE
+      4  -             two
+      3  -             one
 ∎
 ### kv.history · responses/v1/kv/history_found.json · raw
-{"timestamp":4,"tombstone":false,"value":"two","version":4}
-{"timestamp":3,"tombstone":false,"value":"one","version":3}
+4		two
+3		one
 ∎
 ### kv.list · edge:items=[] · human
 (empty)
 ∎
 ### kv.list · edge:items=[] · raw
-(empty)
 ∎
 ### kv.list · responses/v1/kv/list_page.json · human
 a1
 a2
+∎
+### kv.list · responses/v1/kv/list_page.json · human · stderr
 -- more: add --cursor YTI= to the same command
 ∎
 ### kv.list · responses/v1/kv/list_page.json · raw
@@ -193,64 +196,82 @@ created a
 a
 ∎
 ### kv.sample · edge:has_more=true · human
-{"key":"a","timestamp":3,"value":"one","version":3}
+KEY  VERSION  VALUE
+a          3  one
+∎
+### kv.sample · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### kv.sample · edge:has_more=true · raw
-{"key":"a","timestamp":3,"value":"one","version":3}
+a	3	one
 ∎
 ### kv.sample · edge:items=[] · human
 (empty)
 ∎
 ### kv.sample · edge:items=[] · raw
-(empty)
+∎
+### kv.sample · edge:total_count=more · human
+KEY  VERSION  VALUE
+a          3  one
+∎
+### kv.sample · edge:total_count=more · human · stderr
+-- sampled 1 of 10
+∎
+### kv.sample · edge:total_count=more · raw
+a	3	one
 ∎
 ### kv.sample · edge:value=non-utf8 · human
-{"key":"a","timestamp":3,"value":"/w==","version":3}
+KEY  VERSION  VALUE
+a          3  base64:/w==
 ∎
 ### kv.sample · edge:value=non-utf8 · raw
-{"key":"a","timestamp":3,"value":"/w==","version":3}
+a	3	/w==
 ∎
 ### kv.sample · responses/v1/kv/sample_page.json · human
-{"key":"a","timestamp":3,"value":"one","version":3}
+KEY  VERSION  VALUE
+a          3  one
 ∎
 ### kv.sample · responses/v1/kv/sample_page.json · raw
-{"key":"a","timestamp":3,"value":"one","version":3}
+a	3	one
 ∎
 ### kv.scan · edge:has_more=true · human
-{"key":"a1","timestamp":3,"value":"1","version":3}
-{"key":"a2","timestamp":4,"value":"2","version":4}
-{"key":"a3","timestamp":5,"value":"3","version":5}
+KEY  VERSION  VALUE
+a1         3  1
+a2         4  2
+a3         5  3
+∎
+### kv.scan · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### kv.scan · edge:has_more=true · raw
-{"key":"a1","timestamp":3,"value":"1","version":3}
-{"key":"a2","timestamp":4,"value":"2","version":4}
-{"key":"a3","timestamp":5,"value":"3","version":5}
+a1	3	1
+a2	4	2
+a3	5	3
 ∎
 ### kv.scan · edge:items=[] · human
 (empty)
 ∎
 ### kv.scan · edge:items=[] · raw
-(empty)
 ∎
 ### kv.scan · edge:value=non-utf8 · human
-{"key":"a1","timestamp":3,"value":"/w==","version":3}
-{"key":"a2","timestamp":4,"value":"/w==","version":4}
-{"key":"a3","timestamp":5,"value":"/w==","version":5}
+KEY  VERSION  VALUE
+a1         3  base64:/w==
+a2         4  base64:/w==
+a3         5  base64:/w==
 ∎
 ### kv.scan · edge:value=non-utf8 · raw
-{"key":"a1","timestamp":3,"value":"/w==","version":3}
-{"key":"a2","timestamp":4,"value":"/w==","version":4}
-{"key":"a3","timestamp":5,"value":"/w==","version":5}
+a1	3	/w==
+a2	4	/w==
+a3	5	/w==
 ∎
 ### kv.scan · responses/v1/kv/scan_page.json · human
-{"key":"a1","timestamp":3,"value":"1","version":3}
-{"key":"a2","timestamp":4,"value":"2","version":4}
-{"key":"a3","timestamp":5,"value":"3","version":5}
+KEY  VERSION  VALUE
+a1         3  1
+a2         4  2
+a3         5  3
 ∎
 ### kv.scan · responses/v1/kv/scan_page.json · raw
-{"key":"a1","timestamp":3,"value":"1","version":3}
-{"key":"a2","timestamp":4,"value":"2","version":4}
-{"key":"a3","timestamp":5,"value":"3","version":5}
+a1	3	1
+a2	4	2
+a3	5	3
 ∎

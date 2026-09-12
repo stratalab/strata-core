@@ -1,109 +1,74 @@
 ### graph.analytics.bfs · responses/v1/graph/bfs_traversal.json · human
-{
-  "depths": {
-    "alice": 0,
-    "bob": 1,
-    "carol": 1
-  },
-  "edges": [
-    {
-      "dst": "bob",
-      "edge_type": "follows",
-      "src": "alice",
-      "weight": 1.0
-    },
-    {
-      "dst": "carol",
-      "edge_type": "knows",
-      "src": "alice",
-      "weight": 1.0
-    }
-  ],
-  "graph": "social",
-  "start": "alice",
-  "truncated": false,
-  "visited": [
-    "alice",
-    "bob",
-    "carol"
-  ]
-}
+NODE   DEPTH
+alice      0
+bob        1
+carol      1
 ∎
 ### graph.analytics.bfs · responses/v1/graph/bfs_traversal.json · raw
-{"depths":{"alice":0,"bob":1,"carol":1},"edges":[{"dst":"bob","edge_type":"follows","src":"alice","weight":1.0},{"dst":"carol","edge_type":"knows","src":"alice","weight":1.0}],"graph":"social","start":"alice","truncated":false,"visited":["alice","bob","carol"]}
+alice	0
+bob	1
+carol	1
 ∎
 ### graph.analytics.cdlp · responses/v1/graph/cdlp_labels.json · human
-{
-  "graph": "social",
-  "labels": {
-    "alice": "alice",
-    "bob": "alice",
-    "carol": "alice",
-    "dave": "dave"
-  }
-}
+NODE   LABEL
+alice  alice
+bob    alice
+carol  alice
+dave   dave
 ∎
 ### graph.analytics.cdlp · responses/v1/graph/cdlp_labels.json · raw
-{"graph":"social","labels":{"alice":"alice","bob":"alice","carol":"alice","dave":"dave"}}
+alice	alice
+bob	alice
+carol	alice
+dave	dave
 ∎
 ### graph.analytics.lcc · responses/v1/graph/lcc_coefficients.json · human
-{
-  "coefficients": {
-    "alice": 1.0,
-    "bob": 1.0,
-    "carol": 1.0
-  },
-  "graph": "social"
-}
+NODE   COEFFICIENT
+alice          1.0
+bob            1.0
+carol          1.0
 ∎
 ### graph.analytics.lcc · responses/v1/graph/lcc_coefficients.json · raw
-{"coefficients":{"alice":1.0,"bob":1.0,"carol":1.0},"graph":"social"}
+alice	1.0
+bob	1.0
+carol	1.0
 ∎
 ### graph.analytics.pagerank · responses/v1/graph/pagerank_ranks.json · human
-{
-  "graph": "social",
-  "iterations": 10,
-  "personalized": false,
-  "ranks": {
-    "alice": 0.3174603047943687,
-    "bob": 0.3174603047943687,
-    "carol": 0.3174603047943687,
-    "dave": 0.04761908561689371
-  }
-}
+NODE   RANK
+alice   0.31746
+bob     0.31746
+carol   0.31746
+dave   0.047619
 ∎
 ### graph.analytics.pagerank · responses/v1/graph/pagerank_ranks.json · raw
-{"graph":"social","iterations":10,"personalized":false,"ranks":{"alice":0.3174603047943687,"bob":0.3174603047943687,"carol":0.3174603047943687,"dave":0.04761908561689371}}
+alice	0.3174603047943687
+bob	0.3174603047943687
+carol	0.3174603047943687
+dave	0.04761908561689371
 ∎
 ### graph.analytics.sssp · responses/v1/graph/sssp_distances.json · human
-{
-  "direction": "outgoing",
-  "distances": {
-    "alice": 0.0,
-    "bob": 1.0,
-    "carol": 3.0
-  },
-  "graph": "social",
-  "source": "alice"
-}
+NODE   DISTANCE
+alice       0.0
+bob         1.0
+carol       3.0
 ∎
 ### graph.analytics.sssp · responses/v1/graph/sssp_distances.json · raw
-{"direction":"outgoing","distances":{"alice":0.0,"bob":1.0,"carol":3.0},"graph":"social","source":"alice"}
+alice	0.0
+bob	1.0
+carol	3.0
 ∎
 ### graph.analytics.wcc · responses/v1/graph/wcc_components.json · human
-{
-  "component_count": 2,
-  "components": {
-    "alice": "alice",
-    "bob": "alice",
-    "carol": "alice",
-    "dave": "dave"
-  },
-  "graph": "social"
-}
+NODE   COMPONENT
+alice  alice
+bob    alice
+carol  alice
+dave   dave
 ∎
 ### graph.analytics.wcc · responses/v1/graph/wcc_components.json · raw
-{"component_count":2,"components":{"alice":"alice","bob":"alice","carol":"alice","dave":"dave"},"graph":"social"}
+alice	alice
+bob	alice
+carol	alice
+dave	dave
 ∎
 ### graph.apply_delete_policy · edge:applied=false · human
 applied delete policy detach (0 affected)
@@ -150,23 +115,26 @@ applied delete policy detach (1 affected)
 {"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":3,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":2,"result":{"created":true,"operation":"upsert_edge","operation_index":2},"status":"ok"}
 ∎
 ### graph.bindings · edge:has_more=true · human
-{"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
+GRAPH   NODE_ID        PRIMITIVE  SPACE    KEY         VERSION
+social  alice-profile  kv         default  user:alice        4
+∎
+### graph.bindings · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### graph.bindings · edge:has_more=true · raw
-{"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
+social	alice-profile	kv	default	user:alice	4
 ∎
 ### graph.bindings · edge:items=[] · human
 (empty)
 ∎
 ### graph.bindings · edge:items=[] · raw
-(empty)
 ∎
 ### graph.bindings · responses/v1/graph/bindings_page.json · human
-{"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
+GRAPH   NODE_ID        PRIMITIVE  SPACE    KEY         VERSION
+social  alice-profile  kv         default  user:alice        4
 ∎
 ### graph.bindings · responses/v1/graph/bindings_page.json · raw
-{"binding":{"target":{"key":"user:alice","primitive":"kv","space":"default"}},"graph":"social","node_id":"alice-profile","timestamp":4,"version":4}
+social	alice-profile	kv	default	user:alice	4
 ∎
 ### graph.bulk_insert · edge:committed_at=fixed · human
 inserted 3 nodes, 2 edges into social
@@ -296,6 +264,8 @@ alice	follows	bob
 ∎
 ### graph.list · edge:has_more=true · human
 social
+∎
+### graph.list · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### graph.list · edge:has_more=true · raw
@@ -305,7 +275,6 @@ social
 (empty)
 ∎
 ### graph.list · edge:items=[] · raw
-(empty)
 ∎
 ### graph.list · responses/v1/graph/list_page.json · human
 social
@@ -328,27 +297,30 @@ social
 {"created_timestamp":3,"created_version":3,"edge_count":1,"graph":"social","node_count":2,"updated_timestamp":6,"updated_version":6}
 ∎
 ### graph.neighbors · edge:has_more=true · human
-{"direction":"outgoing","dst":"bob","edge":{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":7,"version":7,"weight":1.0},"edge_type":"follows","graph":"social","node":{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5},"node_id":"bob","src":"alice"}
-{"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
+NODE_ID  DIRECTION  EDGE_TYPE  SRC    DST    WEIGHT
+bob      outgoing   follows    alice  bob       1.0
+carol    outgoing   knows      alice  carol     1.0
+∎
+### graph.neighbors · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### graph.neighbors · edge:has_more=true · raw
-{"direction":"outgoing","dst":"bob","edge":{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":7,"version":7,"weight":1.0},"edge_type":"follows","graph":"social","node":{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5},"node_id":"bob","src":"alice"}
-{"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
+bob	outgoing	follows	alice	bob	1.0
+carol	outgoing	knows	alice	carol	1.0
 ∎
 ### graph.neighbors · edge:items=[] · human
 (empty)
 ∎
 ### graph.neighbors · edge:items=[] · raw
-(empty)
 ∎
 ### graph.neighbors · responses/v1/graph/neighbors_page.json · human
-{"direction":"outgoing","dst":"bob","edge":{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":7,"version":7,"weight":1.0},"edge_type":"follows","graph":"social","node":{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5},"node_id":"bob","src":"alice"}
-{"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
+NODE_ID  DIRECTION  EDGE_TYPE  SRC    DST    WEIGHT
+bob      outgoing   follows    alice  bob       1.0
+carol    outgoing   knows      alice  carol     1.0
 ∎
 ### graph.neighbors · responses/v1/graph/neighbors_page.json · raw
-{"direction":"outgoing","dst":"bob","edge":{"dst":"bob","edge_type":"follows","graph":"social","properties":{"since":2021},"src":"alice","timestamp":7,"version":7,"weight":1.0},"edge_type":"follows","graph":"social","node":{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5},"node_id":"bob","src":"alice"}
-{"direction":"outgoing","dst":"carol","edge":{"dst":"carol","edge_type":"knows","graph":"social","src":"alice","timestamp":8,"version":8,"weight":1.0},"edge_type":"knows","graph":"social","node":{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6},"node_id":"carol","src":"alice"}
+bob	outgoing	follows	alice	bob	1.0
+carol	outgoing	knows	alice	carol	1.0
 ∎
 ### graph.node.add · edge:applied=false · human
 ∎
@@ -397,16 +369,18 @@ alice
 (empty)
 ∎
 ### graph.node.list · edge:items=[] · raw
-(empty)
 ∎
 ### graph.node.list · responses/v1/graph/node_list_page.json · human
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
-{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+NODE_ID  OBJECT_TYPE  VERSION
+alice    Person             4
+bob      Person             5
+∎
+### graph.node.list · responses/v1/graph/node_list_page.json · human · stderr
 -- more: add --cursor bob to the same command
 ∎
 ### graph.node.list · responses/v1/graph/node_list_page.json · raw
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
-{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+alice	Person	4
+bob	Person	5
 ∎
 ### graph.node.remove · edge:applied=false · human
 ∎
@@ -434,16 +408,18 @@ alice
 (empty)
 ∎
 ### graph.nodes_by_type · edge:items=[] · raw
-(empty)
 ∎
 ### graph.nodes_by_type · responses/v1/graph/nodes_by_type_page.json · human
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
-{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+NODE_ID  OBJECT_TYPE  VERSION
+alice    Person             4
+bob      Person             5
+∎
+### graph.nodes_by_type · responses/v1/graph/nodes_by_type_page.json · human · stderr
 -- more: add --cursor bob to the same command
 ∎
 ### graph.nodes_by_type · responses/v1/graph/nodes_by_type_page.json · raw
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
-{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
+alice	Person	4
+bob	Person	5
 ∎
 ### graph.ontology.define_link_type · edge:applied=false · human
 ∎
@@ -616,29 +592,46 @@ social
 {"graph":"social","link_types":[{"cardinality":"many-to-many","edge_count":0,"name":"follows","source":"Person","target":"Person"}],"object_types":[{"name":"Person","node_count":2,"properties":{"level":{"required":false,"value_type":"integer"},"name":{"required":true,"value_type":"string"}}}],"status":"draft","timestamp":5,"version":5}
 ∎
 ### graph.sample · edge:has_more=true · human
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
-{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
-{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6}
+NODE_ID  OBJECT_TYPE  VERSION
+alice    Person             4
+bob      Person             5
+carol    Person             6
+∎
+### graph.sample · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### graph.sample · edge:has_more=true · raw
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
-{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
-{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6}
+alice	Person	4
+bob	Person	5
+carol	Person	6
 ∎
 ### graph.sample · edge:items=[] · human
 (empty)
 ∎
 ### graph.sample · edge:items=[] · raw
-(empty)
+∎
+### graph.sample · edge:total_count=more · human
+NODE_ID  OBJECT_TYPE  VERSION
+alice    Person             4
+bob      Person             5
+carol    Person             6
+∎
+### graph.sample · edge:total_count=more · human · stderr
+-- sampled 3 of 10
+∎
+### graph.sample · edge:total_count=more · raw
+alice	Person	4
+bob	Person	5
+carol	Person	6
 ∎
 ### graph.sample · responses/v1/graph/sample_page.json · human
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
-{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
-{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6}
+NODE_ID  OBJECT_TYPE  VERSION
+alice    Person             4
+bob      Person             5
+carol    Person             6
 ∎
 ### graph.sample · responses/v1/graph/sample_page.json · raw
-{"graph":"social","node_id":"alice","object_type":"Person","properties":{"name":"Alice","role":"eng"},"timestamp":4,"version":4}
-{"graph":"social","node_id":"bob","object_type":"Person","properties":{"name":"Bob"},"timestamp":5,"version":5}
-{"graph":"social","node_id":"carol","object_type":"Person","properties":{"name":"Carol"},"timestamp":6,"version":6}
+alice	Person	4
+bob	Person	5
+carol	Person	6
 ∎

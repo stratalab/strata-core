@@ -79,77 +79,88 @@ true
 {"event":{"event_type":"user.created","hash":"ef66c75b71e03746e96de6ecd282d9f60bc6047f024fd87a22bcbb9eacb2775d","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390446216},"timestamp":3,"version":3}
 ∎
 ### event.list · edge:has_more=true · human
-{"event":{"event_type":"user.created","hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390447369},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"9f41a13d6f49bbc9b9c41dccaed0420b697dea1a971cb5f141cdf21bb47ff5fe","payload":{"name":"Ada","plan":"pro"},"previous_hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","sequence":1,"timestamp":1783742390447545},"timestamp":4,"version":4}
+SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD
+       0  user.created  2026-07-11 03:59:50.447369 UTC  {"name":"Ada"}
+       1  user.updated  2026-07-11 03:59:50.447545 UTC  {"name":"Ada","plan":"pro"}
+∎
+### event.list · edge:has_more=true · human · stderr
 -- more: add --cursor 7 to the same command
 ∎
 ### event.list · edge:has_more=true · raw
-{"event":{"event_type":"user.created","hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390447369},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"9f41a13d6f49bbc9b9c41dccaed0420b697dea1a971cb5f141cdf21bb47ff5fe","payload":{"name":"Ada","plan":"pro"},"previous_hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","sequence":1,"timestamp":1783742390447545},"timestamp":4,"version":4}
+0	user.created	1783742390447369	{"name":"Ada"}
+1	user.updated	1783742390447545	{"name":"Ada","plan":"pro"}
 ∎
 ### event.list · edge:items=[] · human
 (empty)
 ∎
 ### event.list · edge:items=[] · raw
-(empty)
 ∎
 ### event.list · responses/v1/event/list_page.json · human
-{"event":{"event_type":"user.created","hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390447369},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"9f41a13d6f49bbc9b9c41dccaed0420b697dea1a971cb5f141cdf21bb47ff5fe","payload":{"name":"Ada","plan":"pro"},"previous_hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","sequence":1,"timestamp":1783742390447545},"timestamp":4,"version":4}
+SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD
+       0  user.created  2026-07-11 03:59:50.447369 UTC  {"name":"Ada"}
+       1  user.updated  2026-07-11 03:59:50.447545 UTC  {"name":"Ada","plan":"pro"}
 ∎
 ### event.list · responses/v1/event/list_page.json · raw
-{"event":{"event_type":"user.created","hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390447369},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"9f41a13d6f49bbc9b9c41dccaed0420b697dea1a971cb5f141cdf21bb47ff5fe","payload":{"name":"Ada","plan":"pro"},"previous_hash":"4cc3eccd17431239854bce903564972dcccee065faf30e859064b9a79ea189cf","sequence":1,"timestamp":1783742390447545},"timestamp":4,"version":4}
+0	user.created	1783742390447369	{"name":"Ada"}
+1	user.updated	1783742390447545	{"name":"Ada","plan":"pro"}
 ∎
 ### event.range · edge:has_more=true · human
-{"event":{"event_type":"user.created","hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448165},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"998df51fb4d93d47aa277eb9e18b9055e19bf3888d479ad471edb70d3a041fe0","payload":{"name":"Ada","plan":"pro"},"previous_hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","sequence":1,"timestamp":1783742390448342},"timestamp":4,"version":4}
+SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD
+       0  user.created  2026-07-11 03:59:50.448165 UTC  {"name":"Ada"}
+       1  user.updated  2026-07-11 03:59:50.448342 UTC  {"name":"Ada","plan":"pro"}
+∎
+### event.range · edge:has_more=true · human · stderr
 -- more: add --cursor 7 to the same command
 ∎
 ### event.range · edge:has_more=true · raw
-{"event":{"event_type":"user.created","hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448165},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"998df51fb4d93d47aa277eb9e18b9055e19bf3888d479ad471edb70d3a041fe0","payload":{"name":"Ada","plan":"pro"},"previous_hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","sequence":1,"timestamp":1783742390448342},"timestamp":4,"version":4}
+0	user.created	1783742390448165	{"name":"Ada"}
+1	user.updated	1783742390448342	{"name":"Ada","plan":"pro"}
 ∎
 ### event.range · edge:items=[] · human
 (empty)
 ∎
 ### event.range · edge:items=[] · raw
-(empty)
 ∎
 ### event.range · responses/v1/event/range_forward.json · human
-{"event":{"event_type":"user.created","hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448165},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"998df51fb4d93d47aa277eb9e18b9055e19bf3888d479ad471edb70d3a041fe0","payload":{"name":"Ada","plan":"pro"},"previous_hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","sequence":1,"timestamp":1783742390448342},"timestamp":4,"version":4}
+SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD
+       0  user.created  2026-07-11 03:59:50.448165 UTC  {"name":"Ada"}
+       1  user.updated  2026-07-11 03:59:50.448342 UTC  {"name":"Ada","plan":"pro"}
 ∎
 ### event.range · responses/v1/event/range_forward.json · raw
-{"event":{"event_type":"user.created","hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448165},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"998df51fb4d93d47aa277eb9e18b9055e19bf3888d479ad471edb70d3a041fe0","payload":{"name":"Ada","plan":"pro"},"previous_hash":"10b5b342f73d9df9aa1d2c96077063d11361d7abc68b94d686be200df7d7571f","sequence":1,"timestamp":1783742390448342},"timestamp":4,"version":4}
+0	user.created	1783742390448165	{"name":"Ada"}
+1	user.updated	1783742390448342	{"name":"Ada","plan":"pro"}
 ∎
 ### event.range_time · edge:has_more=true · human
-{"event":{"event_type":"user.created","hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448970},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"0bfbda450be637166b0e9cf1acf8461b8165d61544a446201b6a9d8b0111b4da","payload":{"name":"Ada","plan":"pro"},"previous_hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","sequence":1,"timestamp":1783742390449152},"timestamp":4,"version":4}
+SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD
+       0  user.created  2026-07-11 03:59:50.448970 UTC  {"name":"Ada"}
+       1  user.updated  2026-07-11 03:59:50.449152 UTC  {"name":"Ada","plan":"pro"}
+∎
+### event.range_time · edge:has_more=true · human · stderr
 -- more: add --cursor 7 to the same command
 ∎
 ### event.range_time · edge:has_more=true · raw
-{"event":{"event_type":"user.created","hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448970},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"0bfbda450be637166b0e9cf1acf8461b8165d61544a446201b6a9d8b0111b4da","payload":{"name":"Ada","plan":"pro"},"previous_hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","sequence":1,"timestamp":1783742390449152},"timestamp":4,"version":4}
+0	user.created	1783742390448970	{"name":"Ada"}
+1	user.updated	1783742390449152	{"name":"Ada","plan":"pro"}
 ∎
 ### event.range_time · edge:items=[] · human
 (empty)
 ∎
 ### event.range_time · edge:items=[] · raw
-(empty)
 ∎
 ### event.range_time · responses/v1/event/range_time_forward.json · human
-{"event":{"event_type":"user.created","hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448970},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"0bfbda450be637166b0e9cf1acf8461b8165d61544a446201b6a9d8b0111b4da","payload":{"name":"Ada","plan":"pro"},"previous_hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","sequence":1,"timestamp":1783742390449152},"timestamp":4,"version":4}
+SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD
+       0  user.created  2026-07-11 03:59:50.448970 UTC  {"name":"Ada"}
+       1  user.updated  2026-07-11 03:59:50.449152 UTC  {"name":"Ada","plan":"pro"}
 ∎
 ### event.range_time · responses/v1/event/range_time_forward.json · raw
-{"event":{"event_type":"user.created","hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","payload":{"name":"Ada"},"previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":0,"timestamp":1783742390448970},"timestamp":3,"version":3}
-{"event":{"event_type":"user.updated","hash":"0bfbda450be637166b0e9cf1acf8461b8165d61544a446201b6a9d8b0111b4da","payload":{"name":"Ada","plan":"pro"},"previous_hash":"6250fbb31dc31df269e12b7e42e00f8041e47e0eabf7e81bdce3275de07754db","sequence":1,"timestamp":1783742390449152},"timestamp":4,"version":4}
+0	user.created	1783742390448970	{"name":"Ada"}
+1	user.updated	1783742390449152	{"name":"Ada","plan":"pro"}
 ∎
 ### event.types · edge:has_more=true · human
 user.created
 user.updated
+∎
+### event.types · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### event.types · edge:has_more=true · raw
@@ -160,7 +171,6 @@ user.updated
 (empty)
 ∎
 ### event.types · edge:items=[] · raw
-(empty)
 ∎
 ### event.types · responses/v1/event/types.json · human
 user.created

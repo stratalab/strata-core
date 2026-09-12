@@ -51,6 +51,8 @@ true
 ### space.list · edge:has_more=true · human
 default
 tenant_a
+∎
+### space.list · edge:has_more=true · human · stderr
 -- more: add --cursor bmV4dA== to the same command
 ∎
 ### space.list · edge:has_more=true · raw
@@ -61,7 +63,6 @@ tenant_a
 (empty)
 ∎
 ### space.list · edge:items=[] · raw
-(empty)
 ∎
 ### space.list · responses/v1/spaces/list.json · human
 default

@@ -107,10 +107,11 @@ deleted greeting
 ### 13 strata kv history greeting · stderr
 ∎
 ### 13 strata kv history greeting · stdout
-{"committed_at":"<instant>","timestamp":6,"tombstone":true,"value":null,"version":6}
-{"committed_at":"<instant>","timestamp":5,"tombstone":false,"value":"hello3","version":5}
-{"committed_at":"<instant>","timestamp":4,"tombstone":false,"value":"hello2","version":4}
-{"committed_at":"<instant>","timestamp":3,"tombstone":false,"value":"hello","version":3}
+VERSION  COMMITTED_AT                    VALUE
+      6  <instant>  -
+      5  <instant>  hello3
+      4  <instant>  hello2
+      3  <instant>  hello
 ∎
 ### 14 strata --raw kv history greeting · exit
 0
@@ -118,10 +119,10 @@ deleted greeting
 ### 14 strata --raw kv history greeting · stderr
 ∎
 ### 14 strata --raw kv history greeting · stdout
-{"committed_at":"<instant>","timestamp":6,"tombstone":true,"value":null,"version":6}
-{"committed_at":"<instant>","timestamp":5,"tombstone":false,"value":"hello3","version":5}
-{"committed_at":"<instant>","timestamp":4,"tombstone":false,"value":"hello2","version":4}
-{"committed_at":"<instant>","timestamp":3,"tombstone":false,"value":"hello","version":3}
+6	<micros>	
+5	<micros>	hello3
+4	<micros>	hello2
+3	<micros>	hello
 ∎
 ### 15 strata --json kv history greeting · exit
 0
@@ -145,7 +146,6 @@ deleted greeting
 ### 17 strata --raw kv list · stderr
 ∎
 ### 17 strata --raw kv list · stdout
-(empty)
 ∎
 ### 18 strata --json kv list · exit
 0
@@ -175,10 +175,10 @@ created c
 0
 ∎
 ### 21 strata kv list --limit 1 · stderr
+-- more: add --cursor Yg== to the same command
 ∎
 ### 21 strata kv list --limit 1 · stdout
 b
--- more: add --cursor Yg== to the same command
 ∎
 ### 22 strata --raw kv list --limit 1 · exit
 0

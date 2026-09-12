@@ -155,10 +155,15 @@ fn mask_volatile(value: &mut Value, variant: u8) {
 
 /// Overwrites a volatile leaf with a same-typed sentinel. The two variants pick
 /// *different* sentinels of each type, so a leaf that reaches the render renders
-/// differently between them — the signal `render_step` reads.
+/// differently between them — the signal `render_step` reads. The two must
+/// stay different through every presentation a declaration can apply, and a
+/// presentation may drop precision (a size rounds to its unit; a date once
+/// showed whole seconds), so the numeric sentinels sit a million apart rather
+/// than one unit — `0` and `1` micros both read `1970-01-01 00:00:00 UTC`
+/// under that date form, which passed an event list off as reproducible.
 fn mask_leaf(value: &mut Value, variant: u8) {
     match value {
-        Value::Number(_) => *value = Value::from(u64::from(variant)),
+        Value::Number(_) => *value = Value::from(u64::from(variant) * 1_000_000),
         Value::String(_) => {
             *value = Value::from(if variant == 0 { "masked" } else { "masked-alt" });
         }

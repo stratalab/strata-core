@@ -69,10 +69,11 @@ impl CliRenderRule {
     }
 }
 
-/// How an `optional` or `history` command spells its value on the wire
-/// (contract §Root E). Resolved from the generated schema at authoring time
-/// and carried in the CLI index as `encoding`, so the renderer reads it
-/// rather than sniffing the response. Every other rule carries none.
+/// How an `optional`, `history` or `page` command spells its value on the
+/// wire (contract §Root E). Resolved from the generated schema at authoring
+/// time and carried in the CLI index as `encoding`, so the renderer reads it
+/// rather than sniffing the response — a sample page announces itself here,
+/// never through the presence of `total_count`. Every other rule carries none.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CliWireEncoding {
@@ -84,11 +85,23 @@ pub enum CliWireEncoding {
     Items,
     /// `Maybe<Vec<T>>` as a nullable bare array.
     Array,
+    /// `{items, has_more, cursor?}`.
+    Page,
+    /// `{items, has_more, total_count, cursor?}` — a page drawn from a
+    /// population the renderer reports when the page is smaller than it.
+    SamplePage,
 }
 
 impl CliWireEncoding {
     /// Every encoding, in declaration order.
-    pub const ALL: [Self; 4] = [Self::FoundValue, Self::Nullable, Self::Items, Self::Array];
+    pub const ALL: [Self; 6] = [
+        Self::FoundValue,
+        Self::Nullable,
+        Self::Items,
+        Self::Array,
+        Self::Page,
+        Self::SamplePage,
+    ];
 
     /// The index spelling, identical to the serde name — pinned by
     /// `wire_encoding_names_match_serde`.
@@ -98,6 +111,8 @@ impl CliWireEncoding {
             Self::Nullable => "nullable",
             Self::Items => "items",
             Self::Array => "array",
+            Self::Page => "page",
+            Self::SamplePage => "sample_page",
         }
     }
 }
@@ -583,20 +598,23 @@ pub fn validate_display_shape(
 
 /// Checks that a command's wire encoding is the one its render rule needs:
 /// `optional` reads `found_value` or `nullable`, `history` reads `items` or
-/// `array`, and no other rule carries one. A stable `optional`/`history`
-/// command must carry an encoding; only a `transitional` one — whose wire is
-/// a ledgered divergence from its declared family — may lack it.
+/// `array`, `page` reads `page` or `sample_page`, and no other rule carries
+/// one. A stable `optional`/`history`/`page` command must carry an encoding;
+/// only a `transitional` one — whose wire is a ledgered divergence from its
+/// declared family — may lack it.
 pub fn validate_encoding_shape(
     command_id: &str,
     rule: CliRenderRule,
     encoding: Option<CliWireEncoding>,
     wire_status: &str,
 ) -> Result<(), String> {
+    use CliRenderRule::{History, Optional, Page};
     use CliWireEncoding::{Array, FoundValue, Items, Nullable};
     match (rule, encoding) {
-        (CliRenderRule::Optional, Some(FoundValue | Nullable))
-        | (CliRenderRule::History, Some(Items | Array)) => Ok(()),
-        (CliRenderRule::Optional | CliRenderRule::History, None) => {
+        (Optional, Some(FoundValue | Nullable))
+        | (History, Some(Items | Array))
+        | (Page, Some(CliWireEncoding::Page | CliWireEncoding::SamplePage)) => Ok(()),
+        (Optional | History | Page, None) => {
             if wire_status == "transitional" {
                 Ok(())
             } else {
@@ -606,7 +624,7 @@ pub fn validate_encoding_shape(
                 ))
             }
         }
-        (CliRenderRule::Optional | CliRenderRule::History, Some(other)) => Err(format!(
+        (Optional | History | Page, Some(other)) => Err(format!(
             "command `{command_id}` renders `{}` but its wire encoding is `{}`",
             rule.as_str(),
             other.as_str()
@@ -786,17 +804,21 @@ mod tests {
 
     #[test]
     fn encoding_shape_truth_table() {
-        use CliWireEncoding::{Array, FoundValue, Items, Nullable};
+        use CliWireEncoding::{Array, FoundValue, Items, Nullable, Page, SamplePage};
         for rule in CliRenderRule::ALL {
             for encoding in CliWireEncoding::ALL.map(Some).into_iter().chain([None]) {
                 let stable = validate_encoding_shape("t.c", rule, encoding, "stable").is_ok();
                 let transitional =
                     validate_encoding_shape("t.c", rule, encoding, "transitional").is_ok();
-                let reads_one = matches!(rule, CliRenderRule::Optional | CliRenderRule::History);
+                let reads_one = matches!(
+                    rule,
+                    CliRenderRule::Optional | CliRenderRule::History | CliRenderRule::Page
+                );
                 let expected_stable = matches!(
                     (rule, encoding),
                     (CliRenderRule::Optional, Some(FoundValue | Nullable))
                         | (CliRenderRule::History, Some(Items | Array))
+                        | (CliRenderRule::Page, Some(Page | SamplePage))
                 ) || (!reads_one && encoding.is_none());
                 assert_eq!(stable, expected_stable, "stable {rule:?} {encoding:?}");
                 // Transitional relaxes exactly one cell: a missing encoding

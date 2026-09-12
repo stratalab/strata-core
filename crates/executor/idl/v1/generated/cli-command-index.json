@@ -948,7 +948,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "branch.merge",
@@ -1780,7 +1780,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "event.range",
@@ -1859,7 +1859,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "event.range_time",
@@ -1938,7 +1938,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "event.types",
@@ -1997,7 +1997,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "event.verify_chain",
@@ -2595,7 +2595,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "graph.bulk_insert",
@@ -3237,7 +3237,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "graph.node.list",
@@ -3316,7 +3316,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "graph.meta",
@@ -3492,7 +3492,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "graph.nodes_by_type",
@@ -3575,7 +3575,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "graph.ontology.define_link_type",
@@ -4452,7 +4452,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "sample_page"
     },
     {
       "id": "graph.analytics.sssp",
@@ -5717,7 +5717,7 @@
       "wire_status": "stable",
       "render": "page",
       "display": "bespoke",
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "inference.models.local",
@@ -5763,7 +5763,7 @@
       "wire_status": "stable",
       "render": "page",
       "display": "bespoke",
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "inference.models.pull",
@@ -7158,7 +7158,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "json.list",
@@ -7220,7 +7220,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "json.sample",
@@ -7289,7 +7289,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "sample_page"
     },
     {
       "id": "json.scan",
@@ -7358,7 +7358,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "json.set",
@@ -8133,7 +8133,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "kv.put",
@@ -8268,7 +8268,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "sample_page"
     },
     {
       "id": "kv.scan",
@@ -8340,7 +8340,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "admin.metrics",
@@ -8759,7 +8759,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "vector.batch_delete",
@@ -9334,7 +9334,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "vector.collection.set_embedding_model",
@@ -10306,7 +10306,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "vector.query",
@@ -10583,7 +10583,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "sample_page"
     },
     {
       "id": "vector.scan",
@@ -10669,7 +10669,7 @@
           }
         ]
       },
-      "encoding": null
+      "encoding": "page"
     },
     {
       "id": "vector.metadata.update",

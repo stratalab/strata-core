@@ -48,7 +48,7 @@ use strata_executor::{Executor, Output};
 
 const CHILD_MODE: &str = "STRATA_OUTPUT_CONTRACT_CHILD";
 const BLESS: &str = "STRATA_OUTPUT_BLESS";
-/// 2026-09-10 20:19:44 UTC, the exemplar instant of §10 Q3, in micros.
+/// 2026-09-10 20:19:44.000000 UTC, the exemplar instant of §10 Q3, in micros.
 const FIXED_INSTANT_MICROS: u64 = 1_789_071_584_000_000;
 /// base64 of the single byte `0xFF` — a KV value that is not text.
 const NON_UTF8_BYTES: &str = "/w==";
@@ -56,6 +56,9 @@ const NON_UTF8_BYTES: &str = "/w==";
 /// opaque-cursor pages, a sequence number for event pages.
 const FIXED_CURSOR: &str = "bmV4dA==";
 const FIXED_CURSOR_SEQ: u64 = 7;
+/// The population a synthetic sample edge reports: larger than any sample
+/// fixture's item count, so the sample notice fires (§3 `SamplePage`, N < M).
+const SAMPLED_POPULATION: u64 = 10;
 /// Cell terminator in a snapshot file: the rendered text is everything between
 /// the heading line and the first `∎` line, so an empty render, a render with
 /// no trailing newline, and one with are all distinguishable.
@@ -351,6 +354,15 @@ fn edges(family: &str, primary: &Value) -> Vec<(String, Value)> {
             .find(|more| serde_json::from_value::<Output>(more.clone()).is_ok())
             .expect("a has_more page with one of the two cursor shapes deserializes");
         edges.push(("edge:has_more=true".to_owned(), more));
+    }
+    if has_items
+        && primary["data"]["total_count"]
+            .as_u64()
+            .is_some_and(|total| total < SAMPLED_POPULATION)
+    {
+        let mut sampled = primary.clone();
+        sampled["data"]["total_count"] = Value::from(SAMPLED_POPULATION);
+        edges.push(("edge:total_count=more".to_owned(), sampled));
     }
     if has_items {
         let mut empty = primary.clone();
@@ -649,12 +661,19 @@ fn scrub(text: &str) -> String {
     let mut out = text.to_owned();
     for (pattern, placeholder) in [
         // A rendered local date-time (the binary runs under TZ=UTC; the
-        // playground cell renders in the host's zone) and a raw epoch-micros.
+        // playground cell renders in the host's zone), a declared table's
+        // UTC-second cell (Q3), and epoch micros — keyed in an envelope, a
+        // bare 16-digit cell in a raw row (2001 through 2286).
         (
             r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ [+-]\d{2}:\d{2}",
             "<instant>",
         ),
+        (
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6} UTC",
+            "<instant>",
+        ),
         (r#"("committed_at":\s*)\d+"#, "${1}<micros>"),
+        (r"\b\d{16}\b", "<micros>"),
         (r"err_local_[0-9a-f]+_[0-9]+", "<reference_id>"),
         (
             r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",

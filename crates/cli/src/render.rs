@@ -4,13 +4,15 @@ use base64::Engine as _;
 use serde::Serialize;
 use serde_json::Value;
 use strata_executor::cli_metadata::{
-    CliDisplay, CliDisplayDecl, CliRenderRule, ReceiptFilter, ReceiptPlaceholder, ReceiptSegment,
-    ReceiptTemplate, ReceiptValue,
+    CliDisplay, CliDisplayAs, CliDisplayDecl, CliDisplayField, CliDisplaySort, CliRenderRule,
+    CliWireEncoding, ReceiptFilter, ReceiptPlaceholder, ReceiptSegment, ReceiptTemplate,
+    ReceiptValue,
 };
 use strata_executor::{Command, Output};
 
 use crate::catalog;
 use crate::options::Format;
+use crate::table::{Cell, Table};
 use crate::CliError;
 
 // Writing to a String is infallible; the macro keeps the call sites terse.
@@ -55,13 +57,28 @@ impl Rendered {
 }
 
 /// What a rendering knows about the command that produced its output: the
-/// command's `display:` declaration from the embedded catalog and, when the
-/// declared receipt quotes the request (`{/request/name}`), the request
-/// itself. `--json` and `--pretty` read no declaration — the envelope is the
-/// record — so they carry none. Wasm-safe.
+/// command's `display:` declaration from the embedded catalog, parsed into
+/// the shape its render rule reads, and, when a declared receipt quotes the
+/// request (`{/request/name}`), the request itself. `--json` and `--pretty`
+/// read no declaration — the envelope is the record — so they carry none.
+/// Wasm-safe.
 #[derive(Clone, Debug)]
 pub struct Invocation {
-    ack: Option<MutationAck>,
+    declared: Option<Declared>,
+}
+
+/// A `display:` declaration parsed for the rule it renders under (output
+/// contract R2). The rules S3 and S5 have not reached (`optional`, the
+/// status rules, `batch`) still render through the family path and parse
+/// to nothing.
+#[derive(Clone, Debug)]
+enum Declared {
+    /// `mutation_ack`: a receipt and an identity.
+    Ack(MutationAck),
+    /// `page`, `history`, `search`: the rows at one pointer, as a table.
+    Rows(RowsDecl),
+    /// `analytics`: a node-keyed map, as a two-column table.
+    Map(MapDecl),
 }
 
 /// A parsed `mutation_ack` declaration (output contract R1/R2).
@@ -73,11 +90,51 @@ struct MutationAck {
     request: Option<Value>,
 }
 
+/// A parsed `columns:` declaration (output contract R1-table): the one array
+/// the rows come from and the cell each column reads out of a row.
+#[derive(Clone, Debug)]
+struct RowsDecl {
+    /// Pointer to the row array on the envelope: `/data/items`, or `/data`
+    /// when the wire is the bare array.
+    rows: String,
+    columns: Vec<Column>,
+    /// Present under the `page` rule: the continuation and sample facts
+    /// beside the rows decide what stderr says.
+    page: Option<PageDecl>,
+}
+
+/// One declared column.
+#[derive(Clone, Debug)]
+struct Column {
+    /// Pointer within one row (`/version`, `/data/embedding`); empty when the
+    /// row is the cell — a scalar list.
+    path: String,
+    header: String,
+    as_: Option<CliDisplayAs>,
+}
+
+/// What a page's stderr may report.
+#[derive(Clone, Copy, Debug)]
+struct PageDecl {
+    /// The wire carries `total_count`: the rows are a sample of a population.
+    sampled: bool,
+}
+
+/// A parsed `map:` declaration (output contract R1-table for analytics).
+#[derive(Clone, Debug)]
+struct MapDecl {
+    /// Pointer to the node-keyed object.
+    map: String,
+    /// Header over the value column; the key column is always `NODE`.
+    header: String,
+    sort: CliDisplaySort,
+}
+
 impl Invocation {
     /// A rendering with no declaration: JSON/pretty output, progress events,
     /// and every output the catalog does not describe.
     pub const fn none() -> Self {
-        Self { ack: None }
+        Self { declared: None }
     }
 
     /// The declaration `command` renders under in `format`. Human and raw
@@ -104,25 +161,61 @@ impl Invocation {
         let CliDisplayDecl::Declared(display) = &entry.display else {
             return Ok(Self::none());
         };
-        if entry.render != CliRenderRule::MutationAck {
-            return Ok(Self::none());
-        }
-        let mut ack = MutationAck::parse(display).map_err(|reason| {
+        // The IDL guard has already accepted every shipped declaration; a
+        // parse error here means the embedded catalog and the guard disagree.
+        let invalid = |reason: String| {
             CliError::usage(format!(
                 "display declaration for `{wire}` is invalid: {reason}"
             ))
-        })?;
-        if ack.quotes_request() {
-            ack.request = Some(request()?);
+        };
+        let declared = match entry.render {
+            CliRenderRule::MutationAck => {
+                let mut ack = MutationAck::parse(display).map_err(invalid)?;
+                if ack.quotes_request() {
+                    ack.request = Some(request()?);
+                }
+                Declared::Ack(ack)
+            }
+            CliRenderRule::Page => {
+                let page = PageDecl {
+                    sampled: entry.encoding == Some(CliWireEncoding::SamplePage),
+                };
+                Declared::Rows(RowsDecl::parse(display, Some(page)).map_err(invalid)?)
+            }
+            CliRenderRule::History | CliRenderRule::Search => {
+                Declared::Rows(RowsDecl::parse(display, None).map_err(invalid)?)
+            }
+            CliRenderRule::Analytics => Declared::Map(MapDecl::parse(display).map_err(invalid)?),
+            // S3 (`optional`, `status_value`, `status_sections`) and S5
+            // (`batch`) still render through the family path.
+            CliRenderRule::Optional
+            | CliRenderRule::StatusValue
+            | CliRenderRule::StatusSections
+            | CliRenderRule::Batch => return Ok(Self::none()),
+        };
+        Ok(Self {
+            declared: Some(declared),
+        })
+    }
+
+    /// Whether a declaration was parsed at all.
+    #[cfg(test)]
+    const fn is_declared(&self) -> bool {
+        self.declared.is_some()
+    }
+
+    /// The parsed `mutation_ack` declaration, when that is what was parsed.
+    #[cfg(test)]
+    fn ack(self) -> Option<MutationAck> {
+        match self.declared {
+            Some(Declared::Ack(ack)) => Some(ack),
+            _ => None,
         }
-        Ok(Self { ack: Some(ack) })
     }
 }
 
 impl MutationAck {
-    /// Parses a `mutation_ack` display. The IDL guard has already accepted
-    /// every shipped declaration; an error here means the embedded catalog
-    /// and the guard disagree.
+    /// Parses a `mutation_ack` display.
     fn parse(display: &CliDisplay) -> Result<Self, String> {
         let receipt = display
             .receipt
@@ -153,8 +246,78 @@ impl MutationAck {
     }
 }
 
+impl RowsDecl {
+    /// Parses a `columns:` display. Every column steps into the same row
+    /// array with one `/*` (`/data/items/*/version`); the text before it is
+    /// the row source and the text after it the cell's path within a row.
+    fn parse(display: &CliDisplay, page: Option<PageDecl>) -> Result<Self, String> {
+        let mut rows: Option<String> = None;
+        let mut columns = Vec::with_capacity(display.columns.len());
+        for field in &display.columns {
+            let (source, path) = field.field.split_once("/*").ok_or_else(|| {
+                format!("column `{}` does not step into a row array", field.field)
+            })?;
+            match &rows {
+                None => rows = Some(source.to_owned()),
+                Some(rows) if rows == source => {}
+                Some(rows) => {
+                    return Err(format!(
+                        "column `{}` reads rows at `{source}`, not `{rows}`",
+                        field.field
+                    ))
+                }
+            }
+            columns.push(Column {
+                path: path.to_owned(),
+                header: column_header(field),
+                as_: field.as_,
+            });
+        }
+        Ok(Self {
+            rows: rows.ok_or_else(|| "a table declares at least one column".to_owned())?,
+            columns,
+            page,
+        })
+    }
+
+    /// A single column that is the row itself: `kv list` prints keys, one
+    /// per line, with no header.
+    fn is_scalar_list(&self) -> bool {
+        matches!(self.columns.as_slice(), [column] if column.path.is_empty())
+    }
+}
+
+impl MapDecl {
+    /// Parses a `map:` display.
+    fn parse(display: &CliDisplay) -> Result<Self, String> {
+        Ok(Self {
+            map: display
+                .map
+                .clone()
+                .ok_or_else(|| "an analytics display declares a map".to_owned())?,
+            header: display
+                .header
+                .clone()
+                .ok_or_else(|| "a map declares the header over its values".to_owned())?,
+            sort: display.sort.unwrap_or(CliDisplaySort::Key),
+        })
+    }
+}
+
+/// The header over a column: `header:` when authored, else the last pointer
+/// segment upper-cased (`/data/items/*/parent/name` → `NAME`).
+fn column_header(field: &CliDisplayField) -> String {
+    field.header.clone().unwrap_or_else(|| {
+        field
+            .field
+            .rsplit_once('/')
+            .map_or(field.field.as_str(), |(_, last)| last)
+            .to_ascii_uppercase()
+    })
+}
+
 /// Renders an executor `Output` for `format`, without touching stdio. JSON
-/// and pretty print the envelope; human and raw render a declared write
+/// and pretty print the envelope; human and raw render a declared command
 /// through its `display:` declaration (`invocation`) and everything else
 /// through the family renderers. Wasm-safe: the binary prints the result
 /// (`print_output`), the playground returns it (`run_line`).
@@ -170,8 +333,13 @@ pub fn render_output(
             format,
         )));
     }
-    if let Some(ack) = &invocation.ack {
-        return Ok(render_mutation_ack(&value, ack, format));
+    // A declaration reads the wire as it is: each column names its own
+    // presentation, so nothing below rewrites the envelope first.
+    match &invocation.declared {
+        Some(Declared::Ack(ack)) => return Ok(render_mutation_ack(&value, ack, format)),
+        Some(Declared::Rows(rows)) => return Ok(render_rows(&value, rows, format)),
+        Some(Declared::Map(map)) => return Ok(render_map(&value, map, format)),
+        None => {}
     }
     // Human and raw formats show KV keys/values as text when possible. The
     // decode happens here — with the typed `Output` in hand — so only fields
@@ -183,6 +351,223 @@ pub fn render_output(
     // consumers keep an unambiguous number.
     humanize_committed_at(&mut value);
     Ok(Rendered::stdout(value_to_string(&value, format)?))
+}
+
+/// Output contract R1-table for a declared row list. Human prints the
+/// declared columns under an UPPERCASE header (`Table`), or one cell per
+/// line with no header when the row is the cell; `(nil)` when the rows are
+/// absent (a history of a key that never existed), `(empty)` when there are
+/// none. Raw prints the same cells tab-separated and nothing else. A page's
+/// continuation and sample facts go to stderr (R5), human only: a script
+/// reads `has_more` from `--json`.
+fn render_rows(envelope: &Value, decl: &RowsDecl, format: Format) -> Rendered {
+    let mut stdout = String::new();
+    let rows = envelope.pointer(&decl.rows).and_then(Value::as_array);
+    match rows {
+        None => {
+            if format == Format::Human {
+                line!(stdout, "(nil)");
+            }
+        }
+        Some(rows) if rows.is_empty() => {
+            if format == Format::Human {
+                line!(stdout, "(empty)");
+            }
+        }
+        Some(rows) if decl.is_scalar_list() => {
+            for row in rows {
+                line!(
+                    stdout,
+                    "{}",
+                    cell(Some(row), decl.columns[0].as_, format).text
+                );
+            }
+        }
+        Some(rows) => {
+            let mut table = Table::new(decl.columns.iter().map(|c| c.header.clone()).collect());
+            for row in rows {
+                table.push(
+                    decl.columns
+                        .iter()
+                        .map(|column| cell(row.pointer(&column.path), column.as_, format))
+                        .collect(),
+                );
+            }
+            stdout = match format {
+                Format::Human => table.human(),
+                Format::Raw | Format::Json | Format::Pretty => table.raw(),
+            };
+        }
+    }
+    let mut stderr = String::new();
+    if let (Some(page), Format::Human) = (decl.page, format) {
+        // The page facts sit beside the rows, one level up.
+        let facts = decl
+            .rows
+            .rsplit_once('/')
+            .and_then(|(parent, _)| envelope.pointer(parent))
+            .unwrap_or(&Value::Null);
+        page_notices(facts, rows.map_or(0, Vec::len), page, &mut stderr);
+    }
+    Rendered { stdout, stderr }
+}
+
+/// What a reader is told about a page beyond its rows: that it is a sample
+/// (`-- sampled N of M`, only when the sample is smaller than the
+/// population) and how to fetch the next page (`-- more: add --cursor …`).
+fn page_notices(facts: &Value, shown: usize, page: PageDecl, out: &mut String) {
+    if page.sampled {
+        if let Some(total) = facts.get("total_count").and_then(Value::as_u64) {
+            if u64::try_from(shown).is_ok_and(|shown| shown < total) {
+                line!(out, "-- sampled {shown} of {total}");
+            }
+        }
+    }
+    if facts.get("has_more").and_then(Value::as_bool) == Some(true) {
+        if let Some(cursor) = facts.get("cursor").filter(|cursor| !cursor.is_null()) {
+            // Actionable, not just a token (#2998): tell the reader how to
+            // fetch the next page. The cursor stays base64: `--cursor`
+            // accepts it verbatim.
+            line!(
+                out,
+                "-- more: add --cursor {} to the same command",
+                scalar_summary(cursor)
+            );
+        }
+    }
+}
+
+/// Output contract R1-table for an analytics map: one row per node under
+/// `NODE` and the declared header, ordered as declared — by value (ties by
+/// node) or by node. `(nil)` when the map is absent, `(empty)` when it has
+/// no entries, human only.
+fn render_map(envelope: &Value, decl: &MapDecl, format: Format) -> Rendered {
+    let mut stdout = String::new();
+    match envelope.pointer(&decl.map).and_then(Value::as_object) {
+        None => {
+            if format == Format::Human {
+                line!(stdout, "(nil)");
+            }
+        }
+        Some(entries) if entries.is_empty() => {
+            if format == Format::Human {
+                line!(stdout, "(empty)");
+            }
+        }
+        Some(entries) => {
+            let mut rows: Vec<(&String, &Value)> = entries.iter().collect();
+            rows.sort_by(|(node_a, value_a), (node_b, value_b)| match decl.sort {
+                CliDisplaySort::Key => node_a.cmp(node_b),
+                CliDisplaySort::Asc => {
+                    value_order(value_a, value_b).then_with(|| node_a.cmp(node_b))
+                }
+                CliDisplaySort::Desc => {
+                    value_order(value_b, value_a).then_with(|| node_a.cmp(node_b))
+                }
+            });
+            let mut table = Table::new(vec!["NODE".to_owned(), decl.header.clone()]);
+            for (node, value) in rows {
+                table.push(vec![
+                    Cell::text(escape_cell(node)),
+                    cell(Some(value), None, format),
+                ]);
+            }
+            stdout = match format {
+                Format::Human => table.human(),
+                Format::Raw | Format::Json | Format::Pretty => table.raw(),
+            };
+        }
+    }
+    Rendered::stdout(stdout)
+}
+
+/// How two map values order: numerically when both are numbers, else by
+/// their scalar text.
+fn value_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        _ => raw_scalar(a).cmp(&raw_scalar(b)),
+    }
+}
+
+/// One cell of a declared table (output contract R1-table, R4): the value
+/// under its declared presentation, or the format's null cell (`-` human,
+/// empty raw) when it is null or absent.
+fn cell(value: Option<&Value>, as_: Option<CliDisplayAs>, format: Format) -> Cell {
+    let value = match value {
+        None | Some(Value::Null) => {
+            return Cell::null(if format == Format::Human { "-" } else { "" });
+        }
+        Some(value) => value,
+    };
+    let text = |text: String| Cell::text(escape_cell(&text));
+    let number = |text: String| Cell::number(escape_cell(&text));
+    match as_ {
+        None | Some(CliDisplayAs::Float) => match value {
+            Value::Number(n) => number(number_text(n, format)),
+            other => text(scalar_text(other, format)),
+        },
+        Some(CliDisplayAs::Bytes) => text(bytes_text(value, format)),
+        Some(CliDisplayAs::Json | CliDisplayAs::Table) => text(raw_scalar(value)),
+        Some(CliDisplayAs::Date) => match (value.as_u64(), format) {
+            (Some(micros), Format::Human) => text(crate::wall_clock::format_utc_instant(micros)),
+            (Some(micros), _) => number(micros.to_string()),
+            (None, _) => text(scalar_text(value, format)),
+        },
+        Some(CliDisplayAs::Size) => match (value.as_u64(), format) {
+            (Some(bytes), Format::Human) => text(size_text(bytes)),
+            (Some(bytes), _) => number(bytes.to_string()),
+            (None, _) => text(scalar_text(value, format)),
+        },
+        Some(CliDisplayAs::List) => match (value.as_array(), format) {
+            (Some(items), Format::Human) => text(
+                items
+                    .iter()
+                    .map(|item| scalar_text(item, format))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => text(raw_scalar(value)),
+        },
+    }
+}
+
+/// A scalar's cell text: strings as they are, numbers under the format's
+/// precision rule, everything else as compact JSON.
+fn scalar_text(value: &Value, format: Format) -> String {
+    match value {
+        Value::Number(n) => number_text(n, format),
+        other => raw_scalar(other),
+    }
+}
+
+/// A number's cell text (output contract Q19): a reader sees a float to at
+/// most six decimals, trailing zeros trimmed but never the point (`1.0`,
+/// `0.31746`); a script sees the wire's full precision. Integers are as
+/// they are.
+fn number_text(n: &serde_json::Number, format: Format) -> String {
+    match (n.as_f64(), format) {
+        (Some(float), Format::Human) if n.is_f64() => float_text(float),
+        _ => n.to_string(),
+    }
+}
+
+fn float_text(float: f64) -> String {
+    let mut text = format!("{float:.6}");
+    let trimmed = text.trim_end_matches('0').len();
+    text.truncate(trimmed);
+    if text.ends_with('.') {
+        text.push('0');
+    }
+    text
+}
+
+/// A cell holds one line: a newline or tab inside a value is spelled out
+/// (`\n`, `\t`) so the row stays one row in both layouts (R4).
+fn escape_cell(text: &str) -> String {
+    text.replace('\n', "\\n")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
 }
 
 /// Output contract R1 for a `MutationAck`: a hit prints the declared receipt
@@ -426,8 +811,6 @@ fn render_human(value: &Value, out: &mut String) -> Result<(), CliError> {
                 print_optional_record(data, out)?;
             }
             "json_value" | "json_versioned_value" => print_maybe_json(kind, data, out)?,
-            "json_version_history" => print_bare_items(data, out),
-            "vector_matches" => print_matches_data(data, out),
             "inference_generation" => print_inference_generation(data, true, out),
             "inference_text" => line!(out, "{}", data.as_str().unwrap_or_default()),
             "inference_token_ids" => print_token_ids(data, out),
@@ -463,12 +846,6 @@ fn render_human_data(data: &Value, out: &mut String) -> Result<(), CliError> {
 
     if let Some(items) = data.get("items").and_then(Value::as_array) {
         print_items(items, out);
-        print_page_tail(data, out);
-        return Ok(());
-    }
-
-    if let Some(items) = data.get("matches").and_then(Value::as_array) {
-        print_vector_matches(items, out);
         return Ok(());
     }
 
@@ -514,16 +891,6 @@ fn render_raw(value: &Value, out: &mut String) {
             }
             return;
         }
-        "json_version_history" => {
-            if let Some(items) = data.as_array() {
-                print_items(items, out);
-            }
-            return;
-        }
-        "vector_matches" => {
-            print_matches_data(data, out);
-            return;
-        }
         "event_count" => {
             print_count(data, out);
             return;
@@ -549,11 +916,6 @@ fn render_raw(value: &Value, out: &mut String) {
 
     if let Some(items) = data.get("items").and_then(Value::as_array) {
         print_items(items, out);
-        return;
-    }
-
-    if let Some(items) = data.get("matches").and_then(Value::as_array) {
-        print_vector_matches(items, out);
         return;
     }
 
@@ -946,26 +1308,6 @@ fn json_leaf<'a>(kind: &str, data: &'a Value, found: bool) -> Option<&'a Value> 
     }
 }
 
-/// `json_version_history` serializes as a bare item array (or null when the
-/// document never existed), unlike the `{count, items}` KV history envelope.
-fn print_bare_items(data: &Value, out: &mut String) {
-    if let Value::Array(items) = data {
-        print_items(items, out);
-    } else {
-        line!(out, "(nil)");
-    }
-}
-
-/// `vector_matches` serializes its match list as the bare `data` array, so the
-/// tabular key/score renderer must be dispatched by tag.
-#[allow(clippy::single_match_else)]
-fn print_matches_data(data: &Value, out: &mut String) {
-    match data.as_array() {
-        Some(items) => print_vector_matches(items, out),
-        None => line!(out, "(empty)"),
-    }
-}
-
 /// `event_count` wraps its count in `{count}`; humans and scripts get the
 /// bare number, matching how `kv count` (a plain `uint`) renders.
 fn print_count(data: &Value, out: &mut String) {
@@ -982,20 +1324,6 @@ fn print_items(items: &[Value], out: &mut String) {
     }
     if items.is_empty() {
         line!(out, "(empty)");
-    }
-}
-
-fn print_page_tail(data: &Value, out: &mut String) {
-    if data.get("has_more").and_then(Value::as_bool) == Some(true) {
-        if let Some(cursor) = data.get("cursor") {
-            // Actionable, not just a token (#2998): tell the reader how to
-            // fetch the next page.
-            line!(
-                out,
-                "-- more: add --cursor {} to the same command",
-                scalar_summary(cursor)
-            );
-        }
     }
 }
 
@@ -1092,35 +1420,14 @@ fn count_field(value: &Value, field: &str) -> u64 {
     value.get(field).and_then(Value::as_u64).unwrap_or(0)
 }
 
-fn print_vector_matches(items: &[Value], out: &mut String) {
-    for item in items {
-        let key = item
-            .get("key")
-            .map_or_else(|| scalar_summary(item), scalar_summary);
-        let score = item
-            .get("score")
-            .or_else(|| item.get("distance"))
-            .map(scalar_summary)
-            .unwrap_or_default();
-        if score.is_empty() {
-            line!(out, "{key}");
-        } else {
-            line!(out, "{key}\t{score}");
-        }
-    }
-    if items.is_empty() {
-        line!(out, "(empty)");
-    }
-}
-
 /// Rewrites schema-declared `Bytes` fields from base64 to readable text for
-/// human/raw output.
+/// human/raw output on the family path. A declared command never comes
+/// here: its columns say `as: bytes` themselves (`bytes_text`).
 ///
 /// Driven by the typed `Output` variant, never by value shape, so a genuine
 /// string that merely looks like base64 is never touched — the defect that
 /// retired the old integer-array heuristic. Fields whose bytes are not valid
-/// UTF-8 keep their base64 form. Continuation cursors deliberately stay
-/// base64: they are opaque tokens that `--cursor` accepts verbatim.
+/// UTF-8 keep their base64 form.
 fn humanize_kv_bytes(output: &Output, value: &mut Value) {
     let Some(data) = value.get_mut("data") else {
         return;
@@ -1132,17 +1439,6 @@ fn humanize_kv_bytes(output: &Output, value: &mut Value) {
             if let Some(record) = data.get_mut("value") {
                 decode_bytes_fields(record, &["value"]);
             }
-        }
-        Output::VersionHistory(_) => decode_bytes_item_fields(data, &["value"]),
-        Output::KeysPage { .. } => {
-            if let Some(items) = data.get_mut("items").and_then(Value::as_array_mut) {
-                for item in items {
-                    decode_bytes_value(item);
-                }
-            }
-        }
-        Output::KvScanResult { .. } | Output::SampleResult { .. } => {
-            decode_bytes_item_fields(data, &["key", "value"]);
         }
         // Branch diff/merge/preview identities (and values) are logical keys —
         // decode them like `kv history` does, so the one command whose job is
@@ -1176,10 +1472,6 @@ fn humanize_kv_bytes(output: &Output, value: &mut Value) {
         // verb today; their base64 form is still correct if that changes.
         _ => {}
     }
-}
-
-fn decode_bytes_item_fields(data: &mut Value, fields: &[&str]) {
-    decode_bytes_in_array(data, "items", fields);
 }
 
 /// Decodes `fields` on every object in `object[array_field]`, when that is an
@@ -1320,19 +1612,23 @@ fn humanize_committed_at(value: &mut Value) {
 mod tests {
     use serde_json::json;
     use strata_executor::{
-        BranchComparisonItem, BranchPreviewItem, Bytes, CommitDurability, CommitReceipt,
-        ComparedCapability, ComparedEntityItem, ConflictKind, ConflictStrategyResult, Maybe,
-        MutationEffect, Output, PageInfo, PreviewConflictItem, PromotedEntityItem,
-        PromotionOutcomeItem, PromotionStrategy, ScanItem, SpaceComparisonItem, VersionedValue,
+        BranchComparisonItem, BranchItem, BranchParentItem, BranchPreviewItem, BranchStatus, Bytes,
+        CommitDurability, CommitReceipt, ComparedCapability, ComparedEntityItem, ConflictKind,
+        ConflictStrategyResult, EventData, EventVersionedData, GraphBfsData, GraphPagerankData,
+        GraphWccData, HistoryItem, HistoryResult, JsonHistoryItem, Maybe, MutationEffect, Output,
+        PageInfo, PreviewConflictItem, PromotedEntityItem, PromotionOutcomeItem, PromotionStrategy,
+        SampleItem, SpaceComparisonItem, VectorMatch, VersionedValue,
     };
 
-    use strata_executor::cli_metadata::CliDisplay;
+    use strata_executor::cli_metadata::{CliDisplay, CliDisplayAs, CliDisplayField};
     use strata_executor::{AdminPing, Command, MutationEffectKind};
 
     use super::{
-        humanize_kv_bytes, is_miss, render_mutation_ack, render_output, Format, Invocation,
-        MutationAck, Rendered,
+        cell, float_text, humanize_kv_bytes, is_miss, render_map, render_mutation_ack,
+        render_output, Format, Invocation, MapDecl, MutationAck, Rendered, RowsDecl,
     };
+    use crate::table::Cell;
+    use serde_json::Value;
 
     fn bytes(text: &str) -> Bytes {
         Bytes::new(text.as_bytes().to_vec())
@@ -1349,6 +1645,24 @@ mod tests {
     fn render_for(command: &Command, output: &Output, format: Format) -> Rendered {
         let invocation = Invocation::of(command, format).expect("the declaration parses");
         render_output(output, &invocation, format).expect("output renders")
+    }
+
+    /// Renders `output` under the declaration of the command with wire name
+    /// `wire`, for the read commands whose declarations never quote the
+    /// request.
+    fn render_wire(wire: &str, output: &Output, format: Format) -> Rendered {
+        let invocation = Invocation::for_wire(wire, format, || {
+            panic!("a read declaration does not quote the request")
+        })
+        .expect("the declaration parses");
+        render_output(output, &invocation, format).expect("output renders")
+    }
+
+    fn both(text: &str, feedback: &str) -> Rendered {
+        Rendered {
+            stdout: text.to_owned(),
+            stderr: feedback.to_owned(),
+        }
     }
 
     fn only_stdout(text: &str) -> Rendered {
@@ -1500,14 +1814,14 @@ mod tests {
             panic!("kv_put's declaration never reads the request")
         })
         .expect("kv_put is declared");
-        assert!(invocation.ack.is_some());
+        assert!(invocation.ack().is_some());
 
         let invocation = Invocation::for_wire("json_drop_index", Format::Human, || {
             Ok(json!({"name": "x"}))
         })
         .expect("json_drop_index is declared");
         assert_eq!(
-            invocation.ack.and_then(|ack| ack.request),
+            invocation.ack().and_then(|ack| ack.request),
             Some(json!({"name": "x"}))
         );
 
@@ -1528,26 +1842,31 @@ mod tests {
         for format in [Format::Json, Format::Pretty] {
             let invocation = Invocation::of(&command, format).expect("no catalog lookup");
             assert!(
-                invocation.ack.is_none(),
+                !invocation.is_declared(),
                 "{format:?} is the record, not a receipt"
             );
         }
         assert!(Invocation::of(&command, Format::Human)
             .expect("kv_put is declared")
-            .ack
-            .is_some());
+            .is_declared());
         assert!(Invocation::of(&command, Format::Raw)
             .expect("kv_put is declared")
-            .ack
-            .is_some());
+            .is_declared());
         let ping = Invocation::of(&Command::Ping {}, Format::Human).expect("ping is bespoke");
         assert!(
-            ping.ack.is_none(),
+            !ping.is_declared(),
             "a bespoke command renders through its family arm"
         );
         let unknown = Invocation::for_wire("no_such_wire", Format::Human, || Ok(json!({})))
             .expect("an unknown wire renders through the family path");
-        assert!(unknown.ack.is_none());
+        assert!(!unknown.is_declared());
+        // The rules S3 and S5 own are declared in the catalog but not yet
+        // read: they still render through the family path.
+        for wire in ["kv_get", "admin_info", "kv_batch_get"] {
+            let pending = Invocation::for_wire(wire, Format::Human, || Ok(json!({})))
+                .expect("a declared command parses");
+            assert!(!pending.is_declared(), "{wire} waits for its slice");
+        }
     }
 
     #[test]
@@ -1655,6 +1974,529 @@ mod tests {
             render_for(&command, &two, Format::Human),
             only_stdout("deleted 2 vectors from docs\n")
         );
+    }
+
+    // --- #3314 S2: declared tables for page / history / search / analytics ---
+
+    const FIXED_INSTANT_MICROS: u64 = 1_789_071_584_000_000;
+
+    fn kv_history(items: Vec<HistoryItem>) -> Output {
+        Output::VersionHistory(Some(HistoryResult::new(items)))
+    }
+
+    #[test]
+    fn kv_history_is_a_table_of_its_declared_columns() {
+        let output = kv_history(vec![
+            HistoryItem::new(Some(bytes("two")), false, 4, 40)
+                .with_committed_at(Some(FIXED_INSTANT_MICROS)),
+            HistoryItem::new(Some(Bytes::new(vec![0xff])), false, 12, 30),
+            HistoryItem::new(None, true, 2, 20).with_committed_at(Some(FIXED_INSTANT_MICROS)),
+        ]);
+        assert_eq!(
+            render_wire("kv_history", &output, Format::Human),
+            only_stdout(concat!(
+                "VERSION  COMMITTED_AT                    VALUE\n",
+                "      4  2026-09-10 20:19:44.000000 UTC  two\n",
+                "     12  -                               base64:/w==\n",
+                "      2  2026-09-10 20:19:44.000000 UTC  -\n",
+            )),
+            "numbers right-align, a date is a UTC instant, bytes decode, a null is `-`"
+        );
+        assert_eq!(
+            render_wire("kv_history", &output, Format::Raw),
+            only_stdout("4\t1789071584000000\ttwo\n12\t\t/w==\n2\t1789071584000000\t\n"),
+            "raw keeps the epoch micros and bare base64, and an empty cell for null"
+        );
+    }
+
+    #[test]
+    fn a_missing_history_is_nil_and_an_empty_one_is_empty_for_a_reader_only() {
+        let missing = Output::VersionHistory(None);
+        assert_eq!(
+            render_wire("kv_history", &missing, Format::Human),
+            only_stdout("(nil)\n")
+        );
+        assert_eq!(
+            render_wire("kv_history", &missing, Format::Raw),
+            only_stdout("")
+        );
+        let empty = kv_history(Vec::new());
+        assert_eq!(
+            render_wire("kv_history", &empty, Format::Human),
+            only_stdout("(empty)\n")
+        );
+        assert_eq!(
+            render_wire("kv_history", &empty, Format::Raw),
+            only_stdout("")
+        );
+    }
+
+    #[test]
+    fn a_bare_array_history_reads_its_rows_at_data() {
+        let output = Output::JsonVersionHistory(Some(vec![JsonHistoryItem::new(
+            Some(json!({"name": "Ada", "age": 36})),
+            4,
+            40,
+            Some(2),
+            false,
+        )]));
+        assert_eq!(
+            render_wire("json_history", &output, Format::Human),
+            only_stdout(concat!(
+                "VERSION  DOCUMENT_VERSION  COMMITTED_AT  VALUE\n",
+                "      4                 2  -             {\"age\":36,\"name\":\"Ada\"}\n",
+            ))
+        );
+        assert_eq!(
+            render_wire("json_history", &output, Format::Raw),
+            only_stdout("4\t2\t\t{\"age\":36,\"name\":\"Ada\"}\n")
+        );
+        assert_eq!(
+            render_wire(
+                "json_history",
+                &Output::JsonVersionHistory(None),
+                Format::Human
+            ),
+            only_stdout("(nil)\n")
+        );
+    }
+
+    fn branch(name: &str, generation: u64, parent: Option<&str>) -> BranchItem {
+        BranchItem::new(
+            name.to_owned(),
+            format!("id-{name}"),
+            generation,
+            BranchStatus::Active,
+            parent.map(|parent| {
+                BranchParentItem::new(parent.to_owned(), "id".to_owned(), 1, 7, None)
+            }),
+            None,
+            None,
+            None,
+            0,
+        )
+    }
+
+    #[test]
+    fn a_page_is_a_table_and_its_continuation_is_stderr_feedback_for_a_reader() {
+        let output = Output::Branches {
+            items: vec![
+                branch("default", 1, None),
+                branch("feature", 2, Some("default")),
+            ],
+            page: PageInfo::new(true, Some("feature".to_owned())),
+        };
+        assert_eq!(
+            render_wire("branch_list", &output, Format::Human),
+            both(
+                "NAME     PARENT   STATUS  GENERATION\n\
+                 default  -        active           1\n\
+                 feature  default  active           2\n",
+                "-- more: add --cursor feature to the same command\n"
+            ),
+            "a nested pointer reads through the row; `header:` names the column"
+        );
+        assert_eq!(
+            render_wire("branch_list", &output, Format::Raw),
+            only_stdout("default\t\tactive\t1\nfeature\tdefault\tactive\t2\n"),
+            "a script reads `has_more` from --json, not from a hint"
+        );
+        let last = Output::Branches {
+            items: vec![branch("default", 1, None)],
+            page: PageInfo::terminal(),
+        };
+        assert!(
+            render_wire("branch_list", &last, Format::Human)
+                .stderr
+                .is_empty(),
+            "a terminal page needs no attention"
+        );
+    }
+
+    #[test]
+    fn a_scalar_page_is_one_cell_per_line_with_no_header() {
+        let output = Output::KeysPage {
+            items: vec![bytes("user:1"), Bytes::new(vec![0xff])],
+            page: PageInfo::new(true, Some(bytes("next"))),
+        };
+        assert_eq!(
+            render_wire("kv_list", &output, Format::Human),
+            both(
+                "user:1\nbase64:/w==\n",
+                "-- more: add --cursor bmV4dA== to the same command\n"
+            ),
+            "the cursor stays base64: --cursor takes it verbatim"
+        );
+        assert_eq!(
+            render_wire("kv_list", &output, Format::Raw),
+            only_stdout("user:1\n/w==\n")
+        );
+        let empty = Output::KeysPage {
+            items: Vec::new(),
+            page: PageInfo::terminal(),
+        };
+        assert_eq!(
+            render_wire("kv_list", &empty, Format::Human),
+            only_stdout("(empty)\n")
+        );
+        assert_eq!(render_wire("kv_list", &empty, Format::Raw), only_stdout(""));
+    }
+
+    fn kv_sample(total_count: u64, page: PageInfo<Bytes>) -> Output {
+        Output::SampleResult {
+            total_count,
+            items: vec![SampleItem::new(bytes("a"), bytes("1"), 3, 30)],
+            page,
+        }
+    }
+
+    #[test]
+    fn a_sample_smaller_than_its_population_says_so_on_stderr() {
+        let sampled = kv_sample(5, PageInfo::terminal());
+        assert_eq!(
+            render_wire("kv_sample", &sampled, Format::Human),
+            both(
+                "KEY  VERSION  VALUE\na          3  1\n",
+                "-- sampled 1 of 5\n"
+            )
+        );
+        assert_eq!(
+            render_wire("kv_sample", &sampled, Format::Raw),
+            only_stdout("a\t3\t1\n")
+        );
+        let whole = kv_sample(1, PageInfo::terminal());
+        assert!(
+            render_wire("kv_sample", &whole, Format::Human)
+                .stderr
+                .is_empty(),
+            "a sample that is the whole population is not a sample"
+        );
+        let sampled_and_more = kv_sample(5, PageInfo::new(true, Some(bytes("b"))));
+        assert_eq!(
+            render_wire("kv_sample", &sampled_and_more, Format::Human).stderr,
+            "-- sampled 1 of 5\n-- more: add --cursor Yg== to the same command\n",
+            "the sample notice comes before the continuation"
+        );
+    }
+
+    #[test]
+    fn a_search_result_is_a_key_score_metadata_table() {
+        let output = Output::VectorMatches(vec![
+            VectorMatch::new("a".to_owned(), 1.0, None),
+            VectorMatch::new("b".to_owned(), 0.1, Some(json!({"lang": "en"}))),
+        ]);
+        assert_eq!(
+            render_wire("vector_query", &output, Format::Human),
+            only_stdout(
+                "KEY  SCORE  METADATA\n\
+                 a      1.0  -\n\
+                 b      0.1  {\"lang\":\"en\"}\n"
+            ),
+            "a reader's float keeps `.0` and drops the noise past six decimals"
+        );
+        assert_eq!(
+            render_wire("vector_query", &output, Format::Raw),
+            only_stdout("a\t1.0\t\nb\t0.10000000149011612\t{\"lang\":\"en\"}\n"),
+            "a script gets the wire's full precision"
+        );
+        assert_eq!(
+            render_wire(
+                "vector_query",
+                &Output::VectorMatches(Vec::new()),
+                Format::Human
+            ),
+            only_stdout("(empty)\n")
+        );
+    }
+
+    #[test]
+    fn an_analytics_map_orders_by_value_with_ties_by_node() {
+        let ranks = [
+            ("a", 0.317_460_304_794_368_7),
+            ("b", 0.208_127_577_234_3),
+            ("c", 0.474_412_117_971_211_4),
+            ("d", 0.474_412_117_971_211_4),
+        ]
+        .into_iter()
+        .map(|(node, rank)| (node.to_owned(), rank))
+        .collect();
+        let output =
+            Output::GraphPagerankResult(GraphPagerankData::new("g".to_owned(), ranks, 20, false));
+        assert_eq!(
+            render_wire("graph_pagerank", &output, Format::Human),
+            only_stdout(
+                "NODE  RANK\n\
+                 c     0.474412\n\
+                 d     0.474412\n\
+                 a      0.31746\n\
+                 b     0.208128\n"
+            ),
+            "desc: highest rank first, equal ranks by node"
+        );
+        assert_eq!(
+            render_wire("graph_pagerank", &output, Format::Raw),
+            only_stdout(
+                "c\t0.4744121179712114\nd\t0.4744121179712114\na\t0.3174603047943687\nb\t0.2081275772343\n"
+            )
+        );
+    }
+
+    #[test]
+    fn an_analytics_map_orders_ascending_or_by_node_as_declared() {
+        // `10` sorts before `9` as text: the order must be numeric.
+        let depths = [("d", 10), ("a", 0), ("c", 9), ("b", 1), ("e", 1)]
+            .into_iter()
+            .map(|(node, depth)| (node.to_owned(), depth))
+            .collect();
+        let bfs = Output::GraphBfsResult(GraphBfsData::new(
+            "g".to_owned(),
+            "a".to_owned(),
+            vec!["a".to_owned()],
+            depths,
+            Vec::new(),
+            false,
+        ));
+        assert_eq!(
+            render_wire("graph_bfs", &bfs, Format::Human),
+            only_stdout(concat!(
+                "NODE  DEPTH\n",
+                "a         0\n",
+                "b         1\n",
+                "e         1\n",
+                "c         9\n",
+                "d        10\n",
+            )),
+            "asc: nearest first, equal depths by node, and `10` after `9`"
+        );
+        let components = [("b", "a"), ("a", "a"), ("c", "c")]
+            .into_iter()
+            .map(|(node, component)| (node.to_owned(), component.to_owned()))
+            .collect();
+        let wcc = Output::GraphWccResult(GraphWccData::new("g".to_owned(), components, 2));
+        assert_eq!(
+            render_wire("graph_wcc", &wcc, Format::Human),
+            only_stdout("NODE  COMPONENT\na     a\nb     a\nc     c\n"),
+            "key: by node; a text value column reads left to right"
+        );
+        assert_eq!(
+            render_wire("graph_wcc", &wcc, Format::Raw),
+            only_stdout("a\ta\nb\ta\nc\tc\n")
+        );
+        let none = Output::GraphWccResult(GraphWccData::new(
+            "g".to_owned(),
+            std::collections::BTreeMap::new(),
+            0,
+        ));
+        assert_eq!(
+            render_wire("graph_wcc", &none, Format::Human),
+            only_stdout("(empty)\n")
+        );
+        assert_eq!(
+            render_wire("graph_wcc", &none, Format::Raw),
+            only_stdout("")
+        );
+    }
+
+    #[test]
+    fn an_absent_analytics_map_is_nil_for_a_reader_only() {
+        // No wire shape omits its map; the rule still answers like `history`
+        // does for a key that never existed, so a reader can tell "no map"
+        // from "no entries".
+        let decl = MapDecl::parse(&CliDisplay {
+            map: Some("/data/ranks".to_owned()),
+            header: Some("RANK".to_owned()),
+            ..CliDisplay::default()
+        })
+        .expect("a map with a header parses");
+        let without = json!({"data": {"graph": "g"}});
+        assert_eq!(
+            render_map(&without, &decl, Format::Human),
+            only_stdout("(nil)\n")
+        );
+        assert_eq!(render_map(&without, &decl, Format::Raw), only_stdout(""));
+        let with = json!({"data": {"ranks": {"n": 1}}});
+        assert_eq!(
+            render_map(&with, &decl, Format::Human),
+            only_stdout("NODE  RANK\nn        1\n")
+        );
+    }
+
+    #[test]
+    fn a_cell_presents_each_declared_as_in_both_layouts() {
+        use CliDisplayAs::{Bytes as B, Date, Json, List, Size};
+        let human =
+            |value: &Value, as_: Option<CliDisplayAs>| cell(Some(value), as_, Format::Human);
+        let raw = |value: &Value, as_: Option<CliDisplayAs>| cell(Some(value), as_, Format::Raw);
+        let micros = json!(FIXED_INSTANT_MICROS);
+        assert_eq!(
+            human(&micros, Some(Date)),
+            Cell::text("2026-09-10 20:19:44.000000 UTC".to_owned())
+        );
+        assert_eq!(raw(&micros, Some(Date)), Cell::number(micros.to_string()));
+        let size = json!(3_000_000);
+        assert_eq!(human(&size, Some(Size)), Cell::text("3 MB".to_owned()));
+        assert_eq!(raw(&size, Some(Size)), Cell::number("3000000".to_owned()));
+        let list = json!(["kv", "json"]);
+        assert_eq!(human(&list, Some(List)), Cell::text("kv json".to_owned()));
+        assert_eq!(
+            raw(&list, Some(List)),
+            Cell::text("[\"kv\",\"json\"]".to_owned()),
+            "a script gets the list as one JSON cell"
+        );
+        let doc = json!({"a": [1, 2]});
+        assert_eq!(
+            human(&doc, Some(Json)),
+            Cell::text("{\"a\":[1,2]}".to_owned())
+        );
+        assert_eq!(raw(&doc, Some(Json)), human(&doc, Some(Json)));
+        let text = json!("aGVsbG8=");
+        assert_eq!(human(&text, Some(B)), Cell::text("hello".to_owned()));
+        assert_eq!(raw(&text, Some(B)), human(&text, Some(B)));
+        let binary = json!("/w==");
+        assert_eq!(
+            human(&binary, Some(B)),
+            Cell::text("base64:/w==".to_owned())
+        );
+        assert_eq!(
+            raw(&binary, Some(B)),
+            Cell::text("/w==".to_owned()),
+            "a script gets bytes that are not text as bare base64"
+        );
+        // A value of the wrong shape for its `as:` is shown as it is, never
+        // dropped: the declaration is a presentation, not a filter.
+        let odd = json!("not a number");
+        for as_ in [Some(Date), Some(Size), Some(List)] {
+            assert_eq!(
+                human(&odd, as_),
+                Cell::text("not a number".to_owned()),
+                "{as_:?}"
+            );
+        }
+        assert_eq!(cell(None, Some(Date), Format::Human), Cell::null("-"));
+        assert_eq!(
+            cell(Some(&Value::Null), Some(Size), Format::Raw),
+            Cell::null("")
+        );
+    }
+
+    #[test]
+    fn an_event_row_shows_its_date_and_its_payload_compact() {
+        let output = Output::EventRecords {
+            items: vec![EventVersionedData::new(
+                EventData::new(
+                    0,
+                    "user.created".to_owned(),
+                    json!({"id": 1, "note": "line one\nline two"}),
+                    FIXED_INSTANT_MICROS,
+                    String::new(),
+                    "h".to_owned(),
+                ),
+                1,
+                10,
+            )],
+            page: PageInfo::terminal(),
+        };
+        assert_eq!(
+            render_wire("event_list", &output, Format::Human),
+            only_stdout(concat!(
+                "SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD\n",
+                "       0  user.created  2026-09-10 20:19:44.000000 UTC  {\"id\":1,\"note\":\"line one\\nline two\"}\n",
+            )),
+            "compact JSON already spells a newline inside a string"
+        );
+        assert_eq!(
+            render_wire("event_list", &output, Format::Raw),
+            only_stdout(
+                "0\tuser.created\t1789071584000000\t{\"id\":1,\"note\":\"line one\\nline two\"}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_cell_holds_one_line_in_both_layouts() {
+        let output = Output::SampleResult {
+            total_count: 1,
+            items: vec![SampleItem::new(bytes("k\tv"), bytes("one\ntwo"), 3, 30)],
+            page: PageInfo::terminal(),
+        };
+        assert_eq!(
+            render_wire("kv_sample", &output, Format::Human),
+            only_stdout("KEY   VERSION  VALUE\nk\\tv        3  one\\ntwo\n")
+        );
+        assert_eq!(
+            render_wire("kv_sample", &output, Format::Raw),
+            only_stdout("k\\tv\t3\tone\\ntwo\n"),
+            "a tab inside a value never splits a raw row"
+        );
+    }
+
+    #[test]
+    fn a_reader_float_has_at_most_six_decimals_and_always_a_point() {
+        for (float, text) in [
+            (1.0, "1.0"),
+            (0.5, "0.5"),
+            (0.0, "0.0"),
+            (100.0, "100.0"),
+            (0.317_460_304_794_368_7, "0.31746"),
+            (0.474_412_117_971_211_4, "0.474412"),
+            (2.000_000_1, "2.0"),
+            (-0.000_001, "-0.000001"),
+            (123_456.789, "123456.789"),
+        ] {
+            assert_eq!(float_text(float), text, "{float}");
+        }
+    }
+
+    #[test]
+    fn a_declaration_whose_columns_disagree_on_the_row_source_is_refused() {
+        let column = |field: &str| CliDisplayField {
+            field: field.to_owned(),
+            header: None,
+            as_: None,
+            fields: Vec::new(),
+        };
+        let disagree = CliDisplay {
+            columns: vec![column("/data/items/*/a"), column("/data/rows/*/b")],
+            ..CliDisplay::default()
+        };
+        let error = RowsDecl::parse(&disagree, None).expect_err("two row sources");
+        assert!(error.contains("/data/rows"), "{error}");
+        let no_rows = CliDisplay {
+            columns: vec![column("/data/a")],
+            ..CliDisplay::default()
+        };
+        assert!(RowsDecl::parse(&no_rows, None).is_err());
+        assert!(RowsDecl::parse(&CliDisplay::default(), None).is_err());
+        let headed = CliDisplay {
+            columns: vec![
+                column("/data/items/*/parent/name"),
+                CliDisplayField {
+                    header: Some("SIZE".to_owned()),
+                    as_: Some(CliDisplayAs::Size),
+                    ..column("/data/items/*/size_bytes")
+                },
+            ],
+            ..CliDisplay::default()
+        };
+        let parsed = RowsDecl::parse(&headed, None).expect("parses");
+        assert_eq!(parsed.rows, "/data/items");
+        assert_eq!(parsed.columns[0].header, "NAME");
+        assert_eq!(parsed.columns[0].path, "/parent/name");
+        assert_eq!(parsed.columns[1].header, "SIZE");
+        assert!(!parsed.is_scalar_list());
+        let scalar = CliDisplay {
+            columns: vec![column("/data/items/*")],
+            ..CliDisplay::default()
+        };
+        assert!(RowsDecl::parse(&scalar, None)
+            .expect("parses")
+            .is_scalar_list());
+        assert!(MapDecl::parse(&CliDisplay::default()).is_err());
+        let no_header = CliDisplay {
+            map: Some("/data/ranks".to_owned()),
+            ..CliDisplay::default()
+        };
+        assert!(MapDecl::parse(&no_header).is_err());
     }
 
     fn declared(receipt: &str, noun: Option<&str>, identity: &[&str]) -> MutationAck {
@@ -1834,18 +2676,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn page_tail_tells_how_to_fetch_the_next_page() {
-        let value = serde_json::json!({"type": "keys_page", "data": {
-            "items": ["alpha"], "has_more": true, "cursor": "b64token"
-        }});
-        let rendered = super::value_to_string(&value, super::Format::Human).expect("page renders");
-        assert!(
-            rendered.contains("-- more: add --cursor b64token to the same command"),
-            "the continuation must be actionable: {rendered}"
-        );
-    }
-
     const RENDERED_TAGS: &[&str] = &[
         "bool",
         "described",
@@ -1863,13 +2693,11 @@ mod tests {
         "inference_token_ids",
         "inference_unload_result",
         "json_value",
-        "json_version_history",
         "json_versioned_value",
         "kv_versioned_value",
         "pong",
         "uint",
         "vector_data",
-        "vector_matches",
     ];
 
     /// Extracts the string literals that head a `match` arm (`"tag" =>` or
@@ -1880,8 +2708,13 @@ mod tests {
         let full = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/render.rs"))
             .expect("read render.rs source");
         // Scan only the production code; the test module below contains `"tag"`
-        // examples in its comments that are not real dispatch arms.
-        let source = full.split("#[cfg(test)]").next().unwrap_or(&full);
+        // examples in its comments that are not real dispatch arms. (The
+        // test-only accessors on `Invocation` are `#[cfg(test)]` too, so the
+        // cut is at the module, not the first attribute.)
+        let source = full
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap_or(&full);
         let mut tags = std::collections::BTreeSet::new();
         let mut cursor = 0;
         while let Some(rel) = source[cursor..].find('"') {
@@ -1923,30 +2756,6 @@ mod tests {
         assert_eq!(value["data"]["value"]["value"], json!("b25l"));
         humanize_kv_bytes(&output, &mut value);
         assert_eq!(value["data"]["value"]["value"], json!("one"));
-    }
-
-    #[test]
-    fn key_items_decode_but_the_continuation_cursor_stays_base64() {
-        let output = Output::KeysPage {
-            items: vec![bytes("a")],
-            page: PageInfo::new(true, Some(bytes("b"))),
-        };
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        humanize_kv_bytes(&output, &mut value);
-        assert_eq!(value["data"]["items"][0], json!("a"));
-        assert_eq!(value["data"]["cursor"], json!("Yg=="));
-    }
-
-    #[test]
-    fn scan_items_decode_key_and_value() {
-        let output = Output::KvScanResult {
-            items: vec![ScanItem::new(bytes("a"), bytes("one"), 1, 10)],
-            page: PageInfo::terminal(),
-        };
-        let mut value = serde_json::to_value(&output).expect("output serializes");
-        humanize_kv_bytes(&output, &mut value);
-        assert_eq!(value["data"]["items"][0]["key"], json!("a"));
-        assert_eq!(value["data"]["items"][0]["value"], json!("one"));
     }
 
     #[test]
@@ -2255,28 +3064,6 @@ mod tests {
             } }
         });
         assert_eq!(human(&versioned), "{\"name\":\"Ada\"}\n");
-    }
-
-    #[test]
-    fn human_json_version_history_items_and_nil() {
-        let items = json!({
-            "type": "json_version_history",
-            "data": [{ "version": 1 }, { "version": 2 }]
-        });
-        assert_eq!(human(&items), "{\"version\":1}\n{\"version\":2}\n");
-        let nil = json!({ "type": "json_version_history", "data": null });
-        assert_eq!(human(&nil), "(nil)\n");
-    }
-
-    #[test]
-    fn human_vector_matches_some_and_empty() {
-        let some = json!({
-            "type": "vector_matches",
-            "data": [{ "key": "a", "score": 0.5 }]
-        });
-        assert_eq!(human(&some), "a\t0.5\n");
-        let empty = json!({ "type": "vector_matches", "data": [] });
-        assert_eq!(human(&empty), "(empty)\n");
     }
 
     #[test]
