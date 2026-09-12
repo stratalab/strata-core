@@ -595,11 +595,11 @@ fn source_contract_uses_kv_specific_value_outputs() {
     assert!(output_source.contains("EventRecord(Maybe<EventVersionedData>)"));
     assert!(output_source.contains("GraphNodeResult(Maybe<GraphNodeDataOutput>)"));
     assert!(output_source.contains("GraphEdgeResult(Maybe<GraphEdgeDataOutput>)"));
-    // JSON keeps its bespoke envelope: a non-optional `value` preserves a
-    // stored JSON null (found-null) that `Maybe<Value>` would collapse.
-    assert!(output_source.contains("JsonValue(MaybeJsonValue)"));
+    // JSON keeps its bespoke envelope: a non-optional `value` on the payload
+    // preserves a stored JSON null (found-null) that `Maybe<Value>` would
+    // collapse. One envelope, live and as-of alike (#3334).
     assert!(output_source.contains("JsonVersionedValue(MaybeJsonVersionedValue)"));
-    assert!(tests_source.contains("MaybeJsonValue::missing"));
+    assert!(!output_source.contains("JsonValue(MaybeJsonValue)"));
     assert!(tests_source.contains("MaybeJsonVersionedValue::missing"));
 }
 

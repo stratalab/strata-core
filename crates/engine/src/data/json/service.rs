@@ -207,6 +207,23 @@ impl<'a> JsonService<'a> {
         path: &super::JsonPath,
         timestamp: Timestamp,
     ) -> EngineResult<Option<JsonValue>> {
+        Ok(self
+            .get_versioned_at(id, path, timestamp)?
+            .map(|value| value.value().clone()))
+    }
+
+    /// Reads a value at a timestamp with commit metadata.
+    ///
+    /// The metadata is the row's own, not the requested instant: a read as of
+    /// a timestamp answers with the commit that was visible then, and says
+    /// which one that was — the same contract as
+    /// [`KvService::get_versioned_at`](crate::KvService::get_versioned_at).
+    pub fn get_versioned_at(
+        &mut self,
+        id: &JsonDocumentId,
+        path: &super::JsonPath,
+        timestamp: Timestamp,
+    ) -> EngineResult<Option<JsonVersionedValue>> {
         let record = self.branch_record()?;
         let address = self.row_address(&record, id);
         let Some(row) = self
@@ -215,7 +232,7 @@ impl<'a> JsonService<'a> {
         else {
             return Ok(None);
         };
-        Self::value_from_row(id, path, &row)
+        Self::versioned_value_from_row(id, path, &row)
     }
 
     /// #3112 S4: joins each history row to its commit's wall-clock instant.

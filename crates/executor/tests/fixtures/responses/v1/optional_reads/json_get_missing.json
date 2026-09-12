@@ -1,5 +1,5 @@
 {
-  "type": "json_value",
+  "type": "json_versioned_value",
   "data": {
     "found": false,
     "value": null

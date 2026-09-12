@@ -1995,18 +1995,13 @@ fn json_get_response_wire_roundtrip_is_idempotent() {
 }
 
 #[test]
-fn json_get_response_alt1_wire_roundtrip_is_idempotent() {
-    support::response_roundtrip_idempotent("responses/v1/json/get_found.json");
-}
-
-#[test]
 fn json_get_request_rejects_unknown_keys_at_closed_objects() {
     support::unknown_keys_rejected("requests/v1/json/get.json", &[""]);
 }
 
 #[test]
 fn json_get_replay_observes_a_declared_output() {
-    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/get.json", &["json_versioned_value", "json_value"]);
+    support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/get.json", &["json_versioned_value"]);
 }
 
 // ---- json.history ----

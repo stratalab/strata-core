@@ -1,7 +1,12 @@
 {
-  "type": "json_value",
+  "type": "json_versioned_value",
   "data": {
     "found": true,
-    "value": null
+    "value": {
+      "value": null,
+      "version": 3,
+      "timestamp": 3,
+      "document_version": 1
+    }
   }
 }

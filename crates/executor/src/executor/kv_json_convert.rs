@@ -7,14 +7,14 @@ use super::{
     EngineBranchComparison, EngineBranchPreview, EngineBranchStatus, EngineComparedCapability,
     EngineComparedEntity, EngineConflictKind, EngineConflictStrategyResult,
     EngineDerivedStateDisposition, EngineDerivedStateReport, EngineJsonIndexDefinition,
-    EngineJsonSample, EngineJsonValue, EngineJsonVersionedValue, EnginePreviewConflict,
-    EnginePromotedEntity, EnginePromotionOutcome, EnginePromotionStrategy, EngineSpaceComparison,
-    ExecutorError, HistoryItem, HistoryResult, JsonBatchGetItemResult, JsonBatchItemResult,
-    JsonHistory, JsonHistoryItem, JsonHistoryRow, JsonIndexDefinition, JsonListPage,
-    JsonSampleItem, JsonSampleRow, KvHistory, KvHistoryRow, KvKey, KvSample, KvScanRow,
-    KvVersionedValue, MutationEffect, MutationEffectKind, Output, OutputJsonVersionedValue,
-    PageInfo, PreviewConflictItem, ProductSpace, PromotedEntityItem, PromotionOutcomeItem,
-    PromotionStrategy, SampleItem, ScanItem, SpaceComparisonItem, Timestamp, VersionedValue,
+    EngineJsonSample, EngineJsonVersionedValue, EnginePreviewConflict, EnginePromotedEntity,
+    EnginePromotionOutcome, EnginePromotionStrategy, EngineSpaceComparison, ExecutorError,
+    HistoryItem, HistoryResult, JsonBatchGetItemResult, JsonBatchItemResult, JsonHistory,
+    JsonHistoryItem, JsonHistoryRow, JsonIndexDefinition, JsonListPage, JsonSampleItem,
+    JsonSampleRow, KvHistory, KvHistoryRow, KvKey, KvSample, KvScanRow, KvVersionedValue,
+    MutationEffect, MutationEffectKind, Output, OutputJsonVersionedValue, PageInfo,
+    PreviewConflictItem, ProductSpace, PromotedEntityItem, PromotionOutcomeItem, PromotionStrategy,
+    SampleItem, ScanItem, SpaceComparisonItem, Timestamp, VersionedValue,
 };
 
 pub(super) fn bytes_from_key(key: &KvKey) -> Bytes {
@@ -302,10 +302,6 @@ pub(super) fn json_delete_output(
         effect: delete_effect(deleted),
         commit: outcome.map(commit_receipt),
     }
-}
-
-pub(super) fn json_value_output(value: EngineJsonValue) -> serde_json::Value {
-    value.into_inner()
 }
 
 pub(super) fn json_versioned_value(value: &EngineJsonVersionedValue) -> OutputJsonVersionedValue {

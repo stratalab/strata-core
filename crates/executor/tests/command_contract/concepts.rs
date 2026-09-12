@@ -409,44 +409,6 @@ fn kv_batch_get_wrapper_marks_missing_items_as_miss() {
 
 #[test]
 fn json_read_outputs_distinguish_missing_from_stored_null() {
-    let missing = Output::JsonValue(MaybeJsonValue::missing());
-    let stored_null = Output::JsonValue(MaybeJsonValue::found(Value::Null));
-
-    let missing_json = serde_json::to_value(&missing).expect("missing output serializes");
-    let stored_null_json =
-        serde_json::to_value(&stored_null).expect("stored null output serializes");
-
-    assert_eq!(
-        missing_json,
-        json!({
-            "type": "json_value",
-            "data": {
-                "found": false,
-                "value": null,
-            },
-        })
-    );
-    assert_eq!(
-        stored_null_json,
-        json!({
-            "type": "json_value",
-            "data": {
-                "found": true,
-                "value": null,
-            },
-        })
-    );
-    assert_ne!(missing_json, stored_null_json);
-    assert_eq!(
-        serde_json::from_value::<Output>(missing_json).expect("missing output deserializes"),
-        missing
-    );
-    assert_eq!(
-        serde_json::from_value::<Output>(stored_null_json)
-            .expect("stored null output deserializes"),
-        stored_null
-    );
-
     let versioned_null = JsonVersionedValue::new(Value::Null, 1, 10, 2);
     let missing_versioned = Output::JsonVersionedValue(MaybeJsonVersionedValue::missing());
     let stored_versioned_null =

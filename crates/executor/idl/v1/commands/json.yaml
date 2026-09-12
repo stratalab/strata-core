@@ -30,9 +30,6 @@ commands:
     title: Get JSON value
     input: Command::JsonGet
     output: Output::JsonVersionedValue
-    outputs:
-      - Output::JsonValue
-      - Output::JsonVersionedValue
     prose: commands/json.get.md
     errors+:
       - invalid_argument.engine.json_path
@@ -43,15 +40,13 @@ commands:
     fixtures:
       request: requests/v1/json/get.json
       response: responses/v1/json/get_versioned_found.json
-      responses:
-        - responses/v1/json/get_found.json
       setup:
         - requests/v1/json/set.json
       cases:
         - setup:
             - requests/v1/json/set.json
           request: requests/v1/json/get_as_of.json
-          response: responses/v1/json/get_found.json
+          response: responses/v1/json/get_versioned_found.json
   - id: json.delete
     kind: mutation.delete
     title: Delete JSON value

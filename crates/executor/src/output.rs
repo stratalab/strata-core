@@ -11,10 +11,9 @@ use crate::types::{
     GraphPagerankData, GraphSsspData, GraphWccData, HistoryResult, HubCloneProgress,
     HubCloneResult, HubDatasetCard, HubDatasetPage, HubInfo, HubRefList, HubYankedList,
     JsonBatchGetItemResult, JsonBatchItemResult, JsonHistoryItem, JsonIndexDefinition,
-    JsonSampleItem, Maybe, MaybeJsonValue, MaybeJsonVersionedValue, MutationEffect, PageInfo,
-    PromotionOutcomeItem, SampleItem, ScanItem, VectorBatchGetItemResult, VectorBatchItemResult,
-    VectorCollectionInfo, VectorHistoryResult, VectorIndexQueryResult, VectorMatch,
-    VectorVersionedData, VersionedValue,
+    JsonSampleItem, Maybe, MaybeJsonVersionedValue, MutationEffect, PageInfo, PromotionOutcomeItem,
+    SampleItem, ScanItem, VectorBatchGetItemResult, VectorBatchItemResult, VectorCollectionInfo,
+    VectorHistoryResult, VectorIndexQueryResult, VectorMatch, VectorVersionedData, VersionedValue,
 };
 use serde::{Deserialize, Serialize};
 
@@ -128,8 +127,6 @@ pub enum Output {
     },
     /// KV point-read result: present value with commit metadata, or absence.
     KvVersionedValue(Maybe<VersionedValue>),
-    /// Optional JSON value.
-    JsonValue(MaybeJsonValue),
     /// Optional JSON value with commit metadata.
     JsonVersionedValue(MaybeJsonVersionedValue),
     /// Full version history for one key.

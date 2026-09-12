@@ -85,8 +85,6 @@ pub(super) fn kv_outputs() -> Vec<Output> {
 
 pub(super) fn json_outputs() -> Vec<Output> {
     vec![
-        Output::JsonValue(MaybeJsonValue::found(json!({"name": "Ada"}))),
-        Output::JsonValue(MaybeJsonValue::missing()),
         Output::JsonVersionedValue(MaybeJsonVersionedValue::found(JsonVersionedValue::new(
             json!({"name": "Ada"}),
             1,
