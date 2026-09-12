@@ -49,12 +49,17 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) space: Option<String>,
     /// Emit compact JSON.
-    #[arg(long, global = true, conflicts_with = "raw")]
+    #[arg(long, global = true, conflicts_with_all = ["raw", "human"])]
     pub(crate) json: bool,
     /// Shell-composable output: bare values, one per line, tab-separated
     /// fields; no header, hint or summary (a write prints its identity).
-    #[arg(long, global = true, conflicts_with = "json")]
+    #[arg(long, global = true, conflicts_with_all = ["json", "human"])]
     pub(crate) raw: bool,
+    /// Lines for a reader — what a command prints when nothing asks
+    /// otherwise. Worth naming for a line inside a `--json` or `--raw`
+    /// session, which would otherwise inherit the session's format (#3345).
+    #[arg(long, global = true, conflicts_with_all = ["json", "raw"])]
+    pub(crate) human: bool,
     /// Command to run.
     #[command(subcommand)]
     pub(crate) command: Option<TopCommand>,
@@ -119,6 +124,8 @@ impl Cli {
             Some(Format::Raw)
         } else if self.json {
             Some(Format::Json)
+        } else if self.human {
+            Some(Format::Human)
         } else {
             None
         }
