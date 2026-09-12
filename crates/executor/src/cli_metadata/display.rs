@@ -742,7 +742,8 @@ mod tests {
         ] {
             let parsed = ReceiptFilter::parse(text).expect("parses");
             assert_eq!(parsed, filter);
-            assert!(text.starts_with(parsed.name()), "{text}");
+            let name = text.split(':').next().expect("a filter has a name");
+            assert_eq!(parsed.name(), name);
         }
     }
 

@@ -12,7 +12,6 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{json, Value};
-use strata_executor::cli_metadata::CliCommandCatalog;
 use strata_executor::error_registry::public_error_code_entries;
 
 use crate::options::{AgentsCommand, Format};
@@ -49,7 +48,7 @@ pub(crate) fn run(command: &AgentsCommand, format: Format) -> Result<i32, CliErr
 // ---- guide -----------------------------------------------------------------
 
 pub(crate) fn guide_markdown() -> Result<String, CliError> {
-    let catalog = catalog()?;
+    let catalog = crate::catalog::embedded()?;
     let mut guide = String::new();
     let version = env!("CARGO_PKG_VERSION");
 
@@ -174,12 +173,8 @@ command registers this MCP server with every agent surface in a workspace.\n",
 
 // ---- catalogs ---------------------------------------------------------------
 
-fn catalog() -> Result<&'static CliCommandCatalog, CliError> {
-    crate::catalog::embedded()
-}
-
 fn commands_value() -> Result<Value, CliError> {
-    let catalog = catalog()?;
+    let catalog = crate::catalog::embedded()?;
     let index = serde_json::to_value(catalog.index())?;
     Ok(json!({
         "type": "agents_commands",
@@ -452,7 +447,7 @@ mod tests {
     #[test]
     fn guide_covers_every_catalog_family() {
         let guide = guide_markdown().expect("agent guide renders");
-        let catalog = catalog().expect("embedded catalog resolves");
+        let catalog = crate::catalog::embedded().expect("embedded catalog resolves");
         for family in catalog.families() {
             assert!(
                 guide.contains(&format!("### {}", family.id)),
