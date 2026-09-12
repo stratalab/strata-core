@@ -166,6 +166,42 @@ fn catalog_entries_publish_the_executable_wire_name() {
     }
 }
 
+#[test]
+fn command_by_wire_resolves_every_entry_and_only_by_its_wire() {
+    let catalog = CliCommandCatalog::embedded().expect("embedded CLI metadata loads");
+    for command in catalog.commands() {
+        let found = catalog
+            .command_by_wire(&command.wire)
+            .unwrap_or_else(|| panic!("{} resolves by wire `{}`", command.id, command.wire));
+        assert_eq!(found.id, command.id);
+    }
+    // The wire is the only key this lookup answers to: not the dotted id, not
+    // the CLI path, and not a wire with stray whitespace.
+    assert!(catalog.command_by_wire("kv.put").is_none());
+    assert!(catalog.command_by_wire("kv put").is_none());
+    assert!(catalog.command_by_wire(" kv_put").is_none());
+    assert_eq!(
+        catalog
+            .command_by_wire("kv_put")
+            .map(|command| command.id.as_str()),
+        Some("kv.put")
+    );
+}
+
+#[test]
+fn runtime_validation_rejects_duplicate_wire_names() {
+    // Two entries on one wire would make the wire lookup answer for the wrong
+    // command. The clone keeps `input` in step so the per-command wire/input
+    // check passes and only the duplicate is left to catch.
+    let mut value: Value =
+        serde_json::from_str(EMBEDDED_CLI_COMMAND_INDEX_JSON).expect("metadata parses as JSON");
+    let first_wire = value["commands"][0]["wire"].clone();
+    let first_input = value["commands"][0]["input"].clone();
+    value["commands"][1]["wire"] = first_wire;
+    value["commands"][1]["input"] = first_input;
+    assert_parse_invalid(&value, "duplicate wire name");
+}
+
 fn pascal_to_snake(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for (index, ch) in name.chars().enumerate() {

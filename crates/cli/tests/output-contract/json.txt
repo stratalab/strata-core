@@ -77,9 +77,14 @@
 2
 ∎
 ### json.delete · responses/v1/json/delete_missing.json · human
-not_found user:ada applied=false
+∎
+### json.delete · responses/v1/json/delete_missing.json · human · stderr
+no such key: user:ada
 ∎
 ### json.delete · responses/v1/json/delete_missing.json · raw
+∎
+### json.delete · responses/v1/json/delete_missing.json · raw · stderr
+no such key: user:ada
 ∎
 ### json.exists · responses/v1/status/bool_true.json · human
 true
@@ -121,23 +126,16 @@ true
 {"document_version":1,"timestamp":3,"tombstone":false,"value":{"name":"Ada"},"version":3}
 ∎
 ### json.index.create · responses/v1/json/index_definition.json · human
-{
-  "created_timestamp": 3,
-  "created_version": 3,
-  "field_path": "name",
-  "index_type": "tag",
-  "name": "by_name",
-  "space": "default"
-}
+created index by_name on name (tag)
 ∎
 ### json.index.create · responses/v1/json/index_definition.json · raw
-{"created_timestamp":3,"created_version":3,"field_path":"name","index_type":"tag","name":"by_name","space":"default"}
+by_name
 ∎
 ### json.index.drop · responses/v1/status/bool_true.json · human
-true
+dropped index by_name
 ∎
 ### json.index.drop · responses/v1/status/bool_true.json · raw
-true
+by_name
 ∎
 ### json.index.list · edge:has_more=true · human
 {"created_timestamp":3,"created_version":3,"field_path":"name","index_type":"tag","name":"by_name","space":"default"}
@@ -218,21 +216,28 @@ user:ada
 {"document_version":1,"key":"user:grace","timestamp":3,"value":{"name":"Grace"},"version":3}
 ∎
 ### json.set · edge:applied=false · human
-not_found user:ada applied=false
+∎
+### json.set · edge:applied=false · human · stderr
+no such key: user:ada
 ∎
 ### json.set · edge:applied=false · raw
 ∎
+### json.set · edge:applied=false · raw · stderr
+no such key: user:ada
+∎
 ### json.set · edge:committed_at=fixed · human
-created user:ada applied=true
+created user:ada
 ∎
 ### json.set · edge:committed_at=fixed · raw
+user:ada
 ∎
 ### json.set · responses/v1/errors/json/set_empty_key.json · human
 invalid_argument.engine.json_document_id: command failed∎
 ### json.set · responses/v1/errors/json/set_empty_key.json · raw
 invalid_argument.engine.json_document_id: command failed∎
 ### json.set · responses/v1/json/set_applied.json · human
-created user:ada applied=true
+created user:ada
 ∎
 ### json.set · responses/v1/json/set_applied.json · raw
+user:ada
 ∎

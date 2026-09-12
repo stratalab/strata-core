@@ -346,6 +346,12 @@ pub(super) fn verify_examples(
 pub struct CapturedStep {
     /// Rendered CLI invocation (the `$ strata …` line).
     pub cli_input: String,
+    /// The command's wire name (`kv_put`), which names its CLI `display:`
+    /// declaration.
+    pub wire: String,
+    /// The command's wire request (serialized `Command`); a declared receipt
+    /// may quote it.
+    pub request: Value,
     /// The command's wire output envelope (serialized `Output`).
     pub wire_output: Value,
     /// Optional comment shown as `# …` after the CLI line, verbatim from the
@@ -395,12 +401,13 @@ pub(super) fn capture_example_runs(
                 .get(&step.call)
                 .ok_or_else(|| invalid(format!("example `{id}`: no schema for `{}`", step.call)))?;
             let cli_input = render_cli(&by_id, schemas, step, &bindings, arg_spec);
-            let wire = step_wire_json(id, position, step, schema, &tmpdir_path, &bindings)?;
+            let request = step_wire_json(id, position, step, schema, &tmpdir_path, &bindings)?;
             let command: Command =
-                serde_json::from_value(wire).map_err(|source| IdlError::Json {
+                serde_json::from_value(request.clone()).map_err(|source| IdlError::Json {
                     path: PathBuf::from(format!("examples/{id}.yaml")),
                     source,
                 })?;
+            let wire = command.name().to_owned();
             let output = executor.execute(command).map_err(|error| {
                 invalid(format!(
                     "example `{id}` step {position} (`{}`) failed to execute: {error}",
@@ -413,6 +420,8 @@ pub(super) fn capture_example_runs(
             })?;
             steps.push(CapturedStep {
                 cli_input,
+                wire,
+                request,
                 wire_output,
                 note: step.note.clone(),
             });

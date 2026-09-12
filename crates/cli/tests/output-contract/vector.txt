@@ -67,17 +67,16 @@
 {"applied":true,"commit":{"committed_at":null,"delete_count":0,"durability":"not_durable","put_count":1,"timestamp":4,"version":4},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"vector_revision":1},"status":"ok"}
 ∎
 ### vector.collection.create · edge:has_more=true · human
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
--- more: add --cursor bmV4dA== to the same command
+created collection docs (2 dimensions, cosine)
 ∎
 ### vector.collection.create · edge:has_more=true · raw
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+docs
 ∎
 ### vector.collection.create · edge:items=[] · human
-(empty)
+created collection (nil) ((nil) dimensions, (nil))
 ∎
 ### vector.collection.create · edge:items=[] · raw
-(empty)
+
 ∎
 ### vector.collection.create · responses/v1/errors/vector/collection_create_zero_dim.json · human
 invalid_argument.engine.vector_dimension: command failed∎
@@ -88,16 +87,16 @@ invalid_argument.engine.embedding_model: command failed∎
 ### vector.collection.create · responses/v1/errors/vector/embedding_model_empty.json · raw
 invalid_argument.engine.embedding_model: command failed∎
 ### vector.collection.create · responses/v1/vector/collection_list.json · human
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+created collection docs (2 dimensions, cosine)
 ∎
 ### vector.collection.create · responses/v1/vector/collection_list.json · raw
-{"count":0,"dimension":2,"metric":"cosine","name":"docs"}
+docs
 ∎
 ### vector.collection.delete · responses/v1/vector/collection_delete_true.json · human
-true
+deleted collection docs
 ∎
 ### vector.collection.delete · responses/v1/vector/collection_delete_true.json · raw
-true
+docs
 ∎
 ### vector.collection.list · edge:has_more=true · human
 {"count":0,"dimension":2,"metric":"cosine","name":"docs"}
@@ -119,17 +118,16 @@ true
 {"count":0,"dimension":2,"metric":"cosine","name":"docs"}
 ∎
 ### vector.collection.set_embedding_model · edge:has_more=true · human
-{"count":0,"dimension":2,"embedding_model":"miniLM","metric":"cosine","name":"docs"}
--- more: add --cursor bmV4dA== to the same command
+updated collection docs: embedding model miniLM
 ∎
 ### vector.collection.set_embedding_model · edge:has_more=true · raw
-{"count":0,"dimension":2,"embedding_model":"miniLM","metric":"cosine","name":"docs"}
+docs
 ∎
 ### vector.collection.set_embedding_model · edge:items=[] · human
-(empty)
+updated collection (nil): embedding model (nil)
 ∎
 ### vector.collection.set_embedding_model · edge:items=[] · raw
-(empty)
+
 ∎
 ### vector.collection.set_embedding_model · responses/v1/errors/vector/collection_missing.json · human
 not_found.engine.vector_collection: command failed∎
@@ -144,10 +142,10 @@ failed_precondition.engine.embedding_model_mismatch: command failed∎
 ### vector.collection.set_embedding_model · responses/v1/errors/vector/embedding_model_mismatch.json · raw
 failed_precondition.engine.embedding_model_mismatch: command failed∎
 ### vector.collection.set_embedding_model · responses/v1/vector/collection_set_embedding_model.json · human
-{"count":0,"dimension":2,"embedding_model":"miniLM","metric":"cosine","name":"docs"}
+updated collection docs: embedding model miniLM
 ∎
 ### vector.collection.set_embedding_model · responses/v1/vector/collection_set_embedding_model.json · raw
-{"count":0,"dimension":2,"embedding_model":"miniLM","metric":"cosine","name":"docs"}
+docs
 ∎
 ### vector.collection.stats · edge:has_more=true · human
 {"count":0,"dimension":2,"metric":"cosine","name":"docs"}
@@ -175,49 +173,62 @@ failed_precondition.engine.embedding_model_mismatch: command failed∎
 0
 ∎
 ### vector.delete · edge:applied=false · human
-not_found doc-a applied=false
+∎
+### vector.delete · edge:applied=false · human · stderr
+no such vector: doc-a
 ∎
 ### vector.delete · edge:applied=false · raw
 ∎
+### vector.delete · edge:applied=false · raw · stderr
+no such vector: doc-a
+∎
 ### vector.delete · edge:committed_at=fixed · human
-deleted doc-a applied=true
+deleted doc-a in docs
 ∎
 ### vector.delete · edge:committed_at=fixed · raw
+doc-a
 ∎
 ### vector.delete · responses/v1/vector/delete_applied.json · human
-deleted doc-a applied=true
+deleted doc-a in docs
 ∎
 ### vector.delete · responses/v1/vector/delete_applied.json · raw
+doc-a
 ∎
 ### vector.delete_all · edge:applied=false · human
-not_found docs applied=false
+deleted 0 vectors from docs
 ∎
 ### vector.delete_all · edge:applied=false · raw
+0
 ∎
 ### vector.delete_all · edge:committed_at=fixed · human
-deleted docs applied=true
+deleted 2 vectors from docs
 ∎
 ### vector.delete_all · edge:committed_at=fixed · raw
+2
 ∎
 ### vector.delete_all · responses/v1/vector/delete_all_applied.json · human
-deleted docs applied=true
+deleted 2 vectors from docs
 ∎
 ### vector.delete_all · responses/v1/vector/delete_all_applied.json · raw
+2
 ∎
 ### vector.delete_by_filter · edge:applied=false · human
-not_found docs applied=false
+deleted 0 vectors from docs
 ∎
 ### vector.delete_by_filter · edge:applied=false · raw
+0
 ∎
 ### vector.delete_by_filter · edge:committed_at=fixed · human
-deleted docs applied=true
+deleted 1 vector from docs
 ∎
 ### vector.delete_by_filter · edge:committed_at=fixed · raw
+1
 ∎
 ### vector.delete_by_filter · responses/v1/vector/delete_by_filter_applied.json · human
-deleted docs applied=true
+deleted 1 vector from docs
 ∎
 ### vector.delete_by_filter · responses/v1/vector/delete_by_filter_applied.json · raw
+1
 ∎
 ### vector.exists · responses/v1/vector/exists_true.json · human
 true
@@ -302,19 +313,26 @@ doc-a
 doc-b
 ∎
 ### vector.metadata.update · edge:applied=false · human
-not_found doc-a applied=false
+∎
+### vector.metadata.update · edge:applied=false · human · stderr
+no such vector: doc-a
 ∎
 ### vector.metadata.update · edge:applied=false · raw
 ∎
+### vector.metadata.update · edge:applied=false · raw · stderr
+no such vector: doc-a
+∎
 ### vector.metadata.update · edge:committed_at=fixed · human
-updated doc-a applied=true
+updated doc-a in docs
 ∎
 ### vector.metadata.update · edge:committed_at=fixed · raw
+doc-a
 ∎
 ### vector.metadata.update · responses/v1/vector/metadata_update_applied.json · human
-updated doc-a applied=true
+updated doc-a in docs
 ∎
 ### vector.metadata.update · responses/v1/vector/metadata_update_applied.json · raw
+doc-a
 ∎
 ### vector.query · responses/v1/errors/inference/unknown_model.json · human
 inference.unknown_model: command failed∎
@@ -381,14 +399,20 @@ doc-a	1.0
 {"data":{"embedding":[0.0,1.0],"metadata":{"kind":"note"}},"key":"doc-b","timestamp":5,"vector_revision":1,"version":5}
 ∎
 ### vector.upsert · edge:applied=false · human
-not_found doc-a applied=false
+∎
+### vector.upsert · edge:applied=false · human · stderr
+no such vector: doc-a
 ∎
 ### vector.upsert · edge:applied=false · raw
 ∎
+### vector.upsert · edge:applied=false · raw · stderr
+no such vector: doc-a
+∎
 ### vector.upsert · edge:committed_at=fixed · human
-created doc-a applied=true
+created doc-a in docs
 ∎
 ### vector.upsert · edge:committed_at=fixed · raw
+doc-a
 ∎
 ### vector.upsert · responses/v1/errors/inference/unknown_model.json · human
 inference.unknown_model: command failed∎
@@ -403,7 +427,8 @@ invalid_argument.executor.vector_input: command failed∎
 ### vector.upsert · responses/v1/errors/vector/vector_input.json · raw
 invalid_argument.executor.vector_input: command failed∎
 ### vector.upsert · responses/v1/vector/upsert_applied.json · human
-created doc-a applied=true
+created doc-a in docs
 ∎
 ### vector.upsert · responses/v1/vector/upsert_applied.json · raw
+doc-a
 ∎

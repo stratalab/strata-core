@@ -21,7 +21,7 @@ use super::{
 };
 use crate::cli_metadata::{
     validate_display_shape, CliDisplay, CliDisplayAs, CliDisplayDecl, CliDisplayField,
-    CliDisplayShape, CliRenderRule,
+    CliDisplayShape, CliRenderRule, ReceiptFilter, ReceiptPlaceholder, ReceiptTemplate,
 };
 
 /// The display layer as authored: one render rule per kind, one declaration
@@ -382,8 +382,8 @@ fn check_receipt(schema: &SchemaDoc<'_>, display: &CliDisplay) -> Check {
     let Some(receipt) = display.receipt.as_deref() else {
         return Err("`receipt` is missing".to_owned());
     };
-    for body in placeholder_bodies(receipt)? {
-        check_placeholder(schema, body)?;
+    for placeholder in ReceiptTemplate::parse(receipt)?.placeholders() {
+        check_placeholder(schema, placeholder)?;
     }
     let mut seen = BTreeSet::new();
     for entry in &display.identity {
@@ -393,7 +393,7 @@ fn check_receipt(schema: &SchemaDoc<'_>, display: &CliDisplay) -> Check {
         if !seen.insert(entry.as_str()) {
             return Err(format!("`identity` repeats `{entry}`"));
         }
-        check_placeholder(schema, entry)?;
+        check_placeholder(schema, &ReceiptPlaceholder::parse(entry)?)?;
     }
     if let Some(noun) = display.noun.as_deref() {
         if noun.trim().is_empty() {
@@ -410,54 +410,24 @@ fn check_receipt(schema: &SchemaDoc<'_>, display: &CliDisplay) -> Check {
     Ok(())
 }
 
-/// Splits `{…}` placeholders out of a receipt template.
-fn placeholder_bodies(template: &str) -> std::result::Result<Vec<&str>, String> {
-    let mut bodies = Vec::new();
-    let mut open: Option<usize> = None;
-    for (index, ch) in template.char_indices() {
-        match (ch, open) {
-            ('{', None) => open = Some(index + 1),
-            ('}', Some(start)) => {
-                let body = &template[start..index];
-                if body.is_empty() {
-                    return Err(format!("receipt `{template}` has an empty placeholder"));
-                }
-                bodies.push(body);
-                open = None;
+/// Resolves one parsed placeholder against the schema: `{verb}` needs the
+/// effect kind, a pointer must reach a value its filter (or no filter) fits.
+fn check_placeholder(schema: &SchemaDoc<'_>, placeholder: &ReceiptPlaceholder) -> Check {
+    let value = match placeholder {
+        ReceiptPlaceholder::Verb => {
+            let kind = schema.resolve("/data/effect/kind").map_err(|_| {
+                "`{verb}` needs `/data/effect/kind`, which this response does not carry".to_owned()
+            })?;
+            if !matches!(kind.ty, SchemaType::Enum | SchemaType::Text) {
+                return Err("`{verb}` needs `/data/effect/kind` to be an enum".to_owned());
             }
-            ('{' | '}', _) => {
-                return Err(format!("receipt `{template}` has unbalanced braces"));
-            }
-            _ => {}
+            return Ok(());
         }
-    }
-    if open.is_some() {
-        return Err(format!("receipt `{template}` has unbalanced braces"));
-    }
-    Ok(bodies)
-}
-
-/// A placeholder body: `verb`, or `<pointer>` with one optional `|filter`.
-fn check_placeholder(schema: &SchemaDoc<'_>, body: &str) -> Check {
-    if body == "verb" {
-        let kind = schema.resolve("/data/effect/kind").map_err(|_| {
-            "`{verb}` needs `/data/effect/kind`, which this response does not carry".to_owned()
-        })?;
-        if !matches!(kind.ty, SchemaType::Enum | SchemaType::Text) {
-            return Err("`{verb}` needs `/data/effect/kind` to be an enum".to_owned());
-        }
-        return Ok(());
-    }
-    let (pointer, filter) = body
-        .split_once('|')
-        .map_or((body, None), |(pointer, filter)| (pointer, Some(filter)));
-    if pointer.contains('*') {
-        return Err(format!(
-            "placeholder `{{{body}}}` steps into every item with `*`; a receipt names one value (use an index)"
-        ));
-    }
+        ReceiptPlaceholder::Value(value) => value,
+    };
+    let pointer = value.pointer.as_str();
     let node = schema.resolve(pointer)?;
-    match filter {
+    match &value.filter {
         None if node.ty.is_scalar() => Ok(()),
         None => Err(format!(
             "`{pointer}` is {}, not a scalar; use `|len` for an array or point at a field",
@@ -467,27 +437,18 @@ fn check_placeholder(schema: &SchemaDoc<'_>, body: &str) -> Check {
     }
 }
 
-fn check_filter(pointer: &str, node: &Node<'_>, filter: &str) -> Check {
-    let (name, argument) = filter
-        .split_once(':')
-        .map_or((filter, None), |(name, argument)| (name, Some(argument)));
-    let needs = match (name, argument) {
-        ("plural", Some(noun)) if !noun.trim().is_empty() => SchemaType::Integer,
-        ("plural", _) => return Err("`|plural` needs a noun: `|plural:row`".to_owned()),
-        ("size", None) => SchemaType::Integer,
-        ("bytes", None) => SchemaType::Base64,
-        ("len", None) => SchemaType::Array,
-        _ => {
-            return Err(format!(
-            "unknown filter `|{filter}`; filters are `|plural:<noun>`, `|size`, `|bytes`, `|len`"
-        ))
-        }
+fn check_filter(pointer: &str, node: &Node<'_>, filter: &ReceiptFilter) -> Check {
+    let needs = match filter {
+        ReceiptFilter::Plural(_) | ReceiptFilter::Size => SchemaType::Integer,
+        ReceiptFilter::Bytes => SchemaType::Base64,
+        ReceiptFilter::Len => SchemaType::Array,
     };
     if node.ty == needs {
         Ok(())
     } else {
         Err(format!(
-            "`|{name}` needs {}, but `{pointer}` is {}",
+            "`|{}` needs {}, but `{pointer}` is {}",
+            filter.name(),
             article(needs),
             article(node.ty)
         ))

@@ -103,7 +103,9 @@ strata ./my-db kv get k --as-of <t1>     # v1
 
 - `--json`: one compact envelope per command — `{{\"type\": ..., \"data\": ...}}`.
   KV keys/values and cursors are base64 strings on the wire.
-- `--raw`: script-friendly bare values.
+- `--raw`: shell-composable — the declared facts as bare values, one per
+  line and tab-separated; no header, hint or summary. `--json` is the one
+  unmodified record of what the engine returned.
 - default: human-readable; binary values decode to text when valid UTF-8.
 - Continuation cursors are opaque base64 tokens: pass the printed cursor
   back verbatim via `--cursor`.
@@ -172,9 +174,8 @@ command registers this MCP server with every agent surface in a workspace.\n",
 
 // ---- catalogs ---------------------------------------------------------------
 
-fn catalog() -> Result<CliCommandCatalog, CliError> {
-    CliCommandCatalog::embedded()
-        .map_err(|error| CliError::usage(format!("embedded command catalog is invalid: {error}")))
+fn catalog() -> Result<&'static CliCommandCatalog, CliError> {
+    crate::catalog::embedded()
 }
 
 fn commands_value() -> Result<Value, CliError> {

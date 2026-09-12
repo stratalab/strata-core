@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
-use strata_cli::{error_to_string, output_to_string, Format};
+use strata_cli::{error_to_string, render_output, Format, Invocation};
 use strata_executor::{Executor, Output};
 
 const CHILD_MODE: &str = "STRATA_OUTPUT_CONTRACT_CHILD";
@@ -170,6 +170,11 @@ fn report(what: &str, red: &[String]) {
 
 struct Wire {
     command: String,
+    /// The command's wire name (`kv_put`), which names its `display:`
+    /// declaration in the embedded catalog.
+    name: String,
+    /// The command's request fixture — a declared receipt may quote it.
+    request: Value,
     fixture: String,
     value: Value,
     is_error: bool,
@@ -191,7 +196,9 @@ fn typed(command: &str, fixture: &str, wire: &Value) -> Output {
 /// edges its primary response admits, and its error fixtures.
 fn wires_for(command: &Value, fixtures_root: &Path) -> Vec<Wire> {
     let id = command["id"].as_str().expect("command id").to_owned();
+    let wire_name = command["wire"].as_str().expect("wire name").to_owned();
     let fixtures = &command["fixtures"];
+    let request = read_json(&fixtures_root.join(fixtures["request"].as_str().expect("request")));
     let mut wires = Vec::new();
     let primary = fixtures["response"].as_str().expect("response fixture");
     let mut responses = vec![primary];
@@ -205,6 +212,8 @@ fn wires_for(command: &Value, fixtures_root: &Path) -> Vec<Wire> {
     for fixture in responses {
         wires.push(Wire {
             command: id.clone(),
+            name: wire_name.clone(),
+            request: request.clone(),
             fixture: fixture.to_owned(),
             value: read_json(&fixtures_root.join(fixture)),
             is_error: false,
@@ -214,6 +223,8 @@ fn wires_for(command: &Value, fixtures_root: &Path) -> Vec<Wire> {
     for (label, value) in edges(family, &wires[0].value) {
         wires.push(Wire {
             command: id.clone(),
+            name: wire_name.clone(),
+            request: request.clone(),
             fixture: label,
             value,
             is_error: false,
@@ -223,6 +234,8 @@ fn wires_for(command: &Value, fixtures_root: &Path) -> Vec<Wire> {
         let fixture = case["expected_error"].as_str().expect("error fixture");
         wires.push(Wire {
             command: id.clone(),
+            name: wire_name.clone(),
+            request: request.clone(),
             fixture: fixture.to_owned(),
             value: read_json(&fixtures_root.join(fixture)),
             is_error: true,
@@ -364,40 +377,79 @@ fn edges(family: &str, primary: &Value) -> Vec<(String, Value)> {
     edges
 }
 
-/// Renders one wire in every format: `human` and `raw` become cells; `json`
-/// and `pretty` are checked against the wire itself.
+/// Renders one wire in every format: `human` and `raw` become cells (their
+/// stdout, plus a `· stderr` cell whenever the format writes feedback);
+/// `json` and `pretty` are checked against the wire itself and must write
+/// nothing to stderr (R5).
 fn render_wire(wire: &Wire, cells: &mut Cells, invariants: &mut Vec<String>) {
     let key = |format: &str| format!("{} · {} · {format}", wire.command, wire.fixture);
-    let (human, raw, json, pretty, expected) = if wire.is_error {
+    if wire.is_error {
         let render = |format| error_to_string(&wire.value, format);
-        (
-            render(Format::Human),
-            render(Format::Raw),
-            render(Format::Json),
-            render(Format::Pretty),
-            serde_json::json!({ "error": wire.value }),
-        )
-    } else {
-        let output = typed(&wire.command, &wire.fixture, &wire.value);
-        let render = |format| {
-            output_to_string(&output, format)
-                .unwrap_or_else(|error| panic!("{}: {error}", key("render")))
-        };
-        (
-            render(Format::Human),
-            render(Format::Raw),
-            render(Format::Json),
-            render(Format::Pretty),
-            serde_json::to_value(&output).expect("output serializes"),
-        )
+        cells.insert(key("human"), render(Format::Human));
+        cells.insert(key("raw"), render(Format::Raw));
+        let expected = serde_json::json!({ "error": wire.value });
+        check_envelopes(
+            &key,
+            &render(Format::Json),
+            &render(Format::Pretty),
+            &expected,
+            invariants,
+        );
+        return;
+    }
+    let output = typed(&wire.command, &wire.fixture, &wire.value);
+    let render = |format| {
+        let invocation = Invocation::for_wire(&wire.name, format, || Ok(wire.request.clone()))
+            .unwrap_or_else(|error| panic!("{}: {error}", key("declaration")));
+        render_output(&output, &invocation, format)
+            .unwrap_or_else(|error| panic!("{}: {error}", key("render")))
     };
-    cells.insert(key("human"), human);
-    cells.insert(key("raw"), raw);
-    let parsed: Value = serde_json::from_str(&json).expect("json cell parses");
-    if parsed != expected || json.contains('\n') {
+    for (name, format) in [("human", Format::Human), ("raw", Format::Raw)] {
+        let rendered = render(format);
+        cells.insert(key(name), rendered.stdout);
+        if !rendered.stderr.is_empty() {
+            cells.insert(key(&format!("{name} · stderr")), rendered.stderr);
+        }
+    }
+    let json = render(Format::Json);
+    let pretty = render(Format::Pretty);
+    for (name, rendered) in [("json", &json), ("pretty", &pretty)] {
+        if !rendered.stderr.is_empty() {
+            invariants.push(format!("{}: wrote to stderr", key(name)));
+        }
+    }
+    // The binary newline-terminates an envelope; the invariant is about the
+    // envelope itself.
+    let envelope = |rendered: &strata_cli::Rendered| {
+        rendered
+            .stdout
+            .strip_suffix('\n')
+            .unwrap_or_else(|| panic!("{}: not newline-terminated", key("json")))
+            .to_owned()
+    };
+    check_envelopes(
+        &key,
+        &envelope(&json),
+        &envelope(&pretty),
+        &serde_json::to_value(&output).expect("output serializes"),
+        invariants,
+    );
+}
+
+/// `json` and `pretty` are the unmodified wire record, compact on one line or
+/// pretty-printed — the whole of their contract.
+fn check_envelopes(
+    key: &dyn Fn(&str) -> String,
+    json: &str,
+    pretty: &str,
+    expected: &Value,
+    invariants: &mut Vec<String>,
+) {
+    let parsed: Value = serde_json::from_str(json).expect("json cell parses");
+    if &parsed != expected || json.contains('\n') {
         invariants.push(format!("{}: not the compact wire record", key("json")));
     }
-    if pretty != serde_json::to_string_pretty(&expected).expect("wire pretty-prints") {
+    if pretty != serde_json::to_string_pretty(expected).expect("wire pretty-prints") {
         invariants.push(format!(
             "{}: not the pretty-printed wire record",
             key("pretty")
@@ -429,9 +481,10 @@ fn in_process_cells(root: &Path) -> (BTreeMap<String, Cells>, Vec<String>) {
 }
 
 /// `command-examples.json` must agree with this matrix: every reproducible
-/// example line's `out` is the human render of the step's wire (trimmed of
-/// the trailing newline, as the artifact stores it). A non-reproducible line
-/// carries a masked shape, so only its presence is checked.
+/// example line's `out` is the human render of the step's wire — stdout then
+/// stderr, trimmed of the trailing newline, as the artifact stores it. A
+/// non-reproducible line carries a masked shape, so only its presence is
+/// checked.
 fn examples_cross_check(root: &Path) -> Vec<String> {
     let committed = read_json(&root.join("crates/executor/idl/v1/generated/command-examples.json"));
     let runs = strata_executor::idl_tooling::capture_examples(root).expect("capture examples");
@@ -455,7 +508,12 @@ fn examples_cross_check(root: &Path) -> Vec<String> {
                 continue;
             }
             let output = typed(&run.command_id, &step.cli_input, &step.wire_output);
-            let human = output_to_string(&output, Format::Human).expect("render");
+            let invocation =
+                Invocation::for_wire(&step.wire, Format::Human, || Ok(step.request.clone()))
+                    .expect("declaration");
+            let human = render_output(&output, &invocation, Format::Human)
+                .expect("render")
+                .stdout_then_stderr();
             let human = human.trim_end_matches('\n');
             if human != line["out"].as_str().expect("out") {
                 red.push(format!(

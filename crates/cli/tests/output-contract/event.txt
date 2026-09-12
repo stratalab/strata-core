@@ -1,21 +1,24 @@
 ### event.append · edge:applied=false · human
-not_found applied=false
+appended user.created #0
 ∎
 ### event.append · edge:applied=false · raw
+0
 ∎
 ### event.append · edge:committed_at=fixed · human
-created applied=true
+appended user.created #0
 ∎
 ### event.append · edge:committed_at=fixed · raw
+0
 ∎
 ### event.append · responses/v1/errors/event/append_empty_type.json · human
 invalid_argument.engine.event_type: command failed∎
 ### event.append · responses/v1/errors/event/append_empty_type.json · raw
 invalid_argument.engine.event_type: command failed∎
 ### event.append · responses/v1/event/append_applied.json · human
-created applied=true
+appended user.created #0
 ∎
 ### event.append · responses/v1/event/append_applied.json · raw
+0
 ∎
 ### event.batch_append · edge:committed_at=fixed · human
 {"applied":true,"commit":{"committed_at":"2026-09-10 20:19:44.000000 +00:00","delete_count":0,"durability":"not_durable","put_count":5,"timestamp":3,"version":3},"effect":{"affected_count":1,"applied":true,"kind":"created","matched":false},"error":null,"index":0,"result":{"event_type":"user.created","sequence":0},"status":"ok"}
