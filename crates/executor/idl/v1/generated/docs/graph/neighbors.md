@@ -17,10 +17,16 @@ Find a node's neighbors along outgoing edges.
 
 ```console
 $ strata graph create social
+created graph social
 $ strata graph add-node social alice
+created node alice in social
 $ strata graph add-node social bob
+created node bob in social
 $ strata graph add-edge social alice knows bob
+created edge alice -[knows]-> bob in social
 $ strata graph neighbors social alice --direction outgoing
+NODE_ID  DIRECTION  EDGE_TYPE  SRC    DST  WEIGHT
+bob      outgoing   knows      alice  bob     1.0
 ```
 
 ### Wire

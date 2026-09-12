@@ -17,7 +17,9 @@ Declare a collection's embedding model so text can be stored and searched.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata vector collection set-embedding-model docs openai:text-embedding-3-small  # Declared once; repeating it with the same model is a no-op.
+updated collection docs: embedding model openai:text-embedding-3-small
 ```
 
 ### Wire

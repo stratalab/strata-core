@@ -17,9 +17,15 @@ List graph nodes bound to a product entity.
 
 ```console
 $ strata graph create kb
+created graph kb
 $ strata command run --command-json '{"binding":{"target":{"key":"user:1","primitive":"kv","space":"default"}},"graph":"kb","node_id":"ada","type":"graph_add_node"}'  # Bind the node to a KV entity so retrieval can cross primitives.
+created node ada in kb
 $ strata command run --command-json '{"target":{"key":"user:1","primitive":"kv","space":"default"},"type":"graph_bindings_for_entity"}'
+GRAPH  NODE_ID  PRIMITIVE  SPACE    KEY     VERSION
+kb     ada      kv         default  user:1        …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

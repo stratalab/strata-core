@@ -17,7 +17,10 @@ List secondary indexes.
 
 ```console
 $ strata json index create by_name $.name --index-type tag
+created index by_name on name (tag)
 $ strata json index list
+NAME     FIELD_PATH  INDEX_TYPE  SPACE    CREATED_VERSION
+by_name  name        tag         default                3
 ```
 
 ### Wire

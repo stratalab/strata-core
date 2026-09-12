@@ -25,6 +25,7 @@ use crate::Command;
 const EXAMPLES_SUBDIR: &str = "examples";
 const MISSING_EXAMPLES_FILE: &str = "missing-examples.yaml";
 const CLI_ARG_SPEC_FILE: &str = "generated/cli-arg-spec.json";
+const COMMAND_EXAMPLES_FILE: &str = "generated/command-examples.json";
 
 /// The CLI argument spec (#3073), authored from the clap tree by strata-cli.
 /// Maps a verb path (`"graph add-node"`) to its positional wire fields in order
@@ -50,6 +51,38 @@ pub(super) fn load_arg_spec(repo_root: &Path) -> Result<CliArgSpec> {
         source,
     })?;
     serde_json::from_str(&text).map_err(|source| IdlError::Json { path, source })
+}
+
+/// One captured step of a command's example: the CLI line, the text that line
+/// printed, and whether that text is exact. Authored by nobody — strata-cli
+/// replays the step and renders the output the way a reader sees it, which is
+/// why the artifact is produced there and consumed here (#3059).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TranscriptStep {
+    #[serde(rename = "in")]
+    pub input: String,
+    pub out: String,
+    pub reproducible: bool,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct CommandTranscripts {
+    commands: BTreeMap<String, Vec<TranscriptStep>>,
+}
+
+/// Loads the captured example transcripts, keyed by command id.
+pub(super) fn load_transcripts(repo_root: &Path) -> Result<BTreeMap<String, Vec<TranscriptStep>>> {
+    let path = repo_root.join(super::IDL_DIR).join(COMMAND_EXAMPLES_FILE);
+    let text = fs::read_to_string(&path).map_err(|source| IdlError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let parsed: CommandTranscripts =
+        serde_json::from_str(&text).map_err(|source| IdlError::Json { path, source })?;
+    Ok(parsed.commands)
 }
 
 /// Rationale for `.expect()` on `write!` into a `String`: the `fmt::Write`
@@ -685,11 +718,20 @@ fn resolve_example_bindings(
 }
 
 pub(super) fn render_section(
+    id: &str,
     by_id: &BTreeMap<&str, &ResolvedCommand>,
     schemas: &BTreeMap<String, Value>,
     example: &Example,
     arg_spec: &CliArgSpec,
-) -> String {
+    transcript: &[TranscriptStep],
+) -> Result<String> {
+    if transcript.len() != example.steps.len() {
+        return Err(stale_transcript(&format!(
+            "`{id}` has {} example steps but {} captured",
+            example.steps.len(),
+            transcript.len()
+        )));
+    }
     let bindings = resolve_example_bindings(example, schemas);
     let mut out = String::from("## Examples\n\n");
     if let Some(caption) = &example.caption {
@@ -697,16 +739,38 @@ pub(super) fn render_section(
         out.push_str("\n\n");
     }
 
+    // The CLI tab is a transcript, not a command list: each line is followed by
+    // what it printed, so a reader sees the same text the binary produces
+    // (#3314 R7). Both halves derive — the input from the step spec, the output
+    // from the replay `command-examples.json` captured — and the two are checked
+    // against each other here, so a stale artifact fails the docs gate instead
+    // of publishing output that belongs to some earlier rendering.
     out.push_str("### CLI\n\n```console\n");
-    for step in &example.steps {
+    let mut varies = false;
+    for (step, captured) in example.steps.iter().zip(transcript) {
         let line = render_cli(by_id, schemas, step, &bindings, arg_spec);
-        let note = step
+        if captured.input != line {
+            return Err(stale_transcript(&format!(
+                "`{id}` renders the step as `{line}` but it was captured as `{}`",
+                captured.input
+            )));
+        }
+        let note = captured
             .note
             .as_deref()
             .map_or_else(String::new, |n| format!("  # {n}"));
         writeln!(out, "$ {line}{note}").expect(INFALLIBLE);
+        varies |= !captured.reproducible;
+        if !captured.out.is_empty() {
+            out.push_str(&captured.out);
+            out.push('\n');
+        }
     }
-    out.push_str("```\n\n### Wire\n\n```json\n");
+    out.push_str("```\n\n");
+    if varies {
+        out.push_str(ELISION_LEGEND);
+    }
+    out.push_str("### Wire\n\n```json\n");
     for step in &example.steps {
         if let Some(schema) = schemas.get(&step.call) {
             if let Ok(wire) = step_wire_json("", 0, step, schema, DOC_TMPDIR, &bindings) {
@@ -715,7 +779,20 @@ pub(super) fn render_section(
         }
     }
     out.push_str("```\n\n");
-    out
+    Ok(out)
+}
+
+/// Shown under a transcript that elided something, so `…` is never mistaken
+/// for text the binary printed.
+const ELISION_LEGEND: &str =
+    "`…` stands for a value that varies by run or by machine — an instant, a version, an id, \
+     a path.\n\n";
+
+fn stale_transcript(detail: &str) -> IdlError {
+    invalid(format!(
+        "command-examples.json is stale: {detail}. Regenerate it with `cargo test -p strata-cli \
+         --lib command_examples -- --ignored regenerate`, which replays every example."
+    ))
 }
 
 /// Whether a clap verb can spell every field the step supplies — each must be

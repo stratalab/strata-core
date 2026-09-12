@@ -17,6 +17,7 @@ A document that never existed has no history.
 
 ```console
 $ strata json history absent
+(nil)
 ```
 
 ### Wire

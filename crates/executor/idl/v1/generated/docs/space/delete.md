@@ -17,8 +17,11 @@ Delete a product space.
 
 ```console
 $ strata space create temp
+created space temp
 $ strata space delete temp
+deleted space temp (0 rows)
 $ strata space exists temp
+false
 ```
 
 ### Wire

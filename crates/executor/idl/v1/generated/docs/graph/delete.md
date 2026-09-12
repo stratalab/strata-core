@@ -17,8 +17,11 @@ Delete a graph.
 
 ```console
 $ strata graph create temp
+created graph temp
 $ strata graph delete temp
+deleted graph temp
 $ strata graph list
+(empty)
 ```
 
 ### Wire

@@ -17,8 +17,14 @@ Check existence for many keys at once.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata command run --command-json '{"collection":"docs","entries":[{"key":"a","vector":[1.0,0.0,0.0]}],"type":"vector_batch_upsert"}'
+#  STATUS  EFFECT   VECTOR_REVISION
+0  ok      created                1
 $ strata command run --command-json '{"collection":"docs","keys":["a","missing"],"type":"vector_batch_exists"}'
+#  STATUS  EXISTS
+0  ok      true
+1  ok      false
 ```
 
 ### Wire

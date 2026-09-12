@@ -17,6 +17,10 @@ Read sanitized configuration facts.
 
 ```console
 $ strata config get
+target          cache
+durable         false
+default_branch  default
+created         true
 ```
 
 ### Wire

@@ -15,6 +15,9 @@ Inspect which models are currently loaded in the runtime cache.
 
 ```console
 $ strata inference cache-status
+generation_models  -
+embedding_models   -
+ranking_models     -
 ```
 
 ### Wire

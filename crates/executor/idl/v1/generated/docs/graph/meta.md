@@ -17,9 +17,17 @@ Read a graph's node and edge counts.
 
 ```console
 $ strata graph create social
+created graph social
 $ strata graph add-node social alice
+created node alice in social
 $ strata graph add-node social bob
+created node bob in social
 $ strata graph meta social
+graph            social
+node_count       2
+edge_count       0
+created_version  3
+updated_version  5
 ```
 
 ### Wire

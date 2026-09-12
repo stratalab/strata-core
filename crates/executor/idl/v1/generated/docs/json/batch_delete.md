@@ -17,9 +17,16 @@ Delete many documents in one commit.
 
 ```console
 $ strata command run --command-json '{"entries":[{"key":"a","path":"$","value":{"v":1}}],"type":"json_batch_set"}'
+#  STATUS  EFFECT   DOCUMENT_VERSION
+0  ok      created                 …
 $ strata command run --command-json '{"entries":[{"key":"a","path":"$"}],"type":"json_batch_delete"}'
+#  STATUS  EFFECT   DOCUMENT_VERSION
+0  ok      deleted  -
 $ strata json exists a
+false
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

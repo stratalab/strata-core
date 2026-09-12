@@ -17,6 +17,11 @@ Read lightweight database metrics.
 
 ```console
 $ strata metrics
+control_status  healthy
+target          cache
+durable         false
+branch_count    1
+space_count     1
 ```
 
 ### Wire

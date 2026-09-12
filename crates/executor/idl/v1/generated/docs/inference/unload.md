@@ -15,6 +15,7 @@ Evict cached models from the runtime (a no-op when nothing is loaded).
 
 ```console
 $ strata inference unload
+no cached entry
 ```
 
 ### Wire

@@ -17,10 +17,15 @@ Delete every vector whose metadata matches a filter.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata vector upsert docs a [1.0,0.0,0.0] --metadata {"tag":"keep"}
+created a in docs
 $ strata vector upsert docs b [0.0,1.0,0.0] --metadata {"tag":"drop"}
+created b in docs
 $ strata vector delete-by-filter docs --filter {"conditions":[{"field":"tag","op":"eq","value":{"type":"string","value":"drop"}}]}
+deleted 1 vector from docs
 $ strata vector count docs
+1
 ```
 
 ### Wire

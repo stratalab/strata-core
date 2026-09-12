@@ -17,8 +17,11 @@ Count stored documents.
 
 ```console
 $ strata json set a $ {"v":1}
+created a
 $ strata json set b $ {"v":2}
+created b
 $ strata json count
+2
 ```
 
 ### Wire

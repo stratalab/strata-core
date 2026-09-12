@@ -17,7 +17,10 @@ Check the database handle is live.
 
 ```console
 $ strata ping
+pong …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

@@ -17,8 +17,17 @@ Delete many keys in one commit.
 
 ```console
 $ strata command run --command-json '{"entries":[{"key":"YQ==","value":"MQ=="},{"key":"Yg==","value":"Mg=="}],"type":"kv_batch_put"}'
+#  STATUS  EFFECT   KEY
+0  ok      created  a
+1  ok      created  b
 $ strata command run --command-json '{"keys":["YQ==","Yg=="],"type":"kv_batch_delete"}'
+#  STATUS  EFFECT   KEY
+0  ok      deleted  a
+1  ok      deleted  b
 $ strata command run --command-json '{"keys":["YQ==","Yg=="],"type":"kv_batch_exists"}'
+#  STATUS  KEY  EXISTS
+0  ok      a    false
+1  ok      b    false
 ```
 
 ### Wire

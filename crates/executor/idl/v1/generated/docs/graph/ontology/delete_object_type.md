@@ -17,11 +17,24 @@ Remove an object type from the ontology.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph ontology define-object-type g person
+created object type person in g
 $ strata graph ontology define-object-type g company
+created object type company in g
 $ strata graph ontology delete-object-type g company
+deleted object type company in g
 $ strata graph ontology summary g
+graph         g
+status        draft
+version       …
+object_types
+  NAME    NODE_COUNT  PROPERTIES
+  person           0  -
+link_types    -
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

@@ -17,8 +17,11 @@ Insert or replace a vector with optional metadata.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata vector upsert docs a [1.0,0.0,0.0] --metadata {"tag":"x"}
+created a in docs
 $ strata vector exists docs a
+true
 ```
 
 ### Wire

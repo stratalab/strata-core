@@ -17,7 +17,12 @@ Store a JSON document, then read it back.
 
 ```console
 $ strata json set user $ {"age":30,"name":"alice"}
+created user
 $ strata json get user $
+{
+  "age": 30,
+  "name": "alice"
+}
 ```
 
 ### Wire

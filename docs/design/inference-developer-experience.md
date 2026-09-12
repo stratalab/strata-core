@@ -161,6 +161,7 @@ everybody else.
 
 One command, answering every question above before anything fails:
 
+<!-- illustrative -->
 ```
 $ strata inference status
 

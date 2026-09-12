@@ -19,9 +19,46 @@ Nearest-neighbor search that also returns index diagnostics.
 
 ```console
 $ strata vector collection create docs 3 --metric cosine
+created collection docs (3 dimensions, cosine)
 $ strata vector upsert docs a [1.0,0.0,0.0]
+created a in docs
 $ strata vector upsert docs b [0.0,1.0,0.0]
+created b in docs
 $ strata command run --command-json '{"collection":"docs","k":2,"query":[1.0,0.0,0.0],"type":"vector_index_query"}'
+KEY  SCORE  METADATA
+a      1.0  -
+b      0.0  -
+
+diagnostics
+  active_delta_count            0
+  active_delta_seal_threshold   16
+  active_delta_source_count     0
+  artifact_sources              -
+  collection                    docs
+  collection_exact_threshold    64
+  derived                       0 B
+  exact_fallback_count          0
+  exact_source_count            1
+  filtered_underfill_fallback   true
+  flat_source_count             0
+  hnsw_graph_builds             0
+  hnsw_memory_budget            67.1 MB
+  hnsw_source_count             0
+  indexed_source_count          0
+  indexed_vector_count          0
+  last_query_fallback_reason    collection_below_exact_threshold
+  last_query_used_index         false
+  manifest_generation           -
+  manifest_inherited_ref_count  0
+  manifest_owned_ref_count      0
+  manifest_ref_count            0
+  manifest_status               missing
+  overfetch_factor              4
+  policy_mode                   auto
+  resolved_index_kind_summary   exact
+  source_candidate_limit        18446744073709551615
+  source_flat_threshold         64
+  source_hnsw_threshold         18446744073709551615
 ```
 
 ### Wire

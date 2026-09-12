@@ -36,9 +36,13 @@ Promote a fork's change back into the branch it came from.
 
 ```console
 $ strata kv put config base
+created config
 $ strata branch fork default experiment
+forked experiment from default
 $ strata command run --command-json '{"branch":"experiment","key":"Y29uZmln","type":"kv_put","value":"dHVuZWQ="}'  # change on the fork
+updated config
 $ strata branch merge experiment default --strategy strict  # applies the fork's change onto default
+merged experiment into default: 1 applied, 0 deleted, 0 conflicts (version 9)
 ```
 
 ### Wire

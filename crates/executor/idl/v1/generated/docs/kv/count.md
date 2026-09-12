@@ -17,8 +17,11 @@ Count the visible keys.
 
 ```console
 $ strata kv put a 1
+created a
 $ strata kv put b 2
+created b
 $ strata kv count
+2
 ```
 
 ### Wire

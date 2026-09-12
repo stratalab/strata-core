@@ -17,10 +17,19 @@ A representative sample plus the total population size.
 
 ```console
 $ strata json set a $ {"v":1}
+created a
 $ strata json set b $ {"v":2}
+created b
 $ strata json set c $ {"v":3}
+created c
 $ strata json sample
+KEY  VERSION  VALUE
+a          …  {"v":1}
+b          …  {"v":2}
+c          …  {"v":3}
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

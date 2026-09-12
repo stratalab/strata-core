@@ -17,10 +17,18 @@ A representative sample of nodes plus the total count.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph add-node g a
+created node a in g
 $ strata graph add-node g b
+created node b in g
 $ strata graph sample g
+NODE_ID  OBJECT_TYPE  VERSION
+a        -                  …
+b        -                  …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

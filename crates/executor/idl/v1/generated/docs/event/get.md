@@ -17,9 +17,20 @@ Read an event by its sequence number.
 
 ```console
 $ strata event append user.created {"id":1}
+appended user.created #0
 $ strata event get 0
+sequence       0
+event_type     user.created
+timestamp      …          …               UTC
+payload        {"id":1}
+hash           …
+previous_hash  …
+version        …
 $ strata event get 999
+(nil)
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

@@ -15,6 +15,22 @@ Report a model's capabilities without a network call.
 
 ```console
 $ strata inference capability openai:gpt-4o-mini  # Pure metadata — no request is sent to the provider.
+provider                  openai
+model                     gpt-4o-mini
+availability              ready
+can_generate              true
+can_embed                 true
+can_rank                  false
+can_tokenize              false
+embedding_dim             0
+requires_api_key          true
+requires_network          true
+network_enabled           true
+provider_feature_enabled  true
+supports_tools            true
+supports_json_object      true
+supports_json_schema      true
+supports_logprobs         true
 ```
 
 ### Wire

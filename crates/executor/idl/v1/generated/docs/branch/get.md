@@ -17,8 +17,17 @@ Read one branch by name.
 
 ```console
 $ strata branch create feature
+created branch feature
 $ strata branch get feature
+name        feature
+parent      -
+status      active
+generation  …
+created_at  …
+deleted_at  -
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

@@ -17,7 +17,9 @@ Append an event to the log.
 
 ```console
 $ strata event append user.created {"id":1}
+appended user.created #0
 $ strata event count
+1
 ```
 
 ### Wire

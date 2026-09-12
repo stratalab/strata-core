@@ -17,6 +17,9 @@ Check whether this process hosts the multi-process broker socket.
 
 ```console
 $ strata ipc status
+hosting       false
+is_owner      true
+client_count  0
 ```
 
 ### Wire

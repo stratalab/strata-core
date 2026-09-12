@@ -17,8 +17,11 @@ Store a value, then replace it.
 
 ```console
 $ strata kv put setting v1
+created setting
 $ strata kv put setting v2  # replaces the visible value
+updated setting
 $ strata kv get setting
+v2
 ```
 
 ### Wire

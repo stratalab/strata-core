@@ -17,10 +17,18 @@ List nodes of a given object type.
 
 ```console
 $ strata graph create g
+created graph g
 $ strata graph add-node g a --type person
+created node a in g
 $ strata graph add-node g b --type person
+created node b in g
 $ strata graph nodes-by-type g person
+NODE_ID  OBJECT_TYPE  VERSION
+a        person             …
+b        person             …
 ```
+
+`…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.
 
 ### Wire
 

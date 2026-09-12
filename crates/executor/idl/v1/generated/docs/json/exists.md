@@ -17,8 +17,11 @@ Check whether a document exists.
 
 ```console
 $ strata json set user $ {"name":"alice"}
+created user
 $ strata json exists user
+true
 $ strata json exists absent
+false
 ```
 
 ### Wire
