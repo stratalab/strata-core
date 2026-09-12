@@ -116,14 +116,22 @@ pub enum Format {
 }
 
 impl Cli {
-    pub(crate) fn output_format(&self) -> Format {
+    /// The output format the flags chose, or `None` when they chose nothing.
+    /// A one-shot's nothing is human; a session line's nothing is its
+    /// session's format (#3326) — the fallback is the caller's to resolve.
+    pub(crate) fn format_override(&self) -> Option<Format> {
         if self.raw {
-            Format::Raw
+            Some(Format::Raw)
         } else if self.json {
-            Format::Json
+            Some(Format::Json)
         } else {
-            self.format.unwrap_or(Format::Human)
+            self.format
         }
+    }
+
+    /// The one-shot's output format: the flags' choice, human by default.
+    pub(crate) fn output_format(&self) -> Format {
+        self.format_override().unwrap_or(Format::Human)
     }
 
     /// Why a line typed inside a session (the REPL, the playground) cannot be

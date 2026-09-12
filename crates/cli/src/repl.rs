@@ -3,7 +3,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use serde_json::json;
@@ -11,6 +11,7 @@ use strata_executor::ipc::Connection;
 use strata_executor::{Command, Output};
 
 use crate::context::CommandContext;
+use crate::line::{self, SessionLine};
 use crate::options::{Cli, Format};
 use crate::render::{render_error, render_value};
 use crate::{execute_parsed_command, CliError};
@@ -38,9 +39,8 @@ pub(crate) fn run_repl(
                 // A failed line reports and keeps the session (#2998): a typo
                 // must never terminate an interactive REPL.
                 match handle_line(connection, context, &line, format) {
-                    Ok(LineOutcome::Exit) => break,
-                    Ok(LineOutcome::Continue) => {}
-                    Err(error) => report_line_error(&error, format),
+                    LineOutcome::Exit => break,
+                    LineOutcome::Continue | LineOutcome::Failed => {}
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -162,6 +162,8 @@ fn prefixed_error_line(message: &str) -> String {
     }
 }
 
+/// Runs a piped session: one line per command until stdin closes. Returns
+/// whether any line failed, for the exit code.
 pub(crate) fn run_pipe(
     connection: &Connection,
     context: &mut CommandContext,
@@ -171,11 +173,8 @@ pub(crate) fn run_pipe(
     for line in io::stdin().lock().lines() {
         let line = line?;
         match handle_line(connection, context, &line, format) {
-            Ok(LineOutcome::Continue | LineOutcome::Exit) => {}
-            Err(error) => {
-                saw_error = true;
-                eprintln!("error: {error}");
-            }
+            LineOutcome::Continue | LineOutcome::Exit => {}
+            LineOutcome::Failed => saw_error = true,
         }
     }
     Ok(saw_error)
@@ -185,28 +184,62 @@ pub(crate) fn run_pipe(
 enum LineOutcome {
     Continue,
     Exit,
+    /// The line was refused or failed and has been reported; the session
+    /// goes on, and a piped session exits non-zero at its end.
+    Failed,
 }
 
+/// Runs one line and reports its failure, if any. The line's own output
+/// format — `--json`, `--raw`, `--output-format` — wins over the session's
+/// for its answer and for its error alike (#3326); a line that does not
+/// parse has no format of its own and reports in the session's. Both loops,
+/// interactive and piped, come through here, so a failed line is reported
+/// once, the same way (#3328).
 fn handle_line(
     connection: &Connection,
     context: &mut CommandContext,
     line: &str,
+    session_format: Format,
+) -> LineOutcome {
+    let parsed = match parse_line(line) {
+        Ok(parsed) => parsed,
+        Err(error) => return failed_line(&error, session_format),
+    };
+    let format = match &parsed {
+        ReplLine::Command(command) => command.format.unwrap_or(session_format),
+        _ => session_format,
+    };
+    match run_parsed_line(connection, context, parsed, format) {
+        Ok(outcome) => outcome,
+        Err(error) => failed_line(&error, format),
+    }
+}
+
+fn failed_line(error: &CliError, format: Format) -> LineOutcome {
+    report_line_error(error, format);
+    LineOutcome::Failed
+}
+
+fn run_parsed_line(
+    connection: &Connection,
+    context: &mut CommandContext,
+    parsed: ReplLine,
     format: Format,
 ) -> Result<LineOutcome, CliError> {
-    match parse_line(line)? {
-        ParsedLine::Empty => Ok(LineOutcome::Continue),
-        ParsedLine::Exit => Ok(LineOutcome::Exit),
-        ParsedLine::Clear => {
+    match parsed {
+        ReplLine::Empty => Ok(LineOutcome::Continue),
+        ReplLine::Exit => Ok(LineOutcome::Exit),
+        ReplLine::Clear => {
             print!("\x1b[2J\x1b[H");
             let _ = io::stdout().flush();
             Ok(LineOutcome::Continue)
         }
-        ParsedLine::Help => {
+        ReplLine::Help => {
             Cli::command().print_long_help().map_err(CliError::from)?;
             println!();
             Ok(LineOutcome::Continue)
         }
-        ParsedLine::Use { branch, space } => {
+        ReplLine::Use { branch, space } => {
             validate_context(connection, &branch, space.as_deref())?;
             context.set_branch(branch.clone());
             context.set_space(space.clone());
@@ -222,68 +255,50 @@ fn handle_line(
             )?;
             Ok(LineOutcome::Continue)
         }
-        ParsedLine::Command(cli) => {
-            let scope = context.scope_with_overrides(cli.branch, cli.space);
-            let Some(command) = cli.command else {
-                return Ok(LineOutcome::Continue);
-            };
-            execute_parsed_command(connection, command, &scope, format)?;
+        ReplLine::Command(line) => {
+            let scope = context.scope_with_overrides(line.branch, line.space);
+            execute_parsed_command(connection, line.command, &scope, format)?;
             Ok(LineOutcome::Continue)
         }
     }
 }
 
-fn parse_line(line: &str) -> Result<ParsedLine, CliError> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(ParsedLine::Empty);
-    }
-
-    let words = shlex::split(trimmed)
-        .ok_or_else(|| CliError::usage("could not parse command line quoting"))?;
-    if words.is_empty() {
-        return Ok(ParsedLine::Empty);
-    }
-
+/// The REPL's own verbs (`quit`/`exit`, `clear`, a lone `help`, `use`) are
+/// read here; every other line is a command line, read by the grammar the
+/// playground shares (`SessionLine`).
+fn parse_line(line: &str) -> Result<ReplLine, CliError> {
+    let Some(words) = line::words(line)? else {
+        return Ok(ReplLine::Empty);
+    };
     match words[0].as_str() {
-        "quit" | "exit" => return Ok(ParsedLine::Exit),
-        "clear" => return Ok(ParsedLine::Clear),
-        "help" if words.len() == 1 => return Ok(ParsedLine::Help),
+        "quit" | "exit" => return Ok(ReplLine::Exit),
+        "clear" => return Ok(ReplLine::Clear),
+        "help" if words.len() == 1 => return Ok(ReplLine::Help),
         "use" => return parse_use(&words),
         _ => {}
     }
-
-    let mut argv = Vec::with_capacity(words.len() + 1);
-    argv.push("strata".to_owned());
-    argv.extend(words);
-    let cli = Cli::try_parse_from(argv).map_err(|error| CliError::usage(error.to_string()))?;
-    // Session arguments (`--db`, `--cache`, …) parse but cannot be honoured
-    // inside a session (#3327): refuse, never answer from the current one.
-    if let Some(refusal) = cli.line_refusal() {
-        return Err(CliError::usage(refusal.to_string()));
-    }
-    Ok(ParsedLine::Command(Box::new(cli)))
+    Ok(ReplLine::Command(Box::new(SessionLine::parse(words)?)))
 }
 
-fn parse_use(words: &[String]) -> Result<ParsedLine, CliError> {
+fn parse_use(words: &[String]) -> Result<ReplLine, CliError> {
     match words {
         [_, branch_space] => {
             if let Some((branch, space)) = branch_space.split_once('/') {
                 if branch.is_empty() || space.is_empty() {
                     return Err(CliError::usage("usage: use <branch>/<space>"));
                 }
-                Ok(ParsedLine::Use {
+                Ok(ReplLine::Use {
                     branch: branch.to_owned(),
                     space: Some(space.to_owned()),
                 })
             } else {
-                Ok(ParsedLine::Use {
+                Ok(ReplLine::Use {
                     branch: branch_space.clone(),
                     space: None,
                 })
             }
         }
-        [_, branch, space] => Ok(ParsedLine::Use {
+        [_, branch, space] => Ok(ReplLine::Use {
             branch: branch.clone(),
             space: Some(space.clone()),
         }),
@@ -329,7 +344,8 @@ fn history_path() -> Option<PathBuf> {
         })
 }
 
-enum ParsedLine {
+/// One REPL line: a verb of the REPL's own, or a command line.
+enum ReplLine {
     Empty,
     Exit,
     Clear,
@@ -338,7 +354,8 @@ enum ParsedLine {
         branch: String,
         space: Option<String>,
     },
-    Command(Box<Cli>),
+    // Boxed: a `TopCommand` is large next to the verbs.
+    Command(Box<SessionLine>),
 }
 
 #[cfg(test)]
@@ -444,19 +461,56 @@ mod tests {
 
     #[test]
     fn parses_use_branch_and_space() {
-        let ParsedLine::Use { branch, space } = parse_line("use main docs").expect("parse") else {
-            panic!("expected use command");
+        let use_line = |line: &str| match parse_line(line).expect(line) {
+            ReplLine::Use { branch, space } => (branch, space),
+            _ => panic!("{line}: expected a use verb"),
         };
-        assert_eq!(branch, "main");
-        assert_eq!(space.as_deref(), Some("docs"));
+        assert_eq!(
+            use_line("use main docs"),
+            ("main".to_owned(), Some("docs".to_owned()))
+        );
+        assert_eq!(
+            use_line("use main/docs"),
+            ("main".to_owned(), Some("docs".to_owned()))
+        );
+        assert_eq!(use_line("use main"), ("main".to_owned(), None));
+        for bad in ["use", "use main/", "use /docs", "use a b c"] {
+            assert!(
+                matches!(parse_line(bad), Err(CliError::Usage(_))),
+                "{bad}: a malformed use is usage, not a command"
+            );
+        }
     }
 
     #[test]
     fn parses_repl_command() {
-        let ParsedLine::Command(cli) = parse_line("kv put a b").expect("parse") else {
+        let ReplLine::Command(line) = parse_line("kv put a b").expect("parse") else {
             panic!("expected executor command");
         };
-        assert!(cli.command.is_some());
+        assert!(matches!(line.command, crate::options::TopCommand::Kv(_)));
+        assert_eq!(line.format, None, "no flag is no choice");
+    }
+
+    #[test]
+    fn repl_verbs_are_the_repl_s_and_a_flag_alone_is_refused() {
+        // The REPL's verbs never reach the shared grammar (`exit` would be
+        // "not a strata command" there), and a line of flags with no command
+        // is an error, not a silent no-op.
+        assert!(matches!(parse_line("exit").expect("parse"), ReplLine::Exit));
+        assert!(matches!(parse_line("quit").expect("parse"), ReplLine::Exit));
+        assert!(matches!(
+            parse_line("clear").expect("parse"),
+            ReplLine::Clear
+        ));
+        assert!(matches!(parse_line("help").expect("parse"), ReplLine::Help));
+        // `help <command>` is clap's own help subcommand, answered as usage
+        // text — only a lone `help` is the REPL's verb.
+        assert!(matches!(parse_line("help kv"), Err(CliError::Usage(_))));
+        assert!(matches!(
+            parse_line("  # comment").expect("parse"),
+            ReplLine::Empty
+        ));
+        assert!(parse_line("--json").is_err());
     }
 
     #[test]

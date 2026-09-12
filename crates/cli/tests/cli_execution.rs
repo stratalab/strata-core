@@ -48,6 +48,27 @@ fn db_arg(dir: &Path) -> String {
     dir.join("db").to_string_lossy().into_owned()
 }
 
+/// Pipes `script` into a session opened with `args` and returns the process
+/// output once stdin closes — the piped REPL, one line per command.
+fn pipe(args: &[&str], script: &[u8]) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_strata"))
+        .args(args)
+        .env_remove("STRATA_DB")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn repl");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(script)
+        .expect("pipe commands");
+    child.wait_with_output().expect("repl completes on EOF")
+}
+
 // --- durable cross-process execution -----------------------------------
 
 #[test]
@@ -364,24 +385,9 @@ fn vector_upsert_and_query_survive_across_processes() {
 
 #[test]
 fn piped_repl_commands_execute_and_persist_durably() {
-    use std::io::Write;
     let dir = tempfile::tempdir().expect("tmp");
     let db = db_arg(dir.path());
-    let mut child = Command::new(env!("CARGO_BIN_EXE_strata"))
-        .args(["--db", &db])
-        .env_remove("STRATA_DB")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn repl");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(b"kv put a 42\nkv get a\n")
-        .expect("pipe commands");
-    let output = child.wait_with_output().expect("repl completes on EOF");
+    let output = pipe(&["--db", &db], b"kv put a 42\nkv get a\n");
     assert!(output.status.success(), "repl exit: {output:?}");
     let out = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(out.contains("42"), "repl session must echo the read: {out}");
@@ -398,26 +404,12 @@ fn piped_repl_refuses_session_arguments_on_a_line() {
     // `--db /elsewhere kv get a` answered from this database and
     // `--read-only kv put` wrote. Each such line is now an error naming the
     // argument, the command does not run, and the session exits non-zero.
-    use std::io::Write;
     let dir = tempfile::tempdir().expect("tmp");
     let db = db_arg(dir.path());
-    let mut child = Command::new(env!("CARGO_BIN_EXE_strata"))
-        .args(["--db", &db])
-        .env_remove("STRATA_DB")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn repl");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(
-            b"kv put a 1\n--read-only kv put a 2\n--db /elsewhere kv get a\n--cache kv get a\nfoo\nkv get a\n",
-        )
-        .expect("pipe commands");
-    let output = child.wait_with_output().expect("repl completes on EOF");
+    let output = pipe(
+        &["--db", &db],
+        b"kv put a 1\n--read-only kv put a 2\n--db /elsewhere kv get a\n--cache kv get a\nfoo\nkv get a\n",
+    );
     assert_eq!(
         output.status.code(),
         Some(1),
@@ -444,6 +436,131 @@ fn piped_repl_refuses_session_arguments_on_a_line() {
             "refusal must name {named}: {refusal}"
         );
     }
+}
+
+#[test]
+fn piped_repl_renders_each_line_in_the_format_its_flags_chose() {
+    // #3326: a line's `--json` / `--raw` / `--output-format` parsed and was
+    // dropped, every line rendering in the session's format. Each line now
+    // renders exactly what a one-shot with the same flags prints.
+    let dir = tempfile::tempdir().expect("tmp");
+    let db = db_arg(dir.path());
+    assert_ok(
+        &strata(&["--db", &db, "kv", "put", "greeting", "hello"]),
+        "seed",
+    );
+    let one_shot = |flags: &[&str]| {
+        let mut args = vec!["--db", db.as_str()];
+        args.extend_from_slice(flags);
+        args.extend_from_slice(&["kv", "get", "greeting"]);
+        let output = strata(&args);
+        assert_ok(&output, "one-shot read");
+        stdout(&output)
+    };
+    let expected = [
+        one_shot(&["--json"]),
+        one_shot(&["--raw"]),
+        one_shot(&[]),
+        one_shot(&["--output-format", "pretty"]),
+    ]
+    .concat();
+
+    let output = pipe(
+        &["--db", &db],
+        b"--json kv get greeting\n--raw kv get greeting\nkv get greeting\n--output-format pretty kv get greeting\n",
+    );
+    assert_ok(&output, "a format flag on a line is honoured, not an error");
+    assert_eq!(stdout(&output), expected);
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn piped_repl_line_format_overrides_a_json_session() {
+    // #3326, the inverse: under `--json`, a line that asks for human or raw
+    // output gets it — for its answer and for its error alike — while lines
+    // that choose nothing keep the session's JSON.
+    let dir = tempfile::tempdir().expect("tmp");
+    let db = db_arg(dir.path());
+    assert_ok(
+        &strata(&["--db", &db, "kv", "put", "greeting", "hello"]),
+        "seed",
+    );
+    let json_read = strata(&["--db", &db, "--json", "kv", "get", "greeting"]);
+    assert_ok(&json_read, "one-shot json read");
+
+    let output = pipe(
+        &["--db", &db, "--json"],
+        b"--output-format human kv get greeting\n--raw kv get greeting\nkv get greeting\n--output-format human branch get nope\nbranch get nope\n",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a failed line is a pipe error: {output:?}"
+    );
+    assert_eq!(
+        stdout(&output),
+        format!("hello\nhello\n{}", stdout(&json_read))
+    );
+    let err = stderr(&output);
+    let mut lines = err.lines();
+    let human = lines.next().expect("the human line's error");
+    assert!(
+        human.starts_with("not_found.engine.branch:"),
+        "a human line's error is the human error line: {err}"
+    );
+    let envelope: serde_json::Value = serde_json::from_str(
+        lines.last().expect("the json line's error"),
+    )
+    .unwrap_or_else(|error| panic!("a json line's error is the JSON envelope: {error}\n{err}"));
+    assert_eq!(
+        envelope["error"]["code"], "not_found.engine.branch",
+        "{err}"
+    );
+}
+
+#[test]
+fn piped_repl_reports_a_failed_line_in_the_format_the_line_chose() {
+    // #3326 for the error path: a `--json` line under a human session fails
+    // with the JSON error envelope, and a plain line with the human line.
+    let dir = tempfile::tempdir().expect("tmp");
+    let db = db_arg(dir.path());
+    let output = pipe(&["--db", &db], b"--json branch get nope\nbranch get nope\n");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(stdout(&output), "", "errors never answer on stdout");
+    let err = stderr(&output);
+    let mut lines = err.lines();
+    let envelope: serde_json::Value = serde_json::from_str(
+        lines.next().expect("the json line's error"),
+    )
+    .unwrap_or_else(|error| panic!("a json line's error is the JSON envelope: {error}\n{err}"));
+    assert_eq!(
+        envelope["error"]["code"], "not_found.engine.branch",
+        "{err}"
+    );
+    let human = lines.next().expect("the plain line's error");
+    assert!(
+        human.starts_with("not_found.engine.branch:"),
+        "a plain line's error is the session's human line: {err}"
+    );
+}
+
+#[test]
+fn piped_repl_prints_a_parse_error_once() {
+    // #3328: the piped loop prefixed every failed line with `error: ` on top
+    // of clap's own `error:`, so a parse error read `error: error: …`; the
+    // interactive loop had already stopped doing that (#2998). One reporter
+    // now serves both.
+    let dir = tempfile::tempdir().expect("tmp");
+    let db = db_arg(dir.path());
+    let output = pipe(&["--db", &db], b"kv get\n");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let err = stderr(&output);
+    let first = err.lines().next().expect("a parse error is reported");
+    assert!(
+        first.starts_with("error: ") && !first.starts_with("error: error:"),
+        "clap's message is printed once, not re-prefixed: {err}"
+    );
+    assert_eq!(err.matches("error:").count(), 1, "{err}");
 }
 
 // --- init / observability ---------------------------------------------------

@@ -7,6 +7,9 @@
 // helpers and flag types go unexercised there. That is expected, not a defect.
 #![cfg_attr(not(feature = "native"), allow(dead_code))]
 
+// The parser-only build reads a line through `line::SessionLine` (#3326);
+// `Cli` itself is parsed here only by the binary's entry point and the tests.
+#[cfg(any(feature = "native", test))]
 use clap::Parser;
 use strata_executor::{Command, Executor, ExecutorError, GraphPropertyDef};
 
@@ -41,6 +44,7 @@ mod guidance;
 #[cfg(feature = "native")]
 mod init;
 mod input;
+mod line;
 #[cfg(feature = "native")]
 mod mcp;
 #[cfg(feature = "native")]
@@ -63,10 +67,12 @@ use input::{
     parse_optional_filter_argument, parse_optional_json_argument, parse_relaxed_json_argument,
     parse_vector_argument,
 };
+#[cfg(any(feature = "native", test))]
+use options::Cli;
 use options::{
-    ArrowCommand, BranchCommand, Cli, CloneProgressFormat, CommandCommand, ConfigCommand,
-    EventCommand, GraphCommand, GraphOntologyCommand, HubCommand, JsonCommand, KvCommand,
-    SpaceCommand, VectorCollectionCommand, VectorCommand,
+    ArrowCommand, BranchCommand, CloneProgressFormat, CommandCommand, ConfigCommand, EventCommand,
+    GraphCommand, GraphOntologyCommand, HubCommand, JsonCommand, KvCommand, SpaceCommand,
+    VectorCollectionCommand, VectorCommand,
 };
 #[cfg(feature = "native")]
 use render::{print_output, render_error, render_value};
@@ -2826,56 +2832,51 @@ fn bytes(value: String) -> strata_executor::Bytes {
 }
 
 /// A CLI line parsed for an embedded session: the executor command it names
-/// and the output format its flags selected (`--json`, `--raw`, or the human
-/// default), so the caller renders the result the way the binary would.
+/// and the output format its flags selected (`--json`, `--raw`,
+/// `--output-format`), so the caller renders the result the way the binary
+/// would.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ParsedLine {
     /// The command to execute.
     pub command: Command,
-    /// The output format the line's flags chose.
-    pub format: Format,
+    /// The output format the line's flags chose, or `None` when they chose
+    /// nothing — the caller falls back to its session's format.
+    pub format: Option<Format>,
 }
 
 /// Parses a single CLI line (e.g. `--json kv get greeting`) into an executor
 /// [`Command`] and its output [`Format`], reusing the exact clap grammar and
-/// argument handling the `strata` binary uses. Wasm-safe and host-free: it
-/// opens no database and performs no I/O. `branch`/`space` supply the session
-/// scope for commands that omit their own `--branch`/`--space`.
+/// argument handling the `strata` binary uses (one `SessionLine`, shared
+/// with the REPL — `crates/cli/src/line.rs`). Wasm-safe and host-free: it
+/// opens no database and performs no I/O. `branch`/`space` supply the
+/// session scope for commands that omit their own `--branch`/`--space`.
 ///
 /// The `Err` string is human-readable text to display in place of running a
 /// command: a clap parse error, `--help`/`--version` output, or a note that the
 /// command needs a host environment (`mcp`, `init`, `clone`, `start`/`stop`, …)
-/// and is unavailable in an embedded session.
+/// and is unavailable in an embedded session. A blank line or a `#` comment
+/// is `Err` of the empty string: nothing to run, nothing to show.
 pub fn command_from_line(
     line: &str,
     branch: Option<String>,
     space: Option<String>,
 ) -> Result<ParsedLine, String> {
-    let tokens = shlex::split(line)
-        .ok_or_else(|| "could not parse the line (unbalanced quotes?)".to_owned())?;
-    if tokens.is_empty() {
+    let Some(words) = line::words(line).map_err(|error| error.to_string())? else {
         return Err(String::new());
-    }
-    let argv = std::iter::once("strata".to_owned()).chain(tokens);
-    let cli = Cli::try_parse_from(argv).map_err(|error| error.render().to_string())?;
-    // Session arguments (`--db`, `--cache`, …) parse but cannot be honoured
-    // inside a session (#3327): refuse, never answer from the current one.
-    if let Some(refusal) = cli.line_refusal() {
-        return Err(refusal.to_string());
-    }
-    let format = cli.output_format();
-    let Some(command) = cli.command else {
-        return Err("type a command, e.g. `kv put greeting hello`".to_owned());
     };
+    let parsed = line::SessionLine::parse(words).map_err(|error| error.to_string())?;
     // A per-command --branch/--space (global clap flags) overrides the session
     // scope the caller supplies.
     let scope = Scope {
-        branch: cli.branch.or(branch),
-        space: cli.space.or(space),
+        branch: parsed.branch.or(branch),
+        space: parsed.space.or(space),
     };
-    let command = command_to_executor(command, &scope).map_err(|error| error.to_string())?;
-    Ok(ParsedLine { command, format })
+    let command = command_to_executor(parsed.command, &scope).map_err(|error| error.to_string())?;
+    Ok(ParsedLine {
+        command,
+        format: parsed.format,
+    })
 }
 
 /// Runs one CLI line against an embedded `executor` and returns what the
@@ -2900,6 +2901,9 @@ pub fn run_line(executor: &mut Executor, line: &str) -> Result<String, CliError>
         Ok(parsed) => parsed,
         Err(message) => return Ok(message),
     };
+    // The line's own format over the session's (#3326); the playground's
+    // session is a human one.
+    let format = format.unwrap_or(Format::Human);
     let invocation = Invocation::of(&command, format)?;
     match executor.execute(command) {
         Ok(output) => Ok(render_output(&output, &invocation, format)?.stdout_then_stderr()),
@@ -3334,13 +3338,17 @@ mod tests {
     fn command_from_line_carries_the_output_format_its_flags_chose() {
         // #3312: the format is part of the parse, so an embedded session
         // renders `--json`/`--raw` the way the binary does instead of
-        // dropping the flag on the floor.
+        // dropping the flag on the floor; #3326: a line that chose nothing
+        // says so, and the session decides.
         let format = |line: &str| command_from_line(line, None, None).expect(line).format;
-        assert_eq!(format("kv get k"), Format::Human);
-        assert_eq!(format("--json kv get k"), Format::Json);
-        assert_eq!(format("kv get k --json"), Format::Json);
-        assert_eq!(format("--raw kv get k"), Format::Raw);
-        assert_eq!(format("--output-format pretty kv get k"), Format::Pretty);
+        assert_eq!(format("kv get k"), None);
+        assert_eq!(format("--json kv get k"), Some(Format::Json));
+        assert_eq!(format("kv get k --json"), Some(Format::Json));
+        assert_eq!(format("--raw kv get k"), Some(Format::Raw));
+        assert_eq!(
+            format("--output-format pretty kv get k"),
+            Some(Format::Pretty)
+        );
         // Conflicting flags are a parse error, as on the command line.
         assert!(command_from_line("--json --raw kv get k", None, None).is_err());
     }
