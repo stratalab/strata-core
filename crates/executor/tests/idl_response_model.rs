@@ -770,3 +770,23 @@ fn a_capture_that_no_longer_matches_its_example_fails_the_docs_build() {
         "{message}"
     );
 }
+
+#[test]
+fn a_capture_missing_a_step_fails_the_docs_build() {
+    // The pairing is positional, so a capture that lost a step would otherwise
+    // print the next command's output under this one — silently, and only for
+    // the steps after the gap.
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        "generated/command-examples.json",
+        ",\n      {\n        \"in\": \"strata kv get absent\",\n        \"out\": \"(nil)\",\n        \
+         \"reproducible\": true\n      }",
+        "",
+    );
+    let message = rejection(generate_docs(scratch.root.path()));
+    assert!(
+        message.contains("command-examples.json is stale")
+            && message.contains("`kv.get` has 3 example steps but 2 captured"),
+        "{message}"
+    );
+}
