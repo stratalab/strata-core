@@ -457,6 +457,33 @@ mod tests {
         }
     }
 
+    /// `strata agents commands` is the embedded catalog under the agents
+    /// envelope — the same index the renderer resolves declarations from, not
+    /// a second copy — so its command list is the catalog's, wire for wire.
+    #[test]
+    fn commands_value_carries_the_embedded_catalog_index() {
+        let value = commands_value().expect("agents commands renders");
+        assert_eq!(value["type"], "agents_commands");
+        let listed = value["data"]["commands"]
+            .as_array()
+            .expect("the payload lists the commands")
+            .iter()
+            .map(|command| {
+                command["wire"]
+                    .as_str()
+                    .expect("every entry names its wire")
+            })
+            .collect::<Vec<_>>();
+        let catalog = crate::catalog::embedded().expect("embedded catalog resolves");
+        let expected = catalog
+            .commands()
+            .iter()
+            .map(|command| command.wire.as_str())
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty(), "the embedded catalog has commands");
+        assert_eq!(listed, expected);
+    }
+
     /// The skill is a valid Claude Code skill: YAML frontmatter with the
     /// trigger description, version-stamped body, and the canonical Python
     /// entry point — with no unexpanded template placeholder left behind.
