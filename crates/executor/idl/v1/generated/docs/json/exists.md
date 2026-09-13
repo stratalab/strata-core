@@ -16,7 +16,7 @@ Check whether a document exists.
 ### CLI
 
 ```console
-$ strata json set user $ {"name":"alice"}
+$ strata json set user '$' '{"name":"alice"}'
 created user
 $ strata json exists user
 true

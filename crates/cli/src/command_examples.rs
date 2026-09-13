@@ -506,6 +506,114 @@ mod tests {
         assert_eq!(elide_span("café 1", "café 2"), "café …");
     }
 
+    /// #3358 F3: the printed CLI line must produce the request that was
+    /// captured. The docs assert the *output* half — the page renders its own
+    /// `$` line and holds it equal to the captured one — but both sides come
+    /// from the same renderer, so that compares two generated strings. This is
+    /// the semantic half: split the line the way a shell would, parse it with
+    /// the real clap grammar, and compare the command it yields with the one
+    /// the step actually ran.
+    /// Commands whose examples replay through the executor but which the CLI
+    /// refuses to convert in an embedded session. See the note at the skip
+    /// below; this list goes away with #3355.
+    const NEEDS_A_HOST: &[&str] = &[
+        "admin.ipc_status",
+        "admin.ipc_stop",
+        "inference.cache_status",
+        "inference.capability",
+        "inference.models.list",
+        "inference.status",
+        "inference.unload",
+    ];
+
+    #[test]
+    fn every_printed_line_produces_the_request_it_documents() {
+        let mut broken = Vec::new();
+        let mut exercised = std::collections::BTreeSet::new();
+        for run in
+            strata_executor::idl_tooling::capture_examples(&repo_root()).expect("capture examples")
+        {
+            for step in run.steps {
+                let Some(line) = step.cli_input.strip_prefix("strata ") else {
+                    broken.push(format!(
+                        "{}: `{}` is not a strata line",
+                        run.command_id, step.cli_input
+                    ));
+                    continue;
+                };
+                let words = match crate::line::words(line) {
+                    Ok(Some(words)) => words,
+                    other => {
+                        broken.push(format!(
+                            "{}: `{}` does not split into words: {other:?}",
+                            run.command_id, step.cli_input
+                        ));
+                        continue;
+                    }
+                };
+                let parsed = match crate::line::SessionLine::parse(words) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        broken.push(format!(
+                            "{}: `{}` does not parse: {error}",
+                            run.command_id, step.cli_input
+                        ));
+                        continue;
+                    }
+                };
+                // A command that needs a host environment cannot be converted
+                // in process. Its line is still proven to *parse* — the clap
+                // grammar accepted it above — which is all this guard can say
+                // about it. The class has no name in the code today: it is a
+                // `_` arm in `command_to_executor` returning a string, which
+                // is the same missing classification that lets these commands
+                // panic a session (#3355). When that lands, this ledger is
+                // replaced by the typed predicate.
+                if crate::deferred_top_command(&parsed.command).is_some()
+                    || NEEDS_A_HOST.contains(&run.command_id.as_str())
+                {
+                    exercised.insert(run.command_id.clone());
+                    continue;
+                }
+                let scope = crate::Scope {
+                    branch: parsed.branch,
+                    space: parsed.space,
+                };
+                match crate::command_to_executor(parsed.command, &scope) {
+                    Ok(command) => {
+                        let produced = serde_json::to_value(&command).expect("command serializes");
+                        if produced != step.documented_request {
+                            broken.push(format!(
+                                "{}: `{}`\n     runs: {produced}\n  documents: {}",
+                                run.command_id, step.cli_input, step.documented_request
+                            ));
+                        }
+                    }
+                    Err(error) => broken.push(format!(
+                        "{}: `{}` does not convert: {error}",
+                        run.command_id, step.cli_input
+                    )),
+                }
+            }
+        }
+        assert!(
+            broken.is_empty(),
+            "{} printed example lines do not run what they claim:\n  {}",
+            broken.len(),
+            broken.join("\n  ")
+        );
+        // A stale entry would silently excuse a command this guard could
+        // otherwise check.
+        let stale: Vec<&&str> = NEEDS_A_HOST
+            .iter()
+            .filter(|id| !exercised.contains(**id))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "these no longer need a host and should leave the list: {stale:?}"
+        );
+    }
+
     #[test]
     #[ignore = "regenerates the committed command-examples.json; run explicitly"]
     fn regenerate() {

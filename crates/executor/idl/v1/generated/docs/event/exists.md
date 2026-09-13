@@ -16,7 +16,7 @@ Check whether an event sequence exists.
 ### CLI
 
 ```console
-$ strata event append user.created {"id":1}
+$ strata event append user.created '{"id":1}'
 appended user.created #0
 $ strata event exists 0
 true

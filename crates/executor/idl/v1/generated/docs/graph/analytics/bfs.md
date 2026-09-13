@@ -28,7 +28,7 @@ $ strata graph add-edge g a knows b
 created edge a -[knows]-> b in g
 $ strata graph add-edge g b knows c
 created edge b -[knows]-> c in g
-$ strata graph bfs g a
+$ strata graph bfs g a --direction outgoing
 NODE  DEPTH
 a         0
 b         1
@@ -44,7 +44,7 @@ c         2
 {"graph":"g","node_id":"c","type":"graph_add_node"}
 {"dst":"b","edge_type":"knows","graph":"g","src":"a","type":"graph_add_edge"}
 {"dst":"c","edge_type":"knows","graph":"g","src":"b","type":"graph_add_edge"}
-{"graph":"g","start":"a","type":"graph_bfs"}
+{"direction":"outgoing","graph":"g","start":"a","type":"graph_bfs"}
 ```
 
 ## Parameters

@@ -18,7 +18,7 @@ Delete one vector.
 ```console
 $ strata vector collection create docs 3 --metric cosine
 created collection docs (3 dimensions, cosine)
-$ strata vector upsert docs a [1.0,0.0,0.0]
+$ strata vector upsert docs a '[1.0,0.0,0.0]'
 created a in docs
 $ strata vector delete docs a
 deleted a in docs

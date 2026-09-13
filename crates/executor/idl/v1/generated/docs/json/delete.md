@@ -16,9 +16,9 @@ Delete a document.
 ### CLI
 
 ```console
-$ strata json set temp $ {"x":1}
+$ strata json set temp '$' '{"x":1}'
 created temp
-$ strata json delete temp $
+$ strata json delete temp '$'
 deleted temp
 $ strata json exists temp
 false

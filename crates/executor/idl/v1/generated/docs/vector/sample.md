@@ -18,9 +18,9 @@ A representative sample of stored vectors plus the total count.
 ```console
 $ strata vector collection create docs 3 --metric cosine
 created collection docs (3 dimensions, cosine)
-$ strata vector upsert docs a [1.0,0.0,0.0]
+$ strata vector upsert docs a '[1.0,0.0,0.0]'
 created a in docs
-$ strata vector upsert docs b [0.0,1.0,0.0]
+$ strata vector upsert docs b '[0.0,1.0,0.0]'
 created b in docs
 $ strata vector sample docs
 KEY  VERSION  VECTOR_REVISION  EMBEDDING      METADATA

@@ -16,9 +16,9 @@ Count the events in the log.
 ### CLI
 
 ```console
-$ strata event append user.created {"id":1}
+$ strata event append user.created '{"id":1}'
 appended user.created #0
-$ strata event append user.updated {"id":2}
+$ strata event append user.updated '{"id":2}'
 appended user.updated #1
 $ strata event count
 2

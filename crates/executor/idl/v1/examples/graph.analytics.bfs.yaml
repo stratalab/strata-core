@@ -13,5 +13,5 @@ steps:
   - call: graph.edge.add
     args: { graph: g, src: b, edge_type: knows, dst: c }
   - call: graph.analytics.bfs
-    args: { graph: g, start: a }
+    args: { graph: g, start: a, direction: outgoing }
     returns: ["a", "b", "c"]

@@ -18,9 +18,9 @@ Patch the metadata of an existing vector.
 ```console
 $ strata vector collection create docs 3 --metric cosine
 created collection docs (3 dimensions, cosine)
-$ strata vector upsert docs a [1.0,0.0,0.0] --metadata {"tag":"x"}
+$ strata vector upsert docs a '[1.0,0.0,0.0]' --metadata '{"tag":"x"}'
 created a in docs
-$ strata vector update-metadata docs a {"tag":"z"}
+$ strata vector update-metadata docs a '{"tag":"z"}'
 updated a in docs
 $ strata vector get docs a
 key              a

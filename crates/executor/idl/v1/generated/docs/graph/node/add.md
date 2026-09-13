@@ -18,7 +18,7 @@ Add a node with an object type and properties.
 ```console
 $ strata graph create social
 created graph social
-$ strata graph add-node social alice --type person --properties {"age":30}
+$ strata graph add-node social alice --type person --properties '{"age":30}'
 created node alice in social
 $ strata graph get-node social alice
 node_id      alice
