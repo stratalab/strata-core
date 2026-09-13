@@ -629,9 +629,6 @@ fn resolve_durable_target(
 /// The one dispatch for a parsed command, one-shot or mid-session. `scope` is
 /// the branch/space this command runs under (the session's, or the command's
 /// own overrides).
-#[cfg(feature = "native")]
-// A flat top-level command dispatch, like its family-level siblings.
-#[allow(clippy::too_many_lines)]
 /// A line's branch and space, applied to the connection for the length of that
 /// line and no longer.
 ///
@@ -645,12 +642,14 @@ fn resolve_durable_target(
 ///
 /// Restoring on drop is what makes it hold: a line that fails returns through
 /// `?` from a dozen places, and every one of them must put the connection back.
+#[cfg(feature = "native")]
 struct LineScope<'a> {
     connection: &'a Connection,
     branch: String,
     space: String,
 }
 
+#[cfg(feature = "native")]
 impl<'a> LineScope<'a> {
     fn apply(connection: &'a Connection, scope: &Scope) -> Self {
         let restore = Self {
@@ -671,6 +670,7 @@ impl<'a> LineScope<'a> {
     }
 }
 
+#[cfg(feature = "native")]
 impl Drop for LineScope<'_> {
     fn drop(&mut self) {
         self.connection.set_default_branch(self.branch.clone());
@@ -678,6 +678,9 @@ impl Drop for LineScope<'_> {
     }
 }
 
+#[cfg(feature = "native")]
+// A flat top-level command dispatch, like its family-level siblings.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn execute_parsed_command(
     connection: &Connection,
     command: options::TopCommand,
@@ -689,7 +692,7 @@ pub(crate) fn execute_parsed_command(
         return Err(deferred_command(name));
     }
     if let Some(name) = host_only_top_command(&command) {
-        return Err(host_only_command(name));
+        return Err(host_only_command(Some(name)));
     }
     // The executor owns branch and space session context (CLI-4). Resolve the
     // current scope onto the connection so every path — including `command run`,
@@ -719,8 +722,9 @@ pub(crate) fn execute_parsed_command(
         // Refused above by `host_only_top_command`. Answering rather than
         // panicking means a variant added without updating that predicate
         // costs a refusal, not the session (#3355).
-        options::TopCommand::Clone(_) => return Err(host_only_command("clone")),
-        options::TopCommand::Hub(_) => return Err(host_only_command("hub")),
+        options::TopCommand::Clone(_) | options::TopCommand::Hub(_) => {
+            return Err(host_only_command(None))
+        }
         options::TopCommand::Init => {
             let value = init::run_init()?;
             render_value(&value, format)?;
@@ -800,8 +804,9 @@ pub(crate) fn execute_parsed_command(
         | options::TopCommand::Compact
         | options::TopCommand::Up(_)
         | options::TopCommand::Down(_) => return Err(deferred_command("a retired command")),
-        options::TopCommand::Start => return Err(host_only_command("start")),
-        options::TopCommand::Stop => return Err(host_only_command("stop")),
+        options::TopCommand::Start | options::TopCommand::Stop => {
+            return Err(host_only_command(None))
+        }
     };
 
     print_output(&output, &invocation, format, channel)?;
@@ -865,11 +870,26 @@ pub(crate) fn host_only_top_command(command: &options::TopCommand) -> Option<&'s
     })
 }
 
-fn host_only_command(name: &str) -> CliError {
-    CliError::usage(format!(
-        "`{name}` runs before a session opens and is not available inside one; \
-         run it as its own `strata {name}` command"
-    ))
+/// The refusal for a command that runs before a session opens.
+///
+/// `Some` is the answer `host_only_top_command` gives, and names the command.
+/// `None` is the fallback on the dispatch arms below it, reached only if that
+/// predicate ever stops naming one: a refusal that says less, rather than the
+/// `unreachable!` that used to take the session down (#3355). The two must say
+/// *different* things — when they said the same thing, deleting any arm of the
+/// predicate changed nothing observable and the mutation gate reported every
+/// one of them as untested, which is a fair description of a branch whose
+/// absence no one can notice.
+fn host_only_command(name: Option<&str>) -> CliError {
+    match name {
+        Some(name) => CliError::usage(format!(
+            "`{name}` runs before a session opens and is not available inside one; \
+             run it as its own `strata {name}` command"
+        )),
+        None => CliError::usage(
+            "that command runs before a session opens and is not available inside one",
+        ),
+    }
 }
 
 fn deferred_command(name: &str) -> CliError {
@@ -920,10 +940,10 @@ fn config_command(command: ConfigCommand) -> Result<Command, CliError> {
         // (`top_level_without_database`) and are refused ahead of a session by
         // `host_only_top_command`. Answering rather than panicking keeps a
         // dispatch mistake from taking a whole session down (#3355).
-        ConfigCommand::Set { .. } => return Err(host_only_command("config set")),
-        ConfigCommand::Unset { .. } => return Err(host_only_command("config unset")),
-        ConfigCommand::Path => return Err(host_only_command("config path")),
-        ConfigCommand::Show => return Err(host_only_command("config show")),
+        ConfigCommand::Set { .. }
+        | ConfigCommand::Unset { .. }
+        | ConfigCommand::Path
+        | ConfigCommand::Show => return Err(host_only_command(None)),
     })
 }
 
