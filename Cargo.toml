@@ -106,7 +106,15 @@ base64 = "0.22"
 # Testing
 rand = "0.9.3"
 tempfile = "3.8"
-serde_json = "1.0"
+# `float_roundtrip` is a CORRECTNESS requirement, not a nicety. serde_json's
+# default parser is best-effort precision: about one f64 in ten does not survive
+# serialize -> parse bit-exactly. The event hash chain covers a re-serialization
+# of the parsed payload, so without this an appended event whose payload carries
+# such a double is permanently unreadable (`data_loss.engine.event_record`), and
+# any f64 read back through a JSON row can differ in its last bits. Declared here
+# rather than inherited: it previously reached the CLI only by accident, through
+# `crates/hub -> serde_jcs`, which left `stratadb` library callers exposed (#3188).
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 proptest = "1.7"
 criterion = "0.5"
 serial_test = "3"

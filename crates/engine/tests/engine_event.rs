@@ -1157,3 +1157,85 @@ fn payload(value: serde_json::Value) -> EventPayload {
 fn batch_entry(event_type: &str, payload: serde_json::Value) -> EventBatchAppendEntry {
     EventBatchAppendEntry::new(self::event_type(event_type), self::payload(payload))
 }
+
+/// An appended event must be readable again whatever `f64` its payload carries.
+///
+/// The hash covers `serde_json::to_vec` of the in-memory payload, and the
+/// decoder recomputes it from the value it just parsed — so any `f64` that does
+/// not survive a serialize/parse round trip bit-exactly makes a successfully
+/// appended row permanently unreadable with `data_loss.engine.event_record`.
+/// About one double in ten fails that round trip under `serde_json`'s
+/// default (best-effort precision) parser.
+#[test]
+fn every_float_an_event_accepts_can_be_read_back() {
+    run_database_modes(|database| {
+        // A deterministic spread of doubles, not a hand-picked pair: two values
+        // observed to fail, the boundaries, and a pseudo-random sweep. A fix
+        // that special-cases one literal cannot satisfy this.
+        let mut values = vec![
+            0.5_f64,
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            1.0 / 3.0,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN,
+            0.999_048_498_585_043_9,
+            123_456_789.012_345_67,
+        ];
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        for _ in 0..64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            values.push(f64::from_bits((state >> 12) | 0x3FF0_0000_0000_0000) - 1.0);
+        }
+
+        let mut appended = Vec::new();
+        {
+            let mut events = event_service(database, "default", "default");
+            for (index, value) in values.iter().enumerate() {
+                let sequence = events
+                    .append(
+                        event_type("probe"),
+                        payload(json!({ "i": index, "v": value })),
+                    )
+                    .expect("append succeeds")
+                    .sequence();
+                appended.push((sequence, *value));
+            }
+        }
+
+        let mut events = event_service(database, "default", "default");
+        let mut unreadable = Vec::new();
+        for (sequence, value) in &appended {
+            match events.get(*sequence) {
+                Ok(Some(record)) => {
+                    let stored = record
+                        .payload()
+                        .as_inner()
+                        .get("v")
+                        .and_then(serde_json::Value::as_f64)
+                        .expect("payload carries its float");
+                    assert_eq!(
+                        stored.to_bits(),
+                        value.to_bits(),
+                        "event {sequence:?} read back a different double"
+                    );
+                }
+                Ok(None) => unreadable.push((*value, "row vanished".to_owned())),
+                Err(error) => unreadable.push((*value, error.code().to_owned())),
+            }
+        }
+
+        assert!(
+            unreadable.is_empty(),
+            "{} of {} appended events are unreadable: {unreadable:?}",
+            unreadable.len(),
+            appended.len()
+        );
+    });
+}
