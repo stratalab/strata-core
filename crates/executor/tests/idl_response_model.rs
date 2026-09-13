@@ -790,3 +790,44 @@ fn a_capture_missing_a_step_fails_the_docs_build() {
         "{message}"
     );
 }
+
+#[test]
+fn every_generated_page_is_text() {
+    // #3357: a branch-diff identity is a capability's internal length-prefixed
+    // encoding — valid UTF-8 beginning with NUL — so rendering it as text put
+    // control bytes in a published reference page, which git then classified
+    // as binary and would not diff. The contract's answer (Q20) is a marker;
+    // this asserts the answer holds for every page, not just that one.
+    let mut binary = Vec::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("idl/v1/generated/docs");
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("generated docs dir is readable") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("page is readable");
+            let offenders: Vec<usize> = bytes
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| {
+                    **byte < 0x09 || (0x0b..=0x0c).contains(*byte) || (0x0e..=0x1f).contains(*byte)
+                })
+                .map(|(at, _)| at)
+                .collect();
+            if !offenders.is_empty() {
+                binary.push(format!(
+                    "{}: control bytes at {offenders:?}",
+                    path.strip_prefix(&root).unwrap_or(&path).display()
+                ));
+            }
+        }
+    }
+    assert!(
+        binary.is_empty(),
+        "a generated page is not text:\n  {}",
+        binary.join("\n  ")
+    );
+}

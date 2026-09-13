@@ -49,7 +49,7 @@
 -- itemwise: 1 ok, 1 miss
 ∎
 ### kv.batch_get · edge:value=non-utf8 · raw
-0	ok	a	3	/w==
+0	ok	a	3	base64:/w==
 1	miss	missing		
 ∎
 ### kv.batch_get · responses/v1/kv/batch_get_ok.json · human
@@ -148,8 +148,8 @@ VERSION  COMMITTED_AT  VALUE
       3  -             base64:/w==
 ∎
 ### kv.history · edge:value=non-utf8 · raw
-4		/w==
-3		/w==
+4		base64:/w==
+3		base64:/w==
 ∎
 ### kv.history · responses/v1/kv/history_found.json · human
 VERSION  COMMITTED_AT  VALUE
@@ -232,7 +232,7 @@ KEY  VERSION  VALUE
 a          3  base64:/w==
 ∎
 ### kv.sample · edge:value=non-utf8 · raw
-a	3	/w==
+a	3	base64:/w==
 ∎
 ### kv.sample · responses/v1/kv/sample_page.json · human
 KEY  VERSION  VALUE
@@ -267,9 +267,9 @@ a2         4  base64:/w==
 a3         5  base64:/w==
 ∎
 ### kv.scan · edge:value=non-utf8 · raw
-a1	3	/w==
-a2	4	/w==
-a3	5	/w==
+a1	3	base64:/w==
+a2	4	base64:/w==
+a3	5	base64:/w==
 ∎
 ### kv.scan · responses/v1/kv/scan_page.json · human
 KEY  VERSION  VALUE

@@ -1160,3 +1160,42 @@ fn a_boundary_error_log_carries_no_colour_into_a_piped_stderr() {
         );
     }
 }
+
+/// #3358 F7/F8: a receipt is one line and a raw identity is one record, so a
+/// key carrying control bytes is cell-encoded rather than written through.
+/// Before this, a key holding a newline made the receipt two lines and the raw
+/// identity two rows; a key holding a tab added a column.
+#[test]
+fn a_control_byte_in_a_key_stays_inside_one_receipt_line() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let db = dir.path().join("db");
+    let db = db.to_str().expect("path is utf-8");
+    let key = "a\nb\tc";
+
+    let raw = strata(&["--db", db, "--raw", "kv", "put", key, "v"]);
+    assert_eq!(stdout(&raw), "a\\nb\\tc\n", "one record, escaped");
+
+    let human = strata(&["--db", db, "kv", "put", key, "v2"]);
+    assert_eq!(stdout(&human), "updated a\\nb\\tc\n", "one receipt line");
+
+    let missed = strata(&["--db", db, "kv", "delete", "x\ny"]);
+    assert_eq!(
+        stderr(&missed),
+        "no such key: x\\ny\n",
+        "the feedback line is one line too"
+    );
+
+    // Injective: a key whose text spells an escape is not the escape, and a key
+    // whose text spells the bytes marker is not an encoding.
+    strata(&["--db", db, "kv", "put", "real\\nnewline", "spelled"]);
+    strata(&["--db", db, "kv", "put", "base64:AAAA", "marker"]);
+    let scan = strata(&["--db", db, "--raw", "kv", "scan"]);
+    let scanned = stdout(&scan);
+    let keys: Vec<&str> = scanned
+        .lines()
+        .filter_map(|line| line.split('\t').next())
+        .collect();
+    assert!(keys.contains(&"a\\nb\\tc"), "{keys:?}");
+    assert!(keys.contains(&"real\\\\nnewline"), "{keys:?}");
+    assert!(keys.contains(&"\\base64:AAAA"), "{keys:?}");
+}

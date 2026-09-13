@@ -991,7 +991,7 @@ fn value_line(value: &Value, as_: Option<CliDisplayAs>, format: Format) -> Strin
         }
         (Some(CliDisplayAs::Json), _) => raw_json_leaf(value),
         _ if value.is_null() => return miss_line(format),
-        _ => presented(value, as_, format).0,
+        _ => presented(value, as_, format).into_line(),
     };
     let mut line = text;
     line.push('\n');
@@ -1151,28 +1151,55 @@ pub(crate) fn cell(value: Option<&Value>, as_: Option<CliDisplayAs>, format: For
     {
         return Cell::null("-");
     }
-    let (text, numeric) = presented(value, as_, format);
-    let text = escape_cell(&text);
-    if numeric {
-        Cell::number(text)
-    } else {
-        Cell::text(text)
+    match presented(value, as_, format) {
+        Presented::Text(text) => Cell::text(escape_cell(&text)),
+        // A number's text is digits, a sign and a point: nothing to escape.
+        Presented::Number(text) => Cell::number(text),
+        Presented::Encoded(text) => Cell::text(text),
+    }
+}
+
+/// What a presentation produced. The distinction matters only at the moment a
+/// value joins a line with other values: text is the value's own characters,
+/// which a cell must escape to stay one cell, while an encoding is already an
+/// unambiguous spelling of bytes that escaping would corrupt — doubling its
+/// backslashes or escaping its marker (#3358 F8).
+enum Presented {
+    Text(String),
+    Number(String),
+    Encoded(String),
+}
+
+impl Presented {
+    /// The text itself, for a value that is the whole line and so needs no
+    /// cell encoding.
+    fn into_line(self) -> String {
+        match self {
+            Self::Text(text) | Self::Number(text) | Self::Encoded(text) => text,
+        }
     }
 }
 
 /// The text a declared value shows under its presentation (output contract
 /// R4), and whether it is a number for alignment. Unescaped: a table cell
 /// escapes it, a value that is the whole line prints as it is.
-fn presented(value: &Value, as_: Option<CliDisplayAs>, format: Format) -> (String, bool) {
-    let text = |text: String| (text, false);
-    let number = |text: String| (text, true);
+fn presented(value: &Value, as_: Option<CliDisplayAs>, format: Format) -> Presented {
+    let text = Presented::Text;
+    let number = Presented::Number;
     match as_ {
         None | Some(CliDisplayAs::Float) => match value {
             Value::Number(n) => number(number_text(n, format)),
             other => text(scalar_text(other, format)),
         },
-        Some(CliDisplayAs::Bytes) => text(bytes_text(value, format)),
-        Some(CliDisplayAs::Json | CliDisplayAs::Table) => text(raw_scalar(value)),
+        Some(CliDisplayAs::Bytes) => bytes_text(value),
+        // A serialized document escapes its own control characters, so it is
+        // already an unambiguous spelling of itself; escaping it again would
+        // show a reader `\\n` where the document says `\n`. A bare string
+        // under the same presentation is ordinary text and is escaped.
+        Some(CliDisplayAs::Json | CliDisplayAs::Table) => match value {
+            Value::Array(_) | Value::Object(_) => Presented::Encoded(raw_scalar(value)),
+            other => text(raw_scalar(other)),
+        },
         Some(CliDisplayAs::Date) => match (value.as_u64(), format) {
             (Some(micros), Format::Human) => text(crate::wall_clock::format_utc_instant(micros)),
             (Some(micros), _) => number(micros.to_string()),
@@ -1229,10 +1256,30 @@ fn float_text(float: f64) -> String {
 /// A cell holds one line: a newline or tab inside a value is spelled out
 /// (`\n`, `\t`) so the row stays one row in both layouts (R4).
 pub(crate) fn escape_cell(text: &str) -> String {
-    text.replace('\n', "\\n")
+    let escaped = text
+        // The escape character first, or an escape this function writes would
+        // be indistinguishable from one the value already contained: `a\nb`
+        // typed with a backslash and an `n` encoded to the same six bytes as
+        // `a` newline `b` (#3358 F8).
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
         .replace('\t', "\\t")
-        .replace('\r', "\\r")
+        .replace('\r', "\\r");
+    if escaped.starts_with(BYTES_LABEL) {
+        // Text that spells the marker is not the marker. A leading backslash
+        // says so, and cannot be read as an encoded backslash because that is
+        // always doubled.
+        format!("\\{escaped}")
+    } else {
+        escaped
+    }
 }
+
+/// The marker (Q20) that tells a reader a cell carries an encoding of bytes
+/// rather than the text those characters spell. Values the CLI encodes carry
+/// it; see [`Presented::Encoded`], which never passes through
+/// [`escape_cell`].
+pub(crate) const BYTES_LABEL: &str = "base64:";
 
 /// Output contract R1 for a `MutationAck`: a hit prints the declared receipt
 /// (human) or the declared identity, tab-separated (raw), on stdout; a miss
@@ -1320,6 +1367,7 @@ fn render_placeholder(
         Format::Human => "(nil)".to_owned(),
         Format::Raw | Format::Json => String::new(),
     };
+    let encode = |text: String| escape_cell(&text);
     let ReceiptPlaceholder::Value(ReceiptValue { pointer, filter }) = placeholder else {
         return envelope
             .pointer("/data/effect/kind")
@@ -1334,12 +1382,19 @@ fn render_placeholder(
         Some(Value::Null) | None => return absent(),
         Some(value) => value,
     };
+    // A receipt is one line and a raw identity is one tab-separated record, so
+    // every value that lands in one is cell-encoded exactly as a table cell is
+    // (#3358 F7). Writing an identity unescaped turned a key holding a newline
+    // into two rows, and a key holding a tab into extra columns.
     match filter {
-        None => match format {
+        None => encode(match format {
             Format::Human => scalar_summary(value),
             Format::Raw | Format::Json => raw_scalar(value),
+        }),
+        Some(ReceiptFilter::Bytes) => match bytes_text(value) {
+            Presented::Encoded(text) => text,
+            other => encode(other.into_line()),
         },
-        Some(ReceiptFilter::Bytes) => bytes_text(value, format),
         Some(ReceiptFilter::Size) => value.as_u64().map_or_else(absent, size_text),
         Some(ReceiptFilter::Len) => value
             .as_array()
@@ -1361,15 +1416,33 @@ fn stored_bytes(value: &Value) -> Option<Vec<u8>> {
 /// `|bytes`: a base64 wire string as the text it encodes. Non-UTF-8 bytes
 /// stay base64, labelled `base64:` for a reader (R1-table) and bare for a
 /// script, which S4 changes to the bytes themselves.
-fn bytes_text(value: &Value, format: Format) -> String {
+fn bytes_text(value: &Value) -> Presented {
     let Some(encoded) = value.as_str() else {
-        return scalar_summary(value);
+        return Presented::Text(scalar_summary(value));
     };
-    match decode_base64_text(encoded) {
-        Some(text) => text,
-        None if format == Format::Human => format!("base64:{encoded}"),
-        None => encoded.to_owned(),
+    match displayable_text(encoded) {
+        Some(text) => Presented::Text(text),
+        // Both formats carry the marker. Raw used to emit the base64 bare,
+        // which a reader could not tell from a value whose text happens to be
+        // those characters (#3358 F8).
+        None => Presented::Encoded(format!("{BYTES_LABEL}{encoded}")),
     }
+}
+
+/// The text a byte value spells, when it spells text a line can carry: valid
+/// UTF-8 whose only control characters are the three [`escape_cell`] encodes.
+/// Anything else is bytes and says so with a marker.
+///
+/// UTF-8 validity alone is not the test. A branch-diff identity is the
+/// capability's internal length-prefixed encoding — valid UTF-8 beginning
+/// with NUL and 0x05 — and treating it as text wrote those bytes to the
+/// terminal, into the snapshot corpus, and into a generated reference page,
+/// which git then classified as binary (#3357).
+fn displayable_text(encoded: &str) -> Option<String> {
+    let text = decode_base64_text(encoded)?;
+    text.chars()
+        .all(|character| !character.is_control() || matches!(character, '\n' | '\t' | '\r'))
+        .then_some(text)
 }
 
 /// `|plural:<noun>`: a count with its noun — `1 row`, `12 rows`.
@@ -2137,6 +2210,66 @@ fn human_error_line(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{displayable_text, escape_cell, BYTES_LABEL};
+
+    /// The encoding must be injective: two different values may never produce
+    /// the same cell, or a consumer cannot recover what was stored (#3358 F8).
+    #[test]
+    fn distinct_values_never_share_a_cell() {
+        let cells: Vec<String> = [
+            "a\nb",  // a real newline
+            "a\\nb", // the two characters that spell one
+            "a\tb",  // a real tab
+            "a\\tb", "a\\\\nb", // a backslash followed by the escape of a newline
+            "plain",
+        ]
+        .iter()
+        .map(|value| escape_cell(value))
+        .collect();
+        let mut unique = cells.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), cells.len(), "collision among {cells:?}");
+    }
+
+    #[test]
+    fn the_escape_character_is_itself_escaped() {
+        assert_eq!(escape_cell("a\nb"), "a\\nb");
+        assert_eq!(escape_cell("a\\nb"), "a\\\\nb");
+        assert_eq!(escape_cell("a\tb"), "a\\tb");
+        assert_eq!(escape_cell("a\rb"), "a\\rb");
+    }
+
+    /// Text that spells the marker is not the marker. The leading backslash
+    /// cannot be read as an encoded backslash, which is always doubled.
+    #[test]
+    fn text_that_spells_the_bytes_marker_is_escaped() {
+        assert_eq!(escape_cell("base64:AAAA"), "\\base64:AAAA");
+        assert_eq!(escape_cell("\\base64:AAAA"), "\\\\base64:AAAA");
+        assert!(!escape_cell("nobase64:AAAA").starts_with('\\'));
+    }
+
+    /// UTF-8 validity is not the test for printability: an internal identity
+    /// is valid UTF-8 whose first bytes are NUL and 0x05, and treating it as
+    /// text put those bytes in a published reference page (#3357).
+    #[test]
+    fn bytes_carrying_control_characters_are_not_displayable_text() {
+        // base64 of the branch-diff identity for collection `notes`, id `n1`.
+        assert_eq!(displayable_text("AAVub3Rlc24x"), None);
+        // base64 of `hello`, which is text.
+        assert_eq!(displayable_text("aGVsbG8="), Some("hello".to_owned()));
+        // A newline is a control character a cell can carry, because a cell
+        // escapes it.
+        assert_eq!(displayable_text("YQpi"), Some("a\nb".to_owned()));
+        // Not valid UTF-8 at all.
+        assert_eq!(displayable_text("/w=="), None);
+    }
+
+    #[test]
+    fn the_marker_is_the_one_the_contract_named() {
+        assert_eq!(BYTES_LABEL, "base64:");
+    }
+
     use serde_json::json;
     use strata_executor::{
         BranchComparisonItem, BranchItem, BranchParentItem, BranchStatus, Bytes, CommitDurability,
@@ -2410,7 +2543,7 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_identity_is_labelled_base64_for_a_reader() {
+    fn a_non_utf8_identity_carries_its_marker_in_both_layouts() {
         let key = Bytes::new(vec![0xff]);
         let command = kv_put(key.clone());
         let output = kv_write(key, MutationEffect::created());
@@ -2420,8 +2553,9 @@ mod tests {
         );
         assert_eq!(
             render_for(&command, &output, Format::Raw),
-            only_stdout("/w==\n"),
-            "raw keeps the bare wire form until S4 prints the bytes themselves"
+            only_stdout("base64:/w==\n"),
+            "raw carries the marker too: bare base64 is indistinguishable from a \
+             value whose text is those characters (#3358 F8)"
         );
     }
 
@@ -2528,8 +2662,9 @@ mod tests {
         );
         assert_eq!(
             render_wire("kv_history", &output, Format::Raw),
-            only_stdout("4\t1789071584000000\ttwo\n12\t\t/w==\n2\t1789071584000000\t\n"),
-            "raw keeps the epoch micros and bare base64, and an empty cell for null"
+            only_stdout("4\t1789071584000000\ttwo\n12\t\tbase64:/w==\n2\t1789071584000000\t\n"),
+            "raw keeps the epoch micros, marks bytes that are not text, and leaves an \
+             empty cell for null"
         );
     }
 
@@ -2653,7 +2788,7 @@ mod tests {
         );
         assert_eq!(
             render_wire("kv_list", &output, Format::Raw),
-            only_stdout("user:1\n/w==\n")
+            only_stdout("user:1\nbase64:/w==\n")
         );
         let empty = Output::KeysPage {
             items: Vec::new(),
@@ -2883,8 +3018,9 @@ mod tests {
         );
         assert_eq!(
             raw(&binary, Some(B)),
-            Cell::text("/w==".to_owned()),
-            "a script gets bytes that are not text as bare base64"
+            Cell::text("base64:/w==".to_owned()),
+            "a script gets the marker too, so it can tell an encoding from a \
+             value whose text is those characters (#3358 F8)"
         );
         // A value of the wrong shape for its `as:` is shown as it is, never
         // dropped: the declaration is a presentation, not a filter.
@@ -3489,8 +3625,8 @@ mod tests {
 
     #[test]
     fn branch_diff_non_utf8_identity_keeps_base64() {
-        // Direction control: an identity that is not text is labelled for a
-        // reader and bare for a script, like every other declared byte cell.
+        // Direction control: an identity that is not text carries its marker
+        // in both layouts, like every other declared byte cell.
         let output = kv_comparison(vec![ComparedEntityItem::new(
             Bytes::new(vec![0xff, 0xfe]),
             1,
@@ -3507,7 +3643,7 @@ mod tests {
             render(&output, Format::Raw)
                 .stdout
                 .text()
-                .contains("\t//4=\t"),
+                .contains("\tbase64://4=\t"),
             "{:?}",
             render(&output, Format::Raw).stdout
         );
