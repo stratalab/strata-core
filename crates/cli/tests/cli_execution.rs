@@ -1131,3 +1131,31 @@ fn changelog_can_print_a_single_release_and_refuses_an_unknown_one() {
         "refusal should name the versions available: {message}"
     );
 }
+
+/// #3316: two writers share stderr — `render_error` and the boundary tracing
+/// subscriber — and `tracing_subscriber` colours by default no matter what
+/// stderr is. A captured stderr got escape codes wrapped around a line the
+/// other writer leaves plain. `Command::output` pipes, so this asserts the
+/// piped case, which is every programmatic caller.
+#[test]
+fn a_boundary_error_log_carries_no_colour_into_a_piped_stderr() {
+    let missing = "/nonexistent-parent-for-3316/db";
+    for args in [
+        vec!["--db", missing, "kv", "get", "x"],
+        vec!["--json", "--db", missing, "kv", "get", "x"],
+    ] {
+        let output = strata(&args);
+        let text = stderr(&output);
+        assert!(
+            !text.contains('\u{1b}'),
+            "escape byte on a piped stderr for {args:?}: {text:?}"
+        );
+        // Direction control: the line itself must survive. It is what makes a
+        // shown reference_id correlate with a real, inspectable record (ERR-2),
+        // so decolouring it must not amount to deleting it.
+        assert!(
+            text.contains("engine error crossed the executor boundary"),
+            "the boundary log went missing for {args:?}: {text:?}"
+        );
+    }
+}
