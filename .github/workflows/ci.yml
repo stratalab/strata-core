@@ -61,6 +61,11 @@ jobs:
           cargo test --locked -p strata-storage --test format_golden
           cargo test --locked -p strata-engine --test capability_conformance
           cargo test --locked -p strata-executor --features testkit --test error_contract
+          # Standalone (no `hub` in the graph), so serde_json's `float_roundtrip`
+          # is whatever the workspace declares rather than whatever `serde_jcs`
+          # happens to unify in. The whole-workspace run above cannot fail if
+          # that feature is dropped; this one can (#3188).
+          cargo test --locked -p strata-engine --test engine_event
       - name: Executor IDL drift gates
         run: |
           cargo run --locked -p strata-executor --features idl-tooling,inference,testkit --bin strata-idl -- check
