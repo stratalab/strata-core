@@ -122,8 +122,9 @@ impl CliWireEncoding {
 pub enum CliDisplayDecl {
     /// A hand-written renderer arm; no declaration to validate.
     Bespoke,
-    /// A declared shape rendered by the family rule.
-    Declared(CliDisplay),
+    /// A declared shape rendered by the family rule. Boxed because the
+    /// declaration is much larger than `Bespoke`, which carries nothing.
+    Declared(Box<CliDisplay>),
 }
 
 const BESPOKE: &str = "bespoke";
@@ -158,7 +159,7 @@ impl<'de> Deserialize<'de> for CliDisplayDecl {
 
             fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
                 CliDisplay::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-                    .map(CliDisplayDecl::Declared)
+                    .map(|display| CliDisplayDecl::Declared(Box::new(display)))
             }
         }
 
@@ -204,6 +205,17 @@ pub struct CliDisplay {
     /// Row order for the map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<CliDisplaySort>,
+    /// Where to find the flag saying this answer was cut short (#3358 F6).
+    /// The rule writes the notice; the command says where the fact lives, so
+    /// the renderer never looks for a field by name. A complete answer stays
+    /// quiet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<String>,
+    /// Where to find the count of everything that matched, when a listing
+    /// reports one (`hub list-datasets`). Shown only when the page is short of
+    /// it (#3358 F6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<String>,
 }
 
 /// One declared column or field.
@@ -212,6 +224,14 @@ pub struct CliDisplay {
 pub struct CliDisplayField {
     /// Schema pointer.
     pub field: String,
+    /// Where to find the flag saying this row is a deletion, when this is the
+    /// column that would carry the value (#3358 F10). A reader sees
+    /// `(deleted)` in the cell; `--raw` leaves it empty, because a script
+    /// reads the flag itself from `--json`. Without it a tombstone and a
+    /// stored JSON `null` both render as the empty cell and only the wire
+    /// tells them apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tombstone: Option<String>,
     /// Header override; defaults to the upper-cased wire name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
@@ -774,11 +794,11 @@ mod tests {
     #[test]
     fn a_receipt_shape_must_parse_to_be_accepted() {
         let display = |receipt: &str, identity: &[&str]| {
-            CliDisplayDecl::Declared(CliDisplay {
+            CliDisplayDecl::Declared(Box::new(CliDisplay {
                 receipt: Some(receipt.to_owned()),
                 identity: identity.iter().map(|entry| (*entry).to_owned()).collect(),
                 ..CliDisplay::default()
-            })
+            }))
         };
         let rule = CliRenderRule::MutationAck;
         validate_display_shape("t.c", rule, &display("{verb} {/data/key}", &["/data/key"]))

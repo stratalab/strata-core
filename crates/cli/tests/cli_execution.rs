@@ -1300,3 +1300,73 @@ fn an_empty_value_is_still_an_answer_in_a_session() {
     let one_shot = strata(&["--db", db, "--raw", "kv", "get", "empty"]);
     assert!(one_shot.stdout.is_empty(), "{:?}", one_shot.stdout);
 }
+
+/// #3358 F10: a deletion and a stored JSON `null` both left the value cell
+/// empty, and only `--json` distinguished them. The catalog asks for
+/// `(deleted)` in the value column, and an empty raw cell.
+#[test]
+fn a_history_tells_a_deletion_from_a_stored_null() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let db = dir.path().join("db");
+    let db = db.to_str().expect("path is utf-8");
+    strata(&["--db", db, "json", "set", "doc", "$", "null"]);
+    strata(&["--db", db, "json", "delete", "doc", "$"]);
+
+    let human = stdout(&strata(&["--db", db, "json", "history", "doc"]));
+    let rows: Vec<&str> = human.lines().skip(1).collect();
+    assert!(rows[0].ends_with("(deleted)"), "{human}");
+    assert!(
+        rows[1].ends_with("null"),
+        "the stored null is a value: {human}"
+    );
+    // The deletion marks the value column and nothing else: the row's other
+    // empty cell is still an empty cell.
+    assert!(rows[0].contains("  -  "), "{human}");
+
+    let raw = stdout(&strata(&["--db", db, "--raw", "json", "history", "doc"]));
+    let raw_rows: Vec<&str> = raw.lines().collect();
+    assert!(raw_rows[0].ends_with('\t'), "raw leaves it empty: {raw:?}");
+    assert!(raw_rows[1].ends_with("\tnull"), "{raw:?}");
+}
+
+/// #3358 F6: an answer cut short says so. A complete one stays quiet.
+#[test]
+fn a_truncated_answer_says_it_is_partial() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let db = dir.path().join("db");
+    let db = db.to_str().expect("path is utf-8");
+    for args in [
+        vec!["graph", "create", "g"],
+        vec!["graph", "add-node", "g", "a"],
+        vec!["graph", "add-node", "g", "b"],
+        vec!["graph", "add-edge", "g", "a", "knows", "b"],
+    ] {
+        let mut full = vec!["--db", db];
+        full.extend(args);
+        strata(&full);
+    }
+
+    let cut = strata(&["--db", db, "graph", "bfs", "g", "a", "--max-nodes", "1"]);
+    assert!(
+        stderr(&cut).contains("-- truncated"),
+        "stderr: {:?}",
+        stderr(&cut)
+    );
+    let whole = strata(&["--db", db, "graph", "bfs", "g", "a"]);
+    assert_eq!(stderr(&whole), "", "a complete answer says nothing");
+
+    // The notice is for a reader; a script reads the flag from the envelope.
+    let scripted = strata(&[
+        "--db",
+        db,
+        "--json",
+        "graph",
+        "bfs",
+        "g",
+        "a",
+        "--max-nodes",
+        "1",
+    ]);
+    assert_eq!(stderr(&scripted), "");
+    assert!(stdout(&scripted).contains("\"truncated\":true"));
+}

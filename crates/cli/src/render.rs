@@ -182,6 +182,7 @@ struct RowsDecl {
     /// The `search` rule's block beside its rows — the index diagnostics —
     /// shown to a reader under the table. A script reads the rows alone.
     fields: Vec<Field>,
+    conditions: Conditions,
 }
 
 /// One declared column.
@@ -192,6 +193,9 @@ struct Column {
     path: String,
     header: String,
     as_: Option<CliDisplayAs>,
+    /// Where this row's deletion flag sits, when the column declares one:
+    /// the path within the row, as `path` is (#3358 F10).
+    tombstone: Option<String>,
 }
 
 /// What a page's stderr may report.
@@ -199,6 +203,53 @@ struct Column {
 struct PageDecl {
     /// The wire carries `total_count`: the rows are a sample of a population.
     sampled: bool,
+}
+
+/// The conditional facts a rule reports, as pointers the command declared
+/// (#3358 F6/F10). The renderer reads them by pointer, never by field name:
+/// a rule that sniffed for `truncated` would be the guessing S3b deleted.
+#[derive(Clone, Debug, Default)]
+struct Conditions {
+    /// True when the answer was cut short.
+    truncated: Option<String>,
+    /// How many rows exist in total, when a listing reports one.
+    total: Option<String>,
+}
+
+impl Conditions {
+    fn parse(display: &CliDisplay) -> Self {
+        Self {
+            truncated: display.truncated.clone(),
+            total: display.total.clone(),
+        }
+    }
+
+    /// What a reader is told when an answer is not the whole answer. Human
+    /// only: a script reads the flag from `--json`, where it has always been.
+    fn notices(&self, envelope: &Value, shown: usize, out: &mut String) {
+        if self
+            .truncated
+            .as_deref()
+            .and_then(|pointer| envelope.pointer(pointer))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            line!(
+                out,
+                "-- truncated: this is part of the answer, not all of it"
+            );
+        }
+        if let Some(total) = self
+            .total
+            .as_deref()
+            .and_then(|pointer| envelope.pointer(pointer))
+            .and_then(Value::as_u64)
+        {
+            if u64::try_from(shown).is_ok_and(|shown| shown < total) {
+                line!(out, "-- showing {shown} of {total}");
+            }
+        }
+    }
 }
 
 /// A parsed `map:` declaration (output contract R1-table for analytics).
@@ -209,6 +260,7 @@ struct MapDecl {
     /// Header over the value column; the key column is always `NODE`.
     header: String,
     sort: CliDisplaySort,
+    conditions: Conditions,
 }
 
 /// A parsed record declaration: the commands whose answer is one record,
@@ -425,6 +477,7 @@ impl RowsDecl {
             columns,
             page,
             fields: Field::parse_all(&display.fields, DATA)?,
+            conditions: Conditions::parse(display),
         })
     }
 
@@ -555,6 +608,7 @@ impl MapDecl {
                 .clone()
                 .ok_or_else(|| "a map declares the header over its values".to_owned())?,
             sort: display.sort.unwrap_or(CliDisplaySort::Key),
+            conditions: Conditions::parse(display),
         })
     }
 }
@@ -584,6 +638,13 @@ fn parse_columns(columns: &[CliDisplayField]) -> Result<(String, Vec<Column>), S
             path: path.to_owned(),
             header: column_header(field),
             as_: field.as_,
+            // Read within the row, like the column itself: the guard has
+            // already held both to the same row array.
+            tombstone: field
+                .tombstone
+                .as_deref()
+                .and_then(|pointer| pointer.split_once("/*"))
+                .map(|(_, within)| within.to_owned()),
         });
     }
     Ok((
@@ -744,6 +805,10 @@ fn render_rows(envelope: &Value, decl: &RowsDecl, format: Format) -> Rendered {
         render_fields_human(envelope, &decl.fields, 0, &mut stdout);
     }
     let mut stderr = String::new();
+    if format == Format::Human {
+        decl.conditions
+            .notices(envelope, rows.map_or(0, Vec::len), &mut stderr);
+    }
     if let (Some(page), Format::Human) = (decl.page, format) {
         // The page facts sit beside the rows, one level up.
         let facts = decl
@@ -901,6 +966,7 @@ fn batch_summary(envelope: &Value, items: &[Value], out: &mut String) {
 /// no entries, human only.
 fn render_map(envelope: &Value, decl: &MapDecl, format: Format) -> Rendered {
     let mut stdout = String::new();
+    let mut shown = 0;
     match envelope.pointer(&decl.map).and_then(Value::as_object) {
         None => {
             if format == Format::Human {
@@ -924,6 +990,7 @@ fn render_map(envelope: &Value, decl: &MapDecl, format: Format) -> Rendered {
                 }
             });
             let mut table = Table::new(vec!["NODE".to_owned(), decl.header.clone()]);
+            shown = rows.len();
             for (node, value) in rows {
                 table.push(vec![
                     Cell::text(escape_cell(node)),
@@ -936,7 +1003,14 @@ fn render_map(envelope: &Value, decl: &MapDecl, format: Format) -> Rendered {
             };
         }
     }
-    Rendered::stdout(stdout)
+    let mut stderr = String::new();
+    if format == Format::Human {
+        decl.conditions.notices(envelope, shown, &mut stderr);
+    }
+    Rendered {
+        stdout: Answer::Text(stdout),
+        stderr,
+    }
 }
 
 /// Output contract R1 for a declared record: a reader gets `label  value`
@@ -1093,13 +1167,48 @@ fn render_receipt(envelope: &Value, decl: &ReceiptDecl, format: Format) -> Rende
 }
 
 /// A declared table: one row per element, one cell per declared column.
+/// A column's cells, with the declared tombstone flag read per row (#3358
+/// F10).
+///
+/// A deleted row carries no value, and neither does a row whose stored value
+/// *is* null — so both rendered as the empty cell and only `--json` could tell
+/// them apart. The column that would have carried the value says `(deleted)`
+/// instead. `--raw` leaves the cell empty, as the catalog specifies: a script
+/// reads the flag itself from `--json`, and a word where a value goes would be
+/// indistinguishable from a value.
 fn rows_table(rows: &[Value], columns: &[Column], format: Format) -> Table {
     let mut table = Table::new(columns.iter().map(|column| column.header.clone()).collect());
     for row in rows {
         table.push(
             columns
                 .iter()
-                .map(|column| cell(row.pointer(&column.path), column.as_, format))
+                .map(|column| {
+                    let deleted = column
+                        .tombstone
+                        .as_deref()
+                        .and_then(|path| row.pointer(path))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    let value = row.pointer(&column.path);
+                    match (deleted, format) {
+                        (true, Format::Human) => Cell::text("(deleted)".to_owned()),
+                        (true, _) => Cell::null(""),
+                        // A column that marks its deletions separately can say
+                        // that a null here is the stored document, not an
+                        // absence — which is the whole distinction a reader
+                        // could not see (#3358 F10). Everywhere else a null
+                        // still means "nothing to show": in a batch, the miss
+                        // beside it says why.
+                        (false, _)
+                            if column.tombstone.is_some()
+                                && column.as_ == Some(CliDisplayAs::Json)
+                                && matches!(value, Some(Value::Null)) =>
+                        {
+                            Cell::text("null".to_owned())
+                        }
+                        (false, _) => cell(value, column.as_, format),
+                    }
+                })
                 .collect(),
         );
     }
@@ -2666,9 +2775,10 @@ mod tests {
                 "VERSION  COMMITTED_AT                    VALUE\n",
                 "      4  2026-09-10 20:19:44.000000 UTC  two\n",
                 "     12  -                               base64:/w==\n",
-                "      2  2026-09-10 20:19:44.000000 UTC  -\n",
+                "      2  2026-09-10 20:19:44.000000 UTC  (deleted)\n",
             )),
-            "numbers right-align, a date is a UTC instant, bytes decode, a null is `-`"
+            "numbers right-align, a date is a UTC instant, bytes decode, and the row \
+             the tombstone marks says why its value cell is empty (#3358 F10)"
         );
         assert_eq!(
             render_wire("kv_history", &output, Format::Raw),
@@ -3125,6 +3235,7 @@ mod tests {
             as_: None,
             fields: Vec::new(),
             columns: Vec::new(),
+            tombstone: None,
         };
         let disagree = CliDisplay {
             columns: vec![column("/data/items/*/a"), column("/data/rows/*/b")],

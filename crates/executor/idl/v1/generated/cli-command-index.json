@@ -2549,7 +2549,8 @@
       "display": {
         "map": "/data/depths",
         "header": "DEPTH",
-        "sort": "asc"
+        "sort": "asc",
+        "truncated": "/data/truncated"
       },
       "encoding": null
     },
@@ -5089,7 +5090,8 @@
           {
             "field": "/data/items/*/last_updated"
           }
-        ]
+        ],
+        "total": "/data/total"
       },
       "encoding": null
     },
@@ -5269,7 +5271,8 @@
           {
             "field": "/data/items/*/manifest_hash"
           }
-        ]
+        ],
+        "total": "/data/total"
       },
       "encoding": null
     },
@@ -7048,6 +7051,7 @@
           },
           {
             "field": "/data/*/value",
+            "tombstone": "/data/*/tombstone",
             "as": "json"
           }
         ]
@@ -8171,6 +8175,7 @@
           },
           {
             "field": "/data/items/*/value",
+            "tombstone": "/data/items/*/tombstone",
             "as": "bytes"
           }
         ]
@@ -10160,6 +10165,7 @@
           },
           {
             "field": "/data/items/*/data/metadata",
+            "tombstone": "/data/items/*/tombstone",
             "as": "json"
           }
         ]

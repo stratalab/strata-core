@@ -49,6 +49,7 @@ commands:
           as: size
         - field: /data/items/*/downloads
         - field: /data/items/*/last_updated
+      total: /data/total
     fixtures:
       request: requests/v1/hub/list_datasets.json
       response: responses/v1/hub/datasets.json
@@ -129,6 +130,7 @@ commands:
         - field: /data/items/*/reason
         - field: /data/items/*/yanked_at
         - field: /data/items/*/manifest_hash
+      total: /data/total
     fixtures:
       request: requests/v1/hub/list_yanked.json
       response: responses/v1/hub/yanked.json

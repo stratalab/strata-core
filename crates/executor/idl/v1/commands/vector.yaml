@@ -202,6 +202,7 @@ commands:
           as: json
         - field: /data/items/*/data/metadata
           as: json
+          tombstone: /data/items/*/tombstone
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json

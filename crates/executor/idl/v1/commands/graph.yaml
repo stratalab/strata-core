@@ -667,6 +667,7 @@ commands:
       - invalid_argument.executor.graph_analytics_budget
     display:
       map: /data/depths
+      truncated: /data/truncated
       header: DEPTH
       sort: asc
     fixtures:
