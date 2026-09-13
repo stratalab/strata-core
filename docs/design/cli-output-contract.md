@@ -595,6 +595,17 @@ it still applies to human mode.
   when something needs attention**; a fully successful command writes
   nothing to stderr (Q11 — `-- itemwise: 2 ok` after a clean batch was
   noise, and is gone).
+- **One writer per stream, and the diagnostic behind an error is asked for.**
+  The executor emits a structured event when an engine error crosses its
+  boundary, correlating the `reference_id` a user is shown with the code and
+  the full source chain (ERR-2) — and leaves capturing to the consumer. The
+  CLI captured it unconditionally onto stderr, so a non-JSON line carrying
+  uncurated storage wording sat ahead of the error envelope in `--json`, and
+  ahead of the curated error in human mode. *Since #3352 (2026-09-13) it is
+  installed only when `STRATA_LOG` asks for it*, so stderr is the envelope
+  alone under `--json` — `2>&1 | jq .error` is a recipe that works — and the
+  curated error alone for a reader. The useful part of the cause is already in
+  the envelope's `details`, curated; the log is the raw chain behind it.
 - exit 0: the command did what it was asked — including a delete of
   something that was not there, which is idempotent (Q2, decided on review
   2026-09-11). exit 1: it could not (an executor error). exit 2: usage.

@@ -87,6 +87,61 @@ use render::{print_output, render_error, render_value};
 pub use options::Format;
 pub use render::{error_to_string, render_output, value_to_string, Invocation, Rendered};
 
+/// The environment variable that asks for diagnostic logging.
+#[cfg(feature = "native")]
+pub(crate) const LOG_ENV: &str = "STRATA_LOG";
+
+/// Installs the boundary-log subscriber, when the caller asked for one.
+///
+/// The executor emits one structured event per engine error crossing its
+/// boundary, correlating the `reference_id` a user is shown with the code and
+/// the full source chain (ERR-2) — and says in as many words that *capturing
+/// is the consumer's choice*. This CLI used to capture unconditionally onto
+/// stderr, which put a non-JSON line carrying uncurated storage wording ahead
+/// of the error envelope, in every format including `--json` where stderr is
+/// the envelope alone (#3352). The envelope is the curated answer; this is the
+/// diagnostic behind it, and it appears when asked for.
+///
+/// Ignored if a subscriber is already installed (a test, or an embedder).
+#[cfg(feature = "native")]
+fn install_logging() {
+    let Some(level) = std::env::var(LOG_ENV).ok().as_deref().and_then(log_level) else {
+        return;
+    };
+    // Colour only a terminal. `tracing_subscriber` defaults ANSI on regardless
+    // of what stderr is, so a captured stderr — a CI log, `2>err.log`, an agent
+    // reading the error — received raw escape bytes around a line that
+    // `render_error` writes uncoloured (#3316). Two writers share this stream;
+    // they answer to one contract.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_max_level(level)
+        .with_ansi(std::io::stderr().is_terminal())
+        .try_init();
+}
+
+/// What `STRATA_LOG` asked for: `None` is off.
+///
+/// An empty value is off, so `STRATA_LOG=` in a script reads as "not set". A
+/// value that is not a level name still turns logging *on*, at the level the
+/// boundary events use — someone who set the variable wants output, and
+/// silently giving them none because they typed `warning` would be the worse
+/// failure.
+#[cfg(feature = "native")]
+fn log_level(value: &str) -> Option<tracing::Level> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(match value.to_ascii_lowercase().as_str() {
+        "trace" => tracing::Level::TRACE,
+        "debug" => tracing::Level::DEBUG,
+        "info" => tracing::Level::INFO,
+        "warn" | "warning" => tracing::Level::WARN,
+        _ => tracing::Level::ERROR,
+    })
+}
+
 /// Runs the CLI and returns a process exit code.
 #[cfg(feature = "native")]
 pub fn run<I, T>(args: I) -> i32
@@ -94,20 +149,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    // Capture the executor's boundary error logs (reference_id + code + source
-    // chain) to stderr so the reference id shown in an error message correlates
-    // to a real, inspectable line (ERR-2). stdout stays clean for command
-    // output. Ignored if a subscriber is already installed (e.g. in tests).
-    // Colour only a terminal. `tracing_subscriber` defaults ANSI on regardless
-    // of what stderr is, so a captured stderr — a CI log, `2>err.log`, an agent
-    // reading the error, the output-contract matrix — received raw `^[[31m`
-    // bytes around a line that `render_error` writes uncoloured (#3316). Two
-    // writers share this stream; they answer to one contract.
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_max_level(tracing::Level::ERROR)
-        .with_ansi(std::io::stderr().is_terminal())
-        .try_init();
+    install_logging();
     match Cli::try_parse_from(args) {
         Ok(cli) => {
             let format = cli.output_format();
@@ -3146,6 +3188,32 @@ impl From<ExecutorError> for CliError {
 #[cfg(test)]
 #[cfg(feature = "native")]
 mod tests {
+    /// #3352: `STRATA_LOG` decides whether the boundary log is captured at
+    /// all. Off is the default, because the envelope is the answer and this is
+    /// the diagnostic behind it.
+    #[test]
+    fn strata_log_says_whether_to_capture_and_at_what_level() {
+        use tracing::Level;
+        assert_eq!(super::log_level(""), None, "unset is off");
+        assert_eq!(super::log_level("   "), None, "blank is off");
+        assert_eq!(super::log_level("error"), Some(Level::ERROR));
+        assert_eq!(
+            super::log_level("ERROR"),
+            Some(Level::ERROR),
+            "case-insensitive"
+        );
+        assert_eq!(super::log_level(" debug "), Some(Level::DEBUG), "trimmed");
+        assert_eq!(super::log_level("warn"), Some(Level::WARN));
+        assert_eq!(super::log_level("warning"), Some(Level::WARN));
+        assert_eq!(super::log_level("info"), Some(Level::INFO));
+        assert_eq!(super::log_level("trace"), Some(Level::TRACE));
+        // A value that is not a level still turns logging on: someone who set
+        // the variable wants output, and silently giving them none because
+        // they typed `verbose` is the worse failure.
+        assert_eq!(super::log_level("verbose"), Some(Level::ERROR));
+        assert_eq!(super::log_level("1"), Some(Level::ERROR));
+    }
+
     use super::*;
 
     #[test]

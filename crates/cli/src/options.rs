@@ -15,7 +15,7 @@ use strata_executor::{HubDatasetSort, JsonIndexType};
     name = "strata",
     version,
     about = "Strata database CLI",
-    after_help = "get started:\n  strata ./my-db kv put greeting hello          a database is created by writing to it\n  strata agents guide                           the full surface, written for agents\n  npx skills add stratalab/strata-agent-skills  install the Strata agent skills\n  https://stratadb.org                          docs"
+    after_help = "get started:\n  strata ./my-db kv put greeting hello          a database is created by writing to it\n  strata agents guide                           the full surface, written for agents\n  npx skills add stratalab/strata-agent-skills  install the Strata agent skills\n  https://stratadb.org                          docs\n\nenvironment:\n  STRATA_DB    the database to open when no path is given\n  STRATA_LOG   diagnostic logging to stderr (error, warn, info, debug, trace); off by default"
 )]
 pub(crate) struct Cli {
     /// Durable database path.
