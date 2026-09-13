@@ -567,11 +567,11 @@ fn piped_repl_renders_each_line_in_the_format_its_flags_chose() {
 
 #[test]
 fn piped_repl_line_format_overrides_a_json_session() {
-    // #3326, the inverse: under `--json`, a line that asks for raw output
-    // gets it — for its answer and for its error alike — while lines that
-    // choose nothing keep the session's JSON. (Since Q5 in #3314 S4 a line
-    // chooses `--json` or `--raw`; the hidden `--output-format`, and with it
-    // the only way to ask a line for human output, is gone.)
+    // #3326, the inverse: under `--json`, a line that asks for human or raw
+    // output gets it — for its answer and for its error alike — while lines
+    // that choose nothing keep the session's JSON. Q5 (#3314 S4) removed the
+    // hidden `--output-format`, which had been the only spelling of human;
+    // `--human` is its replacement, and this is what it is for (#3345).
     let dir = tempfile::tempdir().expect("tmp");
     let db = db_arg(dir.path());
     assert_ok(
@@ -583,25 +583,26 @@ fn piped_repl_line_format_overrides_a_json_session() {
 
     let output = pipe(
         &["--db", &db, "--json"],
-        b"--raw kv get greeting\n--raw kv get greeting\nkv get greeting\n--raw branch get nope\nbranch get nope\n",
+        b"--human kv get greeting\n--raw kv get greeting\nkv get greeting\n--human branch get nope\nbranch get nope\n",
     );
     assert_eq!(
         output.status.code(),
         Some(1),
         "a failed line is a pipe error: {output:?}"
     );
-    // The two raw lines answer with the stored value; the stream separates
-    // them (#3116), and the session's JSON line keeps its envelope.
+    // The human line prints its own line; the raw line answers with the
+    // stored value and the stream separates it (#3116); the unflagged line
+    // keeps the session's envelope.
     assert_eq!(
         stdout(&output),
         format!("hello\nhello\n{}", stdout(&json_read))
     );
     let err = stderr(&output);
     let mut lines = err.lines();
-    let raw = lines.next().expect("the raw line's error");
+    let human = lines.next().expect("the human line's error");
     assert!(
-        raw.starts_with("not_found.engine.branch:"),
-        "a raw line's error is the code-led line, not an envelope: {err}"
+        human.starts_with("not_found.engine.branch:"),
+        "a human line's error is the human error line, not an envelope: {err}"
     );
     let envelope: serde_json::Value = serde_json::from_str(
         lines.last().expect("the json line's error"),

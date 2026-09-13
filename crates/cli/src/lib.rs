@@ -3359,6 +3359,9 @@ mod tests {
         assert_eq!(format("--json kv get k"), Some(Format::Json));
         assert_eq!(format("kv get k --json"), Some(Format::Json));
         assert_eq!(format("--raw kv get k"), Some(Format::Raw));
+        // #3345: human has a name too, so a line in a `--json` session can
+        // ask for it instead of inheriting the session.
+        assert_eq!(format("--human kv get k"), Some(Format::Human));
         // Q5 (#3314 S4): the hidden flag is gone; so is the format it named.
         assert!(command_from_line("--output-format pretty kv get k", None, None).is_err());
         // Conflicting flags are a parse error, as on the command line.
@@ -3405,6 +3408,7 @@ mod tests {
             "--space s kv get k",
             "--json kv get k",
             "--raw kv get k",
+            "--human kv get k",
             "--json",
         ] {
             assert_eq!(refusal(line), None, "{line} must not be refused");
