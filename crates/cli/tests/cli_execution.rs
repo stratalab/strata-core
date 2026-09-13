@@ -1199,3 +1199,72 @@ fn a_control_byte_in_a_key_stays_inside_one_receipt_line() {
     assert!(keys.contains(&"real\\\\nnewline"), "{keys:?}");
     assert!(keys.contains(&"\\base64:AAAA"), "{keys:?}");
 }
+
+/// #3354: a line's `--branch` is that line's, not the session's. It used to be
+/// written to the connection and left there, so once any line carried one,
+/// every later line that named no branch resolved against it — writes
+/// included, landing in a branch the caller never asked for.
+#[test]
+fn a_per_line_branch_does_not_retarget_the_lines_after_it() {
+    let session = pipe(
+        &["--cache"],
+        b"branch create alternate\n\
+          --branch alternate kv put key branch-only\n\
+          kv get key\n\
+          --branch default kv get key\n\
+          --branch alternate kv get key\n\
+          kv put later session-branch\n\
+          --branch default kv get later\n",
+    );
+    let answered = stdout(&session);
+    let lines: Vec<&str> = answered.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "created branch alternate",
+            "created key",
+            "(nil)",       // the unqualified read is the session's branch
+            "(nil)",       // and the session's branch really is empty
+            "branch-only", // the value is where the line put it
+            "created later",
+            "session-branch", // a later write lands in the session's branch
+        ],
+        "stderr: {}",
+        stderr(&session)
+    );
+}
+
+/// #3355: a command that runs before a session opens must say so, not reach an
+/// `unreachable!` and take the session down with it (exit 101 and a Rust
+/// backtrace, in every format including `--json`).
+#[test]
+fn a_command_that_needs_a_host_is_refused_and_the_session_survives() {
+    let session = pipe(
+        &["--cache"],
+        b"config show\nconfig path\nconfig set openai.api_key never-written\n\
+          config unset openai.api_key\nstart\nstop\nhub info\nclone ds\n\
+          kv put after-all survived\nkv get after-all\n",
+    );
+    let errors = stderr(&session);
+    for name in [
+        "config show",
+        "config path",
+        "config set",
+        "config unset",
+        "start",
+        "stop",
+        "hub",
+        "clone",
+    ] {
+        assert!(
+            errors.contains(&format!("`{name}` runs before a session opens")),
+            "{name} was not refused: {errors}"
+        );
+    }
+    assert!(!errors.contains("panicked"), "{errors}");
+    assert_eq!(
+        stdout(&session),
+        "created after-all\nsurvived\n",
+        "the session kept running: {errors}"
+    );
+}

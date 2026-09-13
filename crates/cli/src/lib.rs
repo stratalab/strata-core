@@ -632,6 +632,52 @@ fn resolve_durable_target(
 #[cfg(feature = "native")]
 // A flat top-level command dispatch, like its family-level siblings.
 #[allow(clippy::too_many_lines)]
+/// A line's branch and space, applied to the connection for the length of that
+/// line and no longer.
+///
+/// The scope has to travel on the connection: the executor owns session
+/// context, and `command run` executes raw JSON with no per-command scope
+/// injection. But a line's own `--branch` is the line's, not the session's.
+/// It used to be written to the connection and left there, so once any line
+/// carried `--branch X`, every later line that named no branch resolved
+/// against `X` — including writes, which landed in a branch the caller never
+/// asked for and had no reason to look in (#3354).
+///
+/// Restoring on drop is what makes it hold: a line that fails returns through
+/// `?` from a dozen places, and every one of them must put the connection back.
+struct LineScope<'a> {
+    connection: &'a Connection,
+    branch: String,
+    space: String,
+}
+
+impl<'a> LineScope<'a> {
+    fn apply(connection: &'a Connection, scope: &Scope) -> Self {
+        let restore = Self {
+            connection,
+            branch: connection.default_branch(),
+            space: connection.default_space(),
+        };
+        if let Some(branch) = scope.branch.clone() {
+            connection.set_default_branch(branch);
+        }
+        connection.set_default_space(
+            scope
+                .space
+                .clone()
+                .unwrap_or_else(|| strata_executor::DEFAULT_SPACE.to_owned()),
+        );
+        restore
+    }
+}
+
+impl Drop for LineScope<'_> {
+    fn drop(&mut self) {
+        self.connection.set_default_branch(self.branch.clone());
+        self.connection.set_default_space(self.space.clone());
+    }
+}
+
 pub(crate) fn execute_parsed_command(
     connection: &Connection,
     command: options::TopCommand,
@@ -642,18 +688,15 @@ pub(crate) fn execute_parsed_command(
     if let Some(name) = deferred_top_command(&command) {
         return Err(deferred_command(name));
     }
+    if let Some(name) = host_only_top_command(&command) {
+        return Err(host_only_command(name));
+    }
     // The executor owns branch and space session context (CLI-4). Resolve the
     // current scope onto the connection so every path — including `command run`,
     // which executes raw JSON without per-command scope injection — honors
-    // --branch/--space and the REPL `use` context uniformly.
-    let connection_branch = connection.default_branch();
-    let branch = scope.branch.clone().unwrap_or(connection_branch);
-    connection.set_default_branch(branch);
-    let space = scope
-        .space
-        .clone()
-        .unwrap_or_else(|| strata_executor::DEFAULT_SPACE.to_owned());
-    connection.set_default_space(space);
+    // --branch/--space and the REPL `use` context uniformly. The scope belongs
+    // to this line and is taken off the connection when the line ends.
+    let _scope = LineScope::apply(connection, scope);
     // Every command's declaration is read before it runs, so the render never
     // touches the executor again; the two closures differ only in whether a
     // model-availability refusal gets the download offer.
@@ -673,9 +716,11 @@ pub(crate) fn execute_parsed_command(
     let (invocation, output) = match command {
         options::TopCommand::Ping => run(Command::Ping {})?,
         options::TopCommand::Remote => run(Command::RemoteGet {})?,
-        options::TopCommand::Clone(_) | options::TopCommand::Hub(_) => {
-            unreachable!("host-only hub commands are dispatched before a session database opens")
-        }
+        // Refused above by `host_only_top_command`. Answering rather than
+        // panicking means a variant added without updating that predicate
+        // costs a refusal, not the session (#3355).
+        options::TopCommand::Clone(_) => return Err(host_only_command("clone")),
+        options::TopCommand::Hub(_) => return Err(host_only_command("hub")),
         options::TopCommand::Init => {
             let value = init::run_init()?;
             render_value(&value, format)?;
@@ -723,7 +768,7 @@ pub(crate) fn execute_parsed_command(
         options::TopCommand::Describe => run(Command::Describe {
             branch: scope.branch.clone(),
         })?,
-        options::TopCommand::Config(args) => run(config_command(args.command))?,
+        options::TopCommand::Config(args) => run(config_command(args.command)?)?,
         options::TopCommand::Ipc(args) => match args.command {
             options::IpcSubcommand::Status => run(Command::IpcStatus {})?,
             options::IpcSubcommand::Stop => run(Command::IpcStop {})?,
@@ -754,10 +799,9 @@ pub(crate) fn execute_parsed_command(
         | options::TopCommand::Flush
         | options::TopCommand::Compact
         | options::TopCommand::Up(_)
-        | options::TopCommand::Down(_) => unreachable!("deferred top commands handled above"),
-        options::TopCommand::Start | options::TopCommand::Stop => {
-            unreachable!("start/stop own their open and are handled before a session opens")
-        }
+        | options::TopCommand::Down(_) => return Err(deferred_command("a retired command")),
+        options::TopCommand::Start => return Err(host_only_command("start")),
+        options::TopCommand::Stop => return Err(host_only_command("stop")),
     };
 
     print_output(&output, &invocation, format, channel)?;
@@ -790,6 +834,42 @@ fn deferred_top_command(command: &options::TopCommand) -> Option<&'static str> {
         options::TopCommand::Down(_) => Some("down"),
         _ => None,
     }
+}
+
+/// Commands that run before any session database opens: they own their own
+/// open (`start`, `stop`, `clone`), talk to a host service (`hub`), or read
+/// and write the user's own configuration file (`config show`, `path`, `set`,
+/// `unset`). The one-shot path dispatches them ahead of the database; a
+/// session line reaching one used to fall through to an `unreachable!` and
+/// take the whole session down with it, exit 101 and a Rust backtrace where
+/// `--json` promises an error envelope (#3355).
+///
+/// This is the name the class never had. `command_to_executor` answered the
+/// same question with a `_` arm returning a string, which is why nothing
+/// noticed the session path was not asking it.
+pub(crate) fn host_only_top_command(command: &options::TopCommand) -> Option<&'static str> {
+    use options::TopCommand as Top;
+    Some(match command {
+        Top::Clone(_) => "clone",
+        Top::Hub(_) => "hub",
+        Top::Start => "start",
+        Top::Stop => "stop",
+        Top::Config(args) => match &args.command {
+            ConfigCommand::Set { .. } => "config set",
+            ConfigCommand::Unset { .. } => "config unset",
+            ConfigCommand::Path => "config path",
+            ConfigCommand::Show => "config show",
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+fn host_only_command(name: &str) -> CliError {
+    CliError::usage(format!(
+        "`{name}` runs before a session opens and is not available inside one; \
+         run it as its own `strata {name}` command"
+    ))
 }
 
 fn deferred_command(name: &str) -> CliError {
@@ -832,17 +912,19 @@ fn top_level_without_database(command: &options::TopCommand) -> Result<TopLevelA
     }
 }
 
-fn config_command(command: ConfigCommand) -> Command {
-    match command {
+fn config_command(command: ConfigCommand) -> Result<Command, CliError> {
+    Ok(match command {
         ConfigCommand::Get => Command::ConfigGet {},
         ConfigCommand::GetKey { key } => Command::ConfigureGetKey { key },
-        // User-config subcommands are handled before a database opens
-        // (top_level_without_database); reaching here is a dispatch bug.
-        ConfigCommand::Set { .. }
-        | ConfigCommand::Unset { .. }
-        | ConfigCommand::Path
-        | ConfigCommand::Show => unreachable!("user-config subcommands run without a database"),
-    }
+        // User-config subcommands run without a database
+        // (`top_level_without_database`) and are refused ahead of a session by
+        // `host_only_top_command`. Answering rather than panicking keeps a
+        // dispatch mistake from taking a whole session down (#3355).
+        ConfigCommand::Set { .. } => return Err(host_only_command("config set")),
+        ConfigCommand::Unset { .. } => return Err(host_only_command("config unset")),
+        ConfigCommand::Path => return Err(host_only_command("config path")),
+        ConfigCommand::Show => return Err(host_only_command("config show")),
+    })
 }
 
 /// The settings a `[providers.<name>]` section stores, in the order the
@@ -2959,7 +3041,7 @@ fn command_to_executor(command: options::TopCommand, scope: &Scope) -> Result<Co
                 args.command,
                 ConfigCommand::Get | ConfigCommand::GetKey { .. }
             ) {
-                config_command(args.command)
+                config_command(args.command)?
             } else {
                 return Err(CliError::usage(
                     "`config set`/`unset`/`show`/`path` manage on-disk user config and are not available in an embedded session",
