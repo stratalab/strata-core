@@ -421,7 +421,15 @@ found five raw behaviours for one family and replaced them with this rule).
 `branch_id` and `state_revision`; `--json` is the complete record, which is
 what it is for. Every status command declares its list even when the list is
 "all of them", so a new wire field is a `check-cli` failure until someone
-decides where it goes. A record-valued field may carry its own `fields:`
+decides where it goes. *Implemented 2026-09-13 (#3358 F12): the guard had
+validated only the fields a declaration selected, so it could never notice
+what one omitted — a field added to a payload was silently never shown. The
+record shapes now account for every field of their payload: shown, or named
+in `DELIBERATELY_UNSHOWN` (`idl_tooling/display.rs`) with the reason. The
+curations this paragraph describes in prose are entries there now, so they
+are checked rather than remembered. Page and batch commands are out of scope:
+their rule decides what shows, and their envelope — `items`, `cursor`,
+`has_more`, `applied` — is not a per-command decision.* A record-valued field may carry its own `fields:`
 (one level down, the same selection rule: `admin info` shows three of
 `memory_budget`'s fields); a nested pointer must stay under its parent, and
 a field cannot pair `as` with nested `fields`. `header:` is optional and
@@ -538,6 +546,17 @@ declaration marking one `as: date` is a `check` error because the schema
 type for a logical clock is not the wall-clock newtype (a guard the S0
 schema pass will confirm is expressible; if it is not, the field allowlist
 is the guard).
+
+*Resolved 2026-09-13 (#3358 F11): it is **not** expressible, so the
+allowlist is the guard. `schemars` flattens core's `Timestamp` newtype to a
+bare `uint64`, and the executor's response DTOs carry instants as plain
+`u64` besides, so nothing in a generated schema separates an instant from
+any other counter — `as: date` accepted every integer. `WALL_CLOCK_SITES` in
+`idl_tooling/display.rs` now names the eight (command, pointer) sites where a
+date may be declared; anything else is a `check-cli` error. The list is keyed
+on the command because the field names do not distinguish them: an event's
+`timestamp` is an instant, a KV history row's is a position on the commit
+timeline.*
 
 Human date form: Q3.
 
