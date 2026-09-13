@@ -107,7 +107,7 @@ deleted greeting
 ∎
 ### 13 strata kv history greeting · stdout
 VERSION  COMMITTED_AT                    VALUE
-      6  <instant>  -
+      6  <instant>  (deleted)
       5  <instant>  hello3
       4  <instant>  hello2
       3  <instant>  hello

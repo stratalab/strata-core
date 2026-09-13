@@ -79,6 +79,7 @@ commands:
           as: date
         - field: /data/*/value
           as: json
+          tombstone: /data/*/tombstone
     fixtures:
       setup:
         - requests/v1/json/set.json

@@ -57,6 +57,9 @@ telemetry_endpoint_enabled	false
 ### hub.list_datasets · edge:items=[] · human
 (empty)
 ∎
+### hub.list_datasets · edge:items=[] · human · stderr
+-- showing 0 of 1
+∎
 ### hub.list_datasets · edge:items=[] · raw
 ∎
 ### hub.list_datasets · responses/v1/errors/hub/list_datasets_bad_limit.json · human
@@ -84,6 +87,9 @@ refs	[{"branch":"main","last_updated":"2026-09-02T00:00:00Z","manifest_hash":"bl
 ∎
 ### hub.list_yanked · edge:items=[] · human
 (empty)
+∎
+### hub.list_yanked · edge:items=[] · human · stderr
+-- showing 0 of 1
 ∎
 ### hub.list_yanked · edge:items=[] · raw
 ∎

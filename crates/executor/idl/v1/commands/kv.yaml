@@ -190,6 +190,7 @@ commands:
           as: date
         - field: /data/items/*/value
           as: bytes
+          tombstone: /data/items/*/tombstone
     fixtures:
       setup:
         - requests/v1/kv/put.json

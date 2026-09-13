@@ -90,6 +90,7 @@ pub(super) fn resolve_display(
         document,
         command_id,
     };
+    let conditions = check_conditions(&schema, display);
     let outcome = match display.shape() {
         Ok(CliDisplayShape::Receipt) => check_receipt(&schema, display),
         Ok(CliDisplayShape::Value) => check_value(&schema, display),
@@ -99,6 +100,7 @@ pub(super) fn resolve_display(
         Ok(CliDisplayShape::Map) => check_map(&schema, display),
         Err(reason) => Err(reason),
     };
+    let outcome = conditions.and(outcome);
     // Only a fields block renders a nested table; a column's `as: table`
     // stays a compact-JSON cell, so its columns are never needed.
     let resolved = outcome.and_then(|()| {
@@ -771,6 +773,60 @@ fn check_header(pointer: &str, header: Option<&str>) -> Check {
     }
 }
 
+/// The conditional facts a rule reports: whether the answer was cut short,
+/// how many rows exist in total, and whether a history row is a deletion.
+///
+/// Each is a pointer the command declares and the rule reads, so the renderer
+/// never looks for a field by name — the sniffing S3b deleted, and what #3332
+/// was filed to avoid reintroducing. The guard is what makes a declared
+/// pointer safe to trust at render time.
+fn check_conditions(schema: &SchemaDoc<'_>, display: &CliDisplay) -> Check {
+    for (key, pointer, wanted) in [
+        (
+            "truncated",
+            display.truncated.as_deref(),
+            SchemaType::Boolean,
+        ),
+        ("total", display.total.as_deref(), SchemaType::Integer),
+    ] {
+        let Some(pointer) = pointer else { continue };
+        let node = schema.resolve(pointer)?;
+        if node.ty != wanted {
+            return Err(format!(
+                "`{key}` reads `{pointer}`, which is {}, not {}",
+                article(node.ty),
+                article(wanted)
+            ));
+        }
+    }
+    // A tombstone marks a row, so it is read per row like the column it
+    // annotates, and from the same row array.
+    for column in &display.columns {
+        let Some(pointer) = column.tombstone.as_deref() else {
+            continue;
+        };
+        let node = schema.resolve(pointer)?;
+        if node.ty != SchemaType::Boolean {
+            return Err(format!(
+                "`tombstone` on `{}` reads `{pointer}`, which is {}, not a boolean",
+                column.field,
+                article(node.ty)
+            ));
+        }
+        let (row_source, _) = pointer.split_once("/*").ok_or_else(|| {
+            format!("`tombstone` on `{}` reads `{pointer}`, which names one value; it marks a row, so it steps into the row array with `/*`", column.field)
+        })?;
+        let (column_source, _) = column.field.split_once("/*").unwrap_or((&column.field, ""));
+        if row_source != column_source {
+            return Err(format!(
+                "`tombstone` on `{}` reads rows from `{row_source}`, but the column reads them from `{column_source}`",
+                column.field
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn check_columns(schema: &SchemaDoc<'_>, display: &CliDisplay, rule: CliRenderRule) -> Check {
     let mut rows: Option<&str> = None;
     let mut seen = BTreeSet::new();
@@ -866,6 +922,9 @@ fn table_columns(
             as_: implied_as(node.ty),
             fields: Vec::new(),
             columns: Vec::new(),
+            // A nested table's columns are derived from the row schema; only
+            // an authored column can annotate itself with a tombstone flag.
+            tombstone: None,
         });
     }
     if columns.is_empty() {
