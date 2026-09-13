@@ -1,7 +1,7 @@
 ---
 title: "Read event time range"
 description: "Read a range of events by occurrence time."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: event
 ---
 

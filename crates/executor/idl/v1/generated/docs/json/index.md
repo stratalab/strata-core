@@ -1,7 +1,7 @@
 ---
 title: "json commands"
 description: "Command reference for the json family."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: json
 ---
 

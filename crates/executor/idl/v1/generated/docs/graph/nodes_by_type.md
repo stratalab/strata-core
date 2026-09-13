@@ -1,7 +1,7 @@
 ---
 title: "List graph nodes by type"
 description: "List nodes declaring an object type."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: graph
 ---
 

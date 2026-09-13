@@ -1,7 +1,7 @@
 ---
 title: "Verify event chain"
 description: "Verify event log density and hash linkage."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: event
 ---
 

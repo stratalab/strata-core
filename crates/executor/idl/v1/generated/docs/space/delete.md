@@ -1,7 +1,7 @@
 ---
 title: "Delete product space"
 description: "Delete a product space from a branch."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: space
 ---
 

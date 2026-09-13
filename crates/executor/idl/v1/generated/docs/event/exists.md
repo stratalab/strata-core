@@ -1,7 +1,7 @@
 ---
 title: "Check event existence"
 description: "Check whether an event sequence exists."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: event
 ---
 

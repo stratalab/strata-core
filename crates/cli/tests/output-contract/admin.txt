@@ -17,13 +17,13 @@ default
 default
 ∎
 ### admin.describe · responses/v1/admin/describe.json · human
-StrataDB 1.2.1 · cache
+StrataDB 1.2.2 · cache
 branch default · branches: default · spaces: default
 capabilities: arrow event graph_core inference json kv vector vector_index
 kv 0 · json 0 · events 0
 ∎
 ### admin.describe · responses/v1/admin/describe.json · raw
-{"branch":"default","branches":["default"],"capabilities":{"arrow":true,"event":true,"graph_core":true,"inference":true,"json":true,"kv":true,"vector":true,"vector_index":true},"config":{"created":true,"default_branch":"default","durable":false,"target":"cache"},"default_branch":"default","primitives":{"event_count":0,"graphs":[],"json_count":0,"kv_count":0,"vector_collections":[]},"spaces":["default"],"target":"cache","version":"1.2.1"}
+{"branch":"default","branches":["default"],"capabilities":{"arrow":true,"event":true,"graph_core":true,"inference":true,"json":true,"kv":true,"vector":true,"vector_index":true},"config":{"created":true,"default_branch":"default","durable":false,"target":"cache"},"default_branch":"default","primitives":{"event_count":0,"graphs":[],"json_count":0,"kv_count":0,"vector_collections":[]},"spaces":["default"],"target":"cache","version":"1.2.2"}
 ∎
 ### admin.health · responses/v1/admin/health.json · human
 status          healthy
@@ -56,7 +56,7 @@ total_bytes	40960
 ∎
 ### admin.info · responses/v1/admin/info.json · human
 target          cache
-version         1.2.1
+version         1.2.2
 durable         false
 default_branch  default
 branch_count    1
@@ -68,7 +68,7 @@ memory_budget
 ∎
 ### admin.info · responses/v1/admin/info.json · raw
 target	cache
-version	1.2.1
+version	1.2.2
 durable	false
 default_branch	default
 branch_count	1
@@ -108,10 +108,10 @@ branch_count	1
 space_count	1
 ∎
 ### admin.ping · responses/v1/admin/ping.json · human
-pong 1.2.1
+pong 1.2.2
 ∎
 ### admin.ping · responses/v1/admin/ping.json · raw
-1.2.1
+1.2.2
 ∎
 ### admin.remote · responses/v1/admin/remote_null.json · human
 (nil)

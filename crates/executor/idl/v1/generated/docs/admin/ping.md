@@ -1,7 +1,7 @@
 ---
 title: "Ping database"
 description: "Check that the database handle is live."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: admin
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Get graph node"
 description: "Read one graph node."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: graph
 ---
 

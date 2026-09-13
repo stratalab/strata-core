@@ -1,7 +1,7 @@
 ---
 title: "Read database health"
 description: "Read control-plane health facts."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: admin
 ---
 

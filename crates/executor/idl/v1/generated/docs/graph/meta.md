@@ -1,7 +1,7 @@
 ---
 title: "Read graph metadata"
 description: "Read graph metadata and counts."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: graph
 ---
 

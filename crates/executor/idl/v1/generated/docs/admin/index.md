@@ -1,7 +1,7 @@
 ---
 title: "admin commands"
 description: "Command reference for the admin family."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: admin
 ---
 

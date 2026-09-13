@@ -1,7 +1,7 @@
 ---
 title: "Describe database"
 description: "Read a compact description of the database."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: admin
 ---
 

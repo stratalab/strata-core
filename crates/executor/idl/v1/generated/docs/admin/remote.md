@@ -1,7 +1,7 @@
 ---
 title: "Read remote origin"
 description: "Read where this database was cloned from."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: admin
 ---
 

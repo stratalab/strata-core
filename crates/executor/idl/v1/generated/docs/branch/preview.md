@@ -1,7 +1,7 @@
 ---
 title: "Preview branch promotion"
 description: "Preview promoting one branch into another, reporting conflicts without mutating either branch."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: branch
 ---
 

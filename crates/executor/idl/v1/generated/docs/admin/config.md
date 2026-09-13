@@ -1,7 +1,7 @@
 ---
 title: "Read sanitized config"
 description: "Read sanitized configuration facts."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: admin
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Embed one or more texts"
 description: "Embed one or more texts into vectors."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: inference
 ---
 

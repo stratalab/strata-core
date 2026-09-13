@@ -1,7 +1,7 @@
 ---
 title: "Fork branch at timestamp"
 description: "Fork a new branch from a retained source timestamp."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: branch
 ---
 

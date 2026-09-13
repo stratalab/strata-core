@@ -1,7 +1,7 @@
 ---
 title: "List JSON document keys"
 description: "List JSON document keys with optional prefix filtering."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: json
 ---
 
