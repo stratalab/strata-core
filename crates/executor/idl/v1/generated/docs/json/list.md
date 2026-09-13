@@ -16,11 +16,11 @@ List document keys under a prefix, in key order.
 ### CLI
 
 ```console
-$ strata json set user:1 $ {"v":1}
+$ strata json set user:1 '$' '{"v":1}'
 created user:1
-$ strata json set user:2 $ {"v":2}
+$ strata json set user:2 '$' '{"v":2}'
 created user:2
-$ strata json set other $ {"v":3}
+$ strata json set other '$' '{"v":3}'
 created other
 $ strata json list --prefix user:
 user:1

@@ -16,7 +16,7 @@ Verify the integrity of the event hash chain.
 ### CLI
 
 ```console
-$ strata event append user.created {"id":1}
+$ strata event append user.created '{"id":1}'
 appended user.created #0
 $ strata event verify-chain
 valid          true

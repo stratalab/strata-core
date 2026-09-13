@@ -13,5 +13,5 @@ steps:
   - call: graph.edge.add
     args: { graph: g, src: b, edge_type: knows, dst: c }
   - call: graph.analytics.cdlp
-    args: { graph: g }
+    args: { graph: g, direction: both }
     returns: ["a", "b", "c"]

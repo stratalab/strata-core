@@ -16,9 +16,9 @@ Read a range of events by sequence.
 ### CLI
 
 ```console
-$ strata event append user.created {"id":1}
+$ strata event append user.created '{"id":1}'
 appended user.created #0
-$ strata event append user.updated {"id":2}
+$ strata event append user.updated '{"id":2}'
 appended user.updated #1
 $ strata event range 0 --direction forward
 SEQUENCE  EVENT_TYPE    TIMESTAMP                       PAYLOAD

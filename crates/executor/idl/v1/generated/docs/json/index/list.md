@@ -16,7 +16,7 @@ List secondary indexes.
 ### CLI
 
 ```console
-$ strata json index create by_name $.name --index-type tag
+$ strata json index create by_name '$.name' --index-type tag
 created index by_name on name (tag)
 $ strata json index list
 NAME     FIELD_PATH  INDEX_TYPE  SPACE    CREATED_VERSION

@@ -385,6 +385,12 @@ pub struct CapturedStep {
     /// The command's wire request (serialized `Command`); a declared receipt
     /// may quote it.
     pub request: Value,
+    /// The same request as the printed `$` line spells it. The two differ only
+    /// where a step names a scratch path: the replay uses a real temporary
+    /// directory, while the line shows a stable one so the docs do not change
+    /// every run. This is the request a round-trip guard should expect the
+    /// printed line to produce (#3358 F3).
+    pub documented_request: Value,
     /// The command's wire output envelope (serialized `Output`).
     pub wire_output: Value,
     /// Optional comment shown as `# …` after the CLI line, verbatim from the
@@ -451,10 +457,13 @@ pub(super) fn capture_example_runs(
                 path: PathBuf::from(format!("examples/{id}.yaml")),
                 source,
             })?;
+            let documented_request =
+                step_wire_json(id, position, step, schema, DOC_TMPDIR, &bindings)?;
             steps.push(CapturedStep {
                 cli_input,
                 wire,
                 request,
+                documented_request,
                 wire_output,
                 note: step.note.clone(),
             });
@@ -826,7 +835,12 @@ fn render_cli(
         // clap verb cannot spell (#3073).
         schema
             .and_then(|s| step_wire_json("", 0, step, s, DOC_TMPDIR, bindings).ok())
-            .map(|wire| format!("strata command run --command-json '{}'", compact(&wire)))
+            .map(|wire| {
+                format!(
+                    "strata command run --command-json {}",
+                    shell_quote(&compact(&wire))
+                )
+            })
     };
 
     // A verb renders as its real clap invocation — but only when the clap tree
@@ -863,11 +877,32 @@ fn cli_token(value: &Value) -> String {
         Value::String(text) => text.clone(),
         other => other.to_string(),
     };
-    if text.is_empty() || text.contains(char::is_whitespace) {
-        format!("{text:?}")
-    } else {
-        text
+    shell_quote(&text)
+}
+
+/// Quotes a token so a POSIX shell hands the binary exactly these bytes.
+///
+/// The previous rule quoted only a token holding whitespace, and quoted it
+/// with Rust's own string escaping rather than the shell's. So a JSON argument
+/// went out bare — `strata json set user $ {"age":30,"name":"alice"}` — and the
+/// shell removed the quotes before the binary ever saw them: the documented
+/// line either stored the string `{age:30,name:alice}` or failed to parse
+/// (#3358 F3). These lines are published as transcripts a reader runs, so they
+/// have to survive a shell.
+fn shell_quote(text: &str) -> String {
+    const UNQUOTED: &str = "_-./:=@,+";
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || UNQUOTED.contains(character))
+    {
+        return text.to_owned();
     }
+    // Single quotes protect everything else, including the `$`, backtick and
+    // backslash that double quotes would let the shell interpret. A single
+    // quote itself cannot appear inside them, so it is closed, escaped, and
+    // reopened.
+    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 fn request_properties(schema: &Value) -> Option<&Map<String, Value>> {

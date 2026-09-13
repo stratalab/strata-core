@@ -16,7 +16,7 @@ Append an event to the log.
 ### CLI
 
 ```console
-$ strata event append user.created {"id":1}
+$ strata event append user.created '{"id":1}'
 appended user.created #0
 $ strata event count
 1

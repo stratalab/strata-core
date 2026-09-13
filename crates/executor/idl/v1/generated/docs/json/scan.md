@@ -16,9 +16,9 @@ Scan documents from the start, in key order.
 ### CLI
 
 ```console
-$ strata json set a $ {"v":1}
+$ strata json set a '$' '{"v":1}'
 created a
-$ strata json set b $ {"v":2}
+$ strata json set b '$' '{"v":2}'
 created b
 $ strata json scan
 KEY  VERSION  VALUE

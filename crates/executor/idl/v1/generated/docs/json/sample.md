@@ -16,11 +16,11 @@ A representative sample plus the total population size.
 ### CLI
 
 ```console
-$ strata json set a $ {"v":1}
+$ strata json set a '$' '{"v":1}'
 created a
-$ strata json set b $ {"v":2}
+$ strata json set b '$' '{"v":2}'
 created b
-$ strata json set c $ {"v":3}
+$ strata json set c '$' '{"v":3}'
 created c
 $ strata json sample
 KEY  VERSION  VALUE
