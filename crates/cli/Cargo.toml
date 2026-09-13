@@ -60,6 +60,7 @@ strata-executor = { path = "../executor", default-features = false }
 strata-hub = { path = "../hub", optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
+unicode-width = { workspace = true }
 
 [dev-dependencies]
 regex = { workspace = true }

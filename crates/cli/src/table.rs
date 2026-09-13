@@ -57,6 +57,26 @@ pub(crate) struct Table {
     rows: Vec<Vec<Cell>>,
 }
 
+/// The widest a column pads to. A table is read in a terminal, and no terminal
+/// is this wide, so beyond it padding buys nothing — while costing every row in
+/// the table. One 60,000-character key in a thousand-row scan rendered 60 MB of
+/// mostly spaces, against 147 KB of JSON for the same answer, built entirely in
+/// memory and on the browser's path too (#3358 F4).
+///
+/// A value wider than the cap is never truncated: human output hides nothing
+/// that `--raw` would show. It simply stops being something the other rows
+/// align to.
+const COLUMN_WIDTH_CAP: usize = 160;
+
+/// How many terminal columns a cell occupies.
+///
+/// Not the number of characters: a CJK ideograph occupies two columns and a
+/// combining mark none, so counting scalars misaligns every row after one
+/// (#3358 F14).
+fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
 impl Table {
     pub(crate) const fn new(headers: Vec<String>) -> Self {
         Self {
@@ -79,15 +99,20 @@ impl Table {
     /// The reader's layout: the header, then every row, columns padded to the
     /// wider of the header and the widest cell, two spaces between columns,
     /// no trailing whitespace, every line newline-terminated.
+    ///
+    /// A column pads to [`COLUMN_WIDTH_CAP`] at most. A value wider than that
+    /// still prints in full and pushes the rest of *its own* row right; what
+    /// the cap prevents is every other row being padded out to match it.
     pub(crate) fn human(&self) -> String {
         let widths: Vec<usize> = (0..self.headers.len())
             .map(|column| {
                 self.rows
                     .iter()
-                    .map(|row| row[column].text.chars().count())
-                    .chain(std::iter::once(self.headers[column].chars().count()))
+                    .map(|row| display_width(&row[column].text))
+                    .chain(std::iter::once(display_width(&self.headers[column])))
                     .max()
                     .unwrap_or(0)
+                    .min(COLUMN_WIDTH_CAP)
             })
             .collect();
         let right_aligned: Vec<bool> = (0..self.headers.len())
@@ -140,7 +165,7 @@ fn push_line<'a>(out: &mut String, cells: impl Iterator<Item = (&'a str, bool)>,
         if column > 0 {
             line.push_str("  ");
         }
-        let padding = widths[column].saturating_sub(text.chars().count());
+        let padding = widths[column].saturating_sub(display_width(text));
         if right {
             line.extend(std::iter::repeat_n(' ', padding));
             line.push_str(text);
@@ -157,7 +182,7 @@ fn push_line<'a>(out: &mut String, cells: impl Iterator<Item = (&'a str, bool)>,
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Table};
+    use super::{display_width, Cell, Table, COLUMN_WIDTH_CAP};
 
     fn text(value: &str) -> Cell {
         Cell::text(value.to_owned())
@@ -169,6 +194,74 @@ mod tests {
 
     fn headers(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// #3358 F4: one wide value used to be paid for by every other row. A
+    /// thousand-row scan holding a single 60,000-character key rendered 60 MB,
+    /// nearly all of it padding, against 147 KB of JSON for the same answer.
+    #[test]
+    fn one_wide_value_does_not_pad_the_rest_of_the_table() {
+        let wide = "w".repeat(60_000);
+        let mut table = Table::new(headers(&["KEY", "VERSION", "VALUE"]));
+        table.push(vec![text(&wide), number("1"), text("wide")]);
+        for row in 0..999 {
+            table.push(vec![text(&format!("k{row:04}")), number("2"), text("v")]);
+        }
+        let rendered = table.human();
+
+        // Printed in full: human output hides nothing `--raw` would show.
+        assert!(rendered.contains(&wide));
+        // But it is not what the other thousand rows align to. Without the cap
+        // this is above 60 MB.
+        assert!(
+            rendered.len() < 300_000,
+            "rendered {} bytes; the cap is not holding",
+            rendered.len()
+        );
+        let ordinary = rendered
+            .lines()
+            .find(|line| line.starts_with("k0000"))
+            .expect("an ordinary row");
+        assert!(ordinary.len() < COLUMN_WIDTH_CAP + 32, "{ordinary:?}");
+    }
+
+    /// #3358 F14: alignment is terminal columns, not Unicode scalars.
+    ///
+    /// Measured with `unicode_width` directly rather than through
+    /// [`display_width`]: a test that measures with the same ruler it is
+    /// checking passes whatever that ruler says, which is exactly how the
+    /// first version of this test stayed green against `chars().count()`.
+    #[test]
+    fn a_wide_character_occupies_the_columns_it_draws() {
+        let mut table = Table::new(headers(&["KEY", "VALUE"]));
+        table.push(vec![text("ab"), text("ascii")]);
+        table.push(vec![text("東京"), text("cjk")]);
+        let rendered = table.human();
+        let value_starts: Vec<usize> = rendered
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let value = line.rsplit("  ").next().unwrap_or("");
+                unicode_width::UnicodeWidthStr::width(line)
+                    - unicode_width::UnicodeWidthStr::width(value)
+            })
+            .collect();
+        assert_eq!(
+            value_starts[0], value_starts[1],
+            "the value column starts in a different place on each row:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn width_counts_columns_not_characters() {
+        assert_eq!(display_width("ab"), 2);
+        assert_eq!(display_width("東京"), 4, "two ideographs, four columns");
+        assert_eq!(
+            display_width("e\u{301}"),
+            1,
+            "a combining mark draws nothing"
+        );
+        assert_eq!(display_width(""), 0);
     }
 
     #[test]
