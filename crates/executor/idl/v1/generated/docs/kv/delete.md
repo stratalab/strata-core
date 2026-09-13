@@ -1,7 +1,7 @@
 ---
 title: "Delete KV value"
 description: "Delete one visible KV key."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: kv
 ---
 

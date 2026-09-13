@@ -1,7 +1,7 @@
 ---
 title: "Get JSON value"
 description: "Read the current or historical JSON value at a document path."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: json
 ---
 

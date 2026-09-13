@@ -1,7 +1,7 @@
 ---
 title: "Fork branch at version"
 description: "Fork a new branch from a retained source commit version."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: branch
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "List KV keys"
 description: "List KV keys with optional prefix filtering."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: kv
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Compare branches"
 description: "Compare two branches and report the entities that differ across every primitive."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: branch
 ---
 

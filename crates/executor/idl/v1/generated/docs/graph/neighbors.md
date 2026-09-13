@@ -1,7 +1,7 @@
 ---
 title: "List graph neighbors"
 description: "List a node's neighbors."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: graph
 ---
 

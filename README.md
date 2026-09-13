@@ -9,7 +9,7 @@ and built-in time travel. One binary, one directory, zero infrastructure.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-1.2.1-brightgreen.svg)](https://stratadb.org/changelog)
+[![Version](https://img.shields.io/badge/version-1.2.2-brightgreen.svg)](https://stratadb.org/changelog)
 
 [Website](https://stratadb.org) · [Documentation](https://stratadb.org/docs) · [Playground](https://stratadb.org/playground) · [Agent skills](https://github.com/stratalab/strata-agent-skills)
 
@@ -190,7 +190,7 @@ namespaced by the capability it belongs to — `stratadb::json`, `stratadb::even
 
 ```bash
 curl -fsSL https://stratadb.org/install.sh | sh
-strata --cache ping                 # pong 1.2.1
+strata --cache ping                 # pong 1.2.2
 ```
 
 **Homebrew:** `brew install stratalab/tap/strata`

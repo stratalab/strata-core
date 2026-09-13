@@ -1,7 +1,7 @@
 ---
 title: "Delete graph"
 description: "Delete a graph and its visible data."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: graph
 ---
 

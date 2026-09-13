@@ -1,7 +1,7 @@
 ---
 title: "Clone hub dataset"
 description: "Clone a dataset from a hub into a new local database."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: admin
 ---
 

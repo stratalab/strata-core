@@ -1,7 +1,7 @@
 ---
 title: "Compute graph pagerank"
 description: "Compute PageRank importance scores."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: graph
 ---
 

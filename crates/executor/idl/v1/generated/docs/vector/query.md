@@ -1,7 +1,7 @@
 ---
 title: "Query vectors"
 description: "Search a vector collection."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: vector
 ---
 

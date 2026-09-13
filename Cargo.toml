@@ -25,7 +25,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 # The MSRV PROMISE, verified by the `msrv` CI job on every PR. Floor set by the
 # stratahub crates, which ride in the default graph via strata-hub. Distinct

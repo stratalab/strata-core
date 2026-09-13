@@ -1,7 +1,7 @@
 ---
 title: "Read vector history"
 description: "Read retained vector history for one key."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: vector
 ---
 

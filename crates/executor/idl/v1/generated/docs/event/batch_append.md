@@ -1,7 +1,7 @@
 ---
 title: "Batch append events"
 description: "Append multiple events in one commit."
-source: strata-core@1.2.1
+source: strata-core@1.2.2
 section: event
 ---
 
