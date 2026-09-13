@@ -64,6 +64,9 @@ unnecessary_map_or = "allow"
 
 [workspace.dependencies]
 # Core dependencies shared across crates
+# Terminal display width, for human table alignment (a CJK character is two
+# columns wide, a combining mark none; counting scalars misaligns both).
+unicode-width = "0.2"
 uuid = { version = "1.6", features = ["v4", "v5", "serde"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 bincode = "1.3"
