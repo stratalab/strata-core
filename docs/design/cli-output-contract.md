@@ -322,9 +322,21 @@ right-aligned — the `kubectl` / `gh` style, which pastes into an issue and
 diffs cleanly. Dates render per R3. Bytes render as text when UTF-8, else
 as `base64:<…>` — labelled, so a reader knows (#3116's second half).
 
-**What does not change:** `--json` is byte-identical before and after every
-slice; the matrix pins that. (`--pretty` was the second envelope format until
-Q5 deleted it at S4.)
+**What does not change, with one recorded exception:** `--json` is
+byte-identical before and after every slice; the matrix pins that.
+(`--pretty` was the second envelope format until Q5 deleted it at S4.)
+
+*The exception is #3334, fixed in #3336 (`da7cc1d7`) between S2 and S3a: an
+as-of `json get` answered `Output::JsonValue` while a live read of the same
+command answered `Output::JsonVersionedValue`, so one command carried two wire
+shapes and the historical read dropped the version, timestamp and
+`document_version` it exists to report. Both branches now answer
+`json_versioned_value`, and the unproduced `JsonValue` / `MaybeJsonValue`
+variants are deleted. It was a prerequisite for S3a — a single `value:`
+pointer cannot describe two shapes — and it moves the wire toward the
+`response_model` the command has always published, but it is a wire change and
+the rule above does not cover it. Release notes carry it; the compatibility
+direction is recorded in §6.*
 
 ### R2 — the declaration lives in the IDL, the renderer interprets it
 
@@ -749,6 +761,25 @@ slice's cells change as §5.4 predicts, no other cell moves, and the `json` /
 `pretty` cells never move. Every slice that changes a human or raw cell is
 a visible CLI change and carries release notes in the PR body.
 
+**One slice moved a `json` cell**, and the rule is worth stating precisely
+rather than quietly: #3336 (`da7cc1d7`) changed what an as-of `json get`
+answers, as R1 records. It was not one of S0–S5 — it is the prerequisite
+S3a could not proceed without — but it went through the same matrix, and
+saying "the json cells never move" while one did would make the rule
+decorative.
+
+**The compatibility direction, decided 2026-09-13.** The old `Output` enum
+carried *both* `JsonValue` and `JsonVersionedValue` — a live read already
+answered the versioned one — so a **1.2.1 client reading a 1.2.2 server
+deserializes the new answer**; it receives the richer shape it already knew.
+The reverse does not hold: a 1.2.2 client no longer has `JsonValue`, so an
+as-of JSON read **from a 1.2.1 server fails to deserialize**. IPC negotiates
+on `ServerHello.protocol`, which is still revision 2, so that mismatch is not
+refused at connect time — the hello carries `release` and the IDL stamps, but
+nothing compares them for this. Mixed-version IPC is not a supported
+configuration and the release notes say so; ticking the protocol revision is
+the alternative and is recorded as #3369 rather than taken silently.
+
 | Slice | Content | Wire change | Closes |
 |---|---|---|---|
 | **S0** (three PRs under the ≤1,500-LOC rule) | **S0a** — the matrix (§5.2: in-process, binary, examples cross-check; playground cells come with #3312), blessed on today's output; the three plants; both design documents committed. **S0b** — `render:` per kind in `kinds.yaml` and `display:` per command in `commands/*.yaml` (R2 as amended: `receipt`/`identity`/`noun`, `value`, `fields`, `columns`, `map`, `header`, `as`, `sort`, or `bespoke`), resolved into `cli-command-index.json` and **declared and guarded but not yet read** by the renderer (so the declaration review happens on a PR that changes no output), with the guard that `command-index.json` never carries it (the SDK boundary). **S0c** — the #3313 `check` guard (family ⇔ schema) with its shrink-only `response-model-divergences.yaml`, `wire_status: transitional` on the divergent rows, and the declarations that are simply wrong corrected (Q13) — a docs-only change to `Returns:` | none (docs `Returns:` lines change in S0c) | #3313 asks 1–2 |
@@ -846,7 +877,7 @@ Verified against `main` at `60db96ac`.
 | Q15 | `bool` acks (`json index drop`, `vector collection delete`) carry no identity on the wire | receipt takes the name from the request through a `/request/…` pointer (`dropped index {/request/name}`, `identity: [/request/name]`), until #3313 puts it on the wire |
 | Q16 | `--raw` for status objects (`admin info`, `inference status`, `branch get`) — today compact JSON | **`key<TAB>value` lines — decided 2026-09-11.** Dotted keys for nesting, arrays as one compact-JSON field, null as an empty value; `--raw` is TSV everywhere and `--json` is the only JSON |
 | Q21 | How a rule says an answer is partial, or that a row is a deletion | **Per-rule declared pointers — decided 2026-09-13 (#3358 F6/F10, closing the #3332 gap).** A display declares `truncated:` (boolean) and `total:` (integer); the rule writes `-- truncated: this is part of the answer, not all of it` and `-- showing N of M` on stderr, human only, and a complete answer stays quiet. A *column* declares `tombstone:` (boolean, same row array) and shows `(deleted)` where its value would be — empty in `--raw`, because a script reads the flag from `--json` and a word where a value goes cannot be told from a value. A column that marks its deletions can also say a `null` in it is the stored document rather than an absence; everywhere else a null still means nothing to show, and the miss beside it says why. The renderer reads all of these by pointer: a rule sniffing for `truncated` or `tombstone` by name would be the guessing S3b deleted |
-| Q16b | How a cell carries a value containing the separator, a newline, or bytes that are not text | **Escape the escape — decided 2026-09-13 (#3358 F7/F8).** A cell is injective, so a consumer can recover what was stored: `\\`, `\n`, `\t` and `\r` are escaped (the escape character *first*, or a value spelling `\n` would encode to the same six bytes as one containing a newline); bytes that are not displayable text carry the Q20 marker in **both** layouts, not only human, because bare base64 cannot be told from a value whose text is those characters; and a literal value beginning with the marker is escaped with a leading `\`, which cannot be read as an encoded backslash because that is always doubled. Displayability is *not* UTF-8 validity — a value with any control character other than the three escaped ones is bytes. A serialized JSON document escapes its own control characters and so is already an unambiguous spelling of itself; it passes through unescaped. Applies wherever values share a line: table cells, `key<TAB>value` lines, **receipts and raw identities** (which previously bypassed it entirely). The whole-value `--raw` point read (Q5/#3116) is a separate encoding and stays byte-exact |
+| Q16b | How a cell carries a value containing the separator, a newline, or bytes that are not text | **Escape the escape — decided 2026-09-13 (#3358 F7/F8).** A cell is injective, so a consumer can recover what was stored: `\\`, `\n`, `\t` and `\r` are escaped (the escape character *first*, or a value spelling `\n` would encode to the same six bytes as one containing a newline); bytes that are not displayable text carry the Q20 marker in **both** layouts, not only human, because bare base64 cannot be told from a value whose text is those characters; and a literal value beginning with the marker is escaped with a leading `\`, which cannot be read as an encoded backslash because that is always doubled. Displayability is *not* UTF-8 validity — a value with any control character other than the three escaped ones is bytes. A serialized JSON document escapes its own control characters and so is already an unambiguous spelling of itself; it passes through unescaped. Applies wherever values share a line: table cells, `key<TAB>value` lines, **receipts and raw identities** (which previously bypassed it entirely). The whole-value `--raw` point read (Q5/#3116) is a separate encoding and stays byte-exact. *Two limits, known and deferred to 1.2.3 — what holds today is injectivity over escape spellings, which is narrower than the word "composable" suggests. (a) Only those four characters are escaped, so a value carrying ESC or another control byte reaches the terminal intact and is interpreted there (#3371). (b) The encoding is not type-reversible for JSON-valued cells: `raw_scalar` returns a string bare while serializing structures, so the array `[1]` and the string `"[1]"` produce the same cell, as do `1`/`"1"` and `true`/`"true"` (#3372). Fixing (b) changes what a `--raw json scan` string cell looks like, which is why it is scheduled with a release that can carry the change rather than squeezed into this one* |
 | Q17 | `action.status` commands (`arrow export/import`, `clone`, `ipc stop`) — today pretty JSON | one-line receipt like a write (`exported 1 row of kv to /tmp/exports/kv.parquet (1.9 kB)`); `--raw` = key/value lines as any status; the record stays in `--json` |
 | Q18 | Human labels and headers | **Wire field names by default; an explicit `header:` permitted where the wire name misstates the humanised value — relaxed 2026-09-11 on review** (round 1 had said "always", which yields `SIZE_BYTES  1 kB`). Headers are the wire name in UPPERCASE unless the command declares a `header:`; the one class today is byte counts (`size_bytes` → `SIZE` / `size`, `total_bytes` → `total`). `header:` is human-only, `--raw` keys stay wire names, and the declaration lives in the IDL beside the field it labels, so there is still no alias table to drift |
 | Q19 | Floats in human tables | up to six decimals (`0.184417`); an integral float keeps one decimal (`1.0`); `--raw` / `--json` full precision |

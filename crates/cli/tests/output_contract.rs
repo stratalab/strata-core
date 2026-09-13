@@ -23,7 +23,11 @@
 //! - format: `human` and `raw` are pinned; `json` and `pretty` are asserted
 //!   as invariants instead of data — each must be the unmodified wire record
 //!   (compact on one line, or pretty-printed), which is the whole of their
-//!   contract and the reason they never move in any slice.
+//!   contract and the reason they never move in any slice. One wire shape did
+//!   move, deliberately and outside S0–S5: #3336 made an as-of `json get`
+//!   answer the versioned envelope its live read already answered, which is
+//!   what let S3a describe the command with one pointer. The contract's R1
+//!   records it as the exception.
 //!
 //! The in-process cells run in a child process with `TZ=UTC` and a scrubbed
 //! environment, so the local-date formatter and every environment-sensitive
