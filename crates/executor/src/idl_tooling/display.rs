@@ -86,11 +86,15 @@ pub(super) fn resolve_display(
     let CliDisplayDecl::Declared(display) = decl else {
         return Ok(decl.clone());
     };
-    let schema = SchemaDoc { document };
+    let schema = SchemaDoc {
+        document,
+        command_id,
+    };
     let outcome = match display.shape() {
         Ok(CliDisplayShape::Receipt) => check_receipt(&schema, display),
         Ok(CliDisplayShape::Value) => check_value(&schema, display),
-        Ok(CliDisplayShape::Fields) => check_fields(&schema, &display.fields, None),
+        Ok(CliDisplayShape::Fields) => check_fields(&schema, &display.fields, None)
+            .and_then(|()| check_every_payload_field_was_decided(&schema, &display.fields)),
         Ok(CliDisplayShape::Columns) => check_columns(&schema, display, rule),
         Ok(CliDisplayShape::Map) => check_map(&schema, display),
         Err(reason) => Err(reason),
@@ -188,6 +192,10 @@ struct Node<'a> {
 
 struct SchemaDoc<'a> {
     document: &'a Value,
+    /// The command being checked. A pointer alone cannot say whether an
+    /// integer is an instant: `timestamp` is a wall-clock time on an event and
+    /// a position on the commit timeline in a KV history row.
+    command_id: &'a str,
 }
 
 impl<'a> SchemaDoc<'a> {
@@ -483,6 +491,106 @@ fn check_value(schema: &SchemaDoc<'_>, display: &CliDisplay) -> Check {
 }
 
 /// `as` fit: what each presentation needs the schema to say.
+/// Payload fields a record command deliberately does not show, as
+/// (command, field). Each is a decision someone made once; a field that is
+/// not here and not in `fields` fails `check-cli` (#3358 F12).
+const DELIBERATELY_UNSHOWN: &[(&str, &str)] = &[
+    // True whenever a reader can see the answer at all: neither command can be
+    // reported on a handle that is not open.
+    ("admin.info", "open"),
+    ("admin.metrics", "open"),
+    // A fact about the open that produced this handle, not about the database
+    // it describes. `config get` reports it, where it is the subject.
+    ("admin.info", "created"),
+    // Machine specifics of the current host, not facts about the database:
+    // `ipc status` reports whether it is hosting, whether this process owns
+    // the socket, and how many clients are attached. The per-client list, the
+    // owning pid and the socket path vary by machine and by run.
+    ("admin.ipc_status", "clients"),
+    ("admin.ipc_status", "owner_pid"),
+    ("admin.ipc_status", "socket_path"),
+    // The graph records carry a logical clock, not an instant (R3), so it has
+    // no reading a person can use; the version is what identifies the write.
+    ("graph.edge.get", "timestamp"),
+    ("graph.node.get", "timestamp"),
+    ("graph.ontology.get", "timestamp"),
+    ("graph.ontology.summary", "timestamp"),
+    ("graph.meta", "created_timestamp"),
+    ("graph.meta", "updated_timestamp"),
+    // A node's binding names the row the node projects from, which `graph
+    // bindings` reports as its subject.
+    ("graph.node.get", "binding"),
+    // See the note in the PR for #3358 F12: an edge's properties are shown by
+    // no command today, unlike a node's. Recorded as it stands rather than
+    // changed inside a guard slice.
+    ("graph.edge.get", "properties"),
+    // The catalogue record `hub get-dataset` curates down to the fifteen facts
+    // a reader acts on. The rest are the manifest's own bookkeeping, long-form
+    // prose, or embedded documents that do not belong in a terminal record;
+    // `--json` carries all of them.
+    ("hub.get_dataset", "capability_registry_version"),
+    ("hub.get_dataset", "citation"),
+    ("hub.get_dataset", "format_version"),
+    ("hub.get_dataset", "frontmatter_extras"),
+    ("hub.get_dataset", "manifest_hash"),
+    ("hub.get_dataset", "provenance"),
+    ("hub.get_dataset", "quick_start_snippets"),
+    ("hub.get_dataset", "readme"),
+    ("hub.get_dataset", "sample_preview"),
+    ("hub.get_dataset", "schema"),
+    ("hub.get_dataset", "strata_features"),
+    ("hub.get_dataset", "summary_excerpt"),
+    // The engine's own identifiers for a branch and its lineage: a reader
+    // works with the branch by name, and `branch diff`/`preview` report the
+    // lineage where it is the subject. The contract names this curation
+    // ("`branch get` drops `branch_id` and `state_revision`"); until now it
+    // was recorded only in prose.
+    ("branch.get", "branch_id"),
+    ("branch.get", "merge_parent"),
+    ("branch.get", "state_revision"),
+    // The versioned wrapper's own logical clock, beside the commit version
+    // these commands do show. It is a position on the commit timeline, not an
+    // instant (R3); for an event the instant a reader wants is the event's own
+    // `timestamp` inside the record, which `event get` shows as a date.
+    ("event.get", "timestamp"),
+    ("vector.get", "timestamp"),
+    // Facts about fetching a model, not about the capability being reported:
+    // `inference capability` answers what this build can run.
+    ("inference.capability", "pull_spec"),
+    ("inference.capability", "size_bytes"),
+];
+
+/// Where a wall-clock date may be declared, as (command, pointer).
+///
+/// R3 wanted this to be a type — "a declaration marking one `as: date` is a
+/// `check` error because the schema type for a logical clock is not the
+/// wall-clock newtype" — with an explicit fallback: "if it is not [expressible],
+/// the field allowlist is the guard". It is not expressible. `schemars`
+/// flattens core's `Timestamp` newtype to a bare `uint64`, and the executor's
+/// own response DTOs carry instants as plain `u64`, so nothing in a generated
+/// schema separates an instant from any other counter (#3358 F11).
+///
+/// Naming the sites is what tells them apart, because the field names do not:
+/// an event's `timestamp` is a real instant, while a KV history row's
+/// `timestamp` is a position on the commit timeline whose own description says
+/// it "is never a calendar date".
+const WALL_CLOCK_SITES: &[(&str, &str)] = &[
+    ("admin.remote", "/data/origin/fetched_at_micros"),
+    ("event.get", "/data/value/event/timestamp"),
+    ("event.list", "/data/items/*/event/timestamp"),
+    ("event.range", "/data/items/*/event/timestamp"),
+    ("event.range_time", "/data/items/*/event/timestamp"),
+    ("json.history", "/data/*/committed_at"),
+    ("kv.history", "/data/items/*/committed_at"),
+    ("vector.history", "/data/items/*/committed_at"),
+];
+
+fn is_wall_clock(command_id: &str, pointer: &str) -> bool {
+    WALL_CLOCK_SITES
+        .iter()
+        .any(|(command, field)| *command == command_id && *field == pointer)
+}
+
 fn check_as(schema: &SchemaDoc<'_>, pointer: &str, node: &Node<'_>, as_: CliDisplayAs) -> Check {
     let (fits, needs) = match as_ {
         CliDisplayAs::Bytes => (node.ty == SchemaType::Base64, "a base64 string"),
@@ -493,7 +601,20 @@ fn check_as(schema: &SchemaDoc<'_>, pointer: &str, node: &Node<'_>, as_: CliDisp
             ),
             "a structured or untyped value",
         ),
-        CliDisplayAs::Date | CliDisplayAs::Size => (node.ty == SchemaType::Integer, "an integer"),
+        CliDisplayAs::Date => {
+            if node.ty == SchemaType::Integer && !is_wall_clock(schema.command_id, pointer) {
+                return Err(format!(
+                    "`as: date` on `{pointer}` of `{}` is not a registered wall-clock field. \
+                     Every integer is a candidate date and most are not one — a commit \
+                     version or a position on the commit timeline rendered as a date reads \
+                     as 1970 (#3112). If this field really is microseconds since the epoch, \
+                     add it to `WALL_CLOCK_SITES`.",
+                    schema.command_id
+                ));
+            }
+            (node.ty == SchemaType::Integer, "an integer")
+        }
+        CliDisplayAs::Size => (node.ty == SchemaType::Integer, "an integer"),
         CliDisplayAs::Float => (node.ty == SchemaType::Number, "a number"),
         CliDisplayAs::List => (
             node.ty == SchemaType::Array && schema.element(pointer, node)?.ty.is_scalar(),
@@ -554,6 +675,79 @@ fn check_fields(schema: &SchemaDoc<'_>, fields: &[CliDisplayField], parent: Opti
         }
     }
     Ok(())
+}
+
+/// The record every declared field belongs to: their common parent, when they
+/// share one. A declaration whose fields sit at different depths describes no
+/// single record, and is left to the other checks.
+fn declared_record_root(fields: &[CliDisplayField]) -> Option<String> {
+    fields
+        .iter()
+        .filter_map(|field| field.field.rsplit_once('/').map(|(parent, _)| parent))
+        .min_by_key(|parent| parent.matches('/').count())
+        .map(ToOwned::to_owned)
+}
+
+/// The record field a declared pointer decides about: the segment just below
+/// the record root. Reaching into `/data/parent/name` is a decision about
+/// `parent`.
+fn decided_field<'a>(pointer: &'a str, root: &str) -> Option<&'a str> {
+    pointer
+        .strip_prefix(root)?
+        .strip_prefix('/')?
+        .split('/')
+        .next()
+}
+
+/// Every field of a record payload is either shown or deliberately not shown.
+///
+/// R2 says a new wire field must fail `check-cli` until someone decides where
+/// it belongs. The guard validated only the fields a declaration *selected*,
+/// so a field added to a payload was silently never shown — the declaration
+/// stayed valid because nothing asked about what it omitted (#3358 F12).
+///
+/// Scoped to the record shapes, where a hidden fact actually misleads: these
+/// are the commands a person reads as a description of something (`info`,
+/// `describe`, `branch get`). A page or a batch decides what to show by its
+/// rule, not by this list.
+fn check_every_payload_field_was_decided(
+    schema: &SchemaDoc<'_>,
+    fields: &[CliDisplayField],
+) -> Check {
+    // The record is wherever the declaration points, not `/data`: an
+    // `optional` command's payload sits under the `Maybe` envelope at
+    // `/data/value`, and `found` beside it is the envelope's business.
+    let Some(root) = declared_record_root(fields) else {
+        return Ok(());
+    };
+    let shown: BTreeSet<&str> = fields
+        .iter()
+        .filter_map(|field| decided_field(&field.field, &root))
+        .collect();
+    let Ok(record) = schema.resolve(&root) else {
+        return Ok(());
+    };
+    let Some(properties) = record.schema.get("properties").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let undecided: Vec<&String> = properties
+        .keys()
+        .filter(|name| {
+            !shown.contains(name.as_str())
+                && !DELIBERATELY_UNSHOWN
+                    .iter()
+                    .any(|(command, field)| *command == schema.command_id && field == name)
+        })
+        .collect();
+    if undecided.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "`{}` does not say what happens to {undecided:?}. A record command shows every \
+         field of its payload or records the omission: add it to `fields`, or to \
+         `DELIBERATELY_UNSHOWN` with the reason it is not worth a reader's attention.",
+        schema.command_id
+    ))
 }
 
 /// A table's columns are resolved, never authored: a declaration that

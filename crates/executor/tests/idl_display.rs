@@ -1083,3 +1083,90 @@ fn a_map_needs_an_object_keyed_by_node() {
         "`map` needs an object keyed by node, but `/data` is a record",
     );
 }
+
+/// #3358 F11: `as: date` used to accept any integer, so a counter could be
+/// declared a date and pass. Every one of these is an integer in the schema
+/// and none is microseconds since the epoch; a date column over one of them
+/// renders 1970 forever (#3112).
+#[test]
+fn a_counter_cannot_be_declared_a_date() {
+    // The review's own probe: swap the KV history date column's pointer for the
+    // logical clock beside it, whose description says it "is never a calendar
+    // date".
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        "commands/kv.yaml",
+        "        - field: /data/items/*/committed_at\n          as: date\n",
+        "        - field: /data/items/*/timestamp\n          as: date\n",
+    );
+    assert_rejects(&scratch, "kv.history", "not a registered wall-clock field");
+
+    // A branch's `created_at` and `generation` are counters too (R3, #3112),
+    // and neither is anywhere near an instant.
+    for counter in ["created_at", "generation"] {
+        let scratch = Scratch::new();
+        scratch.replace_in(
+            "commands/branch.yaml",
+            &format!("        - field: /data/{counter}\n"),
+            &format!("        - field: /data/{counter}\n          as: date\n"),
+        );
+        assert_rejects(&scratch, "branch.get", "not a registered wall-clock field");
+    }
+}
+
+/// Direction control: the sites that really are instants keep working, and the
+/// allowlist is keyed on the command, not on the field name — an event's
+/// `timestamp` is a wall-clock instant even though a KV history row's is not.
+#[test]
+fn a_registered_wall_clock_field_is_still_a_date() {
+    let index = Scratch::new().resolve().expect("the real tree resolves");
+    for (command, pointer) in [
+        ("kv.history", "/data/items/*/committed_at"),
+        ("event.list", "/data/items/*/event/timestamp"),
+    ] {
+        let declared = format!("{:?}", display_of(&index, command));
+        assert!(
+            declared.contains(pointer),
+            "{command} no longer declares {pointer}: {declared}"
+        );
+    }
+}
+
+/// #3358 F12: R2 says a new wire field must fail `check-cli` until someone
+/// decides where it belongs. The guard used to validate only the fields a
+/// declaration selected, so a field added to a record payload was silently
+/// never shown — the declaration stayed valid because nothing asked what it
+/// left out.
+#[test]
+fn a_new_field_on_a_record_payload_needs_a_decision() {
+    let scratch = Scratch::new();
+    scratch.replace_in(
+        "generated/schemas/admin.info.json",
+        "\"branch_count\":",
+        "\"new_important_fact\": {\"type\": \"string\"}, \"branch_count\":",
+    );
+    assert_rejects(&scratch, "admin.info", "does not say what happens to");
+    assert!(
+        scratch.rejection().contains("new_important_fact"),
+        "the rejection should name the field: {}",
+        scratch.rejection()
+    );
+}
+
+/// Direction control: the check is the record shapes' business. A page or a
+/// batch decides what to show by its rule, and its envelope — `items`,
+/// `cursor`, `has_more`, `applied` — is not a decision an author makes per
+/// command.
+#[test]
+fn a_page_envelope_is_not_an_undecided_field() {
+    // Each of these carries a `fields` block under a page or batch rule, and
+    // each has envelope fields (`items`, `cursor`, `has_more`, `applied`) that
+    // no declaration names. The real tree resolving at all is the assertion:
+    // an inventory applied to them would reject it.
+    let index = Scratch::new().resolve().expect("the real tree resolves");
+    for command in ["kv.list", "kv.batch_put", "event.list"] {
+        // Panics if the command is missing, so this pins that the commands
+        // this test speaks for still exist.
+        let _ = display_of(&index, command);
+    }
+}
