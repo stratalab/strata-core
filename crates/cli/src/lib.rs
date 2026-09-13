@@ -98,9 +98,15 @@ where
     // chain) to stderr so the reference id shown in an error message correlates
     // to a real, inspectable line (ERR-2). stdout stays clean for command
     // output. Ignored if a subscriber is already installed (e.g. in tests).
+    // Colour only a terminal. `tracing_subscriber` defaults ANSI on regardless
+    // of what stderr is, so a captured stderr — a CI log, `2>err.log`, an agent
+    // reading the error, the output-contract matrix — received raw `^[[31m`
+    // bytes around a line that `render_error` writes uncoloured (#3316). Two
+    // writers share this stream; they answer to one contract.
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_max_level(tracing::Level::ERROR)
+        .with_ansi(std::io::stderr().is_terminal())
         .try_init();
     match Cli::try_parse_from(args) {
         Ok(cli) => {
