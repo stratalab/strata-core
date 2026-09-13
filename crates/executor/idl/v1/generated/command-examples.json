@@ -185,7 +185,7 @@
       },
       {
         "in": "strata branch diff default experiment",
-        "out": "branch_a  default\nbranch_b  experiment\n\nSPACE    CAPABILITY  CHANGE    IDENTITY   VERSION\ndefault  kv          modified  config           …\ndefault  vector      added     \u0000\u0005notesn1        …",
+        "out": "branch_a  default\nbranch_b  experiment\n\nSPACE    CAPABILITY  CHANGE    IDENTITY             VERSION\ndefault  kv          modified  config                     …\ndefault  vector      added     base64:AAVub3Rlc24x        …",
         "reproducible": false,
         "note": "reports the key-value change and the new vector, grouped by capability"
       }
