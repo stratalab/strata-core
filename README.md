@@ -221,17 +221,25 @@ Deeper internals live in [`docs/architecture/`](docs/architecture/).
 
 ## Status
 
-Strata 1.2.1 is released. The on-disk format, error codes, and CLI surface documented here are stable contracts. The four distributions are not on one release train:
+Strata 1.2.2 is released. The on-disk format, error codes, and CLI surface documented here are stable contracts. The four distributions are not on one release train:
 
 | Surface | How you get it | Where it is |
 |---|---|---|
-| CLI (`strata`) | `curl … \| sh`, `brew install stratalab/tap/strata` | 1.2.1, released |
+| CLI (`strata`) | `curl … \| sh`, `brew install stratalab/tap/strata` | 1.2.2, released |
 | Python (`stratadb`) | `pip install stratadb` | on PyPI, its own train |
-| Rust (`stratadb`) | path dependency on this repo | **not on crates.io** — every crate is `publish = false` |
+| Rust (`stratadb`) | path dependency on this repo | **name claimed, API not yet published** — see below |
 | Node / TypeScript | — | not shipped |
 
-`cargo add stratadb` does not work yet; the crates.io name is reserved for the
-release train that flips `publish`.
+`cargo add stratadb` resolves, but only to a placeholder: the crates.io names
+[`stratadb`](https://crates.io/crates/stratadb), `stratadb-core`,
+`stratadb-storage` and `stratadb-engine` are claimed at `0.0.1` and carry
+documentation only. The Rust API itself lands in 1.3.0, when the in-tree crates
+stop being `publish = false`. Until then, use the CLI or the Python package.
+
+Nothing about a crates.io name is reserved by intent — a name belongs to
+whoever publishes it first. `strata-cli`, which this project had planned to
+use, was taken by an unrelated crate on 2026-09-09 while it sat unclaimed
+(#3381).
 
 ## License
 
