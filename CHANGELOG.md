@@ -39,10 +39,25 @@ declared facts; `--json` is the unmodified wire record, as before.
   as-of read dropped the version, timestamp and `document_version` it exists
   to report. Both now answer `json_versioned_value`; the unproduced
   `Output::JsonValue` and `MaybeJsonValue` variants are removed. **This is a
-  wire change** — the only one in this release. A client built against 1.2.1
+  wire change** — one of two in this release; the other is the
+  `ComparedCapability` rename below. A client built against 1.2.1
   reads a 1.2.2 answer without trouble (its enum already carried both shapes);
   a 1.2.2 client cannot read an as-of JSON read from a 1.2.1 server. Mixed
   versions over IPC are not a supported configuration (see #3369).
+- **`ComparedCapability` renames its key-value variant `key_value` → `kv`.**
+  **This is a wire change**, and it was omitted when 1.2.2 shipped — the entry
+  above originally claimed to be the only one. It affects the `capabilities`
+  field of `branch diff`, `branch preview` and `branch merge`
+  (`schemas/branch.{diff,preview,merge}.json`). Any consumer matching the
+  string breaks: the Python SDK's branch tests began raising `KeyError` on
+  `caps["key_value"]` when they re-pinned. Landed in `13812387` (#3211,
+  "one name per concept") as part of aligning the product's `kv` vocabulary;
+  reported as #3379.
+
+  No drift guard could have caught this: every IDL gate diffs the working tree
+  against itself, and no released-schema baseline is retained anywhere in the
+  repo, so a renamed `const` is structurally invisible to them. Retaining a
+  per-release schema baseline and diffing against it is tracked separately.
 - Human output is declared per command rather than hand-written: writes print
   a receipt (`created greeting`), reads print the value, records print aligned
   `label  value` blocks, and lists and histories print aligned tables. 109
