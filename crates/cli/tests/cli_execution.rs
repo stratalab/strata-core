@@ -9,17 +9,27 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+/// The environment a child starts from: every variable that changes what the
+/// binary does is cleared, so a test observes the default whatever the shell
+/// running the suite happens to export. A test that wants one sets it through
+/// [`strata_env`].
+///
+/// `STRATA_LOG` earned its place here: the test asserting that the boundary
+/// log is off by default inherited it, so running the suite with
+/// `STRATA_LOG=error` made that test exercise the opposite of its name.
+fn baseline(command: &mut Command) -> &mut Command {
+    command.env_remove("STRATA_DB").env_remove("STRATA_LOG")
+}
+
 fn strata(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_strata"))
-        .args(args)
-        .env_remove("STRATA_DB")
+    baseline(Command::new(env!("CARGO_BIN_EXE_strata")).args(args))
         .output()
         .expect("run strata binary")
 }
 
 fn strata_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_strata"));
-    command.args(args).env_remove("STRATA_DB");
+    baseline(command.args(args));
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -52,9 +62,7 @@ fn db_arg(dir: &Path) -> String {
 /// output once stdin closes — the piped REPL, one line per command.
 fn pipe(args: &[&str], script: &[u8]) -> Output {
     use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_strata"))
-        .args(args)
-        .env_remove("STRATA_DB")
+    let mut child = baseline(Command::new(env!("CARGO_BIN_EXE_strata")).args(args))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1198,14 +1206,24 @@ fn the_boundary_log_is_asked_for_rather_than_assumed() {
         logged.contains("engine error crossed the executor boundary"),
         "{logged:?}"
     );
-    let reference = logged
+    // The correlation is the point of ERR-2, and it is checkable within this
+    // one run: the same stderr carries the log line and the curated error the
+    // user reads, formatted independently. Reading both ids out of the log
+    // would be true by construction.
+    let logged_reference = logged
         .split("reference_id=\"")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
         .expect("the log names a reference id");
-    assert!(
-        logged.contains(reference),
-        "the shown error and the log disagree: {logged:?}"
+    let shown_reference = logged
+        .lines()
+        .find(|line| line.starts_with("invalid_argument.engine.persistence:"))
+        .and_then(|line| line.rsplit_once('('))
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .expect("the error line shows a reference id");
+    assert_eq!(
+        logged_reference, shown_reference,
+        "the log and the error a user reads name different errors: {logged:?}"
     );
 
     // An empty value reads as "not set", so `STRATA_LOG=` in a script is off.
@@ -1346,7 +1364,14 @@ fn an_empty_value_is_still_an_answer_in_a_session() {
     assert_eq!(lines[1], "hello");
     // The miss printed nothing and contributes no line; the next answer
     // follows directly.
-    assert_eq!(lines[2], "1.2.1", "a miss added a line: {answered:?}");
+    // The build's version, not a literal: a bump must not fail a test about
+    // transcript separators (#3358 R4). `ping` is here because it is a short
+    // answer after the miss, not because of what it says.
+    assert_eq!(
+        lines[2],
+        env!("CARGO_PKG_VERSION"),
+        "a miss added a line: {answered:?}"
+    );
 
     // A one-shot read is the file, not a transcript: byte-exact, no separator.
     let one_shot = strata(&["--db", db, "--raw", "kv", "get", "empty"]);
