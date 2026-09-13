@@ -1145,7 +1145,9 @@ fn a_boundary_error_log_carries_no_colour_into_a_piped_stderr() {
         vec!["--db", missing, "kv", "get", "x"],
         vec!["--json", "--db", missing, "kv", "get", "x"],
     ] {
-        let output = strata(&args);
+        // The log is opt-in since #3352, so ask for it: the colour rule is
+        // about the line that is written, not about whether one is.
+        let output = strata_env(&args, &[("STRATA_LOG", "error")]);
         let text = stderr(&output);
         assert!(
             !text.contains('\u{1b}'),
@@ -1159,6 +1161,56 @@ fn a_boundary_error_log_carries_no_colour_into_a_piped_stderr() {
             "the boundary log went missing for {args:?}: {text:?}"
         );
     }
+}
+
+/// #3352: the executor emits the boundary event and leaves capturing to the
+/// consumer (ERR-2). This CLI captured unconditionally onto stderr, which put
+/// a non-JSON line carrying uncurated storage wording ahead of the error
+/// envelope — in `--json`, where stderr is the envelope alone, and in human
+/// mode, where a person reads it.
+#[test]
+fn the_boundary_log_is_asked_for_rather_than_assumed() {
+    let missing = "/nonexistent-parent-for-3352/db";
+
+    // `--json`: stderr is the envelope, and nothing else, so the documented
+    // `2>&1 | jq .error` recipe works.
+    let scripted = strata(&["--json", "--db", missing, "kv", "get", "x"]);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&stderr(&scripted)).expect("stderr is one JSON envelope");
+    assert!(envelope.get("error").is_some(), "{:?}", stderr(&scripted));
+
+    // Human: the curated error, with no storage wording behind it.
+    let readable = strata(&["--db", missing, "kv", "get", "x"]);
+    assert!(stderr(&readable).starts_with("invalid_argument.engine.persistence:"));
+    assert!(
+        !stderr(&readable).contains("invalid storage API argument"),
+        "storage wording reached a reader: {:?}",
+        stderr(&readable)
+    );
+
+    // Asked for, it is there, and it carries the reference id the answer shows.
+    let asked = strata_env(
+        &["--db", missing, "kv", "get", "x"],
+        &[("STRATA_LOG", "error")],
+    );
+    let logged = stderr(&asked);
+    assert!(
+        logged.contains("engine error crossed the executor boundary"),
+        "{logged:?}"
+    );
+    let reference = logged
+        .split("reference_id=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the log names a reference id");
+    assert!(
+        logged.contains(reference),
+        "the shown error and the log disagree: {logged:?}"
+    );
+
+    // An empty value reads as "not set", so `STRATA_LOG=` in a script is off.
+    let empty = strata_env(&["--db", missing, "kv", "get", "x"], &[("STRATA_LOG", "")]);
+    assert!(!stderr(&empty).contains("crossed the executor boundary"));
 }
 
 /// #3358 F7/F8: a receipt is one line and a raw identity is one record, so a
