@@ -2,7 +2,7 @@
 
 **Status:** frozen design artifact after three review rounds (2026-09-11), companion to `cli-output-contract.md` (tracker #3314). Generated on 2026-09-11 from `main` at `60db96ac`: every command's `command-examples` steps and IDL fixture response, rendered through today's real renderer, next to what the contract's rules would print. The "proposed" text comes from a reference implementation of §4 R1–R7 written for the review; nothing here is shipped code, and nothing changes until S1. This file is not regenerated as slices land — the executable form of the "today" column is the §5 matrix (`crates/cli/tests/output_contract.rs` and its `output-contract/` snapshots), and each of S1–S5 moves the snapshots from the "today" column to the "proposed" one for the rows it owns.
 
-137 commands · 169 example steps · 109 commands whose human or raw output changes · `--json` byte-identical throughout.
+137 commands · 169 example steps · 109 commands whose human or raw output changes · `--json` byte-identical throughout, with one recorded exception (`json get --as-of`, #3334/#3336 — see the contract's R1).
 
 **S0b (2026-09-11) declared every row below in the IDL, and the guard disagreed with this file in two places.** The `display:` one-liners here are shorthand; the built declarations (`crates/executor/idl/v1/commands/*.yaml`, resolved into `generated/cli-command-index.json`) are authoritative, and the amended R2 in the contract is their vocabulary. The two deviations: `vector collection delete` reads `{/request/collection}`, not `{request.name}` — the request field is `collection`, and the pointer guard refused the name this file guessed; and `vector index query` declares `manifest_generation` in its diagnostics block — the schema carries it, the sample step's wire happened not to (it is optional), so it is absent from the "proposed" text below. Neither changes what a reader should expect to see; both are the guard doing its job.
 
@@ -39,7 +39,7 @@
 | Bytes (kv) | key/value decoded to UTF-8 inside the JSON line; binary shows as base64 with no marker | UTF-8 verbatim in cells; non-UTF-8 as `base64:<b64>`; `--raw` writes the bytes verbatim |
 | Errors | stderr `code: message (err_ref)` + `  hint:` + `  ref:` lines, exit 1 | unchanged, identical in every format (`--json` prints the error envelope on stderr, exit 1) |
 | Usage errors | clap on stderr, exit 2 | unchanged |
-| `--json` | one line, wire envelope | **byte-identical, every command, every slice** — the one unmodified representation |
+| `--json` | one line, wire envelope | **byte-identical, every command, every slice** — the one unmodified representation. *One exception, recorded in the contract's R1: `json get --as-of` moved from `json_value` to `json_versioned_value` (#3334/#3336), which is what let S3a describe the command with a single pointer* |
 | `--raw` | a per-shape sniff; nothing for writes; compact JSON for statuses | the **shell-composable** form of the human answer: the same declared fields and columns, as bare values / TSV / `key<TAB>value`, with no header, alignment, hint or humanising. It is not the raw wire — that is `--json`. The `--raw` help text says so (S1) |
 | `--pretty` / `--output-format` | hidden flag | deleted in S4 (Q5) |
 | TTY | no sniffing | no sniffing (R6) |

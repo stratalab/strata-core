@@ -322,9 +322,21 @@ right-aligned — the `kubectl` / `gh` style, which pastes into an issue and
 diffs cleanly. Dates render per R3. Bytes render as text when UTF-8, else
 as `base64:<…>` — labelled, so a reader knows (#3116's second half).
 
-**What does not change:** `--json` is byte-identical before and after every
-slice; the matrix pins that. (`--pretty` was the second envelope format until
-Q5 deleted it at S4.)
+**What does not change, with one recorded exception:** `--json` is
+byte-identical before and after every slice; the matrix pins that.
+(`--pretty` was the second envelope format until Q5 deleted it at S4.)
+
+*The exception is #3334, fixed in #3336 (`da7cc1d7`) between S2 and S3a: an
+as-of `json get` answered `Output::JsonValue` while a live read of the same
+command answered `Output::JsonVersionedValue`, so one command carried two wire
+shapes and the historical read dropped the version, timestamp and
+`document_version` it exists to report. Both branches now answer
+`json_versioned_value`, and the unproduced `JsonValue` / `MaybeJsonValue`
+variants are deleted. It was a prerequisite for S3a — a single `value:`
+pointer cannot describe two shapes — and it moves the wire toward the
+`response_model` the command has always published, but it is a wire change and
+the rule above does not cover it. Release notes carry it; the compatibility
+direction is recorded in §6.*
 
 ### R2 — the declaration lives in the IDL, the renderer interprets it
 
@@ -737,6 +749,25 @@ Each slice is one PR, ≤1,500 LOC, with the matrix as its acceptance: the
 slice's cells change as §5.4 predicts, no other cell moves, and the `json` /
 `pretty` cells never move. Every slice that changes a human or raw cell is
 a visible CLI change and carries release notes in the PR body.
+
+**One slice moved a `json` cell**, and the rule is worth stating precisely
+rather than quietly: #3336 (`da7cc1d7`) changed what an as-of `json get`
+answers, as R1 records. It was not one of S0–S5 — it is the prerequisite
+S3a could not proceed without — but it went through the same matrix, and
+saying "the json cells never move" while one did would make the rule
+decorative.
+
+**The compatibility direction, decided 2026-09-13.** The old `Output` enum
+carried *both* `JsonValue` and `JsonVersionedValue` — a live read already
+answered the versioned one — so a **1.2.1 client reading a 1.2.2 server
+deserializes the new answer**; it receives the richer shape it already knew.
+The reverse does not hold: a 1.2.2 client no longer has `JsonValue`, so an
+as-of JSON read **from a 1.2.1 server fails to deserialize**. IPC negotiates
+on `ServerHello.protocol`, which is still revision 2, so that mismatch is not
+refused at connect time — the hello carries `release` and the IDL stamps, but
+nothing compares them for this. Mixed-version IPC is not a supported
+configuration and the release notes say so; ticking the protocol revision is
+the alternative and is recorded as #3369 rather than taken silently.
 
 | Slice | Content | Wire change | Closes |
 |---|---|---|---|
