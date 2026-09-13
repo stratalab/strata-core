@@ -1268,3 +1268,35 @@ fn a_command_that_needs_a_host_is_refused_and_the_session_survives() {
         "the session kept running: {errors}"
     );
 }
+
+/// #3358 F13: a stored empty value is an answer, and a transcript separates
+/// answers. It used to contribute no line at all, so a successful read was
+/// indistinguishable from a command that printed nothing — while a `--raw`
+/// miss, which really does print nothing, must not gain a blank line either.
+#[test]
+fn an_empty_value_is_still_an_answer_in_a_session() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let db = dir.path().join("db");
+    let db = db.to_str().expect("path is utf-8");
+    strata(&["--db", db, "kv", "put", "empty", ""]);
+    strata(&["--db", db, "kv", "put", "full", "hello"]);
+
+    let session = pipe(
+        &["--db", db],
+        b"--raw kv get empty\n--raw kv get full\n--raw kv get absent\n--raw ping\n",
+    );
+    let answered = stdout(&session);
+    let lines: Vec<&str> = answered.split('\n').collect();
+    assert_eq!(
+        lines[0], "",
+        "the empty value gets its own line: {answered:?}"
+    );
+    assert_eq!(lines[1], "hello");
+    // The miss printed nothing and contributes no line; the next answer
+    // follows directly.
+    assert_eq!(lines[2], "1.2.1", "a miss added a line: {answered:?}");
+
+    // A one-shot read is the file, not a transcript: byte-exact, no separator.
+    let one_shot = strata(&["--db", db, "--raw", "kv", "get", "empty"]);
+    assert!(one_shot.stdout.is_empty(), "{:?}", one_shot.stdout);
+}

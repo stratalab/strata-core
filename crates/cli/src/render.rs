@@ -1572,7 +1572,17 @@ pub(crate) fn print_output(
     let mut stdout = std::io::stdout().lock();
     let answer = rendered.stdout.as_bytes();
     std::io::Write::write_all(&mut stdout, answer)?;
-    if channel == Channel::Transcript && !answer.is_empty() && !answer.ends_with(b"\n") {
+    // A transcript separates one answer from the next; a one-shot read stays
+    // byte-exact and gains nothing (#3116). An empty answer is still an answer
+    // when it is a value that was read: `Answer::Bytes` is built only from a
+    // hit, so a stored empty value gets its separator, while an empty `Text` —
+    // a `--raw` miss, which prints nothing — does not get a blank line
+    // suggesting it answered (#3358 F13).
+    let answered = match &rendered.stdout {
+        Answer::Bytes(_) => true,
+        Answer::Text(text) => !text.is_empty(),
+    };
+    if channel == Channel::Transcript && answered && !answer.ends_with(b"\n") {
         std::io::Write::write_all(&mut stdout, b"\n")?;
     }
     eprint!("{}", rendered.stderr);
