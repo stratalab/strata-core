@@ -276,9 +276,10 @@ fn assert_durable_local_writer_lock_exclusion(first: &dyn Backend, second: &dyn 
     assert_eq!(
         second
             .acquire_writer_lock(&lock_name)
-            .expect_err("second writer lock should be unavailable")
+            .expect_err("second writer lock is held by the first opener")
             .kind(),
-        BackendErrorKind::Unavailable
+        // Contention is its own kind, not a transient outage (#3005, #3167).
+        BackendErrorKind::AlreadyExists
     );
 
     drop(first_guard);

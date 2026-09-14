@@ -20,6 +20,10 @@ pub(crate) enum LifecycleError {
     InvalidLifecycleState {
         reason: &'static str,
     },
+    /// Another opener holds the database's writer lock. Kept distinct from
+    /// `InvalidLifecycleState` so it survives to the engine as its own code:
+    /// the IPC broker recognises exactly this condition (#3005, #3167).
+    WriterLockHeld,
     InvalidOpenPlan {
         reason: &'static str,
     },
@@ -421,6 +425,7 @@ impl LifecycleError {
         match self {
             Self::InvalidConfig { .. } => "invalid_argument.lifecycle.config",
             Self::InvalidLifecycleState { .. } => "failed_precondition.lifecycle.state",
+            Self::WriterLockHeld => "failed_precondition.lifecycle.writer_lock",
             Self::InvalidOpenPlan { .. } => "invalid_argument.lifecycle.open_plan",
             Self::BranchAlreadyExists { .. } => "already_exists.lifecycle.branch",
             Self::BranchNotFound { .. } => "not_found.lifecycle.branch",
@@ -947,6 +952,12 @@ impl fmt::Display for LifecycleError {
         match self {
             Self::InvalidConfig { field, reason } => {
                 write!(formatter, "invalid lifecycle config {field}: {reason}")
+            }
+            Self::WriterLockHeld => {
+                write!(
+                    formatter,
+                    "the database writer lock is held by another opener"
+                )
             }
             Self::InvalidLifecycleState { reason } => {
                 write!(formatter, "invalid lifecycle state: {reason}")

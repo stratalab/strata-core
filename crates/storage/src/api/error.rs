@@ -69,6 +69,15 @@ pub enum StorageApiError {
     InvalidRuntimeState {
         reason: &'static str,
     },
+    /// Another opener holds the database's writer lock.
+    ///
+    /// Distinct from `InvalidRuntimeState` on purpose: the IPC broker decides
+    /// whether to hand a command to a running host by recognising exactly this
+    /// condition, and `failed_precondition.storage_api.state` is the whole
+    /// class's generic code — branch-not-writable, guard-unavailable and
+    /// quiesce-unavailable all produce it, so brokering on it would fire on
+    /// unrelated preconditions (#3005, #3167).
+    WriterLockHeld,
     BranchNotFound {
         branch_id: BranchId,
     },
@@ -146,6 +155,7 @@ impl StorageApiError {
             Self::InvalidArgument { .. } => "invalid_argument.storage_api.argument",
             Self::UnsupportedCapability { .. } => "unsupported.storage_api.capability",
             Self::InvalidRuntimeState { .. } => "failed_precondition.storage_api.state",
+            Self::WriterLockHeld => "failed_precondition.storage_api.writer_lock",
             Self::BranchNotFound { .. } => "not_found.storage_api.branch",
             Self::BranchAlreadyExists { .. } => "already_exists.storage_api.branch",
             Self::BranchGenerationMismatch { .. } => {
@@ -181,6 +191,9 @@ impl StorageApiError {
             }
             Self::UnsupportedCapability { .. } => {
                 "Open the database in a storage mode or with a backend that supports the requested capability."
+            }
+            Self::WriterLockHeld => {
+                "Close the other handle to this database, or attach to the running host instead of opening it again."
             }
             Self::InvalidRuntimeState { .. } => {
                 "Ensure the runtime is open and in a valid state before issuing this operation."
@@ -232,6 +245,7 @@ impl StorageApiError {
             Self::InvalidArgument { .. } => StorageApiErrorClass::InvalidArgument,
             Self::UnsupportedCapability { .. } => StorageApiErrorClass::Unsupported,
             Self::InvalidRuntimeState { .. }
+            | Self::WriterLockHeld
             | Self::BranchGenerationMismatch { .. }
             | Self::MaintenanceRejected { .. }
             | Self::StoragePressure { .. }
@@ -327,6 +341,9 @@ impl fmt::Display for StorageApiError {
             }
             Self::InvalidRuntimeState { reason } => {
                 write!(formatter, "invalid storage runtime state: {reason}")
+            }
+            Self::WriterLockHeld => {
+                write!(formatter, "the database writer lock is held by another opener")
             }
             Self::IncompatibleLayout { reason } => {
                 write!(formatter, "incompatible storage layout: {reason}")

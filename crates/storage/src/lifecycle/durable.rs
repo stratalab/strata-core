@@ -743,6 +743,11 @@ fn writer_lock_open_error(error: BackendError) -> LifecycleError {
             field: "path",
             reason: "database path is not a directory",
         },
+        // Another opener holds the writer lock. This is a precondition the
+        // caller can satisfy — by closing the other handle or attaching to it —
+        // but never by retrying the same open, so it must not arrive as a
+        // transient backend outage (#3005, #3167).
+        BackendErrorKind::AlreadyExists => LifecycleError::WriterLockHeld,
         _ => backend_error(error),
     }
 }

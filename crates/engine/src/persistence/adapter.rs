@@ -1228,6 +1228,15 @@ const fn persistence_code(error: &StorageApiError) -> (&'static str, &'static st
             "conflict.engine.branch_generation",
             "branch generation changed before the write could commit",
         ),
+        // Its own code, not the FailedPrecondition class default: the IPC
+        // broker recognises exactly this condition to decide whether to hand a
+        // command to a running host, and the class code is shared with
+        // branch-not-writable, guard-unavailable and quiesce-unavailable
+        // (#3005, #3167).
+        StorageApiError::WriterLockHeld => (
+            "failed_precondition.engine.writer_lock",
+            "the database is open by another process or handle",
+        ),
         StorageApiError::RecoveryDegraded { .. } => (
             "corruption.engine.persistence_recovery",
             "persistence recovery reported degraded state",
@@ -1313,6 +1322,12 @@ fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
         StorageApiError::UnsupportedCapability { capability, reason } => {
             details.push(ErrorDetail::new("capability", *capability));
             details.push(ErrorDetail::new("reason", *reason));
+        }
+        StorageApiError::WriterLockHeld => {
+            details.push(ErrorDetail::new(
+                "reason",
+                "the database writer lock is held by another opener",
+            ));
         }
         StorageApiError::InvalidRuntimeState { reason }
         | StorageApiError::RetainedHistoryUnavailable { reason, .. }

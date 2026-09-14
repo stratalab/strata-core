@@ -630,13 +630,11 @@ fn durable_localfs_writer_lock_excludes_second_shell_until_drop() {
         timestamp_source(),
     )
     .expect_err("second durable shell should be blocked by writer guard");
-    assert!(matches!(
-        blocked,
-        LifecycleError::LowerLayer {
-            layer: LifecycleLowerLayer::Backend,
-            ..
-        }
-    ));
+    // Its own variant AND its own code, not an unmapped lower-layer failure:
+    // contention is a precondition the caller can satisfy, never a backend
+    // outage, and consumers key on the code to recognise it (#3005, #3167).
+    assert_eq!(blocked.code(), "failed_precondition.lifecycle.writer_lock");
+    assert!(matches!(blocked, LifecycleError::WriterLockHeld));
 
     drop(first);
 

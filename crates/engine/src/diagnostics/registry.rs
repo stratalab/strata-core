@@ -205,6 +205,7 @@ const AMBIGUOUS_COMMIT_CODES: &[&str] = &["ambiguous_commit.engine.persistence"]
 
 const UNAVAILABLE_CODES: &[&str] = &[
     "failed_precondition.engine.persistence",
+    "failed_precondition.engine.writer_lock",
     "unavailable.engine.control_plane",
     "unavailable.engine.persistence",
     "unavailable.engine.vector_artifacts",
@@ -388,6 +389,7 @@ fn retry_policy_for_code(code: &str, class: EngineErrorClass) -> RetryPolicy {
         "conflict.engine.branch_generation"
         | "conflict.engine.persistence"
         | "failed_precondition.engine.persistence"
+        | "failed_precondition.engine.writer_lock"
         | "history_unavailable.engine.persistence_history"
         | "resource_exhausted.engine.persistence_budget"
         | "unsupported.engine.persistence_capability" => return RetryPolicy::AfterStateChange,
