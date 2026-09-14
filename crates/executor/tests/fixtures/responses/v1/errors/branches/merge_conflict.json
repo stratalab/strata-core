@@ -2,6 +2,6 @@
   "class": "conflict",
   "code": "conflict.engine.promotion",
   "commit_outcome": "not_started",
-  "retry_policy": "never",
-  "retryable": false
+  "retry_policy": "after_state_change",
+  "retryable": true
 }

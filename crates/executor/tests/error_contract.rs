@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use strata_executor::{
-    public_error_code_entries, Command, CommitOutcomeStatus, ErrorClass, Executor, ExecutorError,
-    RetryPolicy,
+    public_error_code_entries, public_error_code_entry, Command, CommitOutcomeStatus, ErrorClass,
+    Executor, ExecutorError, RetryPolicy,
 };
 
 // ---------------------------------------------------------------------------
@@ -463,6 +463,83 @@ fn unknowable_outcomes_stay_unknowable() {
         "unknowable-outcome registry violations:\n  {}",
         violations.join("\n  ")
     );
+}
+
+/// The converse of `unknowable_outcomes_stay_unknowable`: `Unknown` is
+/// RESERVED for conditions that genuinely cannot be classified.
+///
+/// That test asserts `ambiguous_commit` and `internal` carry `Unknown`; nothing
+/// asserted that only they do. Four rows sat on `Unknown` while their own
+/// remedy named a concrete action — fix model-cache permissions, check the
+/// runtime, switch providers, reopen the database. `RetryPolicy::retryable()`
+/// reports FALSE for `Unknown`, so each was telling a caller to retry through
+/// the hint while telling a client library not to bother through the field
+/// (#3403).
+#[test]
+fn unknown_retry_policy_is_reserved_for_genuinely_unclassifiable_conditions() {
+    let violations: Vec<String> = public_error_code_entries()
+        .filter(|entry| entry.retry_policy == RetryPolicy::Unknown)
+        .filter(|entry| {
+            let prefix = entry.code.split('.').next().expect("code has a prefix");
+            prefix != "ambiguous_commit" && prefix != "internal"
+        })
+        .map(|entry| format!("{}: {:?}", entry.code, entry.suggested_fix))
+        .collect();
+
+    assert!(
+        violations.is_empty(),
+        "these codes cannot classify their retryability, yet their remedy names a \
+         concrete action — pick the policy that matches it:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The seven rows #3403 re-classified, pinned to the reasoning that moved them.
+///
+/// Each was reachable by falling through to a class default or by an explicit
+/// `Unknown` that predated the remedy it now contradicts, so none of them is
+/// derivable — without assertions they drift back silently.
+#[test]
+fn reclassified_retry_policies_match_their_remedies() {
+    let cases = [
+        // A conflict means the world moved, not that the request was malformed.
+        (
+            "conflict.engine.artifact_import",
+            RetryPolicy::AfterStateChange,
+        ),
+        ("conflict.engine.promotion", RetryPolicy::AfterStateChange),
+        // A V1 format rule, not a transient capability gap.
+        (
+            "unsupported.engine.graph_binding_cross_branch",
+            RetryPolicy::Never,
+        ),
+        // The write may or may not have applied: safe to retry only if the
+        // operation is idempotent. The row already says `MaybeCommitted`.
+        (
+            "unavailable.executor.ipc_transport",
+            RetryPolicy::IdempotentOnly,
+        ),
+        // Permissions and model/runtime are both named by `AfterStateChange`.
+        ("inference.io_failure", RetryPolicy::AfterStateChange),
+        (
+            "inference.local_runtime_failed",
+            RetryPolicy::AfterStateChange,
+        ),
+        // A garbled provider response may well not repeat.
+        (
+            "inference.provider_malformed_response",
+            RetryPolicy::SameRequest,
+        ),
+    ];
+
+    for (code, expected) in cases {
+        let entry = public_error_code_entry(code).unwrap_or_else(|| panic!("{code} is registered"));
+        assert_eq!(
+            entry.retry_policy, expected,
+            "{code} changed retry policy; its remedy is {:?}",
+            entry.suggested_fix
+        );
+    }
 }
 
 /// #2750 contract (promoted from `pin_2750_*`): a build without the hub/arrow

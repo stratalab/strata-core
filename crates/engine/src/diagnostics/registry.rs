@@ -387,14 +387,28 @@ fn public_class_for_code(legacy_class: EngineErrorClass, code: &str) -> ErrorCla
 
 fn retry_policy_for_code(code: &str, class: EngineErrorClass) -> RetryPolicy {
     match code {
-        "conflict.engine.branch_generation"
+        // A conflict means the world moved, not that the request was malformed:
+        // reloading and retrying is the remedy, and every one of these carries a
+        // hint that says exactly that. `artifact_import` and `promotion` were
+        // absent from this list and fell to the class default of `Never`, so two
+        // of the four conflict codes told the caller that the reload their own
+        // hint prescribed would not help (#3403).
+        "conflict.engine.artifact_import"
+        | "conflict.engine.branch_generation"
         | "conflict.engine.persistence"
+        | "conflict.engine.promotion"
         | "failed_precondition.engine.persistence"
         | "failed_precondition.engine.writer_lock"
         | "history_unavailable.engine.persistence_history"
         | "resource_exhausted.engine.persistence_budget"
         | "unsupported.engine.persistence_capability" => return RetryPolicy::AfterStateChange,
         "unavailable.engine.persistence" => return RetryPolicy::SameRequest,
+        // Not a transient capability gap: cross-branch bindings are a V1 format
+        // rule. No configuration, branch, backend, model or permission change
+        // makes one legal, which is why the other two permanent "unsupported"
+        // conditions (`inference.unsupported_operation`,
+        // `inference.unsupported_provider`) are already `Never` (#3403).
+        "unsupported.engine.graph_binding_cross_branch" => return RetryPolicy::Never,
         _ => {}
     }
     match class {

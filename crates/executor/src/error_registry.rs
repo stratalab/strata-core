@@ -307,7 +307,7 @@ const EXECUTOR_ERROR_CODES: &[ErrorCodeRegistryEntry] = &[
     entry(
         "unavailable.executor.ipc_transport",
         ErrorClass::Unavailable,
-        RetryPolicy::Unknown,
+        RetryPolicy::IdempotentOnly,
         CommitOutcomeStatus::MaybeCommitted,
         "The IPC connection to the store owner failed while a command was in flight.",
         "Reopen the database (the owner may have exited or restarted) and, for a write, \
@@ -485,7 +485,7 @@ const INFERENCE_ERROR_CODES: &[ErrorCodeRegistryEntry] = &[
     entry(
         "inference.io_failure",
         ErrorClass::Io,
-        RetryPolicy::Unknown,
+        RetryPolicy::AfterStateChange,
         CommitOutcomeStatus::NotApplicable,
         "The local inference runtime hit an I/O failure.",
         "Inspect local model-cache filesystem permissions and retry.",
@@ -494,7 +494,7 @@ const INFERENCE_ERROR_CODES: &[ErrorCodeRegistryEntry] = &[
     entry(
         "inference.local_runtime_failed",
         ErrorClass::Unavailable,
-        RetryPolicy::Unknown,
+        RetryPolicy::AfterStateChange,
         CommitOutcomeStatus::NotApplicable,
         "The local inference runtime failed.",
         "Check the local inference runtime and model compatibility before retrying.",
@@ -539,7 +539,7 @@ const INFERENCE_ERROR_CODES: &[ErrorCodeRegistryEntry] = &[
     entry(
         "inference.provider_malformed_response",
         ErrorClass::Serialization,
-        RetryPolicy::Unknown,
+        RetryPolicy::SameRequest,
         CommitOutcomeStatus::NotApplicable,
         "The provider returned a malformed response.",
         "Retry or switch providers if the provider response remains invalid.",
