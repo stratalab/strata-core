@@ -486,6 +486,41 @@ fn class_prefixed_suggested_fix(code: &str) -> Option<&'static str> {
             "Delete the child branches forked from this one (or materialize them) before \
              deleting the source."
         }
+        // #3393 gave lock contention its own code so it would stop reading as a
+        // transient backend problem, but left it on the availability class's
+        // remedy — "retry after the required backend is available" — which is
+        // the very advice the new code existed to replace. The remedy is a
+        // different process, not a wait (#3403).
+        "failed_precondition.engine.writer_lock" => {
+            "Another process holds this database's writer lock. Connect to the running owner, \
+             or close it before opening the database for writing."
+        }
+        // #3403: these were reached through the substring chain, which now runs
+        // only for caller-input classes. They are condition-specific remedies,
+        // not input advice, so they belong here as explicit rows — which is
+        // also what stops the next code that happens to contain ".vector_" or
+        // "budget" from inheriting them by accident.
+        "failed_precondition.engine.vector_artifact"
+        | "failed_precondition.engine.vector_index_manifest"
+        | "unavailable.engine.vector_artifacts" => {
+            "Rebuild vector index artifacts or fall back to exact search before retrying \
+             indexed queries."
+        }
+        "resource_exhausted.engine.persistence_budget" => {
+            "Reduce memory or disk pressure, lower the workload size, or raise the configured \
+             resource budget."
+        }
+        "resource_exhausted.engine.graph_analytics_budget" => {
+            "Lower the graph analytics workload (fewer nodes, lower iteration count) or raise \
+             the configured analytics budget."
+        }
+        "unsupported.engine.persistence_capability" => {
+            "Open the database with a backend that supports the requested persistence capability."
+        }
+        "unsupported.engine.graph_binding_cross_branch" => {
+            "Bind graph relationships to targets on the node's own branch; cross-branch \
+             bindings are not supported in V1."
+        }
         "not_found.engine.branch" => {
             "List branches or use the default branch, then retry with an existing branch name."
         }
@@ -601,6 +636,17 @@ fn suggested_fix_for_code(code: &str, class: EngineErrorClass) -> &'static str {
     if let Some(fix) = class_prefixed_suggested_fix(code) {
         return fix;
     }
+    // The chain below answers "which input do I correct?". That is a remedy
+    // only when the caller's input is what went wrong. Every code names the
+    // primitive it belongs to, so for any other class the chain matches on
+    // that name and hands back advice written for a different condition
+    // entirely: `data_loss.engine.graph_node_record` matched `.graph_` and
+    // told the caller to "use valid graph identifiers" for a record that
+    // failed to decode — 31 of the 37 `data_loss` codes carried an
+    // input-validation remedy this way (#3403).
+    if !remedy_follows_caller_input(class) {
+        return class_suggested_fix(class);
+    }
     if code.contains("branch_name") {
         "Use a non-empty branch name that does not use reserved prefixes or invalid characters."
     } else if code.contains("product_space") || code.contains(".space_") {
@@ -639,7 +685,33 @@ fn suggested_fix_for_code(code: &str, class: EngineErrorClass) -> &'static str {
     {
         "Open the database with a compatible Strata version or run the required migration."
     } else {
-        match class {
+        class_suggested_fix(class)
+    }
+}
+
+/// Whether a code in this class fails because of something the CALLER sent.
+///
+/// Only those classes take the primitive-specific "correct your input" chain.
+/// A condition about stored state or the runtime — corruption and data loss,
+/// an internal fault, an ambiguous commit, an unavailable dependency, an
+/// incompatible layout, a closed handle — is not fixed by changing an
+/// argument, and its class remedy is the accurate one (#3403).
+const fn remedy_follows_caller_input(class: EngineErrorClass) -> bool {
+    match class {
+        EngineErrorClass::InvalidInput
+        | EngineErrorClass::NotFound
+        | EngineErrorClass::Conflict => true,
+        EngineErrorClass::Unavailable
+        | EngineErrorClass::AmbiguousCommit
+        | EngineErrorClass::IncompatibleLayout
+        | EngineErrorClass::Corruption
+        | EngineErrorClass::ClosedRuntime
+        | EngineErrorClass::Internal => false,
+    }
+}
+
+const fn class_suggested_fix(class: EngineErrorClass) -> &'static str {
+    match class {
             EngineErrorClass::InvalidInput => {
                 "Correct the invalid field named by the error message and retry the operation."
             }
@@ -668,7 +740,6 @@ fn suggested_fix_for_code(code: &str, class: EngineErrorClass) -> &'static str {
                 "Capture the reference id and report this as a Strata internal error."
             }
         }
-    }
 }
 
 fn details_schema_for_code(code: &str) -> &'static str {
@@ -717,6 +788,161 @@ mod tests {
         "unavailable",
         "internal",
     ];
+
+    /// Every remedy that is condition-specific rather than input advice is
+    /// pinned here.
+    ///
+    /// These rows exist because gating the substring chain on class would
+    /// otherwise have flattened them to their class default — "retry after the
+    /// required backend is available" for a vector artifact that needs
+    /// rebuilding, for a budget that needs raising, for a binding the format
+    /// does not support. Each is a remedy the caller can act on, and none is
+    /// derivable from the code's spelling, so each needs its own assertion or
+    /// it silently reverts to the generic advice (#3403).
+    ///
+    /// The class comes from the registry rather than being restated here: a
+    /// hand-copied class would be one more thing that can drift from what the
+    /// code actually resolves to.
+    #[test]
+    fn condition_specific_remedies_are_pinned_to_their_codes() {
+        let cases = [
+            ("failed_precondition.engine.writer_lock", "writer lock"),
+            (
+                "failed_precondition.engine.vector_artifact",
+                "Rebuild vector index artifacts",
+            ),
+            (
+                "failed_precondition.engine.vector_index_manifest",
+                "Rebuild vector index artifacts",
+            ),
+            (
+                "unavailable.engine.vector_artifacts",
+                "Rebuild vector index artifacts",
+            ),
+            (
+                "resource_exhausted.engine.persistence_budget",
+                "raise the configured resource budget",
+            ),
+            (
+                "resource_exhausted.engine.graph_analytics_budget",
+                "analytics budget",
+            ),
+            (
+                "unsupported.engine.persistence_capability",
+                "backend that supports",
+            ),
+            (
+                "unsupported.engine.graph_binding_cross_branch",
+                "not supported in V1",
+            ),
+        ];
+        let registered = registered_codes();
+
+        for (code, expected) in cases {
+            let Some((_, class)) = registered
+                .iter()
+                .find(|(registered_code, _)| *registered_code == code)
+            else {
+                panic!("{code} is not registered");
+            };
+            let class = *class;
+            let remedy = suggested_fix_for_code(code, class);
+
+            assert!(
+                remedy.contains(expected),
+                "{code} lost its condition-specific remedy (expected it to mention \
+                 {expected:?}, got {remedy:?}) — it has fallen back to a class default"
+            );
+            assert_ne!(
+                remedy,
+                class_suggested_fix(class),
+                "{code} resolves to its class default, so its own row is doing nothing"
+            );
+        }
+    }
+
+    /// A remedy may not be shared between a data-integrity condition and a
+    /// caller-input one.
+    ///
+    /// `suggested_fix_for_code` picks a remedy by substring-matching the code
+    /// name, and every code names the primitive it belongs to — so
+    /// `data_loss.engine.graph_node_record` matched `.graph_` and told the
+    /// caller to "use valid graph, node, edge and binding identifiers" for a
+    /// record that had failed to decode. 31 of the 37 `data_loss` codes
+    /// carried input-validation advice that way, which does not merely fail to
+    /// help: it points a user whose stored data is unreadable back at their own
+    /// keystrokes (#3403).
+    ///
+    /// Sharing a remedy is fine in itself — `corruption` and `data_loss` want
+    /// the same one. Sharing it ACROSS that boundary is the defect.
+    #[test]
+    fn no_remedy_is_shared_between_data_integrity_and_caller_input_codes() {
+        use std::collections::BTreeMap;
+
+        let mut by_remedy: BTreeMap<&'static str, (Vec<&'static str>, Vec<&'static str>)> =
+            BTreeMap::new();
+        for (code, class) in registered_codes() {
+            let remedy = suggested_fix_for_code(code, class);
+            let entry = by_remedy.entry(remedy).or_default();
+            let public = code.split('.').next().expect("code has a class prefix");
+            match public {
+                "corruption" | "data_loss" => entry.0.push(code),
+                "invalid_argument" | "not_found" => entry.1.push(code),
+                _ => {}
+            }
+        }
+
+        let collisions: Vec<String> = by_remedy
+            .iter()
+            .filter(|(_, (integrity, input))| !integrity.is_empty() && !input.is_empty())
+            .map(|(remedy, (integrity, input))| {
+                format!("{remedy:?}\n    integrity: {integrity:?}\n    caller-input: {input:?}")
+            })
+            .collect();
+
+        assert!(
+            collisions.is_empty(),
+            "a remedy is shared between data-integrity and caller-input codes — one of the two \
+             is being told to fix the wrong thing:\n  {}",
+            collisions.join("\n  ")
+        );
+    }
+
+    /// Every `data_loss` and `corruption` code tells the reader to stop and
+    /// look at the database, not to change what they sent.
+    #[test]
+    fn data_integrity_remedies_never_ask_the_caller_to_correct_input() {
+        let input_shaped = [
+            "use valid",
+            "use non-empty",
+            "use a valid",
+            "use an existing",
+            "use the collection",
+            "use a non-reserved",
+            "correct the",
+            "identifiers",
+            "within limits",
+        ];
+
+        let offenders: Vec<String> = registered_codes()
+            .into_iter()
+            .filter(|(code, _)| code.starts_with("data_loss.") || code.starts_with("corruption."))
+            .filter_map(|(code, class)| {
+                let remedy = suggested_fix_for_code(code, class);
+                let lowered = remedy.to_lowercase();
+                input_shaped
+                    .iter()
+                    .any(|needle| lowered.contains(needle))
+                    .then(|| format!("{code}: {remedy:?}"))
+            })
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "data-integrity codes must not carry input-correction advice:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
 
     fn registered_codes() -> Vec<(&'static str, EngineErrorClass)> {
         GROUPS
