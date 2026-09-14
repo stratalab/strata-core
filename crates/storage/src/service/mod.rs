@@ -70,7 +70,8 @@ pub(crate) use table::{
 )]
 pub(crate) use wal::{
     verify_wal_segment_inventory, wal_segments_present, WalAppend, WalDeleteReport,
-    WalGroupSyncTicket, WalGrowthFacts, WalRepair, WalRetentionProof, WalRetentionProofSource,
-    WalSegmentDeleteFailure, WalSegmentDeleteOutcome, WalService, WalServiceConfig,
-    WalServiceError, WalSidecarDeleteOutcome, WalTruncation, DEFAULT_WAL_APPEND_BUFFER_BYTES,
+    WalGroupSyncTicket, WalGrowthFacts, WalOperation, WalRepair, WalRetentionProof,
+    WalRetentionProofSource, WalSegmentDeleteFailure, WalSegmentDeleteOutcome, WalService,
+    WalServiceConfig, WalServiceError, WalSidecarDeleteOutcome, WalTruncation,
+    DEFAULT_WAL_APPEND_BUFFER_BYTES,
 };

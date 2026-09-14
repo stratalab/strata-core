@@ -1,6 +1,9 @@
 use super::data::{map_commit_admission_pressure_reason, map_commit_admission_pressure_severity};
 #[cfg(any(test, feature = "testkit"))]
 use super::maintenance::map_maintenance_summary;
+use crate::format::FormatError;
+use crate::service::{WalOperation, WalServiceError};
+
 use super::{
     CommitBranchGeneration, LifecycleError, RecoveryHealth, RecoveryHealthSummary, StorageApiError,
     StorageApiLowerLayer, StorageApiResult, DEFAULT_BRANCH_GENERATION,
@@ -30,6 +33,32 @@ fn budget_exceeded_to_api(error: &LifecycleError) -> Option<StorageApiError> {
             used_bytes: *used_bytes,
             limit_bytes: *limit_bytes,
             reason,
+        }),
+        _ => None,
+    }
+}
+
+/// Surface a row too large to encode as a typed `invalid_argument` API error.
+///
+/// The WAL commit payload caps one row at `MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES`.
+/// Exceeding it on the write path is deterministic and permanent: the same
+/// request can never succeed, and no backend, branch or budget change makes it
+/// succeed. Left unmapped it arrives as `LowerLayer` — class `Unavailable`,
+/// `RetryPolicy::SameRequest` — which tells the caller to retry forever (#3383).
+///
+/// `WalOperation::Append` is what separates this from the identically-shaped
+/// decode-side check: on a read, an oversized `row_len` means the stored bytes
+/// are corrupt, which must keep its corruption classification. Only the encode
+/// direction is a caller error.
+fn row_too_large_to_api(error: &WalServiceError) -> Option<StorageApiError> {
+    match error {
+        WalServiceError::Format {
+            operation: WalOperation::Append,
+            source: FormatError::InvalidLength { field: "row_len" },
+            ..
+        } => Some(StorageApiError::InvalidArgument {
+            field: "row",
+            reason: "a single committed row exceeds the maximum encodable size",
         }),
         _ => None,
     }
@@ -158,6 +187,22 @@ pub(super) fn commit_error(error: crate::commit::CommitRuntimeError) -> StorageA
             mapped.unwrap_or(StorageApiError::LowerLayer {
                 layer: StorageApiLowerLayer::Commit,
                 inner_code: Some(crate::commit::CommitLowerLayer::StorageBudget.code()),
+                reason,
+                source,
+            })
+        }
+        crate::commit::CommitRuntimeError::LowerLayer {
+            layer: crate::commit::CommitLowerLayer::WalService,
+            reason,
+            source,
+        } => {
+            let mapped = source
+                .as_deref()
+                .and_then(|inner| inner.downcast_ref::<WalServiceError>())
+                .and_then(row_too_large_to_api);
+            mapped.unwrap_or(StorageApiError::LowerLayer {
+                layer: StorageApiLowerLayer::Commit,
+                inner_code: Some(crate::commit::CommitLowerLayer::WalService.code()),
                 reason,
                 source,
             })
@@ -495,6 +540,45 @@ mod tests {
             assert_eq!(mapped.inner_code(), Some(expected));
             assert_eq!(mapped.code(), "internal.storage_api.commit");
         }
+    }
+
+    /// An oversized row on the WRITE path is a caller error, not an internal
+    /// lower-layer failure — and the read path's identically-shaped check must
+    /// keep its corruption classification (#3383).
+    #[test]
+    fn an_oversized_row_maps_by_direction_not_by_layer() {
+        use crate::commit::{CommitLowerLayer, CommitRuntimeError};
+        use crate::format::FormatError;
+        use crate::object::ObjectName;
+        use crate::service::{WalOperation, WalServiceError};
+        use std::sync::Arc;
+
+        let wal_error = |operation| WalServiceError::Format {
+            operation,
+            object: ObjectName::new("wal/0000000000000001").expect("object name"),
+            source: FormatError::InvalidLength { field: "row_len" },
+        };
+        let commit_error_for = |operation| {
+            commit_error(CommitRuntimeError::LowerLayer {
+                layer: CommitLowerLayer::WalService,
+                reason: "commit runtime failed",
+                source: Some(Arc::new(wal_error(operation))),
+            })
+        };
+
+        // Encode direction: the caller sent a row too large to encode.
+        let write = commit_error_for(WalOperation::Append);
+        assert_eq!(write.code(), "invalid_argument.storage_api.argument");
+        assert_eq!(
+            write.class(),
+            super::super::StorageApiErrorClass::InvalidArgument
+        );
+
+        // Decode direction: the same inner error means the stored bytes are
+        // corrupt. It must NOT be reclassified as a caller error.
+        let read = commit_error_for(WalOperation::Read);
+        assert_ne!(read.code(), "invalid_argument.storage_api.argument");
+        assert_eq!(read.inner_code(), Some("internal.commit.wal_service"));
     }
 
     /// The timeline arm has its own reason string but must still carry the
