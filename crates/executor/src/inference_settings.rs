@@ -406,3 +406,57 @@ mod tests {
         assert!(settings.base_url(ProviderKind::OpenAI).is_none());
     }
 }
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::{isolated_inference_runtime, InferenceRuntime};
+    use strata_inference::{InferenceStatus, ProviderKind};
+
+    fn openai_key_present(status: &InferenceStatus) -> Option<bool> {
+        status
+            .providers
+            .iter()
+            .find(|provider| provider.provider == ProviderKind::OpenAI)
+            .map(|provider| provider.key_present)
+    }
+
+    /// The capture runtime ignores a provider key the default runtime finds.
+    ///
+    /// This is the property #3389 rests on, and it is only observable when a
+    /// provider setting is actually present — which is why the mutation gate
+    /// could replace `isolated_inference_runtime` with `Default::default()`
+    /// and survive: on a runner with no key set, an environment-reading
+    /// runtime and a no-settings runtime answer identically.
+    ///
+    /// So the key is set here. The first assertion is what stops the test
+    /// being vacuous: it proves the variable actually reached the default
+    /// runtime, so the second is a real difference rather than two runtimes
+    /// agreeing about nothing.
+    #[test]
+    fn the_capture_runtime_ignores_an_environment_key_the_default_runtime_finds() {
+        const VAR: &str = "OPENAI_API_KEY";
+        let restore = std::env::var(VAR).ok();
+        std::env::set_var(VAR, "sk-not-a-real-key");
+
+        let default = openai_key_present(&InferenceRuntime::default().status());
+        let isolated = openai_key_present(&isolated_inference_runtime().status());
+
+        match restore {
+            Some(value) => std::env::set_var(VAR, value),
+            None => std::env::remove_var(VAR),
+        }
+
+        assert_eq!(
+            default,
+            Some(true),
+            "the environment variable did not reach the default runtime, so this \
+             test proves nothing about isolation"
+        );
+        assert_eq!(
+            isolated,
+            Some(false),
+            "the capture runtime read the environment; a captured example would \
+             record the capturing machine's provider state"
+        );
+    }
+}
