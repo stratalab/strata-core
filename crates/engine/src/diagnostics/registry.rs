@@ -803,6 +803,53 @@ mod tests {
         "internal",
     ];
 
+    /// The engine-owned rows #3405 re-classified, asserted HERE rather than
+    /// only in executor's error-contract suite.
+    ///
+    /// The mutation gate mutates a crate and runs that crate's tests, so an
+    /// engine row covered only by an executor test is covered by nothing as far
+    /// as the gate is concerned — deleting the arm below survived exactly that
+    /// way. Same shape as the storage rows that were covered only by engine
+    /// tests in #3392 and #3393.
+    #[test]
+    fn reclassified_engine_retry_policies_hold_in_engine() {
+        let registered = registered_codes();
+        let policy_of = |code: &'static str| {
+            let Some((_, class)) = registered
+                .iter()
+                .find(|(registered_code, _)| *registered_code == code)
+            else {
+                panic!("{code} is not registered");
+            };
+            retry_policy_for_code(code, *class)
+        };
+
+        // A conflict means the world moved: reloading and retrying is the
+        // remedy all four of these share.
+        assert_eq!(
+            policy_of("conflict.engine.artifact_import"),
+            RetryPolicy::AfterStateChange
+        );
+        assert_eq!(
+            policy_of("conflict.engine.promotion"),
+            RetryPolicy::AfterStateChange
+        );
+        assert_eq!(
+            policy_of("conflict.engine.branch_generation"),
+            RetryPolicy::AfterStateChange
+        );
+        assert_eq!(
+            policy_of("conflict.engine.persistence"),
+            RetryPolicy::AfterStateChange
+        );
+
+        // A V1 format rule, not a transient capability gap.
+        assert_eq!(
+            policy_of("unsupported.engine.graph_binding_cross_branch"),
+            RetryPolicy::Never
+        );
+    }
+
     /// Every remedy that is condition-specific rather than input advice is
     /// pinned here.
     ///
