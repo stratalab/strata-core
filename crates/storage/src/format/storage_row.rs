@@ -1,8 +1,11 @@
 use super::{
-    key::{append_physical_key, decode_physical_key},
+    key::{
+        append_physical_key, decode_physical_key, physical_key_encode_capacity,
+        physical_key_encoded_len,
+    },
     ByteReader, FormatError, STORAGE_ROW_FLAGS_NONE, STORAGE_ROW_FORMAT_VERSION,
 };
-use crate::row::StorageRow;
+use crate::row::{PhysicalKey, StorageRow};
 use strata_core::{CommitVersion, Timestamp};
 
 const STORAGE_ROW_FORMAT: &str = "storage_row";
@@ -51,7 +54,7 @@ pub(crate) fn encode_storage_row_with_physical_key_bytes_into(
     bytes: &mut Vec<u8>,
 ) -> Result<(), FormatError> {
     bytes.clear();
-    bytes.reserve(storage_row_encode_capacity_from_parts(
+    bytes.reserve(storage_row_len_from_parts(
         physical_key_bytes.len(),
         row.value().len(),
     ));
@@ -76,34 +79,37 @@ pub(crate) fn encode_storage_row_with_physical_key_bytes_into(
     Ok(())
 }
 
-fn storage_row_encode_capacity(row: &StorageRow) -> usize {
-    let key = row.physical_key();
-    let physical_key_capacity = key
-        .branch_id()
-        .as_bytes()
-        .len()
-        .saturating_add(key.space().len())
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(key.user_key().len())
-        .saturating_add(2);
-    storage_row_encode_capacity_from_parts(physical_key_capacity, row.value().len())
+/// Exactly how many bytes `encode_storage_row_into` will write for a row with
+/// this key and a value of `value_len` bytes.
+///
+/// Every field the encoder writes apart from the physical key and the value is
+/// fixed-width, so those two determine the length. Commit admission uses this
+/// to refuse a mutation no WAL commit payload row could hold — in cache mode
+/// as well as durable, so both modes agree on what a legal write is (#3391).
+/// `storage_row_encoded_len_matches_the_encoder` pins it against the encoder.
+pub(crate) fn storage_row_encoded_len(key: &PhysicalKey, value_len: usize) -> usize {
+    storage_row_len_from_parts(physical_key_encoded_len(key), value_len)
 }
 
-fn storage_row_encode_capacity_from_parts(
-    physical_key_capacity: usize,
-    value_capacity: usize,
-) -> usize {
+fn storage_row_encode_capacity(row: &StorageRow) -> usize {
+    storage_row_len_from_parts(
+        physical_key_encode_capacity(row.physical_key()),
+        row.value().len(),
+    )
+}
+
+/// Exact given an exact `physical_key_len`; a hint given the capacity hint.
+fn storage_row_len_from_parts(physical_key_len: usize, value_len: usize) -> usize {
     1usize
         .saturating_add(4)
-        .saturating_add(physical_key_capacity)
+        .saturating_add(physical_key_len)
         .saturating_add(8)
         .saturating_add(8)
         .saturating_add(8)
         .saturating_add(4)
         .saturating_add(1)
         .saturating_add(4)
-        .saturating_add(value_capacity)
+        .saturating_add(value_len)
 }
 
 pub(crate) fn decode_storage_row(bytes: &[u8]) -> Result<StorageRow, FormatError> {
@@ -217,8 +223,8 @@ fn decode_storage_row_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_storage_row, decode_storage_row_matching_key, encode_storage_row, FormatError,
-        STORAGE_ROW_FORMAT,
+        decode_storage_row, decode_storage_row_matching_key, encode_storage_row,
+        storage_row_encoded_len, FormatError, STORAGE_ROW_FORMAT,
     };
     use crate::row::{PhysicalKey, StorageRow, StorageSpaceId};
     use strata_core::{BranchId, CommitVersion, Timestamp};
@@ -419,6 +425,81 @@ mod tests {
         assert_eq!(
             decode_storage_row(&bytes),
             Err(FormatError::InvalidTombstonePayload { field: "expiry" })
+        );
+    }
+
+    /// Commit admission decides whether a mutation fits a WAL commit payload
+    /// row from this length alone, without encoding it. If the two ever
+    /// disagree, admission either lets through a row the WAL cannot write or
+    /// refuses one it can (#3391).
+    #[test]
+    fn storage_row_encoded_len_matches_the_encoder() {
+        let cases: [(Vec<u8>, Vec<u8>); 5] = [
+            (Vec::new(), Vec::new()),
+            (b"alpha".to_vec(), b"value".to_vec()),
+            (vec![0x00; 16], b"value".to_vec()),
+            (vec![0x00, 0x41, 0x00], vec![0x00; 32]),
+            ((0u8..=255).collect(), vec![7; 4096]),
+        ];
+
+        for (user_key, value) in cases {
+            let key = PhysicalKey::new(
+                BranchId::from_bytes([7; BranchId::BYTE_LEN]),
+                "default",
+                StorageSpaceId::engine(0x20).expect("engine id"),
+                user_key.clone(),
+            )
+            .expect("physical key");
+            let row = StorageRow::put(
+                key.clone(),
+                CommitVersion::new(42),
+                Timestamp::from_micros(11),
+                Timestamp::from_micros(99),
+                value.clone(),
+            );
+
+            assert_eq!(
+                storage_row_encoded_len(&key, value.len()),
+                encode_storage_row(&row).expect("encode row").len(),
+                "computed length disagrees with the encoder for key {user_key:?}"
+            );
+        }
+    }
+
+    /// The reserve hint's job is a single allocation per encoded row; a wrong
+    /// hint still encodes the right bytes, so only the allocation itself
+    /// witnesses it.
+    #[test]
+    fn storage_row_encoding_does_not_reallocate_for_a_key_with_nothing_to_escape() {
+        let row = StorageRow::put(
+            physical_key(),
+            CommitVersion::new(42),
+            Timestamp::from_micros(11),
+            Timestamp::from_micros(99),
+            b"value".to_vec(),
+        );
+        let bytes = encode_storage_row(&row).expect("encode row");
+
+        assert_eq!(
+            bytes.capacity(),
+            bytes.len(),
+            "the reserve did not size the buffer to the encoding"
+        );
+    }
+
+    /// A delete stamps a valueless tombstone, and admission sizes it the same
+    /// way — so the key alone must account for the whole row.
+    #[test]
+    fn storage_row_encoded_len_matches_the_encoder_for_a_tombstone() {
+        let row = StorageRow::tombstone(
+            physical_key(),
+            CommitVersion::new(42),
+            Timestamp::from_micros(11),
+        );
+
+        assert_eq!(
+            storage_row_encoded_len(row.physical_key(), 0),
+            encode_storage_row(&row).expect("encode row").len()
         );
     }
 }

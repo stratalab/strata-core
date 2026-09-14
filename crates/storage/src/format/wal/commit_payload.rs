@@ -10,7 +10,12 @@ const WAL_COMMIT_PAYLOAD_MAGIC: [u8; 4] = *b"STCP";
 const WAL_COMMIT_PAYLOAD_FORMAT_VERSION: u32 = 1;
 const MAX_WAL_COMMIT_PAYLOAD_ROWS: usize = 4096;
 const MAX_WAL_COMMIT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
-const MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES: usize = 16 * 1024 * 1024;
+/// The largest single encoded storage row a commit payload can carry.
+///
+/// Enforced here at encode time, and — because cache mode never reaches this
+/// encoder (hard rule 14) — again at commit admission, so a write cache mode
+/// accepts is a write durable mode accepts (#3391).
+pub(crate) const MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WalCommitPayload {
@@ -560,5 +565,38 @@ mod tests {
                 Ok(())
             })
             .expect("WAL commit payload property");
+    }
+
+    /// The whole-payload cap is 64 MiB, and nothing else pins its magnitude:
+    /// the row cap bounds each row, the row-count cap bounds how many, but a
+    /// payload cap collapsed to roughly a megabyte would refuse ordinary
+    /// multi-row commits and no other test would notice. Encode a payload far
+    /// above any plausible wrong value and far below the real one.
+    #[test]
+    fn wal_commit_payload_admits_a_multi_megabyte_payload() {
+        let row = |user_key: &[u8]| {
+            StorageRow::put(
+                physical_key(branch_id(), user_key),
+                CommitVersion::new(7),
+                Timestamp::from_micros(1_700_000),
+                Timestamp::from_micros(1_800_000),
+                vec![0x5a; 1024 * 1024],
+            )
+        };
+        let payload = WalCommitPayload::new(vec![row(b"a"), row(b"b"), row(b"c"), row(b"d")])
+            .expect("payload");
+
+        let bytes = encode_wal_commit_payload(&payload).expect("4 MiB is well inside the cap");
+
+        assert!(
+            bytes.len() > 4 * 1024 * 1024,
+            "fixture did not actually exceed a megabyte: {} bytes",
+            bytes.len()
+        );
+        assert_eq!(
+            decode_wal_commit_payload(&bytes).expect("decode"),
+            payload,
+            "the cap must admit on decode too"
+        );
     }
 }

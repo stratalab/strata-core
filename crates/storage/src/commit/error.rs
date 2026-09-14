@@ -28,6 +28,14 @@ pub(crate) enum CommitRuntimeError {
     InvalidMutation {
         reason: &'static str,
     },
+    /// A mutation whose encoded storage row is larger than one WAL commit
+    /// payload row can hold. Distinct from `InvalidMutation` so the refusal
+    /// reaches the caller naming the row rather than the batch, matching the
+    /// WAL encoder's own refusal for the paths that bypass admission (#3391).
+    MutationTooLarge {
+        row_len: usize,
+        max_row_len: usize,
+    },
     InvalidValidationFacts {
         reason: &'static str,
     },
@@ -161,6 +169,7 @@ impl CommitRuntimeError {
             Self::InvalidVisibilityFacts { .. } => "failed_precondition.commit.visibility_facts",
             Self::InvalidBatch { .. } => "invalid_argument.commit.batch",
             Self::InvalidMutation { .. } => "invalid_argument.commit.mutation",
+            Self::MutationTooLarge { .. } => "invalid_argument.commit.mutation_row_size",
             Self::InvalidValidationFacts { .. } => "invalid_argument.commit.validation_facts",
             Self::InvalidTimelineFact { .. } => "failed_precondition.commit.timeline_fact",
             Self::TimelineConflict { .. } => "conflict.commit.timeline",
@@ -324,6 +333,16 @@ impl PartialEq for CommitRuntimeError {
                     last_allocated: right,
                 },
             ) => left == right,
+            (
+                Self::MutationTooLarge {
+                    row_len: left_row_len,
+                    max_row_len: left_max,
+                },
+                Self::MutationTooLarge {
+                    row_len: right_row_len,
+                    max_row_len: right_max,
+                },
+            ) => left_row_len == right_row_len && left_max == right_max,
             (
                 Self::DuplicateMutationKey {
                     space_id: left_space,
@@ -514,6 +533,15 @@ impl fmt::Display for CommitRuntimeError {
             }
             Self::InvalidMutation { reason } => {
                 write!(formatter, "commit mutation is invalid: {reason}")
+            }
+            Self::MutationTooLarge {
+                row_len,
+                max_row_len,
+            } => {
+                write!(
+                    formatter,
+                    "commit mutation encodes to {row_len} bytes, above the {max_row_len}-byte row limit"
+                )
             }
             Self::InvalidValidationFacts { reason } => {
                 write!(formatter, "commit validation facts are invalid: {reason}")
@@ -724,6 +752,7 @@ impl Error for CommitRuntimeError {
             | Self::InvalidVisibilityFacts { .. }
             | Self::InvalidBatch { .. }
             | Self::InvalidMutation { .. }
+            | Self::MutationTooLarge { .. }
             | Self::InvalidValidationFacts { .. }
             | Self::InvalidTimelineFact { .. }
             | Self::TimelineConflict { .. }

@@ -3,6 +3,8 @@ use crate::row::{InternalKey, PhysicalKey, RowError, StorageSpaceId};
 use strata_core::{BranchId, CommitVersion};
 
 const INTERNAL_KEY_SUFFIX_LEN: usize = 8;
+/// The `00 00` `encode_escaped` appends to close the user key.
+const ESCAPED_TERMINATOR_LEN: usize = 2;
 const PHYSICAL_KEY_FORMAT: &str = "physical_key";
 const INTERNAL_KEY_FORMAT: &str = "internal_key";
 
@@ -161,13 +163,46 @@ fn encode_escaped(source: &[u8], target: &mut Vec<u8>) {
     target.push(0x00);
 }
 
-fn physical_key_encode_capacity(key: &PhysicalKey) -> usize {
+/// Exactly how many bytes `append_physical_key` will write for `key`.
+///
+/// Commit admission refuses a mutation whose encoded row cannot fit one WAL
+/// commit payload row, so it needs the true length rather than the reserve
+/// hint below: `encode_escaped` emits two bytes for every `0x00`, so a user
+/// key of zero bytes encodes to nearly twice its length.
+/// `physical_key_encoded_len_matches_the_encoder` pins this against the
+/// encoder, so the widths below cannot drift away from what is written.
+pub(crate) fn physical_key_encoded_len(key: &PhysicalKey) -> usize {
+    physical_key_framing_len(key).saturating_add(escaped_encoded_len(key.user_key()))
+}
+
+/// Buffer hint only: assumes no byte of the user key escapes, which is the
+/// common case and keeps the reserve O(1) in the key length. Undercounting a
+/// key that contains `0x00` costs a reallocation, never a wrong encoding —
+/// use `physical_key_encoded_len` wherever the answer must be exact.
+pub(crate) fn physical_key_encode_capacity(key: &PhysicalKey) -> usize {
+    physical_key_framing_len(key)
+        .saturating_add(key.user_key().len())
+        .saturating_add(ESCAPED_TERMINATOR_LEN)
+}
+
+/// Branch id, NUL-terminated space, storage-space id — everything
+/// `append_physical_key` writes ahead of the escaped user key.
+fn physical_key_framing_len(key: &PhysicalKey) -> usize {
     BranchId::BYTE_LEN
         .saturating_add(key.space().len())
         .saturating_add(1)
         .saturating_add(1)
-        .saturating_add(key.user_key().len())
-        .saturating_add(2)
+}
+
+#[expect(
+    clippy::naive_bytecount,
+    reason = "one count per mutation over a user key, not a bulk scan — a SIMD dependency in the storage crate is not worth it here"
+)]
+fn escaped_encoded_len(source: &[u8]) -> usize {
+    source
+        .len()
+        .saturating_add(source.iter().filter(|byte| **byte == 0x00).count())
+        .saturating_add(ESCAPED_TERMINATOR_LEN)
 }
 
 fn decode_escaped(bytes: &[u8], field: &'static str) -> Result<(Vec<u8>, usize), FormatError> {
@@ -212,8 +247,9 @@ fn format_error_from_row_error(error: RowError) -> FormatError {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_internal_key, decode_physical_key, encode_internal_key, encode_physical_key,
-        internal_key_commit_version, FormatError, PHYSICAL_KEY_FORMAT,
+        append_physical_key, decode_internal_key, decode_physical_key, encode_internal_key,
+        encode_physical_key, internal_key_commit_version, physical_key_encode_capacity,
+        physical_key_encoded_len, FormatError, PHYSICAL_KEY_FORMAT,
     };
     use crate::row::{InternalKey, PhysicalKey, StorageSpaceId};
     use strata_core::{BranchId, CommitVersion};
@@ -311,5 +347,63 @@ mod tests {
                 remaining: 1
             })
         );
+    }
+
+    /// Commit admission refuses an oversized row by computing its length
+    /// instead of encoding it, so the computation has to agree with the
+    /// encoder byte-for-byte — under-counting admits a row the WAL cannot
+    /// write, over-counting refuses one it can (#3391).
+    #[test]
+    fn physical_key_encoded_len_matches_the_encoder() {
+        let user_keys: [Vec<u8>; 6] = [
+            Vec::new(),
+            b"alpha".to_vec(),
+            vec![0x00],
+            vec![0x00; 64],
+            vec![0x00, 0x41, 0x00, 0xff, 0x00],
+            (0u8..=255).collect(),
+        ];
+
+        for user_key in user_keys {
+            let key = key(user_key.clone());
+            assert_eq!(
+                physical_key_encoded_len(&key),
+                encode_physical_key(&key).len(),
+                "computed length disagrees with the encoder for {user_key:?}"
+            );
+        }
+    }
+
+    /// The capacity hint may under-reserve (a realloc) but must never claim
+    /// more than the encoding needs, or every key over-allocates.
+    #[test]
+    fn physical_key_encode_capacity_never_exceeds_the_encoded_length() {
+        for user_key in [Vec::new(), b"alpha".to_vec(), vec![0x00; 8]] {
+            let key = key(user_key.clone());
+            assert!(
+                physical_key_encode_capacity(&key) <= physical_key_encoded_len(&key),
+                "capacity hint over-reserves for {user_key:?}"
+            );
+        }
+    }
+
+    /// The hint's whole job is to let the common case encode in one
+    /// allocation — the escape encode pushes byte by byte, and growing from
+    /// empty reallocs several times per key on the hot path. That property is
+    /// invisible to every behavioural test (a wrong hint still encodes
+    /// correctly), so assert the allocation directly or nothing guards it.
+    #[test]
+    fn physical_key_encoding_does_not_reallocate_for_a_key_with_nothing_to_escape() {
+        let key = key(b"alpha".to_vec());
+        let mut bytes = Vec::with_capacity(physical_key_encode_capacity(&key));
+        let reserved = bytes.capacity();
+        append_physical_key(&key, &mut bytes);
+
+        assert_eq!(
+            bytes.capacity(),
+            reserved,
+            "encoding outgrew the reserve and reallocated"
+        );
+        assert_eq!(bytes.len(), reserved, "the reserve was larger than needed");
     }
 }

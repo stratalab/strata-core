@@ -3,6 +3,7 @@
 use super::{
     CommitAdmissionPressureFacts, CommitRuntimeConfig, CommitRuntimeError, CommitRuntimeResult,
 };
+use crate::format::{storage_row_encoded_len, MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES};
 use crate::observability::perf_trace;
 use crate::row::{PhysicalKey, StorageRow};
 use std::collections::HashSet;
@@ -620,6 +621,7 @@ fn validate_batch_shape(
     validate_duplicate_cas_facts(batch.validation.cas_set())?;
     validate_observed_versions(&batch.validation)?;
     validate_mutation_expiry(&batch.mutations)?;
+    validate_mutation_row_size(&batch.mutations)?;
     Ok(())
 }
 
@@ -734,6 +736,35 @@ fn validate_mutation_expiry(mutations: &[CommitMutation]) -> CommitRuntimeResult
     for mutation in mutations {
         if let Some(expires_at) = mutation.expires_at() {
             expires_at.to_storage_timestamp()?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a mutation whose encoded storage row is larger than one WAL commit
+/// payload row can hold.
+///
+/// The cap belongs to the durable format, but the refusal must not: cache mode
+/// never reaches the WAL encoder (hard rule 14), so without this check cache
+/// accepts rows durable mode cannot encode. Cache is the mode the quickstart,
+/// the compiled rustdoc examples and the browser playground all run, so the
+/// divergence surfaced at the moment of going to production — the worst
+/// possible time for it (#3391).
+///
+/// Both durability modes reach this through `CommitBatch::validate`, and the
+/// row length is exact rather than an upper bound, so this refuses no write
+/// that durable mode would have accepted.
+fn validate_mutation_row_size(mutations: &[CommitMutation]) -> CommitRuntimeResult<()> {
+    for mutation in mutations {
+        let row_len = storage_row_encoded_len(
+            mutation.physical_key(),
+            mutation.value().map_or(0, <[u8]>::len),
+        );
+        if row_len > MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES {
+            return Err(CommitRuntimeError::MutationTooLarge {
+                row_len,
+                max_row_len: MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
+            });
         }
     }
     Ok(())

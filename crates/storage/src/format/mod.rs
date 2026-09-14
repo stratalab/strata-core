@@ -64,7 +64,7 @@ pub(crate) use snapshot_timeline::{
     SnapshotTimelineBranchGroup, SnapshotTimelineEntry, SNAPSHOT_TIMELINE_SECTION_KIND,
     SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY,
 };
-pub(crate) use storage_row::{decode_storage_row, encode_storage_row};
+pub(crate) use storage_row::{decode_storage_row, encode_storage_row, storage_row_encoded_len};
 #[expect(
     unused_imports,
     reason = "immutable table artifact helpers are consumed by the table runtime layer"
@@ -101,6 +101,9 @@ pub(crate) use table_row_split_extension::{table_row_split_extension_section, Ta
     reason = "direct payload codec exports are used by payload fuzz/testkit routing after record integration"
 )]
 pub(crate) use wal::{decode_wal_commit_payload, encode_wal_commit_payload, WalCommitPayload};
+// Kept out of the `expect(unused_imports)` block above: commit admission reads
+// this on every mutation, so it is never unused in any configuration.
+pub(crate) use wal::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES;
 pub(crate) use wal::{
     decode_wal_record, decode_wal_record_envelope, decode_wal_segment_header,
     encode_wal_record_envelope_bytes_into, encode_wal_record_into_reusing,
