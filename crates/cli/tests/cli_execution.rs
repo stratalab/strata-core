@@ -751,8 +751,9 @@ fn writer_lock_is_exclusive_across_processes_and_releases_on_kill() {
         "contender must be refused while the holder owns the lock"
     );
     assert!(
-        stderr(&refused).contains("unavailable.engine.persistence"),
-        "cross-process contention must surface the typed persistence refusal: {}",
+        stderr(&refused).contains("failed_precondition.engine.writer_lock"),
+        "cross-process contention must surface its own typed refusal, not the \
+         generic persistence-unavailable code: {}",
         stderr(&refused)
     );
 

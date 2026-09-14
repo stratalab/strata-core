@@ -240,6 +240,7 @@ pub(super) fn map_lifecycle_error(error: LifecycleError) -> StorageApiError {
             field: "open_options",
             reason,
         },
+        LifecycleError::WriterLockHeld => StorageApiError::WriterLockHeld,
         LifecycleError::InvalidLifecycleState { reason }
         | LifecycleError::PinnedViewReleaseBlocked { reason, .. } => {
             StorageApiError::InvalidRuntimeState { reason }
@@ -445,8 +446,9 @@ pub(crate) fn map_maintenance_outcome_for_test(
 #[cfg(test)]
 mod tests {
     use super::{branch_error, commit_error, map_lifecycle_error};
-    use crate::api::{StorageApiErrorClass, StorageApiLowerLayer};
+    use crate::api::{StorageApiError, StorageApiErrorClass, StorageApiLowerLayer};
     use crate::branch::error::BranchRuntimeError;
+    use crate::lifecycle::LifecycleError;
 
     /// The real mapping — not a hand-built error — must carry the branch
     /// error's own code across the boundary. Before TCP3.2a this arm threw
@@ -579,6 +581,26 @@ mod tests {
         let read = commit_error_for(WalOperation::Read);
         assert_ne!(read.code(), "invalid_argument.storage_api.argument");
         assert_eq!(read.inner_code(), Some("internal.commit.wal_service"));
+    }
+
+    /// Writer-lock contention crosses the API boundary as its own code, not as
+    /// the `FailedPrecondition` class default. The IPC broker recognises this
+    /// exact code to decide whether to hand a command to a running host, and
+    /// `failed_precondition.storage_api.state` is shared with unrelated
+    /// preconditions (#3005, #3167).
+    #[test]
+    fn writer_lock_contention_crosses_the_boundary_as_its_own_code() {
+        let mapped = map_lifecycle_error(LifecycleError::WriterLockHeld);
+        assert_eq!(mapped.code(), "failed_precondition.storage_api.writer_lock");
+        assert_eq!(mapped.class(), StorageApiErrorClass::FailedPrecondition);
+        assert!(matches!(mapped, StorageApiError::WriterLockHeld));
+
+        // Direction control: an ordinary runtime-state failure keeps the shared
+        // class code, so the broker cannot mistake it for contention.
+        let other = map_lifecycle_error(LifecycleError::InvalidLifecycleState {
+            reason: "some other precondition",
+        });
+        assert_eq!(other.code(), "failed_precondition.storage_api.state");
     }
 
     /// The timeline arm has its own reason string but must still carry the

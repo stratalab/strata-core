@@ -242,6 +242,9 @@ the public registry when adding, renaming, or removing a public error code.
 <a id="failed_precondition.engine.storage_registry"></a>
 - `failed_precondition.engine.storage_registry`
 
+<a id="failed_precondition.engine.writer_lock"></a>
+- `failed_precondition.engine.writer_lock`
+
 <a id="failed_precondition.engine.vector_artifact"></a>
 - `failed_precondition.engine.vector_artifact`
 

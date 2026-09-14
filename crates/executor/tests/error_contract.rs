@@ -349,15 +349,19 @@ fn opening_a_pre_v1_layout_reports_layout_version_precondition() {
 /// retryable. A harness that only ever asserts `retryable=false` would be
 /// blind to the opposite misclassification.
 #[test]
-fn opening_a_locked_database_reports_retryable_unavailable() {
+fn opening_a_locked_database_reports_its_own_precondition_code() {
     let dir = tempfile::tempdir().expect("tmp");
     let root = dir.path().join("db");
     let holder = Executor::open_durable_local(&root).expect("first open holds the writer lock");
     let status = open_error(&root);
+    // NOT `unavailable.engine.persistence`, and NOT retryable-as-the-same-
+    // request: the lock is released by another opener, never by repeating the
+    // open. Its own code, because the IPC broker keys on exactly this string
+    // and the class code is shared with unrelated preconditions (#3005, #3167).
     assert_fixture(
         "second open while writer lock held",
         &status,
-        "unavailable.engine.persistence",
+        "failed_precondition.engine.writer_lock",
         true,
         &root,
     );
@@ -595,10 +599,10 @@ fn test_engine_error_crosses_with_the_row_and_only_its_site_facts() {
     let holder = Executor::open_durable_local(&root).expect("first open holds the writer lock");
     let status = open_error(&root);
     drop(holder);
-    let code = "unavailable.engine.persistence";
+    let code = "failed_precondition.engine.writer_lock";
     let entry = public_error_code_entries()
         .find(|entry| entry.code == code)
-        .expect("unavailable.engine.persistence is registered");
+        .expect("failed_precondition.engine.writer_lock is registered");
     assert_eq!(field(&status, "code"), code);
     assert_eq!(
         field(&status, "suggested_fix"),
@@ -622,8 +626,10 @@ fn test_engine_error_crosses_with_the_row_and_only_its_site_facts() {
         status.get("hints").is_none(),
         "held lock carries no restating hint: {status}"
     );
-    // The adapter's structured details (`layer`, `reason` for a lower-layer
-    // failure) are site-owned and cross the boundary.
+    // The adapter's structured details are site-owned and cross the boundary.
+    // A held writer lock no longer carries `layer`: it is a mapped condition
+    // now, not an unmapped lower-layer failure, which is the point of #3005 /
+    // #3167. It does carry `reason`, naming the condition.
     let detail_keys: Vec<&str> = status["details"]
         .as_array()
         .expect("site details survive the boundary")
@@ -631,7 +637,7 @@ fn test_engine_error_crosses_with_the_row_and_only_its_site_facts() {
         .map(|detail| field(detail, "key"))
         .collect();
     assert!(
-        detail_keys.contains(&"layer") && detail_keys.contains(&"reason"),
+        detail_keys.contains(&"reason"),
         "the adapter's site details reach the wire: {status}"
     );
 }

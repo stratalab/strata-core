@@ -58,13 +58,35 @@ fn next_backoff(backoff: Duration) -> Duration {
 }
 
 /// True when the error, or anything on its `source()` chain, is a backend
-/// `Unavailable` — the transient writer-lock/resource-pressure signal. The
-/// check is structural (downcast + `kind()`), never display text.
+/// signal a harness may absorb: `Unavailable` (resource pressure) or
+/// `AlreadyExists` (another opener holds the writer lock). The check is
+/// structural (downcast + `kind()`), never display text.
+///
+/// Contention became its own kind in #3005 / #3167 so the PRODUCT path can stop
+/// reporting it as a transient outage. This harness is the one place the header
+/// of `backend/local_fs.rs` sanctions retrying it, so it must recognise the new
+/// kind — otherwise a briefly-held lock fails a sweep that used to survive it.
 fn is_transient_unavailable<E: Error + 'static>(err: &E) -> bool {
     let mut current: Option<&(dyn Error + 'static)> = Some(err);
     while let Some(inner) = current {
+        // Contention is now a MAPPED condition at both the lifecycle and API
+        // layers, and neither variant carries the BackendError as a source, so
+        // the downcast-to-BackendError walk below can no longer see it. Match
+        // the mapped variants directly (#3005, #3167).
+        if matches!(
+            inner.downcast_ref::<crate::lifecycle::LifecycleError>(),
+            Some(crate::lifecycle::LifecycleError::WriterLockHeld)
+        ) || matches!(
+            inner.downcast_ref::<crate::api::StorageApiError>(),
+            Some(crate::api::StorageApiError::WriterLockHeld)
+        ) {
+            return true;
+        }
         if let Some(backend) = inner.downcast_ref::<BackendError>() {
-            return backend.kind() == BackendErrorKind::Unavailable;
+            return matches!(
+                backend.kind(),
+                BackendErrorKind::Unavailable | BackendErrorKind::AlreadyExists
+            );
         }
         current = inner.source();
     }

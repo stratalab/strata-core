@@ -28,7 +28,7 @@ use super::server::IpcServer;
 
 /// The engine's lock-contention wire code — the signal that another process
 /// owns the store (see the RFC trace: `local_fs` EWOULDBLOCK folds to this).
-const LOCK_CONTENTION_CODE: &str = "unavailable.engine.persistence";
+const LOCK_CONTENTION_CODE: &str = "failed_precondition.engine.writer_lock";
 /// Poll step while riding the owner start-up / shut-down window.
 const OPEN_RETRY_STEP: Duration = Duration::from_millis(25);
 /// Number of poll steps (≈ the ~250ms owner-close window, doubled for headroom).

@@ -1104,8 +1104,22 @@ impl Backend for LocalFsBackend {
             .write(true)
             .open(&path)
             .map_err(|err| map_io_error(&err))?;
-        file.try_lock_exclusive()
-            .map_err(|err| map_io_error(&err))?;
+        file.try_lock_exclusive().map_err(|err| {
+            // Contention is NOT a backend outage. `map_io_error` folds
+            // `WouldBlock` into `Unavailable`, which upstream reads as a
+            // transient failure worth retrying with the same request — but the
+            // lock is released by another opener, never by retrying. Classify
+            // it here rather than in `map_io_error`, whose `WouldBlock` mapping
+            // is correct for every other call site (#3005, #3167).
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                BackendError::new(
+                    BackendErrorKind::AlreadyExists,
+                    "writer lock is held by another opener",
+                )
+            } else {
+                map_io_error(&err)
+            }
+        })?;
         Ok(BackendWriterGuard::new(name.clone(), file))
     }
 
@@ -1322,7 +1336,12 @@ mod tests {
             .expect_err("second writer lock should be unavailable");
 
         assert_eq!(first_guard.object(), &lock_name);
-        assert_eq!(error.kind(), BackendErrorKind::Unavailable);
+        // NOT `Unavailable`: this module's own header states the contract —
+        // contention is the "another live opener" signal and must never be
+        // retried here. `Unavailable` is read upstream as a transient outage
+        // worth retrying with the same request, which cannot release a lock
+        // another opener holds (#3005, #3167).
+        assert_eq!(error.kind(), BackendErrorKind::AlreadyExists);
         assert_eq!(
             first_backend
                 .object_metadata(&lock_name)
@@ -1393,7 +1412,7 @@ mod tests {
         let contention = second_backend
             .acquire_writer_lock(&lock_name)
             .expect_err("generic mutation attempts must not bypass held lock");
-        assert_eq!(contention.kind(), BackendErrorKind::Unavailable);
+        assert_eq!(contention.kind(), BackendErrorKind::AlreadyExists);
 
         drop(guard);
         let second_guard = second_backend
