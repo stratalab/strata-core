@@ -789,6 +789,78 @@ mod tests {
         "internal",
     ];
 
+    /// Every remedy that is condition-specific rather than input advice is
+    /// pinned here.
+    ///
+    /// These rows exist because gating the substring chain on class would
+    /// otherwise have flattened them to their class default — "retry after the
+    /// required backend is available" for a vector artifact that needs
+    /// rebuilding, for a budget that needs raising, for a binding the format
+    /// does not support. Each is a remedy the caller can act on, and none is
+    /// derivable from the code's spelling, so each needs its own assertion or
+    /// it silently reverts to the generic advice (#3403).
+    ///
+    /// The class comes from the registry rather than being restated here: a
+    /// hand-copied class would be one more thing that can drift from what the
+    /// code actually resolves to.
+    #[test]
+    fn condition_specific_remedies_are_pinned_to_their_codes() {
+        let cases = [
+            ("failed_precondition.engine.writer_lock", "writer lock"),
+            (
+                "failed_precondition.engine.vector_artifact",
+                "Rebuild vector index artifacts",
+            ),
+            (
+                "failed_precondition.engine.vector_index_manifest",
+                "Rebuild vector index artifacts",
+            ),
+            (
+                "unavailable.engine.vector_artifacts",
+                "Rebuild vector index artifacts",
+            ),
+            (
+                "resource_exhausted.engine.persistence_budget",
+                "raise the configured resource budget",
+            ),
+            (
+                "resource_exhausted.engine.graph_analytics_budget",
+                "analytics budget",
+            ),
+            (
+                "unsupported.engine.persistence_capability",
+                "backend that supports",
+            ),
+            (
+                "unsupported.engine.graph_binding_cross_branch",
+                "not supported in V1",
+            ),
+        ];
+        let registered = registered_codes();
+
+        for (code, expected) in cases {
+            let Some((_, class)) = registered
+                .iter()
+                .find(|(registered_code, _)| *registered_code == code)
+            else {
+                panic!("{code} is not registered");
+            };
+            let class = *class;
+            let remedy = suggested_fix_for_code(code, class);
+
+            assert!(
+                remedy.contains(expected),
+                "{code} lost its condition-specific remedy (expected it to mention \
+                 {expected:?}, got {remedy:?}) — it has fallen back to a class default"
+            );
+            assert_ne!(
+                remedy,
+                class_suggested_fix(class),
+                "{code} resolves to its class default, so its own row is doing nothing"
+            );
+        }
+    }
+
     /// A remedy may not be shared between a data-integrity condition and a
     /// caller-input one.
     ///
