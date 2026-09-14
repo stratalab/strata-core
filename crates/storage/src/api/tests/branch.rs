@@ -986,6 +986,42 @@ fn checkpoint_over_a_snapshot_recovered_base_stays_self_contained() {
     );
 }
 
+/// Did a drain round make progress, or is the queue genuinely churning?
+///
+/// Two things count as progress, and the second is the one #2953 was missing:
+///
+/// - the queue shrank, or
+/// - a task is in flight. An active task cannot shrink the queue until it
+///   finishes, and while it holds its lane `next_startable_task_index` filters
+///   out every queued task sharing that lane — so `drain_maintenance` returns
+///   immediately having started nothing. That is waiting, not churn.
+///
+/// Pure so it can be truth-tabled directly; the drain loop reads its verdict.
+const fn drain_round_made_progress(
+    pending: usize,
+    previous: usize,
+    active_task: Option<u64>,
+) -> bool {
+    pending < previous || active_task.is_some()
+}
+
+#[test]
+fn a_drain_round_counts_an_in_flight_task_as_progress() {
+    // Shrinking is progress whether or not anything is active.
+    assert!(drain_round_made_progress(1, 2, None));
+    assert!(drain_round_made_progress(1, 2, Some(7)));
+
+    // #2953: not shrinking is NOT churn while a task is in flight — it holds
+    // its lane, so every queued task sharing that lane is unstartable.
+    assert!(drain_round_made_progress(1, 1, Some(7)));
+    assert!(drain_round_made_progress(2, 1, Some(7)));
+
+    // Neither shrinking nor waiting on anything: this is the churn the
+    // assertion exists to catch, and it must still be caught.
+    assert!(!drain_round_made_progress(1, 1, None));
+    assert!(!drain_round_made_progress(2, 1, None));
+}
+
 /// A branch-scoped compaction task legally races a branch delete: enqueued while the
 /// branch was live, drained after it was deleted. The stale task's target is gone —
 /// the drain must consume it as Canceled, not fail the drain and not record a
@@ -1058,6 +1094,16 @@ fn drain_cancels_branch_scoped_compaction_enqueued_before_the_branch_was_deleted
     // keep going while the queue is shrinking, and stop early only when it
     // stops shrinking, which is the churn this is meant to catch. The outer
     // bound is a safety net against an infinite loop, not the real condition.
+    //
+    // #2953: shrinking is not the only form of progress. A queued task whose
+    // lane is already occupied is pending-but-UNSTARTABLE:
+    // `next_startable_task_index` filters it out, `run_next_matching` returns
+    // `None`, and `drain_maintenance` therefore returns having done nothing
+    // while the queue is still non-empty. The count does not fall, and three
+    // such rounds used to be declared churn — which is why raising the round
+    // count twice (#2868, #3209) never fixed this: the blocker is a held lane,
+    // not elapsed time. An in-flight task is progress we cannot see in the
+    // queue length, so it is not churn.
     let safety_rounds = 64;
     let stalled_rounds_before_giving_up = 3;
     let mut pending = usize::MAX;
@@ -1086,8 +1132,10 @@ fn drain_cancels_branch_scoped_compaction_enqueued_before_the_branch_was_deleted
         if pending == 0 {
             break;
         }
-        // Shrinking is progress; not shrinking, repeatedly, is churn.
-        if pending < previous {
+        // Shrinking is progress; so is a task in flight, which cannot shrink
+        // the queue until it finishes. Only a queue that is neither shrinking
+        // nor waiting on anything is churning.
+        if drain_round_made_progress(pending, previous, status.active_task()) {
             stalled = 0;
         } else {
             stalled += 1;
