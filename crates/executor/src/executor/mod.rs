@@ -231,6 +231,38 @@ pub struct Executor {
 }
 
 impl Executor {
+    /// A scratch cache executor for capturing canonical examples: its
+    /// inference runtime reads neither the environment nor the user config
+    /// file, so what a capture records does not depend on the machine that ran
+    /// it.
+    ///
+    /// Captures used the default runtime, which reads both. On a machine that
+    /// had run `strata config set`, `inference status` captured
+    /// `ready -- key from /home/<user>/.config/strata/config.toml` — a
+    /// developer's absolute home path, in a corpus that feeds the published
+    /// reference pages — and the replay test failed there permanently while
+    /// staying green in CI, which has no such file (#3389).
+    ///
+    /// Not reachable through elision: `render_step` elides what differs
+    /// between two renders of the same wire output under different volatile
+    /// masks, and a provider setting is not a wire field, so both renders
+    /// agree and there is nothing to elide.
+    pub(crate) fn open_cache_for_capture() -> Result<Self, ExecutorError> {
+        #[cfg_attr(
+            not(feature = "inference"),
+            expect(
+                unused_mut,
+                reason = "the inference runtime is the only thing this overrides"
+            )
+        )]
+        let mut executor = Self::open_cache()?;
+        #[cfg(feature = "inference")]
+        {
+            executor.inference = Box::new(crate::inference_settings::isolated_inference_runtime());
+        }
+        Ok(executor)
+    }
+
     /// Opens a volatile cache-backed executor handle.
     pub fn open_cache() -> Result<Self, ExecutorError> {
         let outcome = Database::open_cache(CacheOpenOptions::new())?;

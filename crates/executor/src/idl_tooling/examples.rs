@@ -336,7 +336,7 @@ pub(super) fn verify_examples(
         let tmpdir = tempfile::tempdir()
             .map_err(|error| invalid(format!("example `{id}`: scratch dir failed: {error}")))?;
         let tmpdir_path = tmpdir.path().to_string_lossy();
-        let mut executor = Executor::open_cache().map_err(|error| {
+        let mut executor = Executor::open_cache_for_capture().map_err(|error| {
             invalid(format!("example `{id}`: scratch executor failed: {error}"))
         })?;
         let mut bindings = BTreeMap::new();
@@ -430,7 +430,7 @@ pub(super) fn capture_example_runs(
         let tmpdir = tempfile::tempdir()
             .map_err(|error| invalid(format!("example `{id}`: scratch dir failed: {error}")))?;
         let tmpdir_path = tmpdir.path().to_string_lossy();
-        let mut executor = Executor::open_cache().map_err(|error| {
+        let mut executor = Executor::open_cache_for_capture().map_err(|error| {
             invalid(format!("example `{id}`: scratch executor failed: {error}"))
         })?;
         let bindings = resolve_example_bindings(example, schemas);
@@ -699,7 +699,7 @@ fn resolve_example_bindings(
         return bindings;
     };
     let tmpdir_path = tmpdir.path().to_string_lossy();
-    let Ok(mut executor) = Executor::open_cache() else {
+    let Ok(mut executor) = Executor::open_cache_for_capture() else {
         return bindings;
     };
     for step in &example.steps {

@@ -49,6 +49,34 @@ pub fn default_inference_runtime() -> InferenceRuntime {
     InferenceRuntime::with_settings(InferenceRuntimeConfig::default(), settings)
 }
 
+/// An inference runtime that reads no provider settings at all — not the
+/// environment, not the user config file.
+///
+/// The state a fresh install is in, and the only one a captured example can
+/// reproduce. Capturing against the real sources wrote the capturing
+/// developer's own config path into `command-examples.json` — a corpus that
+/// feeds the published reference pages — and made the replay test fail
+/// permanently on any machine that had run `strata config set` (#3389).
+pub(crate) fn isolated_inference_runtime() -> InferenceRuntime {
+    InferenceRuntime::with_settings(
+        InferenceRuntimeConfig::default(),
+        Arc::new(NoProviderSettings),
+    )
+}
+
+/// Holds nothing, for [`isolated_inference_runtime`]. `base_url` takes the
+/// trait's `None` default.
+struct NoProviderSettings;
+
+impl strata_inference::ProviderSettings for NoProviderSettings {
+    fn key(
+        &self,
+        _provider: strata_inference::ProviderKind,
+    ) -> Option<strata_inference::ProviderKey> {
+        None
+    }
+}
+
 /// Environment first, then the user config file.
 #[cfg(feature = "hub")]
 struct EnvThenConfig<E> {
@@ -376,5 +404,66 @@ mod tests {
         };
         assert!(settings.key(ProviderKind::OpenAI).is_none());
         assert!(settings.base_url(ProviderKind::OpenAI).is_none());
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::{isolated_inference_runtime, InferenceRuntime};
+    use strata_inference::{InferenceStatus, ProviderKind};
+
+    fn openai_row(status: &InferenceStatus) -> &strata_inference::ProviderStatus {
+        status
+            .providers
+            .iter()
+            .find(|provider| provider.provider == ProviderKind::OpenAI)
+            .expect("openai is a catalogued provider")
+    }
+
+    /// The capture runtime ignores a provider key the default runtime finds.
+    ///
+    /// This is the property #3389 rests on, and it is only observable when a
+    /// provider setting is actually present — which is why the mutation gate
+    /// could replace `isolated_inference_runtime` with `Default::default()`
+    /// and survive: on a runner with no key set, an environment-reading
+    /// runtime and a no-settings runtime answer identically.
+    ///
+    /// So a key is set here. The first assertion is what stops the test being
+    /// vacuous: it proves the variable actually reached the default runtime,
+    /// so the second is a real difference rather than two runtimes agreeing
+    /// about nothing.
+    ///
+    /// The variable's NAME comes from the provider row rather than being
+    /// written here: which variable a provider reads is inference's to know,
+    /// and `inference_guards` forbids executor sources from naming one.
+    #[test]
+    fn the_capture_runtime_ignores_an_environment_key_the_default_runtime_finds() {
+        let baseline = InferenceRuntime::default().status();
+        let variable = openai_row(&baseline)
+            .key_env_var
+            .clone()
+            .expect("openai reads its key from a variable");
+
+        let restore = std::env::var(&variable).ok();
+        std::env::set_var(&variable, "sk-not-a-real-key");
+
+        let default = openai_row(&InferenceRuntime::default().status()).key_present;
+        let isolated = openai_row(&isolated_inference_runtime().status()).key_present;
+
+        match restore {
+            Some(value) => std::env::set_var(&variable, value),
+            None => std::env::remove_var(&variable),
+        }
+
+        assert!(
+            default,
+            "{variable} did not reach the default runtime, so this test proves \
+             nothing about isolation"
+        );
+        assert!(
+            !isolated,
+            "the capture runtime read the environment; a captured example would \
+             record the capturing machine's provider state"
+        );
     }
 }
