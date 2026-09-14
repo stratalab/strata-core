@@ -1129,6 +1129,38 @@ fn commit_runtime_error_equality_distinguishes_every_field() {
             reason: "something else",
         }
     );
+
+    // The key refusal carries two fields of its own, and each must break
+    // equality alone — an `or` here would let a refusal quoting the wrong size
+    // compare equal to the right one.
+    let key_refusal = CommitRuntimeError::MutationKeyTooLarge {
+        key_len: 100,
+        max_key_len: 64,
+    };
+    assert_eq!(
+        key_refusal,
+        CommitRuntimeError::MutationKeyTooLarge {
+            key_len: 100,
+            max_key_len: 64,
+        }
+    );
+    assert_ne!(
+        key_refusal,
+        CommitRuntimeError::MutationKeyTooLarge {
+            key_len: 101,
+            max_key_len: 64,
+        }
+    );
+    assert_ne!(
+        key_refusal,
+        CommitRuntimeError::MutationKeyTooLarge {
+            key_len: 100,
+            max_key_len: 65,
+        }
+    );
+    // And the row refusal and the key refusal are not each other, even at
+    // identical sizes: they send the caller to change different things.
+    assert_ne!(refusal, key_refusal);
     assert_ne!(
         CommitRuntimeError::InvalidBatch { reason: "a" },
         CommitRuntimeError::InvalidBatch { reason: "b" }
