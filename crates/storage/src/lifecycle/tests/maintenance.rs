@@ -540,6 +540,49 @@ fn checkpoint_tasks_do_not_coalesce_across_different_options() {
     assert_eq!(executor.stats().coalesced(), 1);
 }
 
+/// The mechanism behind the #2953 / #3182 drain flake, made deterministic.
+///
+/// `next_startable_task_index` filters out tasks whose lane is already at
+/// capacity, so a queued task sharing a lane with an ACTIVE one is
+/// pending-but-unstartable. `run_next_matching` then returns `None`, which is
+/// what ends `drain_maintenance`'s `while let Some(..)` loop — so a drain can
+/// return with a non-empty queue while making no progress at all.
+///
+/// No round count can clear that: the blocker is a held lane, not elapsed time,
+/// which is why raising the bound (#2868, #3209) did not fix the flake. A
+/// caller judging "the queue stopped shrinking" as CHURN must first ask whether
+/// something is in flight.
+#[test]
+fn a_queued_task_whose_lane_is_active_leaves_the_drain_with_work_it_cannot_start() {
+    let open = open_state();
+    let active =
+        MaintenanceTask::new_for_test(7, health_request(MaintenanceTaskPolicy::ordinary()))
+            .expect("active task");
+    let mut executor = LifecycleMaintenanceExecutor::new(4).expect("executor");
+    // Same kind, so the same lane: Health is single-occupancy.
+    executor.set_active_for_test(active);
+    executor
+        .enqueue(open, health_request(MaintenanceTaskPolicy::ordinary()))
+        .expect("queued task");
+
+    let mut runner = RecordingRunner::completed();
+    let ran = executor
+        .run_next_matching(open, &mut runner, |_| true)
+        .expect("running must not fail");
+
+    // Nothing ran, yet the queue is not empty: this is the exact observation
+    // the flaky test misreads as churn.
+    assert!(ran.is_none(), "the queued task's lane is occupied");
+    let status = executor.status();
+    assert_eq!(status.pending_tasks(), 1);
+    assert_eq!(
+        status.active_task(),
+        Some(active.id()),
+        "the in-flight task is observable, which is what distinguishes \
+         blocked-but-progressing from churn"
+    );
+}
+
 #[test]
 fn cancel_pending_does_not_cancel_active_task() {
     let closing = closing_state();
