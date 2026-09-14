@@ -434,6 +434,20 @@ impl<'a> BranchService<'a> {
     }
 
     /// Deletes an active product branch.
+    ///
+    /// **A durable database refuses while a fork still depends on this branch.**
+    /// A branch forked at a past version (`fork_at_version`, and other forks
+    /// whose rows were copied rather than layered) re-materializes those rows
+    /// from its source during recovery, so deleting the source would leave the
+    /// child unrecoverable. The refusal is
+    /// `failed_precondition.engine.branch_has_children`, and it is permanent
+    /// until the dependency is gone — delete the child branches first, oldest
+    /// leaf outwards.
+    ///
+    /// **A cache database has no such restriction.** Cache mode has no
+    /// recovery to protect, so it deletes a fork source while its children
+    /// live. Code written against cache mode therefore needs the durable
+    /// ordering added before it runs against a durable database (#3196).
     pub fn delete(&mut self, name: &BranchName) -> Result<BranchDeleteOutcome, EngineError> {
         self.control.require_healthy()?;
         if name == self.control.default_branch() {

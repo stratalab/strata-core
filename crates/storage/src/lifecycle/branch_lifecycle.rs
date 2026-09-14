@@ -814,11 +814,7 @@ impl LifecycleBranchCatalog {
                 _ => true,
             };
             if depends {
-                return Err(LifecycleError::BranchNotWritable {
-                    branch_id,
-                    state: "fork source of a live branch whose recovery depends on it; \
-                            delete or materialize its children first",
-                });
+                return Err(LifecycleError::BranchHasRecoveryDependentChildren { branch_id });
             }
         }
         Ok(())
