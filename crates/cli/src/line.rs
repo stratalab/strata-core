@@ -91,6 +91,33 @@ impl SessionLine {
 mod tests {
     use super::*;
 
+    /// The refusal for malformed JSON (#2571) tells the reader to wrap the
+    /// document in single quotes inside the REPL. That advice is only true if
+    /// the tokenizer actually preserves double quotes inside single ones — so
+    /// it is checked here rather than asserted in a message.
+    #[test]
+    fn single_quotes_preserve_a_json_document_through_the_tokenizer() {
+        let quoted = words(r#"json set profile $ '{"name":"Ada"}'"#)
+            .expect("parses")
+            .expect("has words");
+        assert_eq!(
+            quoted.last().expect("a value word"),
+            r#"{"name":"Ada"}"#,
+            "single quoting must hand the JSON through with its double quotes intact"
+        );
+
+        // And the unquoted form is what loses them — the input that made this
+        // bug. The tokenizer is shell-shaped, so the JSON quoting is consumed.
+        let bare = words(r#"json set profile $ {"name":"Ada"}"#)
+            .expect("parses")
+            .expect("has words");
+        assert_eq!(
+            bare.last().expect("a value word"),
+            "{name:Ada}",
+            "the bare form loses its quotes; the parse layer must refuse the result"
+        );
+    }
+
     fn parse(line: &str) -> Result<SessionLine, CliError> {
         SessionLine::parse(words(line).expect(line).expect("the line has words"))
     }

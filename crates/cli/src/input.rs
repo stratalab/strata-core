@@ -61,8 +61,33 @@ pub(crate) fn parse_relaxed_json_argument(
             strata_executor::guard_json_integers(&text).map_err(CliError::from)?;
             Ok(parsed)
         }
+        // Shaped like JSON and did not parse: a malformed document, not someone
+        // meaning a string. Storing it as one loses the write in silence, which
+        // is how `{"name":"Ada"}` typed at the REPL became the string
+        // `{name:Ada}` — shlex ate the quotes — and a later `$.name` read nil
+        // with no error anywhere (#2571).
+        Err(error) if looks_like_json_structure(&text) => Err(CliError::usage(format!(
+            "{label} looks like JSON but does not parse: {error}. Quote it to store it as \
+             text, or fix the document — inside the REPL, wrap JSON in single quotes \
+             (`json set doc $ '{{\"name\":\"Ada\"}}'`) so the shell-style tokenizer keeps \
+             its double quotes."
+        ))),
         Err(_) => Ok(Value::String(text)),
     }
+}
+
+/// Whether `text` is *shaped* like a JSON object, array or string — the forms a
+/// caller writes on purpose rather than as incidental prose.
+///
+/// Deliberately structural rather than a parse attempt: the question is what
+/// the caller MEANT, and a leading `{`, `[` or `"` answers it. Bare words,
+/// numbers and sentences stay strings under the relaxed contract even when they
+/// fail to parse.
+fn looks_like_json_structure(text: &str) -> bool {
+    matches!(
+        text.trim_start().as_bytes().first(),
+        Some(b'{' | b'[' | b'"')
+    )
 }
 
 pub(crate) fn parse_json_argument(
@@ -183,6 +208,69 @@ mod tests {
             parse_relaxed_json_argument(Some("order 18446744073709551616 shipped"), None, "v")
                 .expect("plain string stored"),
             Value::String("order 18446744073709551616 shipped".to_owned())
+        );
+    }
+
+    /// `json set` accepts non-JSON text as a plain string — that is the point
+    /// of the relaxed parse, so `json set doc $ hello` stores `"hello"`. But
+    /// text that is *shaped* like JSON and fails to parse is not someone
+    /// meaning a string; it is a malformed document, and storing it as a string
+    /// loses the write silently.
+    ///
+    /// The REPL is where this bites. Its tokenizer is `shlex`, so typing
+    /// `json set profile $ {"name":"Ada"}` hands the parser `{name:Ada}` —
+    /// the shell quoting ate the JSON quoting — which parsed as nothing, stored
+    /// as the string `{name:Ada}`, and made a later `json get profile $.name`
+    /// return nil with no error anywhere (#2571).
+    #[test]
+    fn relaxed_json_refuses_text_shaped_like_json_that_does_not_parse() {
+        // What the REPL actually hands over after shlex eats the quotes.
+        let error = parse_relaxed_json_argument(Some("{name:Ada}"), None, "json value")
+            .expect_err("a malformed object is not a string");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("quote"),
+            "the remedy must mention quoting, which is how the REPL loses them: {rendered}"
+        );
+
+        for malformed in [
+            "[1, 2",
+            "{\"a\": }",
+            "[\"a\", ]",
+            "{a:1}",
+            // A leading double quote is the third JSON-structural opener.
+            "\"unterminated",
+            // Leading whitespace must not hide the shape.
+            "   {name:Ada}",
+            "\t[1, 2",
+        ] {
+            assert!(
+                parse_relaxed_json_argument(Some(malformed), None, "json value").is_err(),
+                "{malformed:?} is shaped like JSON and does not parse"
+            );
+        }
+
+        // Direction control: plain text is still a string, and well-formed JSON
+        // is still parsed. The relaxed contract is intact for everything that
+        // is not an unparseable structure.
+        assert_eq!(
+            parse_relaxed_json_argument(Some("hello"), None, "json value").expect("plain string"),
+            Value::String("hello".to_owned())
+        );
+        assert_eq!(
+            parse_relaxed_json_argument(Some("order 42 shipped"), None, "json value")
+                .expect("plain string with digits"),
+            Value::String("order 42 shipped".to_owned())
+        );
+        assert_eq!(
+            parse_relaxed_json_argument(Some(r#"{"name":"Ada"}"#), None, "json value")
+                .expect("well-formed object"),
+            serde_json::json!({"name": "Ada"})
+        );
+        assert_eq!(
+            parse_relaxed_json_argument(Some("[1,2,3]"), None, "json value")
+                .expect("well-formed array"),
+            serde_json::json!([1, 2, 3])
         );
     }
 
