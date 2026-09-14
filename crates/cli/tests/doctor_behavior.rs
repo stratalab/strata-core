@@ -29,9 +29,20 @@ fn bin_dir() -> PathBuf {
 
 /// Runs `strata --json [--db <db>] doctor` with a controlled environment,
 /// returning the parsed report and exit code. The base environment is healthy —
-/// the binary's own directory on `PATH`, no stray `STRATA_HOME`/`STRATA_DB` —
-/// so each test perturbs exactly one axis to trigger exactly one issue.
+/// the binary's own directory on `PATH`, no stray `STRATA_HOME`/`STRATA_DB`,
+/// and an empty config directory — so each test perturbs exactly one axis to
+/// trigger exactly one issue.
+///
+/// `XDG_CONFIG_HOME` is pointed at a scratch directory rather than REMOVED.
+/// Removing it does not neutralise the environment: the config path comes from
+/// `dirs::config_dir()`, which falls back to `$HOME/.config` when the variable
+/// is absent, so removing it guaranteed the developer's real
+/// `~/.config/strata/config.toml` was read. A machine that had ever run
+/// `strata config set` saw a stored provider key here and
+/// `a_default_install_reports_inference_without_calling_it_broken` failed —
+/// permanently, and only locally, since CI has no such file (#3398).
 fn run_doctor(env: &[(&str, Option<&OsStr>)], db: Option<&Path>) -> (Value, i32) {
+    let config_home = tempfile::tempdir().expect("scratch config home");
     let mut cmd = Command::new(bin());
     cmd.arg("--json");
     if let Some(db) = db {
@@ -42,7 +53,7 @@ fn run_doctor(env: &[(&str, Option<&OsStr>)], db: Option<&Path>) -> (Value, i32)
         .env("PATH", bin_dir())
         .env_remove("STRATA_HOME")
         .env_remove("STRATA_DB")
-        .env_remove("XDG_CONFIG_HOME");
+        .env("XDG_CONFIG_HOME", config_home.path());
     for (key, value) in env {
         match value {
             Some(value) => cmd.env(key, value),
@@ -250,6 +261,46 @@ fn an_empty_api_key_variable_is_reported_as_an_issue() {
         "an empty key variable is a real misconfiguration: {report}"
     );
     assert_ne!(code, 0, "doctor exits non-zero when it finds an issue");
+}
+
+/// A key in the config file is found, not only one in the environment.
+///
+/// Every other readiness assertion here supplies the key through an environment
+/// variable, so nothing covered the stored-key path at all — which is how
+/// `run_doctor` could read the developer's real config for as long as it did
+/// without any test being *about* config reading (#3398).
+///
+/// This is also the positive half of the isolation fix: it proves the harness
+/// can point `doctor` at a config and have it read, so the default case
+/// reporting nothing ready means "no config", not "config never consulted".
+#[test]
+fn a_stored_provider_key_is_reported_ready() {
+    let config_home = tempfile::tempdir().expect("scratch config home");
+    let strata_dir = config_home.path().join("strata");
+    std::fs::create_dir_all(&strata_dir).expect("config dir");
+    std::fs::write(
+        strata_dir.join("config.toml"),
+        "[providers.openai]\napi_key = \"sk-not-a-real-key\"\n",
+    )
+    .expect("write config");
+
+    let (report, _) = run_doctor(
+        &[
+            ("OPENAI_API_KEY", None),
+            ("ANTHROPIC_API_KEY", None),
+            ("GOOGLE_API_KEY", None),
+            ("XDG_CONFIG_HOME", Some(config_home.path().as_os_str())),
+        ],
+        None,
+    );
+
+    let ready = report["data"]["inference"]["ready_providers"]
+        .as_array()
+        .expect("ready providers array");
+    assert!(
+        ready.iter().any(|provider| provider == "openai"),
+        "a key stored in the config file must count as ready: {report}"
+    );
 }
 
 /// A key with a value makes its provider ready, and keeps doctor green.
