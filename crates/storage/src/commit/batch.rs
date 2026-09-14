@@ -3,7 +3,10 @@
 use super::{
     CommitAdmissionPressureFacts, CommitRuntimeConfig, CommitRuntimeError, CommitRuntimeResult,
 };
-use crate::format::{storage_row_encoded_len, MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES};
+use crate::format::{
+    internal_key_encoded_len, storage_row_encoded_len, MAX_TABLE_KEY_BYTES,
+    MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
+};
 use crate::observability::perf_trace;
 use crate::row::{PhysicalKey, StorageRow};
 use std::collections::HashSet;
@@ -621,7 +624,7 @@ fn validate_batch_shape(
     validate_duplicate_cas_facts(batch.validation.cas_set())?;
     validate_observed_versions(&batch.validation)?;
     validate_mutation_expiry(&batch.mutations)?;
-    validate_mutation_row_size(&batch.mutations)?;
+    validate_mutation_encodable_size(&batch.mutations)?;
     Ok(())
 }
 
@@ -741,8 +744,12 @@ fn validate_mutation_expiry(mutations: &[CommitMutation]) -> CommitRuntimeResult
     Ok(())
 }
 
-/// Refuse a mutation whose encoded storage row is larger than one WAL commit
-/// payload row can hold.
+/// Refuse a mutation the durable artifacts below could never encode.
+///
+/// Two independent caps, because two different artifacts impose them: the WAL
+/// bounds a whole encoded row, and a table data block bounds an encoded
+/// internal key. A key can breach the second while its row sits far inside the
+/// first, so neither check subsumes the other.
 ///
 /// The cap belongs to the durable format, but the refusal must not: cache mode
 /// never reaches the WAL encoder (hard rule 14), so without this check cache
@@ -751,11 +758,24 @@ fn validate_mutation_expiry(mutations: &[CommitMutation]) -> CommitRuntimeResult
 /// divergence surfaced at the moment of going to production — the worst
 /// possible time for it (#3391).
 ///
-/// Both durability modes reach this through `CommitBatch::validate`, and the
-/// row length is exact rather than an upper bound, so this refuses no write
-/// that durable mode would have accepted.
-fn validate_mutation_row_size(mutations: &[CommitMutation]) -> CommitRuntimeResult<()> {
+/// The key cap is worse than a mode divergence when it is missed: the WAL
+/// accepts an oversized key, so the write is ACKNOWLEDGED, and the branch's
+/// next rotation then cannot build its table — after which the branch refuses
+/// every write, including small unrelated ones, until the database is reopened
+/// (#3396). Admission is the only place the caller can still be told.
+///
+/// Both durability modes reach this through `CommitBatch::validate`, and both
+/// lengths are exact rather than upper bounds, so this refuses no write that
+/// durable mode would have accepted.
+fn validate_mutation_encodable_size(mutations: &[CommitMutation]) -> CommitRuntimeResult<()> {
     for mutation in mutations {
+        let key_len = internal_key_encoded_len(mutation.physical_key());
+        if key_len > MAX_TABLE_KEY_BYTES {
+            return Err(CommitRuntimeError::MutationKeyTooLarge {
+                key_len,
+                max_key_len: MAX_TABLE_KEY_BYTES,
+            });
+        }
         let row_len = storage_row_encoded_len(
             mutation.physical_key(),
             mutation.value().map_or(0, <[u8]>::len),

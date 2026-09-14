@@ -34,7 +34,7 @@ pub(crate) use branch_catalog_manifest::{
 };
 pub(crate) use key::{
     append_internal_key_from_physical, decode_internal_key, encode_internal_key,
-    encode_physical_key,
+    encode_physical_key, internal_key_encoded_len,
 };
 pub(crate) use manifest::{decode_manifest, encode_manifest, DatabaseManifest};
 pub(crate) use pending_releases_manifest::{
@@ -65,6 +65,7 @@ pub(crate) use snapshot_timeline::{
     SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY,
 };
 pub(crate) use storage_row::{decode_storage_row, encode_storage_row, storage_row_encoded_len};
+
 #[expect(
     unused_imports,
     reason = "immutable table artifact helpers are consumed by the table runtime layer"
