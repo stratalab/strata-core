@@ -61,6 +61,7 @@ errors:
   - failed_precondition.engine.embedding_model_mismatch
   - failed_precondition.engine.embedding_model_missing
   - failed_precondition.engine.space_not_empty
+  - failed_precondition.engine.branch_has_children
   - failed_precondition.engine.writer_lock
   - already_exists.engine.graph
   - not_found.engine.graph

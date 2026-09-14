@@ -135,6 +135,7 @@ const CONFLICT_CODES: &[&str] = &[
     "conflict.engine.branch_generation",
     "conflict.engine.persistence",
     "conflict.engine.promotion",
+    "failed_precondition.engine.branch_has_children",
     "failed_precondition.engine.graph_negative_weight",
     "failed_precondition.engine.graph_ontology_edge_type",
     "failed_precondition.engine.graph_ontology_endpoint_type",
@@ -476,6 +477,14 @@ fn class_prefixed_suggested_fix(code: &str) -> Option<&'static str> {
         }
         "invalid_argument.engine.embedding_model" => {
             "Use a non-empty model id such as `openai:text-embedding-3-small` or `miniLM`."
+        }
+        // #3196: waiting never clears this — a fork's recovery re-materializes
+        // from its source, so the source stays undeletable until the children
+        // that depend on it are gone. The class fallback ("reload current
+        // state and retry") describes a different failure entirely.
+        "failed_precondition.engine.branch_has_children" => {
+            "Delete the child branches forked from this one (or materialize them) before \
+             deleting the source."
         }
         "not_found.engine.branch" => {
             "List branches or use the default branch, then retry with an existing branch name."

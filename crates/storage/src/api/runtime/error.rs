@@ -300,6 +300,9 @@ pub(super) fn map_lifecycle_error(error: LifecycleError) -> StorageApiError {
         LifecycleError::BranchNotWritable { state, .. } => {
             StorageApiError::InvalidRuntimeState { reason: state }
         }
+        LifecycleError::BranchHasRecoveryDependentChildren { branch_id } => {
+            StorageApiError::BranchHasDependentChildren { branch_id }
+        }
         LifecycleError::BranchGenerationExhausted { .. } => StorageApiError::InvalidRuntimeState {
             reason: "branch generation is exhausted",
         },
@@ -672,6 +675,52 @@ mod tests {
             KEY_TOO_LARGE_REASON, ROW_TOO_LARGE_REASON,
             "the two refusals must not be indistinguishable: their remedies differ"
         );
+    }
+
+    /// A fork source with live recovery-dependent children crosses the
+    /// boundary as its own code.
+    ///
+    /// It used to arrive as the class-generic
+    /// `failed_precondition.storage_api.state`, which the engine renders as
+    /// "persistence is temporarily unable to accept the request" with a
+    /// wait-and-retry remedy — so callers retried a permanent DAG constraint.
+    /// The whole-database simulation had to string-match the reason prefix to
+    /// tell this refusal from a real error (#3196).
+    #[test]
+    fn a_fork_source_with_dependent_children_crosses_the_boundary_as_its_own_code() {
+        use strata_core::BranchId;
+
+        let branch_id = BranchId::from_bytes([0x33; BranchId::BYTE_LEN]);
+        let lifecycle = LifecycleError::BranchHasRecoveryDependentChildren { branch_id };
+        assert_eq!(
+            lifecycle.code(),
+            "failed_precondition.lifecycle.branch_dependent_children"
+        );
+        assert_ne!(
+            lifecycle.code(),
+            LifecycleError::BranchNotWritable {
+                branch_id,
+                state: "something else",
+            }
+            .code(),
+            "the dependency refusal must not share the generic not-writable code"
+        );
+
+        let refusal = map_lifecycle_error(lifecycle);
+
+        assert_eq!(
+            refusal.code(),
+            "failed_precondition.storage_api.branch_dependent_children"
+        );
+        assert_eq!(refusal.class(), StorageApiErrorClass::FailedPrecondition);
+        assert!(matches!(
+            refusal,
+            StorageApiError::BranchHasDependentChildren { branch_id: reported }
+                if reported == branch_id
+        ));
+        // It must NOT collapse into the generic state code, which is shared
+        // with branch-not-writable, guard-unavailable and quiesce-unavailable.
+        assert_ne!(refusal.code(), "failed_precondition.storage_api.state");
     }
 
     /// Writer-lock contention crosses the API boundary as its own code, not as

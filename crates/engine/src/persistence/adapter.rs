@@ -1241,6 +1241,10 @@ const fn persistence_code(error: &StorageApiError) -> (&'static str, &'static st
             "corruption.engine.persistence_recovery",
             "persistence recovery reported degraded state",
         ),
+        StorageApiError::BranchHasDependentChildren { .. } => (
+            "failed_precondition.engine.branch_has_children",
+            "branch is the source of a fork that still depends on it",
+        ),
         StorageApiError::LowerLayer { .. } => (
             "unavailable.engine.persistence",
             "persistence lower layer is unavailable",
@@ -1338,7 +1342,8 @@ fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
             details.push(ErrorDetail::new("reason", *reason));
         }
         StorageApiError::BranchNotFound { branch_id }
-        | StorageApiError::BranchAlreadyExists { branch_id } => {
+        | StorageApiError::BranchAlreadyExists { branch_id }
+        | StorageApiError::BranchHasDependentChildren { branch_id } => {
             details.push(ErrorDetail::new("branch_id", branch_id.to_string()));
         }
         StorageApiError::BranchGenerationMismatch {

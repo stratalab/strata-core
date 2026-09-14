@@ -1228,7 +1228,11 @@ fn branch_delete_refused_while_layerless_fork_children_live() {
     let error = runtime
         .branch(&branch_request(parent, BranchAction::Delete))
         .expect_err("deleting the layer-less fork's source must refuse");
-    assert_eq!(error.code(), "failed_precondition.storage_api.state");
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.branch_dependent_children",
+        "the refusal must name the dependency, not the generic state class (#3196)"
+    );
 
     // Direction control: once the dependent child is gone, the parent
     // delete proceeds.
@@ -1355,7 +1359,11 @@ fn fork_parent_deletion_cannot_brick_recovery() {
         let error = runtime
             .branch(&branch_request(parent, BranchAction::Delete))
             .expect_err("deleting the historical fork's source must refuse");
-        assert_eq!(error.code(), "failed_precondition.storage_api.state");
+        assert_eq!(
+            error.code(),
+            "failed_precondition.storage_api.branch_dependent_children",
+            "the refusal must name the dependency, not the generic state class (#3196)"
+        );
     }
 
     let backend = StorageBackend::local_fs(root);

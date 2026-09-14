@@ -185,6 +185,9 @@ the public registry when adding, renaming, or removing a public error code.
 <a id="data_loss.engine.vector_record"></a>
 - `data_loss.engine.vector_record`
 
+<a id="failed_precondition.engine.branch_has_children"></a>
+- `failed_precondition.engine.branch_has_children`
+
 <a id="failed_precondition.engine.branch_status"></a>
 - `failed_precondition.engine.branch_status`
 

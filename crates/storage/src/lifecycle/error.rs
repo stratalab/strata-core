@@ -37,6 +37,17 @@ pub(crate) enum LifecycleError {
         branch_id: BranchId,
         state: &'static str,
     },
+    /// The branch is the source of a live fork whose RECOVERY re-materializes
+    /// from it, so deleting it would arm a permanent recovery failure.
+    ///
+    /// Separate from `BranchNotWritable` because it is not a transient state
+    /// the caller waits out: it is a DAG constraint with a specific remedy —
+    /// delete or materialize the children first. Folded into the generic
+    /// not-writable state it reached callers as "temporarily unable to accept
+    /// the request" and sent them into a retry loop (#3196).
+    BranchHasRecoveryDependentChildren {
+        branch_id: BranchId,
+    },
     BranchGenerationMismatch {
         branch_id: BranchId,
         expected: u64,
@@ -430,6 +441,9 @@ impl LifecycleError {
             Self::BranchAlreadyExists { .. } => "already_exists.lifecycle.branch",
             Self::BranchNotFound { .. } => "not_found.lifecycle.branch",
             Self::BranchNotWritable { .. } => "failed_precondition.lifecycle.branch",
+            Self::BranchHasRecoveryDependentChildren { .. } => {
+                "failed_precondition.lifecycle.branch_dependent_children"
+            }
             Self::BranchGenerationMismatch { .. } => {
                 "failed_precondition.lifecycle.branch_generation"
             }
@@ -730,6 +744,14 @@ impl PartialEq for LifecycleError {
                 Self::SourceHasUnflushedRows {
                     branch_id: right_branch,
                 },
+            )
+            | (
+                Self::BranchHasRecoveryDependentChildren {
+                    branch_id: left_branch,
+                },
+                Self::BranchHasRecoveryDependentChildren {
+                    branch_id: right_branch,
+                },
             ) => left_branch == right_branch,
             (
                 Self::BranchNotWritable {
@@ -979,6 +1001,12 @@ impl fmt::Display for LifecycleError {
             }
             Self::BranchNotWritable { branch_id, state } => {
                 write!(formatter, "branch {branch_id} is not writable: {state}")
+            }
+            Self::BranchHasRecoveryDependentChildren { branch_id } => {
+                write!(
+                    formatter,
+                    "branch {branch_id} is the source of a live fork whose recovery depends on it"
+                )
             }
             Self::BranchGenerationMismatch {
                 branch_id,

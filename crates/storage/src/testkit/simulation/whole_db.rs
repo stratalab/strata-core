@@ -424,12 +424,16 @@ impl WholeDbSim {
                         book.delete_acked = true;
                         self.facts.deletes += 1;
                     }
-                    Err(crate::api::StorageApiError::InvalidRuntimeState { reason })
-                        if reason.starts_with("fork source of a live branch") =>
-                    {
+                    Err(crate::api::StorageApiError::BranchHasDependentChildren { .. }) => {
                         // DUR-008 (#2820): deleting a fork source that a
                         // layer-less child's recovery depends on is refused.
                         // A seeded no-op; the branch stays alive.
+                        //
+                        // Matched on the typed variant, not on a prefix of the
+                        // reason string — the string was the only discriminant
+                        // until #3196 gave the condition its own variant, and a
+                        // reworded reason would have silently reclassified the
+                        // refusal as a hard error here.
                         self.facts.deletes_refused += 1;
                     }
                     Err(err) => return Err(self.error(step, format!("delete: {err:?}"))),

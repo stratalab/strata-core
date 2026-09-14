@@ -89,6 +89,18 @@ pub enum StorageApiError {
         expected: u64,
         actual: u64,
     },
+    /// The branch is the source of a live fork whose recovery re-materializes
+    /// from it.
+    ///
+    /// Distinct from `InvalidRuntimeState` on purpose: that variant's code is
+    /// the whole class's generic one, and the engine turns it into
+    /// "persistence is temporarily unable to accept the request" with a
+    /// wait-and-retry remedy. This condition is not transient and waiting
+    /// never clears it — the caller has to delete or materialize the children
+    /// (#3196).
+    BranchHasDependentChildren {
+        branch_id: BranchId,
+    },
     Conflict {
         branch_id: BranchId,
         storage_space: Option<u8>,
@@ -161,6 +173,9 @@ impl StorageApiError {
             Self::BranchGenerationMismatch { .. } => {
                 "failed_precondition.storage_api.branch_generation"
             }
+            Self::BranchHasDependentChildren { .. } => {
+                "failed_precondition.storage_api.branch_dependent_children"
+            }
             Self::Conflict { .. } => "conflict.storage_api.conflict",
             Self::RetainedHistoryUnavailable { .. } => "history_unavailable.storage_api.retained",
             Self::TimestampHistoryUnavailable { .. } => "history_unavailable.storage_api.timestamp",
@@ -207,6 +222,9 @@ impl StorageApiError {
             Self::BranchGenerationMismatch { .. } => {
                 "Reload the current branch generation and retry with the expected generation."
             }
+            Self::BranchHasDependentChildren { .. } => {
+                "Delete or materialize the branches forked from this one, then retry the delete."
+            }
             Self::Conflict { .. } => {
                 "Re-read the conflicting key and retry the commit against the current version."
             }
@@ -247,6 +265,7 @@ impl StorageApiError {
             Self::InvalidRuntimeState { .. }
             | Self::WriterLockHeld
             | Self::BranchGenerationMismatch { .. }
+            | Self::BranchHasDependentChildren { .. }
             | Self::MaintenanceRejected { .. }
             | Self::StoragePressure { .. }
             | Self::RecoveryDegraded { .. }
@@ -352,6 +371,10 @@ impl fmt::Display for StorageApiError {
             Self::BranchAlreadyExists { branch_id } => {
                 write!(formatter, "branch {branch_id} already exists")
             }
+            Self::BranchHasDependentChildren { branch_id } => write!(
+                formatter,
+                "branch {branch_id} is the source of a live fork whose recovery depends on it"
+            ),
             Self::BranchGenerationMismatch {
                 branch_id,
                 expected,
