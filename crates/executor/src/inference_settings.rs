@@ -49,6 +49,34 @@ pub fn default_inference_runtime() -> InferenceRuntime {
     InferenceRuntime::with_settings(InferenceRuntimeConfig::default(), settings)
 }
 
+/// An inference runtime that reads no provider settings at all — not the
+/// environment, not the user config file.
+///
+/// The state a fresh install is in, and the only one a captured example can
+/// reproduce. Capturing against the real sources wrote the capturing
+/// developer's own config path into `command-examples.json` — a corpus that
+/// feeds the published reference pages — and made the replay test fail
+/// permanently on any machine that had run `strata config set` (#3389).
+pub(crate) fn isolated_inference_runtime() -> InferenceRuntime {
+    InferenceRuntime::with_settings(
+        InferenceRuntimeConfig::default(),
+        Arc::new(NoProviderSettings),
+    )
+}
+
+/// Holds nothing, for [`isolated_inference_runtime`]. `base_url` takes the
+/// trait's `None` default.
+struct NoProviderSettings;
+
+impl strata_inference::ProviderSettings for NoProviderSettings {
+    fn key(
+        &self,
+        _provider: strata_inference::ProviderKind,
+    ) -> Option<strata_inference::ProviderKey> {
+        None
+    }
+}
+
 /// Environment first, then the user config file.
 #[cfg(feature = "hub")]
 struct EnvThenConfig<E> {
