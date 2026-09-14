@@ -10,7 +10,12 @@ const WAL_COMMIT_PAYLOAD_MAGIC: [u8; 4] = *b"STCP";
 const WAL_COMMIT_PAYLOAD_FORMAT_VERSION: u32 = 1;
 const MAX_WAL_COMMIT_PAYLOAD_ROWS: usize = 4096;
 const MAX_WAL_COMMIT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
-const MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES: usize = 16 * 1024 * 1024;
+/// The largest single encoded storage row a commit payload can carry.
+///
+/// Enforced here at encode time, and — because cache mode never reaches this
+/// encoder (hard rule 14) — again at commit admission, so a write cache mode
+/// accepts is a write durable mode accepts (#3391).
+pub(crate) const MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WalCommitPayload {

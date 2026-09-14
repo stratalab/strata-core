@@ -58,11 +58,17 @@ fn row_too_large_to_api(error: &WalServiceError) -> Option<StorageApiError> {
             ..
         } => Some(StorageApiError::InvalidArgument {
             field: "row",
-            reason: "a single committed row exceeds the maximum encodable size",
+            reason: ROW_TOO_LARGE_REASON,
         }),
         _ => None,
     }
 }
+
+/// Shared by both refusals of an oversized row — commit admission, which
+/// catches it in every durability mode, and the WAL encoder, which still
+/// catches the paths that do not pass through admission. One wording so the
+/// caller cannot tell, and need not care, which layer refused.
+const ROW_TOO_LARGE_REASON: &str = "a single committed row exceeds the maximum encodable size";
 
 pub(super) fn branch_error(error: crate::branch::error::BranchRuntimeError) -> StorageApiError {
     match error {
@@ -101,6 +107,15 @@ pub(super) fn commit_error(error: crate::commit::CommitRuntimeError) -> StorageA
             StorageApiError::InvalidArgument {
                 field: "commit",
                 reason,
+            }
+        }
+        // Word-for-word what `row_too_large_to_api` returns for the WAL
+        // encoder's own refusal, so the caller sees one contract regardless of
+        // which layer caught the oversized row (#3383, #3391).
+        crate::commit::CommitRuntimeError::MutationTooLarge { .. } => {
+            StorageApiError::InvalidArgument {
+                field: "row",
+                reason: ROW_TOO_LARGE_REASON,
             }
         }
         crate::commit::CommitRuntimeError::DuplicateMutationKey { .. } => {
@@ -445,7 +460,7 @@ pub(crate) fn map_maintenance_outcome_for_test(
 
 #[cfg(test)]
 mod tests {
-    use super::{branch_error, commit_error, map_lifecycle_error};
+    use super::{branch_error, commit_error, map_lifecycle_error, ROW_TOO_LARGE_REASON};
     use crate::api::{StorageApiError, StorageApiErrorClass, StorageApiLowerLayer};
     use crate::branch::error::BranchRuntimeError;
     use crate::lifecycle::LifecycleError;
@@ -581,6 +596,37 @@ mod tests {
         let read = commit_error_for(WalOperation::Read);
         assert_ne!(read.code(), "invalid_argument.storage_api.argument");
         assert_eq!(read.inner_code(), Some("internal.commit.wal_service"));
+    }
+
+    /// Commit admission now refuses an oversized row before the WAL encoder
+    /// ever sees it, in every durability mode (#3391). That refusal has to
+    /// cross the API boundary as the same caller error the encoder's own
+    /// refusal produces — unmapped it falls through to `LowerLayer`, which is
+    /// class `Unavailable`, and the retry-forever bug of #3383 comes back by
+    /// the new route.
+    #[test]
+    fn an_admission_size_refusal_maps_to_the_same_caller_error_as_the_encoder() {
+        use crate::commit::CommitRuntimeError;
+
+        let admission = commit_error(CommitRuntimeError::MutationTooLarge {
+            row_len: 16 * 1024 * 1024 + 1,
+            max_row_len: 16 * 1024 * 1024,
+        });
+
+        assert_eq!(admission.code(), "invalid_argument.storage_api.argument");
+        assert_eq!(
+            admission.class(),
+            super::super::StorageApiErrorClass::InvalidArgument
+        );
+        // Same field and wording as `row_too_large_to_api`, so a caller cannot
+        // tell which layer refused.
+        assert!(matches!(
+            admission,
+            StorageApiError::InvalidArgument {
+                field: "row",
+                reason,
+            } if reason == ROW_TOO_LARGE_REASON
+        ));
     }
 
     /// Writer-lock contention crosses the API boundary as its own code, not as

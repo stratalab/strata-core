@@ -9,7 +9,7 @@ mod commit_payload;
 
 pub(crate) use commit_payload::{
     decode_wal_commit_payload, encode_wal_commit_payload, encode_wal_commit_payload_into,
-    WalCommitPayload,
+    WalCommitPayload, MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
 };
 
 const WAL_ENVELOPE_FORMAT: &str = "wal_record_envelope";

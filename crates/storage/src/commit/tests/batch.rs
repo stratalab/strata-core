@@ -958,3 +958,131 @@ fn commit_batch_debug_and_errors_do_not_dump_value_bytes() {
     assert!(!display.contains("secret-value"));
     assert!(!display.contains("VersionedValue"));
 }
+
+/// The cap is the durable format's, but the rule is the product's: a write
+/// cache mode accepts must be a write durable mode accepts. Both modes reach
+/// this validation, so pinning the boundary here pins it for both (#3391).
+#[test]
+fn commit_batch_admits_the_largest_encodable_row_and_refuses_one_byte_more() {
+    let branch = branch_id(60);
+    let key = physical_key(branch, 0x20, b"boundary".to_vec());
+    let overhead = crate::format::storage_row_encoded_len(&key, 0);
+    let largest_value = crate::format::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES - overhead;
+
+    let at_limit = CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::put(
+            key.clone(),
+            vec![b'x'; largest_value],
+            CommitExpiry::None,
+            CommitRetentionHint::Append,
+        )],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::default(),
+    );
+    let over_limit = CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::put(
+            key,
+            vec![b'x'; largest_value + 1],
+            CommitExpiry::None,
+            CommitRetentionHint::Append,
+        )],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::default(),
+    );
+
+    at_limit
+        .validate(&CommitRuntimeConfig::default())
+        .expect("a row exactly at the limit is encodable, so it must be admitted");
+    let refusal = over_limit
+        .validate(&CommitRuntimeConfig::default())
+        .expect_err("one byte past the limit is not encodable");
+    assert_eq!(
+        refusal,
+        CommitRuntimeError::MutationTooLarge {
+            row_len: crate::format::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES + 1,
+            max_row_len: crate::format::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
+        }
+    );
+    assert_eq!(refusal.code(), "invalid_argument.commit.mutation_row_size");
+}
+
+/// The key is escaped before it is written — every `0x00` costs two bytes — so
+/// sizing the budget off the raw key length would admit a row the WAL encoder
+/// then refuses, which is the very divergence this check exists to close.
+///
+/// Differential, so it cannot be satisfied by a length function that agrees
+/// with itself: two keys of identical length and one identical value, where
+/// only escaping separates the verdicts.
+#[test]
+fn commit_batch_sizes_a_zero_byte_key_at_its_escaped_length() {
+    const KEY_LEN: usize = 4096;
+    let branch = branch_id(61);
+    let plain_key = physical_key(branch, 0x20, vec![b'k'; KEY_LEN]);
+    let zero_key = physical_key(branch, 0x20, vec![0x00; KEY_LEN]);
+
+    // The largest value the un-escaped key of this length can carry. The
+    // escaped key is KEY_LEN bytes longer, so the same value overruns it.
+    let value_len = crate::format::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES
+        - crate::format::storage_row_encoded_len(&plain_key, 0);
+    let batch_of = |key| {
+        CommitBatch::mutating(
+            branch,
+            vec![CommitMutation::put(
+                key,
+                vec![b'x'; value_len],
+                CommitExpiry::None,
+                CommitRetentionHint::Append,
+            )],
+            CommitValidationFacts::empty(),
+            CommitBatchOptions::default(),
+        )
+    };
+
+    batch_of(plain_key)
+        .validate(&CommitRuntimeConfig::default())
+        .expect("a key with nothing to escape fits exactly");
+    assert_eq!(
+        batch_of(zero_key).validate(&CommitRuntimeConfig::default()),
+        Err(CommitRuntimeError::MutationTooLarge {
+            row_len: crate::format::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES + KEY_LEN,
+            max_row_len: crate::format::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
+        })
+    );
+}
+
+/// A delete carries no value, so only its key can push it over — and a key
+/// that large is refused for the same reason a value that large is.
+#[test]
+fn commit_batch_sizes_a_delete_by_its_key_alone() {
+    let branch = branch_id(62);
+    let modest = CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::delete(physical_key(
+            branch,
+            0x20,
+            b"small".to_vec(),
+        ))],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::default(),
+    );
+    let huge = CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::delete(physical_key(
+            branch,
+            0x20,
+            vec![b'k'; crate::format::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES],
+        ))],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::default(),
+    );
+
+    modest
+        .validate(&CommitRuntimeConfig::default())
+        .expect("an ordinary delete is unaffected");
+    assert!(matches!(
+        huge.validate(&CommitRuntimeConfig::default()),
+        Err(CommitRuntimeError::MutationTooLarge { .. })
+    ));
+}

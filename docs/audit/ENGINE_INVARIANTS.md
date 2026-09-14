@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (10, one retired), SCALE (11), DUR (15) = 76 entries, 75 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (11, one retired), SCALE (11), DUR (15) = 77 entries, 76 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -770,6 +770,35 @@ and `persistence::adapter::tests::every_storage_error_maps_to_its_registry_row` 
 and `error::tests::engine_error_status_re_derives_the_row_and_keeps_the_site_fields` in
 executor. A new peer path into the executor that does not go through `from_status` /
 `engine_error_status` / `From<InferenceError>` is the regression.
+
+### ARCH-011: Commit admission is mode-independent
+
+Whether a mutation is a legal write is decided once, for every `CommitDurabilityMode`. A
+write cache mode accepts is a write durable mode accepts, and vice versa. Cache mode has no
+WAL, manifest, snapshot or durable table (hard rule 14), so every limit those artifacts
+impose is invisible there unless admission enforces it — and cache is the mode the
+quickstart, the compiled rustdoc examples and the browser playground all run, so a
+divergence surfaces at the moment a developer goes to production, on code they had already
+proven. The regression this guards against is #3391: a 16 MiB row committed in cache and was
+refused in durable, and the refusal advised a retry that could never succeed (#3383).
+
+A downstream-encoder limit therefore belongs at admission, expressed as an *exact* length
+from the encoder's own module — never a constant restated in the checking layer (which rots
+silently) and never a conservative upper bound (which refuses writes that would have
+succeeded).
+
+**Audit**: Find `validate_batch_shape` (`commit/batch.rs`) and confirm both runtimes reach it
+— `CommitCacheRuntime::execute` and `CommitDurableRuntime::execute_with_role` must each call
+`batch.validate(...)` as their first act, before any allocation, guard or WAL work. Verify
+each size or shape limit it enforces is read from the module that owns the artifact
+(`MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES`, `storage_row_encoded_len`) rather than re-declared, and
+that each computed length is pinned against its encoder by a test
+(`physical_key_encoded_len_matches_the_encoder`,
+`storage_row_encoded_len_matches_the_encoder`). A limit enforced in only one durability mode
+— or enforced only by the artifact's own encoder, which cache never reaches — is the
+violation. Known gap: the table key cap (`MAX_TABLE_KEY_BYTES`) is still enforced only at
+table build, so an oversized key is acknowledged and then wedges the branch at its first
+rotation (#3396).
 
 ---
 
