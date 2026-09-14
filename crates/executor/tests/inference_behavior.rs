@@ -228,10 +228,21 @@ fn inference_error_retry_policies_match_v1_contract() {
         RetryPolicy::AfterStateChange
     );
 
+    // Was pinned to `RetryPolicy::Unknown`. That is the policy for a condition
+    // Strata cannot classify, and this one is classifiable: the row's own
+    // remedy is "check the local inference runtime and model compatibility
+    // before retrying", and a model or runtime change is exactly what
+    // `AfterStateChange` denotes. `Unknown` also reports `retryable() == false`,
+    // so the row was telling a client not to bother while its remedy told the
+    // caller what to change (#3403).
     let local_runtime_error: ExecutorError =
         InferenceError::LlamaCpp("context allocation failed".to_owned()).into();
     assert_eq!(local_runtime_error.code(), "inference.local_runtime_failed");
-    assert_eq!(local_runtime_error.retry_policy(), RetryPolicy::Unknown);
+    assert_eq!(
+        local_runtime_error.retry_policy(),
+        RetryPolicy::AfterStateChange
+    );
+    assert!(local_runtime_error.retryable());
 }
 
 /// One `InferenceError` per way the inference crate can fail. The string

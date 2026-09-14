@@ -387,14 +387,28 @@ fn public_class_for_code(legacy_class: EngineErrorClass, code: &str) -> ErrorCla
 
 fn retry_policy_for_code(code: &str, class: EngineErrorClass) -> RetryPolicy {
     match code {
-        "conflict.engine.branch_generation"
+        // A conflict means the world moved, not that the request was malformed:
+        // reloading and retrying is the remedy, and every one of these carries a
+        // hint that says exactly that. `artifact_import` and `promotion` were
+        // absent from this list and fell to the class default of `Never`, so two
+        // of the four conflict codes told the caller that the reload their own
+        // hint prescribed would not help (#3403).
+        "conflict.engine.artifact_import"
+        | "conflict.engine.branch_generation"
         | "conflict.engine.persistence"
+        | "conflict.engine.promotion"
         | "failed_precondition.engine.persistence"
         | "failed_precondition.engine.writer_lock"
         | "history_unavailable.engine.persistence_history"
         | "resource_exhausted.engine.persistence_budget"
         | "unsupported.engine.persistence_capability" => return RetryPolicy::AfterStateChange,
         "unavailable.engine.persistence" => return RetryPolicy::SameRequest,
+        // Not a transient capability gap: cross-branch bindings are a V1 format
+        // rule. No configuration, branch, backend, model or permission change
+        // makes one legal, which is why the other two permanent "unsupported"
+        // conditions (`inference.unsupported_operation`,
+        // `inference.unsupported_provider`) are already `Never` (#3403).
+        "unsupported.engine.graph_binding_cross_branch" => return RetryPolicy::Never,
         _ => {}
     }
     match class {
@@ -788,6 +802,53 @@ mod tests {
         "unavailable",
         "internal",
     ];
+
+    /// The engine-owned rows #3405 re-classified, asserted HERE rather than
+    /// only in executor's error-contract suite.
+    ///
+    /// The mutation gate mutates a crate and runs that crate's tests, so an
+    /// engine row covered only by an executor test is covered by nothing as far
+    /// as the gate is concerned — deleting the arm below survived exactly that
+    /// way. Same shape as the storage rows that were covered only by engine
+    /// tests in #3392 and #3393.
+    #[test]
+    fn reclassified_engine_retry_policies_hold_in_engine() {
+        let registered = registered_codes();
+        let policy_of = |code: &'static str| {
+            let Some((_, class)) = registered
+                .iter()
+                .find(|(registered_code, _)| *registered_code == code)
+            else {
+                panic!("{code} is not registered");
+            };
+            retry_policy_for_code(code, *class)
+        };
+
+        // A conflict means the world moved: reloading and retrying is the
+        // remedy all four of these share.
+        assert_eq!(
+            policy_of("conflict.engine.artifact_import"),
+            RetryPolicy::AfterStateChange
+        );
+        assert_eq!(
+            policy_of("conflict.engine.promotion"),
+            RetryPolicy::AfterStateChange
+        );
+        assert_eq!(
+            policy_of("conflict.engine.branch_generation"),
+            RetryPolicy::AfterStateChange
+        );
+        assert_eq!(
+            policy_of("conflict.engine.persistence"),
+            RetryPolicy::AfterStateChange
+        );
+
+        // A V1 format rule, not a transient capability gap.
+        assert_eq!(
+            policy_of("unsupported.engine.graph_binding_cross_branch"),
+            RetryPolicy::Never
+        );
+    }
 
     /// Every remedy that is condition-specific rather than input advice is
     /// pinned here.
