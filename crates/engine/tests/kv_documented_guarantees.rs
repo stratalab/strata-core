@@ -266,7 +266,14 @@ fn keys_reject_only_emptiness_and_values_accept_it() {
 
     // A large key and value round-trip: the limit is the format's, not a
     // small engine-imposed one.
-    let big_key = KvKey::new(vec![b'k'; 64 * 1024]).expect("a 64 KiB key is accepted");
+    //
+    // It was `64 * 1024` here, which is the table format's cap on the ENCODED
+    // internal key — and the encoding adds the branch id, the space name and
+    // the version suffix on top of the user key, so a 64 KiB user key is over
+    // it. The write was accepted anyway, and took the branch down at its next
+    // rotation (#3396). 60 KiB leaves room for the framing and still makes the
+    // point the comment is making.
+    let big_key = KvKey::new(vec![b'k'; 60 * 1024]).expect("a 60 KiB key is accepted");
     kv.put(big_key.clone(), KvValue::new(vec![7u8; 1024 * 1024]))
         .expect("a 1 MiB value is accepted");
     assert_eq!(
@@ -277,6 +284,14 @@ fn keys_reject_only_emptiness_and_values_accept_it() {
             .len(),
         1024 * 1024
     );
+
+    // And the cap is a refusal, not a silent acceptance: a key that cannot be
+    // encoded into a table entry is rejected at write time.
+    let unbuildable = KvKey::new(vec![b'k'; 64 * 1024]).expect("the key type itself has no cap");
+    let error = kv
+        .put(unbuildable, value(b"v"))
+        .expect_err("a key over the table cap is refused");
+    assert_eq!(error.class(), EngineErrorClass::InvalidInput);
 }
 
 /// `kv.batch_get` / `kv.batch_exists`: "**Positional.** Results come back one per

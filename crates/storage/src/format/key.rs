@@ -175,6 +175,19 @@ pub(crate) fn physical_key_encoded_len(key: &PhysicalKey) -> usize {
     physical_key_framing_len(key).saturating_add(escaped_encoded_len(key.user_key()))
 }
 
+/// Exactly how many bytes `append_internal_key_from_physical` will write for
+/// `key` at any commit version — the physical key plus the fixed-width
+/// inverted-version suffix.
+///
+/// This, not the user key's own length, is what the table format caps at
+/// `MAX_TABLE_KEY_BYTES`. Commit admission bounds it so an oversized key is
+/// refused at write time instead of being acknowledged and then failing the
+/// branch's next rotation (#3396).
+/// `internal_key_encoded_len_matches_the_encoder` pins it against the encoder.
+pub(crate) fn internal_key_encoded_len(key: &PhysicalKey) -> usize {
+    physical_key_encoded_len(key).saturating_add(INTERNAL_KEY_SUFFIX_LEN)
+}
+
 /// Buffer hint only: assumes no byte of the user key escapes, which is the
 /// common case and keeps the reserve O(1) in the key length. Undercounting a
 /// key that contains `0x00` costs a reallocation, never a wrong encoding —
@@ -248,8 +261,8 @@ fn format_error_from_row_error(error: RowError) -> FormatError {
 mod tests {
     use super::{
         append_physical_key, decode_internal_key, decode_physical_key, encode_internal_key,
-        encode_physical_key, internal_key_commit_version, physical_key_encode_capacity,
-        physical_key_encoded_len, FormatError, PHYSICAL_KEY_FORMAT,
+        encode_physical_key, internal_key_commit_version, internal_key_encoded_len,
+        physical_key_encode_capacity, physical_key_encoded_len, FormatError, PHYSICAL_KEY_FORMAT,
     };
     use crate::row::{InternalKey, PhysicalKey, StorageSpaceId};
     use strata_core::{BranchId, CommitVersion};
@@ -384,6 +397,36 @@ mod tests {
                 physical_key_encode_capacity(&key) <= physical_key_encoded_len(&key),
                 "capacity hint over-reserves for {user_key:?}"
             );
+        }
+    }
+
+    /// The table format caps the INTERNAL key, so admission must size the
+    /// same thing the table builder measures — including the version suffix,
+    /// which a check written against the physical key alone would miss (#3396).
+    #[test]
+    fn internal_key_encoded_len_matches_the_encoder() {
+        let user_keys: [Vec<u8>; 5] = [
+            Vec::new(),
+            b"alpha".to_vec(),
+            vec![0x00; 64],
+            vec![0x00, 0x41, 0x00, 0xff, 0x00],
+            (0u8..=255).collect(),
+        ];
+
+        for user_key in user_keys {
+            let physical = key(user_key.clone());
+            for version in [
+                CommitVersion::ZERO,
+                CommitVersion::new(7),
+                CommitVersion::MAX,
+            ] {
+                let internal = InternalKey::new(physical.clone(), version);
+                assert_eq!(
+                    internal_key_encoded_len(&physical),
+                    encode_internal_key(&internal).len(),
+                    "computed length disagrees with the encoder for {user_key:?} at {version:?}"
+                );
+            }
         }
     }
 

@@ -70,6 +70,11 @@ fn row_too_large_to_api(error: &WalServiceError) -> Option<StorageApiError> {
 /// caller cannot tell, and need not care, which layer refused.
 const ROW_TOO_LARGE_REASON: &str = "a single committed row exceeds the maximum encodable size";
 
+/// The table format's separate cap, on the encoded internal key rather than
+/// the whole row. Named distinctly because trimming the value does nothing
+/// for it — the caller has to shorten the key.
+const KEY_TOO_LARGE_REASON: &str = "a committed key exceeds the maximum encodable size";
+
 pub(super) fn branch_error(error: crate::branch::error::BranchRuntimeError) -> StorageApiError {
     match error {
         crate::branch::error::BranchRuntimeError::InsufficientTimestampHistory {
@@ -116,6 +121,12 @@ pub(super) fn commit_error(error: crate::commit::CommitRuntimeError) -> StorageA
             StorageApiError::InvalidArgument {
                 field: "row",
                 reason: ROW_TOO_LARGE_REASON,
+            }
+        }
+        crate::commit::CommitRuntimeError::MutationKeyTooLarge { .. } => {
+            StorageApiError::InvalidArgument {
+                field: "key",
+                reason: KEY_TOO_LARGE_REASON,
             }
         }
         crate::commit::CommitRuntimeError::DuplicateMutationKey { .. } => {
@@ -460,7 +471,9 @@ pub(crate) fn map_maintenance_outcome_for_test(
 
 #[cfg(test)]
 mod tests {
-    use super::{branch_error, commit_error, map_lifecycle_error, ROW_TOO_LARGE_REASON};
+    use super::{
+        branch_error, commit_error, map_lifecycle_error, KEY_TOO_LARGE_REASON, ROW_TOO_LARGE_REASON,
+    };
     use crate::api::{StorageApiError, StorageApiErrorClass, StorageApiLowerLayer};
     use crate::branch::error::BranchRuntimeError;
     use crate::lifecycle::LifecycleError;
@@ -627,6 +640,38 @@ mod tests {
                 reason,
             } if reason == ROW_TOO_LARGE_REASON
         ));
+    }
+
+    /// An oversized key is a caller error like an oversized row, but a
+    /// DIFFERENT one: the row refusal tells you to send less data, and trimming
+    /// the value does nothing for a key that is too long. Unmapped it falls
+    /// through to `LowerLayer` — class `Unavailable` — and becomes a retry
+    /// suggestion for a write that can never succeed (#3396).
+    #[test]
+    fn an_admission_key_size_refusal_names_the_key_not_the_row() {
+        use crate::commit::CommitRuntimeError;
+
+        let refusal = commit_error(CommitRuntimeError::MutationKeyTooLarge {
+            key_len: 64 * 1024 + 1,
+            max_key_len: 64 * 1024,
+        });
+
+        assert_eq!(refusal.code(), "invalid_argument.storage_api.argument");
+        assert_eq!(
+            refusal.class(),
+            super::super::StorageApiErrorClass::InvalidArgument
+        );
+        assert!(matches!(
+            refusal,
+            StorageApiError::InvalidArgument {
+                field: "key",
+                reason,
+            } if reason == KEY_TOO_LARGE_REASON
+        ));
+        assert_ne!(
+            KEY_TOO_LARGE_REASON, ROW_TOO_LARGE_REASON,
+            "the two refusals must not be indistinguishable: their remedies differ"
+        );
     }
 
     /// Writer-lock contention crosses the API boundary as its own code, not as

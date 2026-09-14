@@ -36,6 +36,14 @@ pub(crate) enum CommitRuntimeError {
         row_len: usize,
         max_row_len: usize,
     },
+    /// A mutation whose encoded INTERNAL key is larger than a table data block
+    /// entry can hold. Separate from `MutationTooLarge` because the caps are
+    /// separate: the row cap is the WAL's, this one is the table's, and a key
+    /// can breach this while its row sits far inside that one (#3396).
+    MutationKeyTooLarge {
+        key_len: usize,
+        max_key_len: usize,
+    },
     InvalidValidationFacts {
         reason: &'static str,
     },
@@ -170,6 +178,7 @@ impl CommitRuntimeError {
             Self::InvalidBatch { .. } => "invalid_argument.commit.batch",
             Self::InvalidMutation { .. } => "invalid_argument.commit.mutation",
             Self::MutationTooLarge { .. } => "invalid_argument.commit.mutation_row_size",
+            Self::MutationKeyTooLarge { .. } => "invalid_argument.commit.mutation_key_size",
             Self::InvalidValidationFacts { .. } => "invalid_argument.commit.validation_facts",
             Self::InvalidTimelineFact { .. } => "failed_precondition.commit.timeline_fact",
             Self::TimelineConflict { .. } => "conflict.commit.timeline",
@@ -343,6 +352,16 @@ impl PartialEq for CommitRuntimeError {
                     max_row_len: right_max,
                 },
             ) => left_row_len == right_row_len && left_max == right_max,
+            (
+                Self::MutationKeyTooLarge {
+                    key_len: left_key_len,
+                    max_key_len: left_max,
+                },
+                Self::MutationKeyTooLarge {
+                    key_len: right_key_len,
+                    max_key_len: right_max,
+                },
+            ) => left_key_len == right_key_len && left_max == right_max,
             (
                 Self::DuplicateMutationKey {
                     space_id: left_space,
@@ -541,6 +560,15 @@ impl fmt::Display for CommitRuntimeError {
                 write!(
                     formatter,
                     "commit mutation encodes to {row_len} bytes, above the {max_row_len}-byte row limit"
+                )
+            }
+            Self::MutationKeyTooLarge {
+                key_len,
+                max_key_len,
+            } => {
+                write!(
+                    formatter,
+                    "commit mutation key encodes to {key_len} bytes, above the {max_key_len}-byte key limit"
                 )
             }
             Self::InvalidValidationFacts { reason } => {
@@ -753,6 +781,7 @@ impl Error for CommitRuntimeError {
             | Self::InvalidBatch { .. }
             | Self::InvalidMutation { .. }
             | Self::MutationTooLarge { .. }
+            | Self::MutationKeyTooLarge { .. }
             | Self::InvalidValidationFacts { .. }
             | Self::InvalidTimelineFact { .. }
             | Self::TimelineConflict { .. }

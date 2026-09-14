@@ -1052,8 +1052,10 @@ fn commit_batch_sizes_a_zero_byte_key_at_its_escaped_length() {
     );
 }
 
-/// A delete carries no value, so only its key can push it over — and a key
-/// that large is refused for the same reason a value that large is.
+/// A delete carries no value, so only its key can push it over — and the key
+/// cap is the one it reaches. The row cap is unreachable for a delete: a
+/// tombstone row is its key plus a few dozen fixed bytes, so any key big
+/// enough to breach 16 MiB breached 64 KiB long before (#3396).
 #[test]
 fn commit_batch_sizes_a_delete_by_its_key_alone() {
     let branch = branch_id(62);
@@ -1083,7 +1085,7 @@ fn commit_batch_sizes_a_delete_by_its_key_alone() {
         .expect("an ordinary delete is unaffected");
     assert!(matches!(
         huge.validate(&CommitRuntimeConfig::default()),
-        Err(CommitRuntimeError::MutationTooLarge { .. })
+        Err(CommitRuntimeError::MutationKeyTooLarge { .. })
     ));
 }
 
@@ -1130,5 +1132,114 @@ fn commit_runtime_error_equality_distinguishes_every_field() {
     assert_ne!(
         CommitRuntimeError::InvalidBatch { reason: "a" },
         CommitRuntimeError::InvalidBatch { reason: "b" }
+    );
+}
+
+/// How long `user_key_len` bytes of non-escaping user key actually encode to as
+/// an internal key, measured by running the encoder. Test fixtures size
+/// themselves from this so they stay anchored to the format rather than to the
+/// helper the production check happens to use.
+fn encoded_internal_key_len(branch: BranchId, user_key_len: usize) -> usize {
+    crate::format::encode_internal_key(&crate::row::InternalKey::new(
+        physical_key(branch, 0x20, vec![b'k'; user_key_len]),
+        CommitVersion::new(1),
+    ))
+    .len()
+}
+
+/// The table format caps the encoded internal key at `MAX_TABLE_KEY_BYTES`,
+/// and nothing on the write path checked it: an oversized key was admitted,
+/// written to the WAL and acknowledged, and only refused when the memtable it
+/// landed in was sealed into a table — at which point the branch stopped
+/// accepting any write at all, including small unrelated ones, until the
+/// database was reopened (#3396).
+#[test]
+fn commit_batch_admits_the_largest_buildable_key_and_refuses_one_byte_more() {
+    let branch = branch_id(63);
+    // Size the fixture from the ENCODER, never from the length helper under
+    // test: a helper that forgot the version suffix would move the fixture
+    // with it and the boundary would never actually be probed.
+    let largest_user_key = crate::format::MAX_TABLE_KEY_BYTES - encoded_internal_key_len(branch, 0);
+    assert_eq!(
+        encoded_internal_key_len(branch, largest_user_key),
+        crate::format::MAX_TABLE_KEY_BYTES,
+        "fixture is not actually sitting on the cap"
+    );
+
+    let at_limit = CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::delete(physical_key(
+            branch,
+            0x20,
+            vec![b'k'; largest_user_key],
+        ))],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::default(),
+    );
+    let over_limit = CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::delete(physical_key(
+            branch,
+            0x20,
+            vec![b'k'; largest_user_key + 1],
+        ))],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::default(),
+    );
+
+    at_limit
+        .validate(&CommitRuntimeConfig::default())
+        .expect("a key exactly at the cap builds, so it must be admitted");
+    let refusal = over_limit
+        .validate(&CommitRuntimeConfig::default())
+        .expect_err("one byte past the cap can never be built into a table");
+    assert_eq!(
+        refusal,
+        CommitRuntimeError::MutationKeyTooLarge {
+            key_len: crate::format::MAX_TABLE_KEY_BYTES + 1,
+            max_key_len: crate::format::MAX_TABLE_KEY_BYTES,
+        }
+    );
+    assert_eq!(refusal.code(), "invalid_argument.commit.mutation_key_size");
+}
+
+/// Escaping counts here for the same reason it counts for the row: the table
+/// builder measures the ENCODED key. Differential — two keys of identical
+/// length where only escaping separates the verdicts.
+#[test]
+fn commit_batch_sizes_a_zero_byte_key_against_the_table_cap_when_escaped() {
+    let branch = branch_id(64);
+    let plain_len = crate::format::MAX_TABLE_KEY_BYTES - encoded_internal_key_len(branch, 0);
+
+    let plain = CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::delete(physical_key(
+            branch,
+            0x20,
+            vec![b'k'; plain_len],
+        ))],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::default(),
+    );
+    let escaping = CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::delete(physical_key(
+            branch,
+            0x20,
+            vec![0x00; plain_len],
+        ))],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::default(),
+    );
+
+    plain
+        .validate(&CommitRuntimeConfig::default())
+        .expect("a key with nothing to escape fits exactly");
+    assert_eq!(
+        escaping.validate(&CommitRuntimeConfig::default()),
+        Err(CommitRuntimeError::MutationKeyTooLarge {
+            key_len: crate::format::MAX_TABLE_KEY_BYTES + plain_len,
+            max_key_len: crate::format::MAX_TABLE_KEY_BYTES,
+        })
     );
 }

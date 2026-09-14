@@ -177,3 +177,65 @@ fn cache_and_durable_agree_at_the_encodable_boundary() {
         "sweep did not straddle the boundary ({admitted} admitted, {refused} refused)"
     );
 }
+
+fn put_key_of(database: &mut Database, key_len: usize) -> Result<(), Box<EngineError>> {
+    let mut kv = database
+        .kv(branch("default"), space("default"))
+        .expect("kv service");
+    kv.put(
+        KvKey::new("k".repeat(key_len)).expect("key"),
+        KvValue::new(vec![b'x'; 64]),
+    )
+    .map(|_| ())
+    .map_err(Box::new)
+}
+
+/// A key too long to encode into a table entry is refused at write time, in
+/// both modes.
+///
+/// Before #3396 the WAL took it happily, so the write was ACKNOWLEDGED and the
+/// branch's next rotation then could not build its table — after which the
+/// branch refused every write, small unrelated ones included, until the
+/// database was reopened. Refusing at admission is what makes that
+/// unreachable: an oversized key never reaches a memtable, so no rotation can
+/// inherit one.
+#[test]
+fn a_key_too_large_to_build_is_refused_in_both_modes() {
+    let cap = 64 * 1024;
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut durable = open_durable_database(tempdir.path()).expect("durable open");
+    let mut cache = open_cache_database().expect("cache open");
+
+    for (mode, database) in [("durable", &mut durable), ("cache", &mut cache)] {
+        // Direction control: a long-but-buildable key is still accepted, so the
+        // refusal is about the cap and not about long keys in general.
+        put_key_of(database, cap / 2).unwrap_or_else(|error| {
+            panic!("{mode}: a key inside the cap must still be accepted: {error}")
+        });
+
+        let error = put_key_of(database, cap * 2)
+            .expect_err("a key twice the cap can never be built into a table");
+        assert_refused_as_caller_error(&format!("{mode} oversized key"), &error);
+    }
+}
+
+/// The two caps are independent, and the refusals must stay distinguishable:
+/// an oversized VALUE is fixed by sending less data, an oversized KEY is not.
+/// Collapsing them would send a caller to trim a payload that was never the
+/// problem.
+#[test]
+fn an_oversized_key_and_an_oversized_value_are_different_refusals() {
+    let cache = open_cache_database().expect("cache open");
+    let mut cache = cache;
+
+    let key_error = put_key_of(&mut cache, 128 * 1024).expect_err("key over the table cap");
+    let value_error =
+        put_value_of(&mut cache, "modest", 16 * 1024 * 1024).expect_err("value over the row cap");
+
+    assert_ne!(
+        key_error.status().details(),
+        value_error.status().details(),
+        "an oversized key and an oversized value report identically, so neither \
+         names the field a caller has to change"
+    );
+}

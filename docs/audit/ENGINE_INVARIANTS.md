@@ -793,12 +793,19 @@ succeeded).
 each size or shape limit it enforces is read from the module that owns the artifact
 (`MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES`, `storage_row_encoded_len`) rather than re-declared, and
 that each computed length is pinned against its encoder by a test
-(`physical_key_encoded_len_matches_the_encoder`,
+(`physical_key_encoded_len_matches_the_encoder`, `internal_key_encoded_len_matches_the_encoder`,
 `storage_row_encoded_len_matches_the_encoder`). A limit enforced in only one durability mode
 — or enforced only by the artifact's own encoder, which cache never reaches — is the
-violation. Known gap: the table key cap (`MAX_TABLE_KEY_BYTES`) is still enforced only at
-table build, so an oversized key is acknowledged and then wedges the branch at its first
-rotation (#3396).
+violation.
+
+Two caps are enforced today and neither subsumes the other: the WAL's on a whole encoded row
+(`MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES`) and the table's on an encoded internal key
+(`MAX_TABLE_KEY_BYTES`). The second is the sharper lesson: the WAL accepted an oversized key,
+so the write was acknowledged and the branch's next rotation could not build its table, after
+which the branch refused every write until reopen (#3396). A downstream limit that admission
+does not enforce is not merely a mode divergence — it can be an acknowledged write that later
+takes the branch down. A new durable artifact with a size or shape limit of its own must
+extend `validate_mutation_encodable_size`.
 
 ---
 
