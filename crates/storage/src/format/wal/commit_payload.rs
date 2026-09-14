@@ -566,4 +566,37 @@ mod tests {
             })
             .expect("WAL commit payload property");
     }
+
+    /// The whole-payload cap is 64 MiB, and nothing else pins its magnitude:
+    /// the row cap bounds each row, the row-count cap bounds how many, but a
+    /// payload cap collapsed to roughly a megabyte would refuse ordinary
+    /// multi-row commits and no other test would notice. Encode a payload far
+    /// above any plausible wrong value and far below the real one.
+    #[test]
+    fn wal_commit_payload_admits_a_multi_megabyte_payload() {
+        let row = |user_key: &[u8]| {
+            StorageRow::put(
+                physical_key(branch_id(), user_key),
+                CommitVersion::new(7),
+                Timestamp::from_micros(1_700_000),
+                Timestamp::from_micros(1_800_000),
+                vec![0x5a; 1024 * 1024],
+            )
+        };
+        let payload = WalCommitPayload::new(vec![row(b"a"), row(b"b"), row(b"c"), row(b"d")])
+            .expect("payload");
+
+        let bytes = encode_wal_commit_payload(&payload).expect("4 MiB is well inside the cap");
+
+        assert!(
+            bytes.len() > 4 * 1024 * 1024,
+            "fixture did not actually exceed a megabyte: {} bytes",
+            bytes.len()
+        );
+        assert_eq!(
+            decode_wal_commit_payload(&bytes).expect("decode"),
+            payload,
+            "the cap must admit on decode too"
+        );
+    }
 }

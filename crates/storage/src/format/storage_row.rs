@@ -466,6 +466,27 @@ mod tests {
         }
     }
 
+    /// The reserve hint's job is a single allocation per encoded row; a wrong
+    /// hint still encodes the right bytes, so only the allocation itself
+    /// witnesses it.
+    #[test]
+    fn storage_row_encoding_does_not_reallocate_for_a_key_with_nothing_to_escape() {
+        let row = StorageRow::put(
+            physical_key(),
+            CommitVersion::new(42),
+            Timestamp::from_micros(11),
+            Timestamp::from_micros(99),
+            b"value".to_vec(),
+        );
+        let bytes = encode_storage_row(&row).expect("encode row");
+
+        assert_eq!(
+            bytes.capacity(),
+            bytes.len(),
+            "the reserve did not size the buffer to the encoding"
+        );
+    }
+
     /// A delete stamps a valueless tombstone, and admission sizes it the same
     /// way — so the key alone must account for the whole row.
     #[test]

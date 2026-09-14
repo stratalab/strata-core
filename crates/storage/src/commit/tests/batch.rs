@@ -1086,3 +1086,49 @@ fn commit_batch_sizes_a_delete_by_its_key_alone() {
         Err(CommitRuntimeError::MutationTooLarge { .. })
     ));
 }
+
+/// `CommitRuntimeError` hand-rolls `PartialEq`, and every assertion in this
+/// suite that compares a returned error against an expected one rests on it.
+/// Those assertions are all `assert_eq!` on a *matching* pair, so an equality
+/// that says yes too readily — a field comparison widened to `or`, or the whole
+/// relation collapsed to `true` — passes every one of them. Only asserting
+/// inequality witnesses it.
+#[test]
+fn commit_runtime_error_equality_distinguishes_every_field() {
+    let refusal = CommitRuntimeError::MutationTooLarge {
+        row_len: 100,
+        max_row_len: 64,
+    };
+
+    assert_eq!(
+        refusal,
+        CommitRuntimeError::MutationTooLarge {
+            row_len: 100,
+            max_row_len: 64,
+        }
+    );
+    assert_ne!(
+        refusal,
+        CommitRuntimeError::MutationTooLarge {
+            row_len: 101,
+            max_row_len: 64,
+        }
+    );
+    assert_ne!(
+        refusal,
+        CommitRuntimeError::MutationTooLarge {
+            row_len: 100,
+            max_row_len: 65,
+        }
+    );
+    assert_ne!(
+        refusal,
+        CommitRuntimeError::InvalidMutation {
+            reason: "something else",
+        }
+    );
+    assert_ne!(
+        CommitRuntimeError::InvalidBatch { reason: "a" },
+        CommitRuntimeError::InvalidBatch { reason: "b" }
+    );
+}

@@ -247,9 +247,9 @@ fn format_error_from_row_error(error: RowError) -> FormatError {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_internal_key, decode_physical_key, encode_internal_key, encode_physical_key,
-        internal_key_commit_version, physical_key_encode_capacity, physical_key_encoded_len,
-        FormatError, PHYSICAL_KEY_FORMAT,
+        append_physical_key, decode_internal_key, decode_physical_key, encode_internal_key,
+        encode_physical_key, internal_key_commit_version, physical_key_encode_capacity,
+        physical_key_encoded_len, FormatError, PHYSICAL_KEY_FORMAT,
     };
     use crate::row::{InternalKey, PhysicalKey, StorageSpaceId};
     use strata_core::{BranchId, CommitVersion};
@@ -385,5 +385,25 @@ mod tests {
                 "capacity hint over-reserves for {user_key:?}"
             );
         }
+    }
+
+    /// The hint's whole job is to let the common case encode in one
+    /// allocation — the escape encode pushes byte by byte, and growing from
+    /// empty reallocs several times per key on the hot path. That property is
+    /// invisible to every behavioural test (a wrong hint still encodes
+    /// correctly), so assert the allocation directly or nothing guards it.
+    #[test]
+    fn physical_key_encoding_does_not_reallocate_for_a_key_with_nothing_to_escape() {
+        let key = key(b"alpha".to_vec());
+        let mut bytes = Vec::with_capacity(physical_key_encode_capacity(&key));
+        let reserved = bytes.capacity();
+        append_physical_key(&key, &mut bytes);
+
+        assert_eq!(
+            bytes.capacity(),
+            reserved,
+            "encoding outgrew the reserve and reallocated"
+        );
+        assert_eq!(bytes.len(), reserved, "the reserve was larger than needed");
     }
 }
