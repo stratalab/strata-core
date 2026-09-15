@@ -1090,13 +1090,16 @@ fn a_map_needs_an_object_keyed_by_node() {
 /// renders 1970 forever (#3112).
 #[test]
 fn a_counter_cannot_be_declared_a_date() {
-    // The review's own probe: swap the KV history date column's pointer for the
-    // logical clock beside it, whose description says it "is never a calendar
-    // date".
+    // The review's own probe: declare the logical clock a date, whose
+    // description says it "is never a calendar date". Written as an `as: date`
+    // added to the existing `timestamp` column — the same shape as the branch
+    // counters below — because since #3414 that column is declared in its own
+    // right, and re-pointing `committed_at` at it would trip the duplicate-field
+    // guard first and never reach the one under test.
     let scratch = Scratch::new();
     scratch.replace_in(
         "commands/kv.yaml",
-        "        - field: /data/items/*/committed_at\n          as: date\n",
+        "        - field: /data/items/*/timestamp\n",
         "        - field: /data/items/*/timestamp\n          as: date\n",
     );
     assert_rejects(&scratch, "kv.history", "not a registered wall-clock field");

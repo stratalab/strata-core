@@ -129,13 +129,13 @@ one
 ### kv.get · responses/v1/kv/get_found.json · raw
 one∎
 ### kv.history · edge:committed_at=fixed · human
-VERSION  COMMITTED_AT                    VALUE
-      4  2026-09-10 20:19:44.000000 UTC  two
-      3  2026-09-10 20:19:44.000000 UTC  one
+TIMESTAMP  VERSION  COMMITTED_AT                    VALUE
+        4        4  2026-09-10 20:19:44.000000 UTC  two
+        3        3  2026-09-10 20:19:44.000000 UTC  one
 ∎
 ### kv.history · edge:committed_at=fixed · raw
-4	1789071584000000	two
-3	1789071584000000	one
+4	4	1789071584000000	two
+3	3	1789071584000000	one
 ∎
 ### kv.history · edge:items=[] · human
 (empty)
@@ -143,22 +143,22 @@ VERSION  COMMITTED_AT                    VALUE
 ### kv.history · edge:items=[] · raw
 ∎
 ### kv.history · edge:value=non-utf8 · human
-VERSION  COMMITTED_AT  VALUE
-      4  -             base64:/w==
-      3  -             base64:/w==
+TIMESTAMP  VERSION  COMMITTED_AT  VALUE
+        4        4  -             base64:/w==
+        3        3  -             base64:/w==
 ∎
 ### kv.history · edge:value=non-utf8 · raw
-4		base64:/w==
-3		base64:/w==
+4	4		base64:/w==
+3	3		base64:/w==
 ∎
 ### kv.history · responses/v1/kv/history_found.json · human
-VERSION  COMMITTED_AT  VALUE
-      4  -             two
-      3  -             one
+TIMESTAMP  VERSION  COMMITTED_AT  VALUE
+        4        4  -             two
+        3        3  -             one
 ∎
 ### kv.history · responses/v1/kv/history_found.json · raw
-4		two
-3		one
+4	4		two
+3	3		one
 ∎
 ### kv.list · edge:items=[] · human
 (empty)

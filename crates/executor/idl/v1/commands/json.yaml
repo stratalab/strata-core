@@ -73,6 +73,10 @@ commands:
     prose: commands/json.history.md
     display:
       columns:
+        # See kv.history: `timestamp` is the `--as-of` handle and led no table
+        # until #3414. `document_version` is this document's own revision
+        # count, which the adjacent `version` was being mistaken for.
+        - field: /data/*/timestamp
         - field: /data/*/version
         - field: /data/*/document_version
         - field: /data/*/committed_at

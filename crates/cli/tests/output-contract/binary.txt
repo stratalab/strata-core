@@ -106,11 +106,11 @@ deleted greeting
 ### 13 strata kv history greeting · stderr
 ∎
 ### 13 strata kv history greeting · stdout
-VERSION  COMMITTED_AT                    VALUE
-      6  <instant>  (deleted)
-      5  <instant>  hello3
-      4  <instant>  hello2
-      3  <instant>  hello
+TIMESTAMP  VERSION  COMMITTED_AT                    VALUE
+        6        6  <instant>  (deleted)
+        5        5  <instant>  hello3
+        4        4  <instant>  hello2
+        3        3  <instant>  hello
 ∎
 ### 14 strata --raw kv history greeting · exit
 0
@@ -118,10 +118,10 @@ VERSION  COMMITTED_AT                    VALUE
 ### 14 strata --raw kv history greeting · stderr
 ∎
 ### 14 strata --raw kv history greeting · stdout
-6	<micros>	
-5	<micros>	hello3
-4	<micros>	hello2
-3	<micros>	hello
+6	6	<micros>	
+5	5	<micros>	hello3
+4	4	<micros>	hello2
+3	3	<micros>	hello
 ∎
 ### 15 strata --json kv history greeting · exit
 0

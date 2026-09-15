@@ -2772,17 +2772,21 @@ mod tests {
         assert_eq!(
             render_wire("kv_history", &output, Format::Human),
             only_stdout(concat!(
-                "VERSION  COMMITTED_AT                    VALUE\n",
-                "      4  2026-09-10 20:19:44.000000 UTC  two\n",
-                "     12  -                               base64:/w==\n",
-                "      2  2026-09-10 20:19:44.000000 UTC  (deleted)\n",
+                "TIMESTAMP  VERSION  COMMITTED_AT                    VALUE\n",
+                "       40        4  2026-09-10 20:19:44.000000 UTC  two\n",
+                "       30       12  -                               base64:/w==\n",
+                "       20        2  2026-09-10 20:19:44.000000 UTC  (deleted)\n",
             )),
             "numbers right-align, a date is a UTC instant, bytes decode, and the row \
-             the tombstone marks says why its value cell is empty (#3358 F10)"
+             the tombstone marks says why its value cell is empty (#3358 F10). \
+             `timestamp` leads because it is the only value `--as-of` accepts, and \
+             it was absent from this table entirely (#3414)"
         );
         assert_eq!(
             render_wire("kv_history", &output, Format::Raw),
-            only_stdout("4\t1789071584000000\ttwo\n12\t\tbase64:/w==\n2\t1789071584000000\t\n"),
+            only_stdout(
+                "40\t4\t1789071584000000\ttwo\n30\t12\t\tbase64:/w==\n20\t2\t1789071584000000\t\n"
+            ),
             "raw keeps the epoch micros, marks bytes that are not text, and leaves an \
              empty cell for null"
         );
@@ -2822,13 +2826,13 @@ mod tests {
         assert_eq!(
             render_wire("json_history", &output, Format::Human),
             only_stdout(concat!(
-                "VERSION  DOCUMENT_VERSION  COMMITTED_AT  VALUE\n",
-                "      4                 2  -             {\"age\":36,\"name\":\"Ada\"}\n",
+                "TIMESTAMP  VERSION  DOCUMENT_VERSION  COMMITTED_AT  VALUE\n",
+                "       40        4                 2  -             {\"age\":36,\"name\":\"Ada\"}\n",
             ))
         );
         assert_eq!(
             render_wire("json_history", &output, Format::Raw),
-            only_stdout("4\t2\t\t{\"age\":36,\"name\":\"Ada\"}\n")
+            only_stdout("40\t4\t2\t\t{\"age\":36,\"name\":\"Ada\"}\n")
         );
         assert_eq!(
             render_wire(
