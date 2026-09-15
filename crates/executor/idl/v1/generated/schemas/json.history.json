@@ -50,7 +50,7 @@
   "command": "json.history",
   "request": {
     "additionalProperties": false,
-    "description": "Reads full JSON document version history.",
+    "description": "Reads full JSON document version history.\n\n# Guaranteed semantics\n\n- **Newest first.** Versions are returned in descending commit order,\n  each with the version that produced it.\n- **Deletes are versions.** A removal appears as a version with no\n  value, distinct from a document that never existed.\n- **Limits.** This command bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`).",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

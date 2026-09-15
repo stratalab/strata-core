@@ -134,7 +134,7 @@
   "command": "json.set",
   "request": {
     "additionalProperties": false,
-    "description": "Sets a JSON value at a document path, creating the document when missing.",
+    "description": "Sets a JSON value at a document path, creating the document when missing.\n\n# Guaranteed semantics\n\n- **Atomic per document.** The write is a single engine commit: the\n  document and its new version apply together or not at all. A reader\n  never observes a partially applied path update.\n- **Creates on demand.** Setting a path in a document that does not\n  exist creates the document; setting the root replaces it whole.\n- **Limits.** This command bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`),\n  a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`), and\n  a document at most **16 MiB** serialized\n  (`invalid_argument.engine.json_document_too_large`), nested at most **100**\n  levels (`invalid_argument.engine.json_document_too_deep`), with any single\n  array at most **1,000,000** elements\n  (`invalid_argument.engine.json_array_too_large`).\n  Each is refused before anything is written.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

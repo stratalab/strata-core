@@ -523,7 +523,7 @@
   "command": "json.batch_exists",
   "request": {
     "additionalProperties": false,
-    "description": "Batch-checks JSON document existence.",
+    "description": "Batch-checks JSON document existence.\n\n# Guaranteed semantics\n\n- **Positional.** Results are returned in request order, one per key, so\n  a caller can zip them against the keys it sent.\n- **Limits.** Each key bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`).",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

@@ -58,7 +58,7 @@
   "command": "json.get",
   "request": {
     "additionalProperties": false,
-    "description": "Reads a JSON value at a document path.",
+    "description": "Reads a JSON value at a document path.\n\n# Guaranteed semantics\n\n- **Absent and null are different.** A missing document or path returns\n  no value; a path holding JSON `null` returns that null.\n- **Reads never block writers.** A read observes one consistent version\n  of the document; a concurrent write is never half-visible.\n- **Limits.** This command bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`)\n  and a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`).",
     "properties": {
       "as_of": {
         "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. To read as of a real time, use `as_of_time` instead.",

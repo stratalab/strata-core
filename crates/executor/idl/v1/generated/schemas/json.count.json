@@ -4,7 +4,7 @@
   "command": "json.count",
   "request": {
     "additionalProperties": false,
-    "description": "Counts JSON documents.",
+    "description": "Counts JSON documents.\n\n# Guaranteed semantics\n\n- **Counts documents, not paths.** The result is the number of documents\n  matching the prefix, whatever each one contains.\n- **One snapshot.** The count is taken at one consistent version.",
     "properties": {
       "as_of": {
         "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. To read as of a real time, use `as_of_time` instead.",

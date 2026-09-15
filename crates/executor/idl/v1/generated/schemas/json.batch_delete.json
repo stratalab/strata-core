@@ -541,7 +541,7 @@
   "command": "json.batch_delete",
   "request": {
     "additionalProperties": false,
-    "description": "Deletes multiple JSON documents or paths.",
+    "description": "Deletes multiple JSON documents or paths.\n\n# Guaranteed semantics\n\n- **One commit.** Every deletion applies together or none does.\n- **Limits.** Each entry bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`)\n  and a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`).",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

@@ -77,3 +77,96 @@ fn json_batch_delete_rejects_duplicate_document_ids() {
         "invalid_argument.engine.json_batch_duplicate_document"
     );
 }
+
+// --- published limits (#3214) ------------------------------------------
+//
+// Each test below pins one number the JSON commands publish in their
+// `# Guaranteed semantics` block. The pair matters: a published limit that is
+// only tested from the refusing side says nothing about where refusal starts,
+// and an off-by-one would put a wrong number in the reference. So every limit
+// is proven from both sides — the largest accepted input, and the smallest
+// refused one, with its code.
+
+/// A document id is bounded at 65,535 bytes.
+#[test]
+fn json_document_id_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = u16::MAX as usize;
+    JsonDocumentId::new("a".repeat(LIMIT)).expect("the largest accepted id");
+    let error = JsonDocumentId::new("a".repeat(LIMIT + 1)).expect_err("one byte past");
+    assert_eq!(error.code(), "invalid_argument.engine.json_document_id");
+}
+
+/// An index name is bounded at 256 bytes.
+#[test]
+fn json_index_name_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 256;
+    JsonIndexName::new("a".repeat(LIMIT)).expect("the largest accepted name");
+    let error = JsonIndexName::new("a".repeat(LIMIT + 1)).expect_err("one byte past");
+    assert_eq!(error.code(), "invalid_argument.engine.json_index_name");
+}
+
+/// A document is bounded at 16 MiB of serialized JSON.
+#[test]
+fn json_document_size_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    // `{"v":"<pad>"}` is the payload plus six bytes of framing and two quotes.
+    let framing = json!({ "v": "" }).to_string().len();
+    let at = json!({ "v": "a".repeat(LIMIT - framing) });
+    assert_eq!(
+        at.to_string().len(),
+        LIMIT,
+        "the fixture is exactly at the limit"
+    );
+    strata_engine::JsonValue::new(at).expect("a document exactly at the limit");
+
+    let over = json!({ "v": "a".repeat(LIMIT - framing + 1) });
+    let error = strata_engine::JsonValue::new(over).expect_err("one byte past");
+    assert_eq!(
+        error.code(),
+        "invalid_argument.engine.json_document_too_large"
+    );
+}
+
+/// Nesting is bounded at 100 levels.
+#[test]
+fn json_nesting_depth_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 100;
+    let nest = |depth: usize| {
+        let mut value = json!(1);
+        for _ in 0..depth {
+            value = json!([value]);
+        }
+        value
+    };
+    strata_engine::JsonValue::new(nest(LIMIT)).expect("the deepest accepted document");
+    let error = strata_engine::JsonValue::new(nest(LIMIT + 1)).expect_err("one level past");
+    assert_eq!(
+        error.code(),
+        "invalid_argument.engine.json_document_too_deep"
+    );
+}
+
+/// A single array is bounded at 1,000,000 elements.
+#[test]
+fn json_array_size_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 1_000_000;
+    let array = |len: usize| serde_json::Value::Array(vec![json!(0); len]);
+    strata_engine::JsonValue::new(array(LIMIT)).expect("the largest accepted array");
+    let error = strata_engine::JsonValue::new(array(LIMIT + 1)).expect_err("one element past");
+    assert_eq!(error.code(), "invalid_argument.engine.json_array_too_large");
+}
+
+/// A path is bounded at 256 segments.
+#[test]
+fn json_path_segment_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 256;
+    let path = |count: usize| {
+        (0..count)
+            .map(|index| strata_engine::JsonPathSegment::Key(format!("s{index}")))
+            .collect::<Vec<_>>()
+    };
+    strata_engine::JsonPath::from_segments(path(LIMIT)).expect("the longest accepted path");
+    let error =
+        strata_engine::JsonPath::from_segments(path(LIMIT + 1)).expect_err("one segment past");
+    assert_eq!(error.code(), "invalid_argument.engine.json_path_too_long");
+}

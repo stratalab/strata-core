@@ -62,7 +62,7 @@
   "command": "json.index.create",
   "request": {
     "additionalProperties": false,
-    "description": "Creates a JSON secondary index.",
+    "description": "Creates a JSON secondary index.\n\n# Guaranteed semantics\n\n- **Idempotent success.** Creating an index that already exists with the\n  same definition is not an error.\n- **Limits.** This command bears an index name at most **256 bytes**\n  (`invalid_argument.engine.json_index_name`),\n  and the indexed field path bears a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`).",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

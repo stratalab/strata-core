@@ -38,7 +38,7 @@
   "command": "json.scan",
   "request": {
     "additionalProperties": false,
-    "description": "Scans JSON documents.",
+    "description": "Scans JSON documents.\n\n# Guaranteed semantics\n\n- **Ordering.** Rows are returned in ascending byte-lexicographic key\n  order, stable across calls for unchanged data.\n- **One snapshot.** A page is read from one consistent version; a\n  concurrent write never splits a row across two pages.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",
