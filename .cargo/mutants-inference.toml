@@ -31,6 +31,19 @@ exclude_globs = [
 # fixed (compile the lane with `local`, or move the gated code into files the
 # globs above already cover); retire them there.
 exclude_re = [
+    # #3293 lock wait: `start.elapsed() < max_wait` compares against a clock,
+    # so `<` and `<=` differ only when elapsed lands EXACTLY on the bound — a
+    # boundary of measure zero on a continuous quantity. The two are
+    # behaviourally identical, not merely hard to test.
+    #
+    # Everything the wait DECIDES is mutated and tested: `lock_is_stale` (a
+    # truth table over absolute ages, so a moved threshold reds it),
+    # `lock_wait_verdict` (both directions), and the loop itself through
+    # `wait_out_lock_within`, whose bounds are injected so
+    # `the_wait_gives_up_on_a_holder_that_never_releases` can watch it give up
+    # in 120ms instead of ten minutes. Anchored to the function so it cannot
+    # over-match a future comparison elsewhere.
+    "replace < with <= in wait_out_lock_within",
     # The `local`-only model-cache guards (#3249). Beyond being uncompiled
     # here, every replacement cargo-mutants can write for a `MutexGuard`
     # return is unviable — this lane judged all ten of the compiled twin
