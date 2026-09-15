@@ -69,6 +69,12 @@ fn interpret(
 pub(crate) struct GraphMetadataBranchAdapter;
 
 impl CapabilityBranchAdapter for GraphMetadataBranchAdapter {
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        // Compare-only: graph rows are never promoted, so no promotion
+        // outcome reports one.
+        Ok(stored.to_vec())
+    }
+
     fn row_class(&self) -> RowClass {
         RowClass::GraphMetadata
     }
@@ -104,6 +110,12 @@ impl CapabilityBranchAdapter for GraphMetadataBranchAdapter {
 pub(crate) struct GraphNodeBranchAdapter;
 
 impl CapabilityBranchAdapter for GraphNodeBranchAdapter {
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        // Compare-only: graph rows are never promoted, so no promotion
+        // outcome reports one.
+        Ok(stored.to_vec())
+    }
+
     fn row_class(&self) -> RowClass {
         RowClass::GraphNode
     }
@@ -139,6 +151,12 @@ impl CapabilityBranchAdapter for GraphNodeBranchAdapter {
 pub(crate) struct GraphEdgeBranchAdapter;
 
 impl CapabilityBranchAdapter for GraphEdgeBranchAdapter {
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        // Compare-only: graph rows are never promoted, so no promotion
+        // outcome reports one.
+        Ok(stored.to_vec())
+    }
+
     fn row_class(&self) -> RowClass {
         RowClass::GraphEdge
     }
@@ -176,6 +194,12 @@ impl CapabilityBranchAdapter for GraphEdgeBranchAdapter {
 pub(crate) struct GraphOntologyBranchAdapter;
 
 impl CapabilityBranchAdapter for GraphOntologyBranchAdapter {
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        // Compare-only: graph rows are never promoted, so no promotion
+        // outcome reports one.
+        Ok(stored.to_vec())
+    }
+
     fn row_class(&self) -> RowClass {
         RowClass::GraphOntology
     }

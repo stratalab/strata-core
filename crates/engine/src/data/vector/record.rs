@@ -162,6 +162,38 @@ pub(crate) fn encode_vector_record(record: &VectorRecord) -> Result<Vec<u8>, Eng
     Ok(bytes)
 }
 
+/// The authored part of a stored vector record: the embedding the caller
+/// upserted and the metadata beside it.
+///
+/// The collection and key are dropped because a promotion outcome already
+/// carries them as the space and identity, and `vector_revision` is the
+/// engine's bookkeeping. Without this, a promotion reported the whole stored
+/// row -- format byte included (#3202).
+pub(crate) fn stored_record_payload(bytes: &[u8]) -> Result<Vec<u8>, EngineError> {
+    if bytes.first().copied() != Some(VECTOR_RECORD_FORMAT_VERSION) {
+        return Err(EngineError::corruption(
+            "data_loss.engine.vector_record",
+            "stored vector record has an unknown format version",
+        ));
+    }
+    let stored = serde_json::from_slice::<StoredVectorRecord>(&bytes[1..]).map_err(|error| {
+        EngineError::corruption(
+            "data_loss.engine.vector_record",
+            format!("stored vector record cannot be decoded: {error}"),
+        )
+    })?;
+    serde_json::to_vec(&serde_json::json!({
+        "embedding": stored.embedding,
+        "metadata": stored.metadata,
+    }))
+    .map_err(|error| {
+        EngineError::corruption(
+            "data_loss.engine.vector_record",
+            format!("stored vector record payload cannot be re-encoded: {error}"),
+        )
+    })
+}
+
 pub(crate) fn decode_vector_record(
     expected_collection: &VectorCollectionName,
     expected_key: &VectorKey,

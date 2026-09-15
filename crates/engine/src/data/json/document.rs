@@ -106,6 +106,35 @@ pub(crate) fn encode_stored_document(document: &JsonDocument) -> Result<Vec<u8>,
     Ok(bytes)
 }
 
+/// The authored document inside a stored envelope, as the JSON bytes a caller
+/// wrote.
+///
+/// Separate from [`decode_stored_document`], which re-validates the identity
+/// against a key the caller already holds. This is for reporting a value whose
+/// row has already been interpreted -- a promotion outcome -- where the
+/// envelope's own bookkeeping (`document_version`, `updated_at_micros`) and
+/// its format byte are engine business and not the caller's (#3202).
+pub(crate) fn stored_document_value(bytes: &[u8]) -> Result<Vec<u8>, EngineError> {
+    if bytes.first().copied() != Some(DOCUMENT_FORMAT_VERSION) {
+        return Err(EngineError::corruption(
+            "data_loss.engine.json_document",
+            "stored JSON document has an unknown format version",
+        ));
+    }
+    let stored = serde_json::from_slice::<StoredJsonDocument>(&bytes[1..]).map_err(|error| {
+        EngineError::corruption(
+            "data_loss.engine.json_document",
+            format!("stored JSON document cannot be decoded: {error}"),
+        )
+    })?;
+    serde_json::to_vec(&stored.value).map_err(|error| {
+        EngineError::corruption(
+            "data_loss.engine.json_document",
+            format!("stored JSON document value cannot be re-encoded: {error}"),
+        )
+    })
+}
+
 pub(crate) fn decode_stored_document(
     expected_id: &JsonDocumentId,
     bytes: &[u8],

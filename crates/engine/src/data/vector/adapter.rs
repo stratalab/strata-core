@@ -37,6 +37,10 @@ use crate::persistence::{
 pub(crate) struct VectorBranchAdapter;
 
 impl CapabilityBranchAdapter for VectorBranchAdapter {
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        super::record::stored_record_payload(stored)
+    }
+
     fn row_class(&self) -> RowClass {
         RowClass::Vector
     }
@@ -98,6 +102,13 @@ impl CapabilityBranchAdapter for VectorBranchAdapter {
 pub(crate) struct VectorCollectionBranchAdapter;
 
 impl CapabilityBranchAdapter for VectorCollectionBranchAdapter {
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        // Compare-only (`supports_promotion` is false), so no promotion
+        // outcome reports it; promotion handles collection configs through
+        // `plan_collection_promotion`.
+        Ok(stored.to_vec())
+    }
+
     fn row_class(&self) -> RowClass {
         RowClass::VectorCollection
     }

@@ -33,6 +33,12 @@ impl CapabilityBranchAdapter for KvBranchAdapter {
         encode_kv_space_prefix(space)
     }
 
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        // KV stores exactly what the caller wrote, which is why this defect
+        // read as JSON-specific: KV is the exception, not the rule (#3202).
+        Ok(stored.to_vec())
+    }
+
     fn interpret_row(
         &self,
         space: &ProductSpace,
