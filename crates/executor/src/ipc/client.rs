@@ -66,20 +66,39 @@ pub(crate) struct IpcClient {
     last_id: u64,
 }
 
+/// Put the connection on the short handshake deadline.
+///
+/// Named rather than inlined so the mutation gate has something viable to
+/// mutate: `connect` itself yields only `Ok(Default::default())`, which does
+/// not compile for a type with no `Default`, so the lane judged nothing at all
+/// (#3337). Replacing this with `Ok(())` reds
+/// `the_handshake_gives_up_on_an_owner_that_accepts_and_never_answers`.
+fn arm_for_handshake(stream: &UnixStream) -> Result<(), ConnectError> {
+    stream
+        .set_read_timeout(Some(HELLO_TIMEOUT))
+        .map_err(ConnectError::Io)?;
+    stream
+        .set_write_timeout(Some(WRITE_TIMEOUT))
+        .map_err(ConnectError::Io)
+}
+
+/// Hand the connection over to command timing, once the owner has answered.
+///
+/// Skipping this leaves every command on the 250ms handshake deadline — a worse
+/// failure than the hang it replaces. Replacing this with `Ok(())` reds
+/// `a_pre_hello_owner_downgrades_the_client_to_protocol_1`.
+fn arm_for_commands(stream: &UnixStream) -> Result<(), ConnectError> {
+    stream
+        .set_read_timeout(Some(READ_TIMEOUT))
+        .map_err(ConnectError::Io)
+}
+
 impl IpcClient {
     /// Connect to a store owner listening at `socket_path` and introduce
     /// ourselves with a protocol-revision-2 hello declaring `access`.
     pub(crate) fn connect(socket_path: &Path, access: SessionAccess) -> Result<Self, ConnectError> {
         let stream = UnixStream::connect(socket_path).map_err(ConnectError::Io)?;
-        // The handshake runs under its own short deadline; the generous
-        // command timeout is installed only once the owner has proved it is
-        // answering (#3007).
-        stream
-            .set_read_timeout(Some(HELLO_TIMEOUT))
-            .map_err(ConnectError::Io)?;
-        stream
-            .set_write_timeout(Some(WRITE_TIMEOUT))
-            .map_err(ConnectError::Io)?;
+        arm_for_handshake(&stream)?;
         let stream_for_commands = stream.try_clone().map_err(ConnectError::Io)?;
         let mut client = Self {
             reader: BufReader::new(stream.try_clone().map_err(ConnectError::Io)?),
@@ -88,10 +107,7 @@ impl IpcClient {
             last_id: 0,
         };
         client.server_hello = client.hello(access)?;
-        // The owner answered, so commands may now take as long as they take.
-        stream_for_commands
-            .set_read_timeout(Some(READ_TIMEOUT))
-            .map_err(ConnectError::Io)?;
+        arm_for_commands(&stream_for_commands)?;
         Ok(client)
     }
 
