@@ -1248,6 +1248,12 @@ fn value_order(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// under its declared presentation, or the format's null cell (`-` human,
 /// empty raw) when it is null or absent.
 pub(crate) fn cell(value: Option<&Value>, as_: Option<CliDisplayAs>, format: Format) -> Cell {
+    // A JSON `null` is the null cell, not the text `null`, in a JSON-typed
+    // column as in every other. The wire spells "nothing here" that way: a
+    // `batch_get` miss carries `found: false` beside `value: null`, so
+    // rendering the null as a value would report a document containing null
+    // where there is no document. The record's own status column is what
+    // distinguishes a hit from a miss, and it is already in the row.
     let value = match value {
         None | Some(Value::Null) => {
             return Cell::null(if format == Format::Human { "-" } else { "" });
@@ -1303,14 +1309,22 @@ fn presented(value: &Value, as_: Option<CliDisplayAs>, format: Format) -> Presen
             other => text(scalar_text(other, format)),
         },
         Some(CliDisplayAs::Bytes) => bytes_text(value),
-        // A serialized document escapes its own control characters, so it is
-        // already an unambiguous spelling of itself; escaping it again would
-        // show a reader `\\n` where the document says `\n`. A bare string
-        // under the same presentation is ordinary text and is escaped.
-        Some(CliDisplayAs::Json | CliDisplayAs::Table) => match value {
-            Value::Array(_) | Value::Object(_) => Presented::Encoded(raw_scalar(value)),
-            other => text(raw_scalar(other)),
-        },
+        // Every present value is compact JSON, its own type included.
+        //
+        // Arrays and objects were serialized while a string was written bare,
+        // so a string lost its quotes and its type: `[1]` the array and
+        // `"[1]"` the string produced one cell, as did `1`/`"1"`,
+        // `true`/`"true"`, and an object beside the string spelling it
+        // (#3372). Q16b made a cell injective over escape spellings, which is
+        // not the same as injective over JSON types.
+        //
+        // `Encoded` because a serialized document already escapes its own
+        // control characters and quotes, so it is an unambiguous spelling of
+        // itself; escaping it again would show a reader `\\n` where the
+        // document says `\n`. Both formats carry it, for the reason the
+        // `base64:` marker is in both (#3358 F8): an encoding a reader can
+        // invert is worth more than one that reads slightly shorter.
+        Some(CliDisplayAs::Json | CliDisplayAs::Table) => Presented::Encoded(json_cell_text(value)),
         Some(CliDisplayAs::Date) => match (value.as_u64(), format) {
             (Some(micros), Format::Human) => text(crate::wall_clock::format_utc_instant(micros)),
             (Some(micros), _) => number(micros.to_string()),
@@ -2304,6 +2318,21 @@ fn raw_scalar(value: &Value) -> String {
     }
 }
 
+/// A JSON value as the compact JSON that spells it, type included.
+///
+/// Distinct from [`raw_scalar`], which writes a string bare: that is right for
+/// a receipt placeholder and for the whole-value `--raw json get` leaf, where
+/// the value is the entire answer and its type is not in question. In a cell
+/// it is beside values of other types in the same column, and the type is the
+/// thing a consumer cannot otherwise recover (#3372).
+fn json_cell_text(value: &Value) -> String {
+    // Serializing a `Value` cannot fail: it holds no non-finite number and no
+    // map key that is not a string. The fallback keeps a render from becoming
+    // a panic if that ever stops being true, and spells a value rather than
+    // an empty cell so it cannot be read as absence.
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned())
+}
+
 /// Raw form of a `json get` leaf: like [`raw_scalar`], but a present JSON `null`
 /// prints the literal `null` so a `--raw` caller can distinguish a null field
 /// from a miss, which emits nothing (#3064).
@@ -2354,6 +2383,68 @@ fn human_error_line(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{displayable_text, escape_cell, BYTES_LABEL};
+
+    /// A JSON-valued cell must be invertible: a consumer that knows the column
+    /// is `as: json` can recover the value it was given.
+    ///
+    /// `raw_scalar` returned a string **bare** while serializing arrays and
+    /// objects, so a string lost its quotes and its type while a structure
+    /// kept both. `[1]` the array and `"[1]"` the string produced one cell, as
+    /// did `1`/`"1"`, `true`/`"true"`, and a stored null beside an empty
+    /// string (#3372). Q16b made the encoding injective over escape
+    /// spellings; that is not the same as injective over JSON types.
+    #[test]
+    fn a_json_cell_distinguishes_every_value_type() {
+        let values = [
+            json!([1]),
+            json!("[1]"),
+            json!(1),
+            json!("1"),
+            json!(true),
+            json!("true"),
+            json!(null),
+            json!(""),
+            json!("null"),
+            json!({ "a": 1 }),
+            json!("{\"a\":1}"),
+        ];
+        for format in [Format::Human, Format::Raw] {
+            let cells: Vec<String> = values
+                .iter()
+                .map(|value| cell(Some(value), Some(CliDisplayAs::Json), format).text)
+                .collect();
+            let mut unique = cells.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                cells.len(),
+                "{format:?}: collision among {cells:?}"
+            );
+        }
+    }
+
+    /// A JSON null stays the null cell, and is not confused with the empty
+    /// string beside it.
+    ///
+    /// The wire spells "nothing here" as null: a `batch_get` miss carries
+    /// `found: false` beside `value: null`, so spelling that null as a value
+    /// would report a document containing null where there is no document.
+    /// What made `null` and `""` one cell was not the null -- it was the
+    /// empty string being written bare, and quoting it is what separates them.
+    #[test]
+    fn a_json_null_is_the_null_cell_and_the_empty_string_is_not() {
+        for format in [Format::Human, Format::Raw] {
+            let absent = cell(None, Some(CliDisplayAs::Json), format).text;
+            let null = cell(Some(&Value::Null), Some(CliDisplayAs::Json), format).text;
+            let empty = cell(Some(&json!("")), Some(CliDisplayAs::Json), format).text;
+            assert_eq!(null, absent, "{format:?}: a null is the null cell");
+            assert_ne!(
+                null, empty,
+                "{format:?}: a stored empty string reads as a null"
+            );
+        }
+    }
 
     /// The encoding must be injective: two different values may never produce
     /// the same cell, or a consumer cannot recover what was stored (#3358 F8).
