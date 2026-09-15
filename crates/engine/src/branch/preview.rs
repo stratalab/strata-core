@@ -264,10 +264,22 @@ fn entity_states(
     Ok(states)
 }
 
-pub(crate) fn value_of(summary: Option<&EntitySummary>) -> Option<Vec<u8>> {
+/// A side's value as the caller wrote it, for anything reported to a caller.
+///
+/// This replaced a `value_of` that answered with the stored row. Every one of
+/// its callers was building something a caller reads -- an applied entity, a
+/// conflict side -- so answering with the stored row leaked each capability's
+/// storage envelope (#3202), and once they all asked the right question there
+/// was nothing left to ask the wrong one. Promotion still writes the stored
+/// row to the target: that path reads `EntitySummary` directly and must stay
+/// exact.
+pub(crate) fn authored_value_of(
+    adapter: &dyn CapabilityBranchAdapter,
+    summary: Option<&EntitySummary>,
+) -> Result<Option<Vec<u8>>, EngineError> {
     match summary {
-        Some(EntitySummary::Present(bytes)) => Some(bytes.clone()),
-        _ => None,
+        Some(EntitySummary::Present(bytes)) => adapter.authored_value(bytes).map(Some),
+        _ => Ok(None),
     }
 }
 
@@ -423,12 +435,13 @@ pub(crate) fn preview_branches(
             ConflictKind::ModifyDeleteDivergence
         };
 
+        let adapter = adapter_for(entity.capability);
         conflicts.push(PreviewConflict::new(
             entity.capability,
             entity.space.clone(),
             entity.identity.clone(),
-            value_of(source_value),
-            value_of(target_value),
+            authored_value_of(adapter.as_ref(), source_value)?,
+            authored_value_of(adapter.as_ref(), target_value)?,
             kind,
             strategy_result,
         ));

@@ -23,6 +23,12 @@ use crate::persistence::{
 pub(crate) struct EventBranchAdapter;
 
 impl CapabilityBranchAdapter for EventBranchAdapter {
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        // Compare-only: an append-only stream is never promoted, so no
+        // promotion outcome reports one of these rows.
+        Ok(stored.to_vec())
+    }
+
     fn row_class(&self) -> RowClass {
         RowClass::Event
     }

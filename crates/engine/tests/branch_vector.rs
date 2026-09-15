@@ -1762,3 +1762,75 @@ fn test_a_metric_change_over_retained_target_vectors_is_refused() {
         VectorDistanceMetric::Cosine
     );
 }
+
+/// A promotion reports the embedding the caller upserted, not the row the
+/// engine stored (#3202).
+///
+/// The vector record wraps the embedding in an envelope — a format byte, then
+/// a wrapper repeating the collection and key and carrying `vector_revision` —
+/// and `applied[].value` carried the whole thing. The issue was filed against
+/// JSON and read as JSON-specific because KV looked fine; KV is the one
+/// capability that stores exactly what the caller wrote, and vector leaks the
+/// same way JSON did.
+#[test]
+fn a_promoted_vector_reports_the_authored_embedding() {
+    let mut database = open_cache_database().expect("cache open succeeds");
+    database
+        .vector(branch("default"), space("default"))
+        .expect("vector service opens")
+        .create_collection(
+            collection(),
+            VectorConfig::new(2, VectorDistanceMetric::Cosine).expect("valid config"),
+        )
+        .expect("create collection");
+    upsert(&mut database, "default", "v1", vec![0.1, 0.2]);
+    database
+        .branches()
+        .expect("branch service opens")
+        .fork_current(&branch("default"), branch("feature"))
+        .expect("fork succeeds");
+    upsert(&mut database, "feature", "v1", vec![0.3, 0.4]);
+
+    let outcome = database
+        .branches()
+        .expect("branch service opens")
+        .promote(
+            &branch("feature"),
+            &branch("default"),
+            PromotionStrategy::Strict,
+        )
+        .expect("strict promote succeeds");
+
+    // The one entity promoted. A vector identity is the capability's own
+    // space-relative key (collection and key encoded together), not the bare
+    // key, so it is taken rather than matched.
+    assert_eq!(outcome.applied().len(), 1, "one vector promoted");
+    let value = outcome.applied()[0]
+        .value()
+        .expect("the promoted vector carries a value");
+    let reported: serde_json::Value = serde_json::from_slice(value).unwrap_or_else(|error| {
+        panic!(
+            "the reported value does not parse as the payload it reports ({error}): {:?}",
+            String::from_utf8_lossy(value)
+        )
+    });
+
+    assert_eq!(
+        reported["embedding"]
+            .as_array()
+            .expect("an embedding array")
+            .len(),
+        2,
+        "reported {reported}"
+    );
+    for internal in ["vector_revision", "collection", "key"] {
+        assert!(
+            reported.get(internal).is_none(),
+            "the envelope's `{internal}` reached the caller: {reported}"
+        );
+    }
+    assert!(
+        !value.iter().any(u8::is_ascii_control),
+        "the format byte reached the caller: {value:?}"
+    );
+}

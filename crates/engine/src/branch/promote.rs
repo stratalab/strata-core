@@ -21,7 +21,7 @@ use crate::api::{
 use crate::branch::adapter::EntitySummary;
 use crate::branch::catalog::BranchCatalogRecord;
 use crate::branch::preview::{
-    adapter_for, base_registered_spaces, changed, normalized, three_way, value_of,
+    adapter_for, authored_value_of, base_registered_spaces, changed, normalized, three_way,
 };
 use crate::control::space::{registered_spaces, registration_and_deletion_mutations};
 use crate::data::kv::ProductSpace;
@@ -106,12 +106,13 @@ pub(crate) fn plan_promotion(
             } else {
                 ConflictKind::ModifyDeleteDivergence
             };
+            let adapter = adapter_for(entity.capability);
             conflicts.push(PreviewConflict::new(
                 entity.capability,
                 entity.space.clone(),
                 entity.identity.clone(),
-                value_of(source_value),
-                value_of(target_value),
+                authored_value_of(adapter.as_ref(), source_value)?,
+                authored_value_of(adapter.as_ref(), target_value)?,
                 kind,
                 strategy_result,
             ));
@@ -132,7 +133,7 @@ pub(crate) fn plan_promotion(
             entity.capability,
             &entity,
             resolved,
-        );
+        )?;
     }
 
     // Carry source-only spaces so promoted rows land in a space the target's
@@ -229,13 +230,16 @@ fn record_applied_or_deleted(
     capability: ComparedCapability,
     entity: &crate::branch::preview::ThreeWayEntity,
     resolved: &EntitySummary,
-) {
+) -> Result<(), EngineError> {
     match resolved {
+        // The value the caller wrote, not the row the engine stored: the two
+        // are the same only for KV, and reporting the row leaked every other
+        // capability's storage envelope (#3202).
         EntitySummary::Present(value) => applied.push(PromotedEntity::new(
             capability,
             entity.space.clone(),
             entity.identity.clone(),
-            Some(value.clone()),
+            Some(adapter_for(capability).authored_value(value)?),
         )),
         EntitySummary::Absent => deleted.push(PromotedEntity::new(
             capability,
@@ -244,4 +248,5 @@ fn record_applied_or_deleted(
             None,
         )),
     }
+    Ok(())
 }

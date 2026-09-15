@@ -31,6 +31,10 @@ impl CapabilityBranchAdapter for JsonBranchAdapter {
         encode_json_space_prefix(space)
     }
 
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+        crate::data::json::document::stored_document_value(stored)
+    }
+
     fn interpret_row(
         &self,
         space: &ProductSpace,

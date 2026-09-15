@@ -136,6 +136,20 @@ pub(crate) trait CapabilityBranchAdapter {
         row: &PersistenceReadRow,
     ) -> Result<ComparableEntity, EngineError>;
 
+    /// The authored value behind a stored row, for an outcome that reports
+    /// what a promotion applied.
+    ///
+    /// Deliberately without a default. The obvious default -- the stored bytes
+    /// -- is right only where a capability stores exactly what the caller
+    /// wrote, and that is KV alone. Every capability that wraps its value in
+    /// an envelope leaked the envelope through `applied[].value`: the format
+    /// byte, then a wrapper carrying the identity again and the engine's own
+    /// bookkeeping, with the authored value nested inside, so a consumer could
+    /// not parse it without stripping a byte first (#3202). A default would
+    /// have let the next capability inherit that silently, which is how this
+    /// one arrived; a missing impl is a build failure instead.
+    fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError>;
+
     /// Build the row mutation that writes `summary` for `identity` in `space`
     /// onto branch `branch_id` — the write-side inverse of
     /// [`CapabilityBranchAdapter::interpret_row`], used by promotion to apply a
@@ -174,11 +188,58 @@ mod tests {
 
     const FAKE_PREFIX: &[u8] = b"fake/";
 
+    /// The capabilities that are compared but never promoted answer
+    /// `authored_value` with the row itself, and nothing asks them.
+    ///
+    /// The trait has no default on purpose (#3202): the obvious one -- the
+    /// stored bytes -- is right only for KV, and a default is how the envelope
+    /// leak would reach the next capability. The cost is six impls whose code
+    /// is unreachable by construction, which no promotion test can exercise
+    /// and which a mutation run therefore reports as survivors. This pins them
+    /// in one place, beside the `supports_promotion` contract that makes them
+    /// unreachable, so the set is stated rather than scattered.
+    #[test]
+    fn a_compare_only_capability_passes_its_row_through() {
+        use crate::data::event::EventBranchAdapter;
+        use crate::data::graph::{
+            GraphEdgeBranchAdapter, GraphMetadataBranchAdapter, GraphNodeBranchAdapter,
+            GraphOntologyBranchAdapter,
+        };
+        use crate::data::vector::VectorCollectionBranchAdapter;
+
+        let compare_only: [(&str, &dyn CapabilityBranchAdapter); 6] = [
+            ("event", &EventBranchAdapter),
+            ("graph metadata", &GraphMetadataBranchAdapter),
+            ("graph node", &GraphNodeBranchAdapter),
+            ("graph edge", &GraphEdgeBranchAdapter),
+            ("graph ontology", &GraphOntologyBranchAdapter),
+            ("vector collection", &VectorCollectionBranchAdapter),
+        ];
+
+        for (name, adapter) in compare_only {
+            assert!(
+                !adapter.supports_promotion(),
+                "{name} is promoted, so its authored value is reported and needs its own test"
+            );
+            assert_eq!(
+                adapter
+                    .authored_value(b"stored-row")
+                    .expect("a pass-through cannot fail"),
+                b"stored-row".to_vec(),
+                "{name}"
+            );
+        }
+    }
+
     /// A minimal capability used to pin the adapter trait's shape without a real
     /// capability or storage. Its rows are `fake/<space>/<identity> => value`.
     struct FakeAdapter;
 
     impl CapabilityBranchAdapter for FakeAdapter {
+        fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
+            Ok(stored.to_vec())
+        }
+
         fn row_class(&self) -> RowClass {
             RowClass::Kv
         }

@@ -1037,3 +1037,143 @@ fn test_recreated_source_after_merge_uses_its_own_fork_base() {
     );
     assert_branch_value(&mut database, "default", "default", b"k", b"w1");
 }
+
+/// What a promotion reports as the value it applied must be the value the
+/// caller wrote, not the row the engine stored (#3202).
+///
+/// `PromotedEntity::value` carried the storage row verbatim. For KV that is
+/// the authored value, which is why the defect read as JSON-specific. It is
+/// the other way round: KV is the one capability that stores exactly what the
+/// caller wrote, and every capability that wraps its value in an envelope
+/// leaked the envelope — the format byte, then a wrapper carrying the identity
+/// again and the engine's own bookkeeping, with the authored value nested
+/// inside. A consumer could not hand it to a JSON parser without stripping a
+/// byte first, and nothing in the record said which capabilities needed that.
+#[test]
+fn a_promotion_reports_the_authored_value_not_the_stored_row() {
+    let mut database = open_cache_database().expect("cache open succeeds");
+    database
+        .branches()
+        .expect("branch service opens")
+        .fork_current(&branch("default"), branch("feature"))
+        .expect("fork succeeds");
+    database
+        .kv(branch("feature"), space("default"))
+        .expect("KV opens")
+        .put(key(b"k"), value(b"authored"))
+        .expect("kv put");
+    database
+        .json(branch("feature"), space("default"))
+        .expect("json opens")
+        .set_or_create(
+            JsonDocumentId::new("doc").expect("id"),
+            &JsonPath::root(),
+            JsonValue::new(json!({"a": 2})).expect("value"),
+        )
+        .expect("json set");
+
+    let outcome = database
+        .branches()
+        .expect("branch service opens")
+        .promote(
+            &branch("feature"),
+            &branch("default"),
+            PromotionStrategy::Strict,
+        )
+        .expect("strict promote succeeds");
+
+    let value_for = |identity: &[u8]| -> Vec<u8> {
+        outcome
+            .applied()
+            .iter()
+            .find(|entity| entity.identity() == identity)
+            .and_then(|entity| entity.value())
+            .expect("an applied value")
+            .to_vec()
+    };
+
+    // KV is unchanged: the stored row is the authored value.
+    assert_eq!(value_for(b"k"), b"authored".to_vec());
+
+    // JSON reports the document, and nothing of the envelope around it.
+    let document = value_for(b"doc");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&document).expect("the document parses as-is"),
+        json!({ "a": 2 }),
+        "reported {:?}",
+        String::from_utf8_lossy(&document)
+    );
+    for internal in ["document_version", "updated_at_micros"] {
+        assert!(
+            !String::from_utf8_lossy(&document).contains(internal),
+            "the envelope's `{internal}` reached the caller: {:?}",
+            String::from_utf8_lossy(&document)
+        );
+    }
+    assert!(
+        !document.iter().any(u8::is_ascii_control),
+        "the format byte reached the caller: {document:?}"
+    );
+}
+
+/// A refused promotion reports the same authored values (#3202).
+///
+/// `PreviewConflict` carries `source_value`/`target_value` for a caller to
+/// show or diff, and they came from the same stored rows as `applied[]`. A
+/// library caller inspecting a conflict got the envelope; the CLI hid it only
+/// because its refusal is a structured error that carries no values.
+#[test]
+fn a_conflict_reports_authored_values_on_both_sides() {
+    let mut database = open_cache_database().expect("cache open succeeds");
+    database
+        .branches()
+        .expect("branch service opens")
+        .fork_current(&branch("default"), branch("feature"))
+        .expect("fork succeeds");
+    for (target_branch, value) in [
+        ("feature", json!({ "a": 2 })),
+        ("default", json!({ "a": 3 })),
+    ] {
+        database
+            .json(branch(target_branch), space("default"))
+            .expect("json opens")
+            .set_or_create(
+                JsonDocumentId::new("doc").expect("id"),
+                &JsonPath::root(),
+                JsonValue::new(value).expect("value"),
+            )
+            .expect("json set");
+    }
+
+    let outcome = database
+        .branches()
+        .expect("branch service opens")
+        .preview(
+            &branch("feature"),
+            &branch("default"),
+            PromotionStrategy::Strict,
+        )
+        .expect("preview succeeds");
+
+    let conflict = outcome
+        .conflicts()
+        .iter()
+        .find(|conflict| conflict.identity() == b"doc")
+        .expect("doc conflict present");
+    for (side, bytes) in [
+        ("source", conflict.source_value()),
+        ("target", conflict.target_value()),
+    ] {
+        let bytes = bytes.expect("both sides are present");
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(bytes).is_ok(),
+            "the {side} value does not parse as the document it reports: {:?}",
+            String::from_utf8_lossy(bytes)
+        );
+        assert!(
+            !String::from_utf8_lossy(bytes).contains("document_version"),
+            "the {side} value carries the envelope: {:?}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+}
