@@ -125,3 +125,86 @@ fn the_package_step_verifies_the_archive_it_built() {
          pipeline stayed green (#3010)"
     );
 }
+
+/// Every target the release BUILDS is also PACKAGED.
+///
+/// The two are separate lists in one file — `build.strategy.matrix.include`
+/// names a target per runner, `package.strategy.matrix.target` names them
+/// again — so a target added to one and not the other compiles a binary that
+/// is silently never shipped, or packages an artifact that was never built.
+///
+/// This is the in-repo half of the drift that made `install.sh` resolve six
+/// targets while the release published three (#3011, #3060). The other half
+/// lives in stratadb.org, which serves the installer; nothing here can see it,
+/// which is precisely why the lists that ARE both here should be pinned.
+#[test]
+fn every_built_target_is_packaged() {
+    let workflow = release_workflow();
+
+    let built: std::collections::BTreeSet<&str> = workflow
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("- target: "))
+        .collect();
+
+    let package_start = workflow
+        .find("  package:")
+        .expect("the release has a package job");
+    let packaged: std::collections::BTreeSet<&str> = workflow[package_start..]
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("target:"))
+        .skip(1)
+        .take_while(|line| line.trim_start().starts_with("- "))
+        .map(|line| line.trim().trim_start_matches("- "))
+        .collect();
+
+    assert!(
+        !built.is_empty() && !packaged.is_empty(),
+        "no targets parsed from one of the matrices; this guard is watching nothing \
+         (built: {built:?}, packaged: {packaged:?})"
+    );
+    assert_eq!(
+        built, packaged,
+        "the build and package target matrices disagree. A target built but not \
+         packaged ships nothing; a target packaged but not built fails the job. \
+         built: {built:?}, packaged: {packaged:?}"
+    );
+}
+
+/// Every placeholder in the Homebrew formula template has a substitution.
+///
+/// The template is Ruby with `SHA_*_PLACEHOLDER` tokens that a later `sed`
+/// replaces. Adding a platform block without its `sed` line ships a formula
+/// whose `sha256` is the literal word `SHA_INTEL64_PLACEHOLDER`, and
+/// `brew install` fails for everyone on that platform — exactly the mistake
+/// available while adding the Intel-Mac block (#3011).
+#[test]
+fn every_formula_placeholder_is_substituted() {
+    let workflow = release_workflow();
+
+    let declared: std::collections::BTreeSet<&str> = workflow
+        .match_indices("_PLACEHOLDER")
+        .filter_map(|(at, _)| {
+            let before = &workflow[..at];
+            // Uppercase and underscore only: the tokens are `SHA_*` and
+            // `VERSION`, and the URL writes `vVERSION_PLACEHOLDER`, whose
+            // lowercase `v` is part of the tag rather than the token.
+            let start = before
+                .rfind(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))?;
+            Some(&workflow[start + 1..at + "_PLACEHOLDER".len()])
+        })
+        .collect();
+
+    assert!(
+        declared.len() >= 4,
+        "expected the formula's version and per-platform placeholders, found {declared:?}"
+    );
+    for placeholder in declared {
+        let substitution = format!("s/{placeholder}/");
+        assert!(
+            workflow.contains(&substitution),
+            "`{placeholder}` appears in the formula template but no `sed` replaces it, \
+             so the published formula would carry the literal token"
+        );
+    }
+}
