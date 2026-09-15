@@ -187,6 +187,7 @@ jobs:
         with:
           sparse-checkout: |
             README.md
+            LICENSE
             Cargo.toml
           sparse-checkout-cone-mode: false
 
@@ -212,8 +213,16 @@ jobs:
         run: |
           chmod +x staging/strata
           cp README.md staging/
+          # Apache-2.0 requires the license text to travel with the work, and
+          # every tarball since v1.0.0 shipped without it (#3010). The sparse
+          # checkout above must list LICENSE too, or this copy finds nothing.
+          cp LICENSE staging/
           ARCHIVE_NAME="strata-v${{ steps.version.outputs.version }}-${{ matrix.target }}${{ matrix.suffix }}.tar.gz"
-          tar czf "${ARCHIVE_NAME}" -C staging strata README.md
+          tar czf "${ARCHIVE_NAME}" -C staging strata README.md LICENSE
+          # Assert what the archive actually holds, the way the IDL docs bundle
+          # below does. The pipeline was green for every release that shipped
+          # without a license, because no job looked inside a tarball (#3010).
+          tar tzf "${ARCHIVE_NAME}" | grep -qx 'LICENSE'
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
 
       - name: Upload packaged artifact
