@@ -1,5 +1,7 @@
 //! CLI response rendering.
 
+use std::fmt::Write as _;
+
 use base64::Engine as _;
 use serde::Serialize;
 use serde_json::Value;
@@ -1365,15 +1367,37 @@ fn float_text(float: f64) -> String {
 /// A cell holds one line: a newline or tab inside a value is spelled out
 /// (`\n`, `\t`) so the row stays one row in both layouts (R4).
 pub(crate) fn escape_cell(text: &str) -> String {
-    let escaped = text
-        // The escape character first, or an escape this function writes would
-        // be indistinguishable from one the value already contained: `a\nb`
-        // typed with a backslash and an `n` encoded to the same six bytes as
-        // `a` newline `b` (#3358 F8).
-        .replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('\t', "\\t")
-        .replace('\r', "\\r");
+    let mut escaped = String::with_capacity(text.len());
+    // One pass, so every character is decided exactly once. Passing the text
+    // through four `replace` calls did the same for these four, but only
+    // because each wrote a backslash the next never reads; a fifth rule for
+    // "every other control character" cannot be expressed that way without
+    // re-escaping what the earlier passes just wrote.
+    for character in text.chars() {
+        match character {
+            // The escape character itself, or an escape this function writes
+            // would be indistinguishable from one the value already
+            // contained: `a\nb` typed with a backslash and an `n` encoded to
+            // the same six bytes as `a` newline `b` (#3358 F8).
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            '\r' => escaped.push_str("\\r"),
+            // Everything else that acts on a terminal rather than printing on
+            // it: ESC and the rest of C0, DEL, and the C1 block, where 0x9B
+            // is a single-byte CSI. A cell escaping only the four characters
+            // above is injective but not safe to print, and a stored id
+            // holding ESC cleared the reader's screen (#3371). The `\uXXXX`
+            // spelling is the one the `--json` envelope already uses for the
+            // same byte, so a reader meets one encoding, not two.
+            control if control.is_control() => {
+                // Infallible: the only error `write!` can report here is the
+                // formatter's, and a `String` has none.
+                write!(escaped, "\\u{:04x}", control as u32).expect("write to a String");
+            }
+            other => escaped.push(other),
+        }
+    }
     if escaped.starts_with(BYTES_LABEL) {
         // Text that spells the marker is not the marker. A leading backslash
         // says so, and cannot be read as an encoded backslash because that is
@@ -2351,12 +2375,69 @@ mod tests {
         assert_eq!(unique.len(), cells.len(), "collision among {cells:?}");
     }
 
+    /// The four with a short spelling keep it, and the escape character is
+    /// itself escaped. Every other control character takes the `\uXXXX` form:
+    /// the arms are ordered so the general rule cannot swallow the four, which
+    /// would silently turn every newline in a cell into `\u000a`.
     #[test]
     fn the_escape_character_is_itself_escaped() {
         assert_eq!(escape_cell("a\nb"), "a\\nb");
         assert_eq!(escape_cell("a\\nb"), "a\\\\nb");
         assert_eq!(escape_cell("a\tb"), "a\\tb");
         assert_eq!(escape_cell("a\rb"), "a\\rb");
+        // ESC, the character #3371 reproduced with.
+        assert_eq!(escape_cell("a\u{1b}b"), "a\\u001bb");
+        // DEL and the C1 block are control characters too, and 0x9B is a
+        // single-byte CSI on terminals that decode C1.
+        assert_eq!(escape_cell("a\u{7f}b"), "a\\u007fb");
+        assert_eq!(escape_cell("a\u{9b}b"), "a\\u009bb");
+    }
+
+    /// A cell may not carry a character that acts on the terminal printing
+    /// it. `\n`, `\t`, `\r` and the backslash were encoded because they break
+    /// a row into two rows or add a column — a structural property. Every
+    /// other control character passed through, so a stored id holding ESC
+    /// cleared the reader's screen instead of being shown (#3371). Injective
+    /// and safe-to-print are different properties; #3360 established only the
+    /// first.
+    #[test]
+    fn every_control_character_is_encoded() {
+        for code in
+            (0..=0x9f_u32).filter(|code| char::from_u32(*code).is_some_and(char::is_control))
+        {
+            let character = char::from_u32(code).expect("a control scalar");
+            let cell = escape_cell(&format!("a{character}b"));
+            assert!(
+                !cell.chars().any(char::is_control),
+                "U+{code:04X} survives into a cell as {cell:?}"
+            );
+        }
+    }
+
+    /// The encoding stays reversible: a value that spells an escape is not
+    /// the escape. Without the backslash doubling `escape_cell` already does,
+    /// a stored ESC byte and the six stored characters `\u001b` would render to
+    /// the same cell, and a reader could not tell which was there.
+    #[test]
+    fn an_encoded_control_character_is_distinct_from_the_text_spelling_it() {
+        assert_ne!(escape_cell("\u{1b}"), escape_cell("\\u001b"));
+        assert_eq!(escape_cell("\\u001b"), "\\\\u001b");
+    }
+
+    /// The other side of the boundary: ordinary text is not touched, so the
+    /// fix cannot be "escape everything" passing its own test.
+    #[test]
+    fn printable_text_is_left_alone() {
+        for text in [
+            "plain",
+            "a b",
+            "ünïcödé",
+            "日本語",
+            "emoji 🎯",
+            "~!@#$%^&*()",
+        ] {
+            assert_eq!(escape_cell(text), text, "{text:?} was altered");
+        }
     }
 
     /// Text that spells the marker is not the marker. The leading backslash

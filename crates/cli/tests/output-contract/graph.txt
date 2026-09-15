@@ -271,6 +271,12 @@ social
 ### graph.list · edge:has_more=true · raw
 social
 ∎
+### graph.list · edge:item=control · human
+a\u001b[2Jb
+∎
+### graph.list · edge:item=control · raw
+a\u001b[2Jb
+∎
 ### graph.list · edge:items=[] · human
 (empty)
 ∎

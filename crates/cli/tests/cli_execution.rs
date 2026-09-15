@@ -136,6 +136,62 @@ fn raw_reads_return_the_stored_bytes_verbatim() {
     assert!(missing.stdout.is_empty(), "{:?}", missing.stdout);
 }
 
+/// A stored identity may not act on the terminal that prints it (#3371).
+///
+/// `a<ESC>[2Jb` as a JSON document id reached the receipt and the scan row as
+/// the bytes themselves, so a terminal executed "clear screen" rather than
+/// showing the id. A document id is a plain `string` field, so it never
+/// reached `displayable_text` — the check that already made byte-valued
+/// fields safe (#3357) — and the cell encoding covered only the four
+/// characters that would break a row into two rows or add a column.
+///
+/// Through the real binary, because that is where the consequence is: the
+/// renderer's unit tests prove the encoding, and this proves the bytes a
+/// terminal would receive.
+#[test]
+fn a_stored_identity_cannot_write_control_sequences_to_the_terminal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db = db_arg(dir.path());
+    // Built here rather than typed, so this source file holds no control
+    // character of its own.
+    let id = format!("a{}[2Jb", '\u{1b}');
+
+    let created = strata(&["--db", &db, "json", "set", &id, "$", r#"{"x":1}"#]);
+    assert_ok(&created, "json set");
+
+    let listed = strata(&["--db", &db, "json", "list"]);
+    assert_ok(&listed, "json list");
+
+    for (surface, output) in [("receipt", &created), ("scan row", &listed)] {
+        let text = stdout(output);
+        assert!(
+            !text
+                .chars()
+                .any(|character| character.is_control() && character != '\n'),
+            "the {surface} passes a control character straight to the terminal: {text:?}"
+        );
+        assert!(
+            text.contains("a\\u001b[2Jb"),
+            "the {surface} does not show the id it stored: {text:?}"
+        );
+    }
+
+    // The other side of the boundary. `--raw` on a whole-value read is the one
+    // path that must stay byte-exact (#3116): a script redirecting it to a
+    // file has to get what was stored, escapes included.
+    assert_ok(
+        &strata(&["--db", &db, "kv", "put", "escaped", &id]),
+        "kv put",
+    );
+    let raw = strata(&["--db", &db, "--raw", "kv", "get", "escaped"]);
+    assert_ok(&raw, "--raw kv get");
+    assert_eq!(
+        raw.stdout,
+        id.as_bytes(),
+        "a --raw value read must hand back the stored bytes, not an encoding"
+    );
+}
+
 #[test]
 fn a_cli_report_prints_lines_not_json() {
     let dir = tempfile::tempdir().expect("temp dir");

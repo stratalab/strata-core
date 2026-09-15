@@ -162,6 +162,15 @@ by_name  name        tag         default                3
 ### json.index.list · responses/v1/json/index_list.json · raw
 by_name	name	tag	default	3
 ∎
+### json.list · edge:item=control · human
+a\u001b[2Jb
+∎
+### json.list · edge:item=control · human · stderr
+-- more: add --cursor user:ada to the same command
+∎
+### json.list · edge:item=control · raw
+a\u001b[2Jb
+∎
 ### json.list · edge:items=[] · human
 (empty)
 ∎

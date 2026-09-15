@@ -335,6 +335,14 @@ doc-b
 doc-a
 doc-b
 ∎
+### vector.keys · edge:item=control · human
+a\u001b[2Jb
+a\u001b[2Jb
+∎
+### vector.keys · edge:item=control · raw
+a\u001b[2Jb
+a\u001b[2Jb
+∎
 ### vector.keys · edge:items=[] · human
 (empty)
 ∎
