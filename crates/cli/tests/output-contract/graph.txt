@@ -225,12 +225,13 @@ alice	follows	bob
 ### graph.edge.get · edge:found=false · raw
 ∎
 ### graph.edge.get · responses/v1/graph/edge_get_found.json · human
-src        alice
-edge_type  follows
-dst        bob
-graph      social
-weight     1.0
-version    6
+src         alice
+edge_type   follows
+dst         bob
+graph       social
+weight      1.0
+properties  {"since":2021}
+version     6
 ∎
 ### graph.edge.get · responses/v1/graph/edge_get_found.json · raw
 src	alice
@@ -238,6 +239,7 @@ edge_type	follows
 dst	bob
 graph	social
 weight	1.0
+properties	{"since":2021}
 version	6
 ∎
 ### graph.edge.remove · edge:applied=false · human

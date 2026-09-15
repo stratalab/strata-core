@@ -522,10 +522,6 @@ const DELIBERATELY_UNSHOWN: &[(&str, &str)] = &[
     // A node's binding names the row the node projects from, which `graph
     // bindings` reports as its subject.
     ("graph.node.get", "binding"),
-    // See the note in the PR for #3358 F12: an edge's properties are shown by
-    // no command today, unlike a node's. Recorded as it stands rather than
-    // changed inside a guard slice.
-    ("graph.edge.get", "properties"),
     // The catalogue record `hub get-dataset` curates down to the fifteen facts
     // a reader acts on. The rest are the manifest's own bookkeeping, long-form
     // prose, or embedded documents that do not belong in a terminal record;

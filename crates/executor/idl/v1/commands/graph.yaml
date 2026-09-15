@@ -237,6 +237,8 @@ commands:
         - field: /data/value/graph
         - field: /data/value/weight
           as: float
+        - field: /data/value/properties
+          as: json
         - field: /data/value/version
     fixtures:
       setup:

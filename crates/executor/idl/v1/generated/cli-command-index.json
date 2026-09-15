@@ -3044,6 +3044,10 @@
             "as": "float"
           },
           {
+            "field": "/data/value/properties",
+            "as": "json"
+          },
+          {
             "field": "/data/value/version"
           }
         ]
