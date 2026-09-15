@@ -25,12 +25,13 @@ created node bob in social
 $ strata graph add-edge social alice knows bob
 created edge alice -[knows]-> bob in social
 $ strata graph get-edge social alice knows bob
-src        alice
-edge_type  knows
-dst        bob
-graph      social
-weight     1.0
-version    …
+src         alice
+edge_type   knows
+dst         bob
+graph       social
+weight      1.0
+properties  -
+version     …
 ```
 
 `…` stands for a value that varies by run or by machine — an instant, a version, an id, a path.

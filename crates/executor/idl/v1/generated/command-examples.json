@@ -827,7 +827,7 @@
       },
       {
         "in": "strata graph get-edge social alice knows bob",
-        "out": "src        alice\nedge_type  knows\ndst        bob\ngraph      social\nweight     1.0\nversion    …",
+        "out": "src         alice\nedge_type   knows\ndst         bob\ngraph       social\nweight      1.0\nproperties  -\nversion     …",
         "reproducible": false
       }
     ],
@@ -854,7 +854,7 @@
       },
       {
         "in": "strata graph get-edge social alice knows bob",
-        "out": "src        alice\nedge_type  knows\ndst        bob\ngraph      social\nweight     1.0\nversion    …",
+        "out": "src         alice\nedge_type   knows\ndst         bob\ngraph       social\nweight      1.0\nproperties  -\nversion     …",
         "reproducible": false
       },
       {
