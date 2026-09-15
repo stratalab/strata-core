@@ -23,6 +23,18 @@ use super::wire;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Client write timeout: framing a request should never block for long.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Handshake read timeout, deliberately far shorter than [`READ_TIMEOUT`].
+///
+/// A *command* may legitimately run for 30s on the owner. A *handshake* may
+/// not: it is a fixed, tiny exchange that a live owner answers immediately.
+/// Letting the hello inherit the command timeout made a stopped owner —
+/// SIGSTOP still holds the listening socket, so `connect()` completes into the
+/// kernel backlog — block each probe for 30s. The broker's open window rides
+/// `OPEN_RETRY_STEPS` iterations on the assumption that each is cheap, so what
+/// reads as a ~500ms window became one that could run for minutes; a
+/// `stratadb.open()` hung with no output until an external timeout killed it
+/// (#3007).
+const HELLO_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Why a connect attempt failed — the broker's open dance treats these
 /// differently: a capacity refusal is a definitive, typed answer from a live
@@ -59,12 +71,16 @@ impl IpcClient {
     /// ourselves with a protocol-revision-2 hello declaring `access`.
     pub(crate) fn connect(socket_path: &Path, access: SessionAccess) -> Result<Self, ConnectError> {
         let stream = UnixStream::connect(socket_path).map_err(ConnectError::Io)?;
+        // The handshake runs under its own short deadline; the generous
+        // command timeout is installed only once the owner has proved it is
+        // answering (#3007).
         stream
-            .set_read_timeout(Some(READ_TIMEOUT))
+            .set_read_timeout(Some(HELLO_TIMEOUT))
             .map_err(ConnectError::Io)?;
         stream
             .set_write_timeout(Some(WRITE_TIMEOUT))
             .map_err(ConnectError::Io)?;
+        let stream_for_commands = stream.try_clone().map_err(ConnectError::Io)?;
         let mut client = Self {
             reader: BufReader::new(stream.try_clone().map_err(ConnectError::Io)?),
             writer: BufWriter::new(stream),
@@ -72,6 +88,10 @@ impl IpcClient {
             last_id: 0,
         };
         client.server_hello = client.hello(access)?;
+        // The owner answered, so commands may now take as long as they take.
+        stream_for_commands
+            .set_read_timeout(Some(READ_TIMEOUT))
+            .map_err(ConnectError::Io)?;
         Ok(client)
     }
 
@@ -232,6 +252,53 @@ mod tests {
     use std::io::{BufReader, BufWriter};
     use std::os::unix::net::UnixListener;
 
+    /// A socket that accepts and then never speaks — the SIGSTOP'd owner.
+    ///
+    /// A stopped process still holds its listening socket, so the kernel
+    /// completes `connect()` into the backlog and the client is left waiting
+    /// on a hello that will never come.
+    fn spawn_silent_owner(dir: &std::path::Path) -> std::path::PathBuf {
+        let sock = dir.join("strata.sock");
+        let listener = UnixListener::bind(&sock).expect("bind silent owner");
+        std::thread::spawn(move || {
+            // Hold the accepted connection open and answer nothing.
+            let accepted = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            drop(accepted);
+        });
+        sock
+    }
+
+    /// The handshake gives up quickly on an owner that accepts and never
+    /// answers.
+    ///
+    /// The hello used to inherit the command read timeout — 30s, generous
+    /// because a *command* may legitimately run that long. A handshake may
+    /// not: it is a fixed, tiny exchange with a live owner. And the broker's
+    /// open window rides `OPEN_RETRY_STEPS` iterations on the assumption that
+    /// each is cheap, so a 30s handshake turned a ~500ms window into one that
+    /// could run for minutes — a `stratadb.open()` against a `kill -STOP`ped
+    /// owner hung with no output until an external timeout killed it (#3007).
+    #[test]
+    fn the_handshake_gives_up_on_an_owner_that_accepts_and_never_answers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = spawn_silent_owner(dir.path());
+
+        let started = std::time::Instant::now();
+        let result = IpcClient::connect(&sock, crate::SessionAccess::ReadWrite);
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "an owner that never answers the hello cannot produce a client"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the handshake took {elapsed:?}; it must be bounded well inside the \
+             command read timeout, or one probe blows the whole open window"
+        );
+    }
+
     /// A hand-rolled pre-hello owner: answers every frame the way the
     /// protocol-1 server did — a `WireRequest` with `ping` gets a pong
     /// envelope; anything else (including a hello frame it has never heard
@@ -384,6 +451,20 @@ mod tests {
         assert!(
             client.server_hello().is_none(),
             "no hello info on a downgraded (protocol 1) connection"
+        );
+        // The short handshake deadline is for the handshake only. A command
+        // may legitimately run for the full read timeout, so the connection
+        // must be back on it once the owner has answered — otherwise #3007's
+        // fix would silently cap every command at 250ms (a downgraded
+        // connection takes the same path, so it pins the restore too).
+        assert_eq!(
+            client
+                .reader
+                .get_ref()
+                .read_timeout()
+                .expect("read the socket timeout"),
+            Some(super::READ_TIMEOUT),
+            "the command read timeout was not restored after the handshake"
         );
 
         let command: crate::Command =
