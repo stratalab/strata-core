@@ -42,14 +42,14 @@
 ∎
 ### json.batch_get · responses/v1/json/batch_get_ok.json · human
 #  STATUS  DOCUMENT_VERSION  VERSION  VALUE
-0  ok                     1        3  Ada
+0  ok                     1        3  "Ada"
 1  miss                   -        -  -
 ∎
 ### json.batch_get · responses/v1/json/batch_get_ok.json · human · stderr
 -- itemwise: 1 ok, 1 miss
 ∎
 ### json.batch_get · responses/v1/json/batch_get_ok.json · raw
-0	ok	1	3	Ada
+0	ok	1	3	"Ada"
 1	miss			
 ∎
 ### json.batch_set · edge:committed_at=fixed · human

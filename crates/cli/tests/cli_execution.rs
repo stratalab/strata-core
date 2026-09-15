@@ -1504,3 +1504,58 @@ fn a_truncated_answer_says_it_is_partial() {
     assert_eq!(stderr(&scripted), "");
     assert!(stdout(&scripted).contains("\"truncated\":true"));
 }
+
+/// A JSON-valued cell must be invertible: a consumer that knows the column is
+/// `as: json` can recover the value that was stored (#3372).
+///
+/// Six databases, one value each, through the real binary — the issue's own
+/// repro. `raw_scalar` wrote a string bare while serializing arrays and
+/// objects, so a string lost its quotes and its type: `[1]` the array and
+/// `"[1]"` the string produced one cell, as did `1`/`"1"` and `true`/`"true"`.
+#[test]
+fn a_json_scan_cell_round_trips_every_value_type() {
+    // Each stored document, and the cell `--raw json scan` must show for it.
+    // The cell is the document's own compact JSON, which is what makes the
+    // pairs below distinguishable.
+    let cases = [
+        ("[1]", "[1]"),
+        (r#""[1]""#, r#""[1]""#),
+        ("1", "1"),
+        (r#""1""#, r#""1""#),
+        ("true", "true"),
+        (r#""true""#, r#""true""#),
+        (r#""null""#, r#""null""#),
+        (r#""""#, r#""""#),
+        (r#"{"a":1}"#, r#"{"a":1}"#),
+        (r#""{\"a\":1}""#, r#""{\"a\":1}""#),
+    ];
+
+    let mut cells = Vec::new();
+    for (stored, expected) in cases {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = db_arg(dir.path());
+        assert_ok(
+            &strata(&["--db", &db, "json", "set", "doc", "$", stored]),
+            &format!("json set {stored}"),
+        );
+
+        let scanned = strata(&["--db", &db, "--raw", "json", "scan"]);
+        assert_ok(&scanned, "--raw json scan");
+        let cell = stdout(&scanned)
+            .lines()
+            .next()
+            .expect("one row")
+            .split('\t')
+            .nth(2)
+            .expect("the VALUE column")
+            .to_owned();
+        assert_eq!(cell, expected, "stored {stored}");
+        cells.push(cell);
+    }
+
+    // And the property the cases are there to establish.
+    let mut unique = cells.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), cells.len(), "collision among {cells:?}");
+}
