@@ -47,6 +47,7 @@ pub(crate) fn run_doctor(
         ));
     }
 
+    let user_config = user_config_report(&mut issues);
     let inference = inference_report(&mut issues);
     let database = database_report(cache, db_flag, db_path, &mut issues)?;
 
@@ -58,12 +59,57 @@ pub(crate) fn run_doctor(
             "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             "home": home,
             "path_ok": path_ok,
+            "user_config": user_config,
             "inference": inference,
             "database": database,
             "issues": issues,
         }
     });
     Ok((report, healthy))
+}
+
+/// The user config file, as a fact plus the one thing that is broken.
+///
+/// Absent is the default install and stays green, the same way no API key and
+/// no local model do. What is counted is a file that exists and cannot be
+/// used: every settings read folds a failure into "no value", so a key the
+/// user did store reads back exactly like one they never set. The call then
+/// fails with `missing_api_key` and tells them to set a key that is already
+/// there, `inference status` reports `key_present: false`, and the only signal
+/// is a `tracing::warn!` the CLI installs no subscriber for (#3296).
+#[cfg(feature = "native")]
+fn user_config_report(issues: &mut Vec<Value>) -> Value {
+    let Some(path) = strata_hub::global_config_path() else {
+        // No config directory on this platform: there is no file to be wrong.
+        return json!({ "path": Value::Null, "state": "absent" });
+    };
+    let state = strata_hub::inspect_config(&path);
+    let shown = path.display().to_string();
+    let label = match state {
+        strata_hub::ConfigFileState::Absent => "absent",
+        strata_hub::ConfigFileState::Readable => "readable",
+        strata_hub::ConfigFileState::Unreadable => {
+            issues.push(issue(
+                "failed_precondition.cli.config_unreadable",
+                &format!(
+                    "the user config file at {shown} cannot be read, so anything stored in it \
+                     is unavailable; fix its permissions or remove it"
+                ),
+            ));
+            "unreadable"
+        }
+        strata_hub::ConfigFileState::Malformed => {
+            issues.push(issue(
+                "failed_precondition.cli.config_malformed",
+                &format!(
+                    "the user config file at {shown} is not valid TOML, so anything stored in \
+                     it is unavailable; fix or remove it, then re-run `strata config set`"
+                ),
+            ));
+            "malformed"
+        }
+    };
+    json!({ "path": shown, "state": label })
 }
 
 /// Inference readiness, as facts plus the few things that are genuinely broken.

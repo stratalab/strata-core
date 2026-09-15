@@ -346,3 +346,112 @@ fn a_non_directory_models_dir_reports_the_models_not_directory_code() {
     );
     assert_ne!(code, 0);
 }
+
+/// A config file that cannot be used is misconfiguration a caller cannot see
+/// and will hit at call time, which is exactly what `doctor` counts (#3296).
+///
+/// Without this, a user who ran `strata config set openai.api_key …` and later
+/// corrupted the file gets `missing_api_key` for a key they did set, an
+/// `inference status` that reads identically to "never set", and a `doctor`
+/// that exits 0. The only signal was a `tracing::warn!` the CLI installs no
+/// subscriber for.
+#[test]
+fn a_malformed_user_config_is_an_issue_and_doctor_exits_non_zero() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_home = tempfile::tempdir().expect("scratch config home");
+    std::fs::create_dir_all(config_home.path().join("strata")).expect("config dir");
+    std::fs::write(
+        config_home.path().join("strata/config.toml"),
+        "not = [toml\n",
+    )
+    .expect("write malformed config");
+
+    let (report, code) = run_doctor(
+        &[
+            ("HOME", Some(home.path().as_os_str())),
+            ("XDG_CONFIG_HOME", Some(config_home.path().as_os_str())),
+        ],
+        None,
+    );
+
+    assert!(
+        issue_codes(&report).contains(&"failed_precondition.cli.config_malformed".to_owned()),
+        "doctor did not report the broken config: {:?}",
+        issue_codes(&report)
+    );
+    assert_ne!(code, 0, "a broken install must not exit 0");
+}
+
+/// The other side of the boundary, and the one that matters most: a default
+/// install has no config file at all, and `doctor` is the last step of the
+/// install script. Absent is a choice, not a fault.
+#[test]
+fn an_absent_or_valid_user_config_is_not_an_issue() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_home = tempfile::tempdir().expect("scratch config home");
+
+    // Absent.
+    let (report, code) = run_doctor(
+        &[
+            ("HOME", Some(home.path().as_os_str())),
+            ("XDG_CONFIG_HOME", Some(config_home.path().as_os_str())),
+        ],
+        None,
+    );
+    assert!(
+        issue_codes(&report).is_empty(),
+        "{:?}",
+        issue_codes(&report)
+    );
+    assert_eq!(code, 0);
+
+    // Present and parses, storing a key.
+    std::fs::create_dir_all(config_home.path().join("strata")).expect("config dir");
+    std::fs::write(
+        config_home.path().join("strata/config.toml"),
+        "[providers.openai]\napi_key = \"sk-not-a-real-key\"\n",
+    )
+    .expect("write config");
+    let (report, code) = run_doctor(
+        &[
+            ("HOME", Some(home.path().as_os_str())),
+            ("XDG_CONFIG_HOME", Some(config_home.path().as_os_str())),
+        ],
+        None,
+    );
+    assert!(
+        issue_codes(&report).is_empty(),
+        "{:?}",
+        issue_codes(&report)
+    );
+    assert_eq!(code, 0);
+}
+
+/// The other unusable shape: the bytes cannot be read at all.
+///
+/// A directory where the file belongs, rather than `chmod 000` — root ignores
+/// the permission bits, so a permissions test would pass without testing
+/// anything wherever CI runs as root.
+#[test]
+fn an_unreadable_user_config_is_an_issue() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_home = tempfile::tempdir().expect("scratch config home");
+    std::fs::create_dir_all(config_home.path().join("strata/config.toml"))
+        .expect("a directory where the config file belongs");
+
+    let (report, code) = run_doctor(
+        &[
+            ("HOME", Some(home.path().as_os_str())),
+            ("XDG_CONFIG_HOME", Some(config_home.path().as_os_str())),
+        ],
+        None,
+    );
+
+    assert!(
+        issue_codes(&report).contains(&"failed_precondition.cli.config_unreadable".to_owned()),
+        "doctor did not report the unreadable config: {:?}",
+        issue_codes(&report)
+    );
+    assert_eq!(report["data"]["user_config"]["state"], "unreadable");
+    assert_ne!(code, 0, "a broken install must not exit 0");
+}

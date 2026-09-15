@@ -187,6 +187,93 @@ fn find_project_config(working_dir: &Path) -> Option<PathBuf> {
 
 /// Reads `hub.url` from a config file. `Ok(None)` when the key is
 /// absent (the file may legitimately hold other configuration); any
+/// What the user config file is, for a diagnostic that must tell "nothing was
+/// ever stored" from "something was stored and cannot be reached".
+///
+/// Every read path folds a failure into "no value", deliberately: the runtime
+/// asks for settings on every status and provider call, and a broken file must
+/// not turn `inference status` into an error. The cost is that a key the user
+/// did store reads back exactly like one they never set, so `doctor` needs a
+/// way to look at the file itself (#3296).
+/// Deliberately exhaustive, where Rule 28 makes public *error* enums
+/// `#[non_exhaustive]`. A `_` arm at the call site would let a state added
+/// later default to "nothing is wrong", and the one caller that matters is
+/// `doctor`, which install scripts run as their last step. A new state should
+/// break the build until someone decides whether it is a fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFileState {
+    /// No file at that path. The default install, and not a fault.
+    Absent,
+    /// Present, readable, and valid TOML. It may still store nothing.
+    Readable,
+    /// Present but its bytes could not be read: permissions, or a directory
+    /// where a file belongs.
+    Unreadable,
+    /// Read, but not valid TOML. Anything stored in it is unreachable.
+    Malformed,
+}
+
+/// Looks at the user config file without asking it for any particular value.
+///
+/// Deliberately not built on [`read_provider_setting`]: that answers "is there
+/// a value for this provider", which is `None` both for a file that stores
+/// nothing and for one that cannot be parsed. This answers the other question.
+pub fn inspect_config(path: &Path) -> ConfigFileState {
+    if !path.exists() {
+        return ConfigFileState::Absent;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return ConfigFileState::Unreadable;
+    };
+    if toml::from_str::<toml::Value>(&text).is_ok() {
+        ConfigFileState::Readable
+    } else {
+        ConfigFileState::Malformed
+    }
+}
+
+/// A TOML parse failure, named without quoting the file that failed.
+///
+/// `toml::de::Error`'s `Display` renders the offending source line as an
+/// excerpt. In this file that line can be `api_key = "sk-..."`, so
+/// interpolating it put a provider key into an error message, and from there
+/// into a terminal, a CI log, or a pasted bug report (#3296, Rule 31).
+///
+/// `message()` is the cause without the excerpt and `span()` locates it, so a
+/// reader still learns what went wrong and where to look, and the file is
+/// named separately by `MalformedSource`.
+fn malformed_toml_detail(text: &str, error: &toml::de::Error) -> String {
+    let cause = error.message();
+    match error.span() {
+        Some(span) => {
+            let (line, column) = line_and_column(text, span.start);
+            format!("malformed TOML at line {line}, column {column}: {cause}")
+        }
+        None => format!("malformed TOML: {cause}"),
+    }
+}
+
+/// The 1-based line and column of a byte offset, counting columns in
+/// characters so a multi-byte line does not report a column past its end.
+fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
+    // A span from a parse error is a byte offset into this same text, but it
+    // is floored to a character boundary rather than trusted: slicing on a
+    // mid-character byte panics, and an error message is the worst place to
+    // learn that.
+    let offset = (0..=offset.min(text.len()))
+        .rev()
+        .find(|candidate| text.is_char_boundary(*candidate))
+        .unwrap_or(0);
+    let before = &text[..offset];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |current| current.chars().count())
+        + 1;
+    (line, column)
+}
+
 /// other defect — unreadable, bad TOML, non-string or invalid URL —
 /// aborts naming the source.
 fn read_config_hub_url(path: &Path) -> Result<Option<Url>, HubUrlError> {
@@ -198,7 +285,7 @@ fn read_config_hub_url(path: &Path) -> Result<Option<Url>, HubUrlError> {
     let value: toml::Value =
         toml::from_str(&text).map_err(|error| HubUrlError::MalformedSource {
             source: source.clone(),
-            detail: format!("malformed TOML: {error}"),
+            detail: malformed_toml_detail(&text, &error),
         })?;
     let Some(url) = value.get("hub").and_then(|hub| hub.get("url")) else {
         return Ok(None);
@@ -389,7 +476,7 @@ pub fn read_provider_setting(
     let value: toml::Value =
         toml::from_str(&text).map_err(|error| HubUrlError::MalformedSource {
             source: source.clone(),
-            detail: format!("malformed TOML: {error}"),
+            detail: malformed_toml_detail(&text, &error),
         })?;
     let field = setting.field();
     let stored = value
@@ -467,7 +554,7 @@ fn edit_global_providers(
     let mut root: toml::Value = if path.is_file() {
         let text = std::fs::read_to_string(path)
             .map_err(|error| malformed(format!("unreadable: {error}")))?;
-        toml::from_str(&text).map_err(|error| malformed(format!("malformed TOML: {error}")))?
+        toml::from_str(&text).map_err(|error| malformed(malformed_toml_detail(&text, &error)))?
     } else {
         toml::Value::Table(toml::map::Map::new())
     };
@@ -515,7 +602,7 @@ fn edit_global_config(
     let mut root: toml::Value = if path.is_file() {
         let text = std::fs::read_to_string(path)
             .map_err(|error| malformed(format!("unreadable: {error}")))?;
-        toml::from_str(&text).map_err(|error| malformed(format!("malformed TOML: {error}")))?
+        toml::from_str(&text).map_err(|error| malformed(malformed_toml_detail(&text, &error)))?
     } else {
         toml::Value::Table(toml::map::Map::new())
     };
@@ -548,6 +635,83 @@ fn edit_global_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The global config write path, asserted in the crate that owns it.
+    ///
+    /// `strata config set hub.url` round-trips in the CLI suite, but that
+    /// suite cannot speak for this code: a mutation lane runs the owning
+    /// crate's tests, so `edit_global_config` replaced by `Ok(())` -- a write
+    /// that silently does nothing -- survived every test here.
+    ///
+    /// Against an explicit path, because the public `write_global_hub_url`
+    /// resolves the real user config and a test must never touch it.
+    #[test]
+    fn editing_the_global_config_writes_a_value_a_read_finds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("config.toml");
+
+        edit_global_config(&path, |hub| {
+            hub.insert(
+                "url".to_owned(),
+                toml::Value::String("https://hub.example.com/".to_owned()),
+            );
+        })
+        .expect("write");
+
+        assert!(path.is_file(), "the write created no file");
+        assert_eq!(
+            read_config_hub_url(&path)
+                .expect("read back")
+                .map(|url| url.to_string()),
+            Some("https://hub.example.com/".to_owned()),
+            "the value read back is not the one written"
+        );
+    }
+
+    /// `line_and_column` is what tells a reader where to look once the excerpt
+    /// is gone, so its arithmetic is pinned directly rather than inferred from
+    /// one rendered message.
+    #[test]
+    fn a_byte_offset_becomes_a_one_based_line_and_column() {
+        let text = "abc\ndefgh\n";
+        assert_eq!(line_and_column(text, 0), (1, 1), "the very start");
+        assert_eq!(line_and_column(text, 2), (1, 3), "third character");
+        assert_eq!(
+            line_and_column(text, 3),
+            (1, 4),
+            "the newline itself ends line 1"
+        );
+        assert_eq!(
+            line_and_column(text, 4),
+            (2, 1),
+            "first character of line 2"
+        );
+        assert_eq!(line_and_column(text, 8), (2, 5));
+
+        // Columns count characters, not bytes: a multi-byte line must not
+        // report a column past its own end.
+        let wide = "aé\nxé y";
+        assert_eq!(
+            line_and_column(wide, 3),
+            (1, 3),
+            "after a two-byte character"
+        );
+        assert_eq!(
+            line_and_column(wide, 7),
+            (2, 3),
+            "line 2, past its two-byte character"
+        );
+
+        // An offset past the end, or inside a character, is floored rather
+        // than panicking: an error message is the worst place to learn that
+        // slicing a mid-character byte aborts.
+        assert_eq!(
+            line_and_column(wide, 2),
+            (1, 2),
+            "mid-character offset floors"
+        );
+        assert_eq!(line_and_column(text, 9_999), (3, 1), "past the end");
+    }
 
     fn refused(setting: ProviderSetting, value: &str) -> (String, String) {
         match setting.validated("openai", value) {

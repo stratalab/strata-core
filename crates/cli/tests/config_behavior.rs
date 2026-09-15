@@ -569,3 +569,49 @@ fn unknown_config_key_is_rejected() {
         "error names the bad key: {stderr}"
     );
 }
+
+/// A parse failure must not read the file back to the user (#3296, Rule 31).
+///
+/// `config get-key` surfaced the TOML error's `Display`, which renders the
+/// offending source line as an excerpt. When the malformed line is the stored
+/// credential — an unterminated string is the ordinary way to produce that —
+/// the key was printed to the terminal, and from there into any CI log or
+/// pasted bug report.
+///
+/// Through the binary, on both output formats, because the leak was in what a
+/// user sees rather than in what the library returns.
+#[test]
+fn a_malformed_config_error_never_echoes_the_stored_key() {
+    const SECRET: &str = "sk-live-thismustneverbeprinted";
+    let home = TempDir::new().expect("temp home");
+    let config = home.path().join(".config/strata");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::write(
+        config.join("config.toml"),
+        format!("[providers.openai]\napi_key = \"{SECRET}\n"),
+    )
+    .expect("write malformed config");
+
+    for args in [
+        vec!["config", "get-key", "openai.api_key"],
+        vec!["--json", "config", "get-key", "openai.api_key"],
+        vec!["config", "show"],
+    ] {
+        let output = config_cli(&home, &args, &[]);
+        let seen = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !seen.contains(SECRET),
+            "`strata {}` echoed the stored key: {seen}",
+            args.join(" ")
+        );
+        assert!(
+            !seen.contains("sk-"),
+            "`strata {}` echoed credential-shaped text: {seen}",
+            args.join(" ")
+        );
+    }
+}

@@ -265,3 +265,94 @@ fn a_malformed_file_or_non_string_field_is_an_error_naming_the_file() {
         );
     }
 }
+
+/// A parse failure may not quote the file it failed on (#3296, Rule 31).
+///
+/// `toml::de::Error`'s `Display` renders the offending source line as an
+/// excerpt. In this file that line can be the stored credential, so
+/// interpolating it put a provider key into an error message — and from there
+/// into a terminal, a CI log, or a pasted bug report. The reader still needs
+/// to know what went wrong and where, so the detail keeps the cause and the
+/// position and drops the excerpt.
+#[test]
+fn a_parse_error_never_quotes_the_line_it_failed_on() {
+    const SECRET: &str = "sk-live-thismustneverbeprinted";
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // An unterminated string: the parse fails ON the credential's own line,
+    // which is the case that leaks.
+    let path = config_file(
+        dir.path(),
+        &format!("[providers.openai]\napi_key = \"{SECRET}\n"),
+    );
+    let error = read_provider_setting(&path, "openai", ProviderSetting::ApiKey)
+        .expect_err("malformed TOML");
+    let rendered = error.to_string();
+
+    assert!(
+        !rendered.contains(SECRET),
+        "the error quotes the stored key: {rendered}"
+    );
+    assert!(
+        !rendered.contains("sk-"),
+        "the error quotes credential-shaped text: {rendered}"
+    );
+    // Still useful: it names the file and where to look.
+    assert!(
+        rendered.contains(&path.display().to_string()),
+        "the error does not name the file: {rendered}"
+    );
+    // The position, exactly: a truth table on `line_and_column` proves the
+    // arithmetic, and this proves the value reaches the message. The key sits
+    // on line 2 and the unterminated string runs to the line's end.
+    assert!(
+        rendered.contains("at line 2, column 42"),
+        "the error does not say where the problem is: {rendered}"
+    );
+}
+
+/// `doctor` must be able to tell "no config file" from "a config file that
+/// cannot be used" (#3296). A read that folds every failure into `None` cannot:
+/// a key the user did store reads back absent, `inference status` says
+/// `key_present: false`, and a broken install ends green.
+///
+/// The file format is hub's to know, so the probe lives here rather than
+/// having each caller parse TOML for itself.
+#[test]
+fn the_config_file_state_distinguishes_absent_from_unusable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // Absent is the default install, and is not a fault.
+    assert_eq!(
+        strata_hub::inspect_config(&dir.path().join("nothing.toml")),
+        strata_hub::ConfigFileState::Absent
+    );
+
+    let good = config_file(dir.path(), "[providers.openai]\napi_key = \"sk-file\"\n");
+    assert_eq!(
+        strata_hub::inspect_config(&good),
+        strata_hub::ConfigFileState::Readable
+    );
+
+    // An empty file is valid TOML and stores nothing: usable, not broken.
+    let empty = config_file(dir.path(), "");
+    assert_eq!(
+        strata_hub::inspect_config(&empty),
+        strata_hub::ConfigFileState::Readable
+    );
+
+    let malformed = config_file(dir.path(), "not = [toml\n");
+    assert_eq!(
+        strata_hub::inspect_config(&malformed),
+        strata_hub::ConfigFileState::Malformed
+    );
+
+    // A directory where a file belongs cannot be read as one.
+    let as_dir = dir.path().join("config-dir.toml");
+    std::fs::create_dir(&as_dir).expect("create dir");
+    assert_eq!(
+        strata_hub::inspect_config(&as_dir),
+        strata_hub::ConfigFileState::Unreadable
+    );
+}
