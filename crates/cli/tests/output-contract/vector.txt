@@ -268,11 +268,11 @@ data.embedding	[1.0,0.0]
 data.metadata	{"kind":"doc"}
 ∎
 ### vector.history · edge:committed_at=fixed · human
-VERSION  VECTOR_REVISION  COMMITTED_AT                    EMBEDDING  METADATA
-      4                1  2026-09-10 20:19:44.000000 UTC  [1.0,0.0]  {"kind":"doc"}
+TIMESTAMP  VERSION  VECTOR_REVISION  COMMITTED_AT                    EMBEDDING  METADATA
+        4        4                1  2026-09-10 20:19:44.000000 UTC  [1.0,0.0]  {"kind":"doc"}
 ∎
 ### vector.history · edge:committed_at=fixed · raw
-4	1	1789071584000000	[1.0,0.0]	{"kind":"doc"}
+4	4	1	1789071584000000	[1.0,0.0]	{"kind":"doc"}
 ∎
 ### vector.history · edge:items=[] · human
 (empty)
@@ -280,11 +280,11 @@ VERSION  VECTOR_REVISION  COMMITTED_AT                    EMBEDDING  METADATA
 ### vector.history · edge:items=[] · raw
 ∎
 ### vector.history · responses/v1/vector/history_found.json · human
-VERSION  VECTOR_REVISION  COMMITTED_AT  EMBEDDING  METADATA
-      4                1  -             [1.0,0.0]  {"kind":"doc"}
+TIMESTAMP  VERSION  VECTOR_REVISION  COMMITTED_AT  EMBEDDING  METADATA
+        4        4                1  -             [1.0,0.0]  {"kind":"doc"}
 ∎
 ### vector.history · responses/v1/vector/history_found.json · raw
-4	1		[1.0,0.0]	{"kind":"doc"}
+4	4	1		[1.0,0.0]	{"kind":"doc"}
 ∎
 ### vector.index.query · responses/v1/vector/index_query_exact.json · human
 KEY    SCORE  METADATA

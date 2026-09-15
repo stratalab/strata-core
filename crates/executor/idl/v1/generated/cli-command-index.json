@@ -7040,6 +7040,9 @@
       "display": {
         "columns": [
           {
+            "field": "/data/*/timestamp"
+          },
+          {
             "field": "/data/*/version"
           },
           {
@@ -8166,6 +8169,9 @@
       "render": "history",
       "display": {
         "columns": [
+          {
+            "field": "/data/items/*/timestamp"
+          },
           {
             "field": "/data/items/*/version"
           },
@@ -10149,6 +10155,9 @@
       "render": "history",
       "display": {
         "columns": [
+          {
+            "field": "/data/items/*/timestamp"
+          },
           {
             "field": "/data/items/*/version"
           },

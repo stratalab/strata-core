@@ -194,6 +194,8 @@ commands:
     prose: commands/vector.history.md
     display:
       columns:
+        # See kv.history (#3414).
+        - field: /data/items/*/timestamp
         - field: /data/items/*/version
         - field: /data/items/*/vector_revision
         - field: /data/items/*/committed_at

@@ -111,22 +111,22 @@ true
 {"name":"Ada"}
 ∎
 ### json.history · edge:committed_at=fixed · human
-VERSION  DOCUMENT_VERSION  COMMITTED_AT                    VALUE
-      4                 2  2026-09-10 20:19:44.000000 UTC  {"age":36,"name":"Ada"}
-      3                 1  2026-09-10 20:19:44.000000 UTC  {"name":"Ada"}
+TIMESTAMP  VERSION  DOCUMENT_VERSION  COMMITTED_AT                    VALUE
+        4        4                 2  2026-09-10 20:19:44.000000 UTC  {"age":36,"name":"Ada"}
+        3        3                 1  2026-09-10 20:19:44.000000 UTC  {"name":"Ada"}
 ∎
 ### json.history · edge:committed_at=fixed · raw
-4	2	1789071584000000	{"age":36,"name":"Ada"}
-3	1	1789071584000000	{"name":"Ada"}
+4	4	2	1789071584000000	{"age":36,"name":"Ada"}
+3	3	1	1789071584000000	{"name":"Ada"}
 ∎
 ### json.history · responses/v1/json/history_found.json · human
-VERSION  DOCUMENT_VERSION  COMMITTED_AT  VALUE
-      4                 2  -             {"age":36,"name":"Ada"}
-      3                 1  -             {"name":"Ada"}
+TIMESTAMP  VERSION  DOCUMENT_VERSION  COMMITTED_AT  VALUE
+        4        4                 2  -             {"age":36,"name":"Ada"}
+        3        3                 1  -             {"name":"Ada"}
 ∎
 ### json.history · responses/v1/json/history_found.json · raw
-4	2		{"age":36,"name":"Ada"}
-3	1		{"name":"Ada"}
+4	4	2		{"age":36,"name":"Ada"}
+3	3	1		{"name":"Ada"}
 ∎
 ### json.index.create · responses/v1/json/index_definition.json · human
 created index by_name on name (tag)

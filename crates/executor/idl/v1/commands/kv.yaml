@@ -185,6 +185,11 @@ commands:
     prose: commands/kv.history.md
     display:
       columns:
+        # `timestamp` first: it is the only handle `--as-of` takes, and it was
+        # not declared at all, so a human-mode reader had no way to reach time
+        # travel from the command the flag's own help names as its source
+        # (#3414). `version` follows it pending #3413, which removes it.
+        - field: /data/items/*/timestamp
         - field: /data/items/*/version
         - field: /data/items/*/committed_at
           as: date
