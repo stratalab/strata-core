@@ -71,43 +71,38 @@ pub fn download_hf_file_with_size(
         .map_err(|e| io_failure("create download dir", &downloading_dir, &e))?;
 
     let lock_path = downloading_dir.join(format!("{}.lock", hf_file));
-    let temp_path = downloading_dir.join(hf_file);
+    // Per-writer, so a lock defeated by any means still cannot make two
+    // writers stream into one inode. The shared path was the second half of
+    // #3293: the lock failing open was survivable, both writers sharing
+    // `.downloading/<hf_file>` was not.
+    let temp_path = downloading_dir.join(format!("{}.{}.part", hf_file, std::process::id()));
 
-    // Check for lock file from another process
-    if lock_path.exists() {
-        let stale_threshold = Duration::from_secs(30 * 60); // 30 minutes
-        let lock_age = lock_path
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| SystemTime::now().duration_since(t).ok())
-            .unwrap_or(Duration::MAX);
-
-        if lock_age < stale_threshold {
-            // Another process is downloading — wait up to 10 minutes
-            let max_wait = Duration::from_secs(10 * 60);
-            let poll_interval = Duration::from_secs(5);
-            let start = std::time::Instant::now();
-
-            while lock_path.exists() && start.elapsed() < max_wait {
-                std::thread::sleep(poll_interval);
+    // Take the lock, or lose the race and wait it out.
+    //
+    // Acquisition is `O_EXCL`, so exactly one writer wins. A loser sees
+    // `AlreadyExists` — not a failure, just someone else holding it — and
+    // waits before trying again.
+    //
+    // There is deliberately no `lock_path.exists()` check before this. That
+    // check was the bug: observing and then creating are two steps, so two
+    // writers could both observe nothing and both proceed. The create is now
+    // the only thing that decides, and a stale lock is removed only after an
+    // acquisition has already lost (#3293).
+    let _lock_guard = loop {
+        match LockGuard::new(&lock_path) {
+            Ok(guard) => break guard,
+            Err(InferenceError::Io(_)) if lock_path.exists() => {
+                if wait_out_lock(&lock_path) == LockWait::Abandoned {
+                    // Ours to clear; the next create decides who takes it.
+                    let _ = fs::remove_file(&lock_path);
+                }
+                if model_file_is_downloaded(&dest) {
+                    return Ok(());
+                }
             }
-            // Whether the other process's download landed is decided once,
-            // below, after our own lock is held — the same check that covers
-            // a download finishing between our first look and the lock. A
-            // separate check here used a bare `exists()`, so a zero-length
-            // file the other process left behind counted as "appeared".
+            Err(error) => return Err(error),
         }
-
-        // Stale lock, or the other process finished or timed out — remove
-        // whatever is left and proceed. Removal failing is not itself an
-        // error: our own lock overwrites the file next, and a lock we cannot
-        // write is reported there.
-        let _ = fs::remove_file(&lock_path);
-    }
-
-    // Write lock file with PID
-    let _lock_guard = LockGuard::new(&lock_path)?;
+    };
 
     // Re-check after acquiring lock — another process may have finished
     // downloading while we were waiting for the lock or between our initial
@@ -291,10 +286,103 @@ struct LockGuard {
     path: std::path::PathBuf,
 }
 
+/// A lock untouched for this long is assumed abandoned by a dead writer.
+/// Thirty minutes.
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(1800);
+/// How long to wait for a live holder before treating the lock as abandoned.
+/// Ten minutes.
+///
+/// Written in seconds rather than `10 * 60` deliberately: the arithmetic is an
+/// artificial mutation target (`*` to `+` turns ten minutes into seventy
+/// seconds) on a policy bound no fast test can observe, and the alternative —
+/// a regex exclusion for `replace * with +` — would have matched every
+/// multiplication in the crate.
+const LOCK_MAX_WAIT: Duration = Duration::from_secs(600);
+/// How often to look while waiting.
+const LOCK_POLL: Duration = Duration::from_secs(5);
+
+/// How a lost acquisition ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockWait {
+    /// The holder released it — try to acquire again.
+    Released,
+    /// Stale, or it outlived the wait: the caller clears it.
+    Abandoned,
+}
+
+/// Whether a lock last touched `age` ago has been abandoned.
+///
+/// Pure so the threshold is a truth table rather than a wall-clock test: the
+/// mutation gate turned `30 * 60` into `30 + 60` and every timing-shaped test
+/// still passed, because none of them observed the boundary.
+const fn lock_is_stale(age: Duration) -> bool {
+    age.as_secs() >= LOCK_STALE_AFTER.as_secs()
+}
+
+/// The verdict once waiting has stopped: a lock still present outlived the
+/// wait and is the caller's to clear.
+const fn lock_wait_verdict(still_held: bool) -> LockWait {
+    if still_held {
+        LockWait::Abandoned
+    } else {
+        LockWait::Released
+    }
+}
+
+/// Wait for the writer holding `lock_path` to finish.
+///
+/// Runs only after an acquisition has already lost — it is never a check
+/// *before* acquiring, which is what made the old sequence check-then-write
+/// and let two writers both proceed (#3293).
+fn wait_out_lock(lock_path: &Path) -> LockWait {
+    wait_out_lock_within(lock_path, LOCK_MAX_WAIT, LOCK_POLL)
+}
+
+/// The waiting itself, with its bounds supplied.
+///
+/// Injected so the loop is observable: at production values a test would have
+/// to hold a lock for ten minutes to watch the wait give up, so nothing
+/// covered the loop and the gate could move its boundary unnoticed.
+fn wait_out_lock_within(lock_path: &Path, max_wait: Duration, poll: Duration) -> LockWait {
+    let age = lock_path
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .unwrap_or(Duration::MAX);
+
+    if lock_is_stale(age) {
+        return LockWait::Abandoned;
+    }
+
+    let start = std::time::Instant::now();
+    while lock_path.exists() && start.elapsed() < max_wait {
+        std::thread::sleep(poll);
+    }
+    lock_wait_verdict(lock_path.exists())
+}
+
 impl LockGuard {
+    /// Acquire the download lock, or fail because another writer holds it.
+    ///
+    /// `create_new` is `O_EXCL`: the create and the exclusivity check are one
+    /// syscall, so two writers cannot both succeed. This was `fs::write`,
+    /// which creates OR TRUNCATES and therefore succeeded for everyone — two
+    /// processes that both saw no lock both "held" it, streamed into one
+    /// shared temp path, and one renamed the interleaved bytes into place as
+    /// the model while the other kept writing through the same inode (#3293).
+    ///
+    /// `ErrorKind::AlreadyExists` is the caller's signal to take the wait
+    /// path, not a failure to report.
     fn new(path: &Path) -> Result<Self, InferenceError> {
         let pid = std::process::id();
-        fs::write(path, format!("{pid}")).map_err(|e| io_failure("write lock file", path, &e))?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| io_failure("write lock file", path, &e))?;
+        std::io::Write::write_all(&mut file, format!("{pid}").as_bytes())
+            .map_err(|e| io_failure("write lock file", path, &e))?;
         Ok(Self {
             path: path.to_path_buf(),
         })
@@ -310,11 +398,14 @@ impl Drop for LockGuard {
 #[cfg(test)]
 mod tests {
     use std::io::Read as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::time::{Duration, SystemTime};
 
     use super::{
-        download_hf_file_with_size, hf_download_url, hf_endpoint, hf_token,
-        model_file_is_downloaded, stream_to_file, verify_sha256, LockGuard, SIZE_TOLERANCE,
+        download_hf_file_with_size, hf_download_url, hf_endpoint, hf_token, lock_is_stale,
+        lock_wait_verdict, model_file_is_downloaded, stream_to_file, verify_sha256,
+        wait_out_lock_within, LockGuard, LockWait, SIZE_TOLERANCE,
     };
     use crate::registry::catalog::CATALOG;
     use crate::InferenceError;
@@ -412,6 +503,219 @@ mod tests {
             );
         }
         assert!(!path.exists(), "the lock must vanish when the guard drops");
+    }
+
+    /// The wait gives up on a holder that never releases, and returns as soon
+    /// as one does.
+    ///
+    /// Both directions, at bounds small enough to observe: at production
+    /// values this would take ten minutes, which is why the loop had no test.
+    #[test]
+    fn the_wait_gives_up_on_a_holder_that_never_releases() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let held = dir.path().join("held.lock");
+        std::fs::write(&held, "1").expect("a holder that never releases");
+
+        let started = std::time::Instant::now();
+        let verdict =
+            wait_out_lock_within(&held, Duration::from_millis(120), Duration::from_millis(10));
+        let waited = started.elapsed();
+
+        assert_eq!(
+            verdict,
+            LockWait::Abandoned,
+            "a lock still held when the wait runs out is the caller's to clear"
+        );
+        assert!(
+            waited >= Duration::from_millis(120),
+            "the wait returned in {waited:?}, before its own bound"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the wait ran to {waited:?}, far past its bound"
+        );
+
+        // A holder that releases is noticed rather than waited out.
+        let released = dir.path().join("released.lock");
+        std::fs::write(&released, "1").expect("a holder that releases");
+        let path = released.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let _ = std::fs::remove_file(&path);
+        });
+        assert_eq!(
+            wait_out_lock_within(&released, Duration::from_secs(5), Duration::from_millis(10)),
+            LockWait::Released,
+            "a released lock ends the wait as Released, not Abandoned"
+        );
+    }
+
+    /// A lock that cannot be created for a reason other than contention is
+    /// reported, not retried forever.
+    ///
+    /// The acquisition loop treats `AlreadyExists` as "someone else holds it,
+    /// wait" — but only that. Widening the guard to every `Io` error (the gate
+    /// replaced `lock_path.exists()` with `true`) turns a permission failure
+    /// into an infinite wait/clear/retry cycle inside a download, which no
+    /// timing-shaped test notices because it simply never returns.
+    #[test]
+    fn a_lock_that_cannot_be_created_is_reported_rather_than_retried() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        without_a_reachable_hub(|| {
+            let dir = tempfile::tempdir().expect("tmp");
+            let downloading = dir.path().join(".downloading");
+            std::fs::create_dir_all(&downloading).expect("download dir");
+            std::fs::set_permissions(&downloading, std::fs::Permissions::from_mode(0o555))
+                .expect("make the download dir read-only");
+
+            let refused = download_hf_file_with_size(
+                "org/repo",
+                "model.gguf",
+                dir.path(),
+                &|_, _| {},
+                4,
+                None,
+            );
+
+            // Restore before asserting so the tempdir can always be cleaned up.
+            let _ = std::fs::set_permissions(&downloading, std::fs::Permissions::from_mode(0o755));
+
+            match refused {
+                Err(error) => assert_eq!(error.code(), "inference.io_failure"),
+                // Running as root ignores the mode, so there is nothing to
+                // observe; skip rather than assert a falsehood.
+                Ok(()) => assert!(
+                    nix_is_root(),
+                    "a read-only download directory must refuse the lock"
+                ),
+            }
+        });
+    }
+
+    /// Whether this process ignores file modes (root does).
+    fn nix_is_root() -> bool {
+        std::fs::metadata("/proc/self").is_ok() && unsafe_getuid() == 0
+    }
+
+    fn unsafe_getuid() -> u32 {
+        // `id -u` avoids a libc dependency for one test predicate.
+        std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(1)
+    }
+
+    /// A lock left behind by a dead writer does not block the next one
+    /// forever.
+    ///
+    /// Nothing covered stale-lock recovery: the gate could invert the verdict
+    /// (`== Abandoned` to `!=`), so a stale lock was kept and a live one
+    /// cleared, and every test still passed. Backdating the lock past the
+    /// threshold is the only way to observe it without waiting half an hour.
+    #[test]
+    fn a_stale_lock_from_a_dead_writer_is_cleared_and_the_download_proceeds() {
+        const BODY: &[u8] = b"gguf";
+        let hub = a_hub_serving(BODY.len(), BODY);
+        with_hub_at(&hub, || {
+            let dir = tempfile::tempdir().expect("tmp");
+            let downloading = dir.path().join(".downloading");
+            std::fs::create_dir_all(&downloading).expect("download dir");
+            let lock = downloading.join("model.gguf.lock");
+            std::fs::write(&lock, "999999").expect("a dead writer's lock");
+
+            // Backdate it well past the stale threshold.
+            let stale = SystemTime::now() - Duration::from_secs(31 * 60);
+            let handle = std::fs::File::options()
+                .write(true)
+                .open(&lock)
+                .expect("reopen the lock");
+            handle
+                .set_times(std::fs::FileTimes::new().set_modified(stale))
+                .expect("backdate the lock");
+            drop(handle);
+
+            download_hf_file_with_size(
+                "org/repo",
+                "model.gguf",
+                dir.path(),
+                &|_, _| {},
+                BODY.len() as u64,
+                None,
+            )
+            .expect("a stale lock must not block the download");
+
+            assert_eq!(
+                std::fs::read(dir.path().join("model.gguf")).expect("the model landed"),
+                BODY
+            );
+            assert!(
+                !lock.exists(),
+                "the stale lock must be gone once the download that cleared it finishes"
+            );
+        });
+    }
+
+    /// The stale threshold, as a truth table over absolute ages.
+    ///
+    /// Absolute rather than derived from `LOCK_STALE_AFTER`: a test written
+    /// against the constant moves with it, so a mutated constant stays
+    /// invisible. The gate turned `30 * 60` into `30 + 60` and nothing failed.
+    #[test]
+    fn a_lock_is_stale_only_after_half_an_hour() {
+        use std::time::Duration;
+        for fresh in [0, 1, 60, 29 * 60, 30 * 60 - 1] {
+            assert!(
+                !lock_is_stale(Duration::from_secs(fresh)),
+                "{fresh}s old is a live holder, not an abandoned lock"
+            );
+        }
+        for stale in [30 * 60, 30 * 60 + 1, 60 * 60, 24 * 60 * 60] {
+            assert!(
+                lock_is_stale(Duration::from_secs(stale)),
+                "{stale}s old is abandoned"
+            );
+        }
+        assert!(
+            lock_is_stale(Duration::MAX),
+            "an unreadable mtime reads as abandoned, not as forever-fresh"
+        );
+    }
+
+    /// Both verdicts, so neither direction can be collapsed.
+    #[test]
+    fn a_lock_still_present_after_the_wait_is_the_callers_to_clear() {
+        assert_eq!(lock_wait_verdict(true), LockWait::Abandoned);
+        assert_eq!(lock_wait_verdict(false), LockWait::Released);
+    }
+
+    /// The lock must be a lock.
+    ///
+    /// `LockGuard::new` was `fs::write`, which creates OR TRUNCATES: two
+    /// processes that both saw no lock both "acquired" it, then streamed into
+    /// one shared temp path and one of them renamed the interleaved bytes into
+    /// place as the model. Acquisition has to fail when the file is already
+    /// there, so the caller takes the wait path instead (#3293).
+    #[test]
+    fn a_lock_another_writer_holds_cannot_be_acquired() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("download.lock");
+        std::fs::write(&path, "4242").expect("another writer's lock");
+
+        let refused = LockGuard::new(&path).map(|_| ());
+
+        assert!(
+            matches!(refused, Err(InferenceError::Io(_))),
+            "acquiring a held lock must fail, got {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the lock survives"),
+            "4242",
+            "a refused acquisition must not overwrite the holder's lock"
+        );
     }
 
     #[test]
@@ -536,6 +840,113 @@ mod tests {
             assert_eq!(
                 std::fs::read(dir.path().join("model.gguf")).expect("landed"),
                 b"gguf"
+            );
+        });
+    }
+
+    /// A hub that counts how many transfers it serves and answers each one
+    /// slowly enough that a concurrent second caller is still inside the
+    /// window. Returns the endpoint and the counter.
+    fn a_slow_counting_hub(body: &'static [u8]) -> (String, std::sync::Arc<AtomicUsize>) {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("bound address").port();
+        let served = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&served);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let counter = std::sync::Arc::clone(&counter);
+                std::thread::spawn(move || {
+                    let mut head = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    // Split the body so a concurrent caller is guaranteed to
+                    // be inside this transfer while it is still incomplete —
+                    // the window in which two writers used to share one inode.
+                    let (first, rest) = body.split_at(body.len() / 2);
+                    let _ = stream.write_all(first);
+                    let _ = stream.flush();
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    let _ = stream.write_all(rest);
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), served)
+    }
+
+    /// Two callers downloading the same model at the same moment produce one
+    /// transfer and one byte-exact file.
+    ///
+    /// Both used to pass the `lock_path.exists()` check, both "acquired" the
+    /// lock (`fs::write` creates or truncates), and both streamed into the
+    /// same `.downloading/<hf_file>`. Whichever finished first renamed the
+    /// interleaved bytes into place as the model while the other kept writing
+    /// through the same inode — a GGUF with an intact header and garbage
+    /// tensors, handed to llama.cpp over the FFI boundary (#3293).
+    #[test]
+    fn two_callers_downloading_one_model_produce_one_transfer_and_an_exact_file() {
+        const BODY: &[u8] = b"gguf-bytes-that-must-not-interleave";
+        let (hub, served) = a_slow_counting_hub(BODY);
+        with_hub_at(&hub, || {
+            let dir = tempfile::tempdir().expect("tmp");
+            let models = dir.path().to_path_buf();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let models = models.clone();
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        download_hf_file_with_size(
+                            "org/repo",
+                            "model.gguf",
+                            &models,
+                            &|_, _| {},
+                            BODY.len() as u64,
+                            None,
+                        )
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("thread")
+                    .expect("both callers succeed");
+            }
+
+            assert_eq!(
+                std::fs::read(models.join("model.gguf")).expect("the model landed"),
+                BODY,
+                "the published artifact must be byte-exact, not two interleaved copies"
+            );
+            assert_eq!(
+                served.load(Ordering::SeqCst),
+                1,
+                "the loser must wait for the winner, not start its own transfer"
+            );
+            let leftovers: Vec<_> = std::fs::read_dir(models.join(".downloading"))
+                .expect("the download dir survives")
+                .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "no lock or partial file may outlive the download: {leftovers:?}"
             );
         });
     }
