@@ -38,7 +38,7 @@
   "command": "json.sample",
   "request": {
     "additionalProperties": false,
-    "description": "Samples JSON documents.",
+    "description": "Samples JSON documents.\n\n# Guaranteed semantics\n\n- **A sample is not a page.** Rows are drawn from the matching set with\n  no ordering or cursor guarantee, and repeating the call may return\n  different rows.\n- **Bounded by what exists.** Asking for more rows than match returns\n  every match, not an error.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

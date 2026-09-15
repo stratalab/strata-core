@@ -134,7 +134,7 @@
   "command": "json.delete",
   "request": {
     "additionalProperties": false,
-    "description": "Deletes a whole JSON document or one JSON path.",
+    "description": "Deletes a whole JSON document or one JSON path.\n\n# Guaranteed semantics\n\n- **Atomic per document.** Removing a path is a single commit, and\n  removing the root removes the document.\n- **Absent is not an error.** Deleting a document or path that is not\n  there succeeds and reports that nothing was applied.\n- **Limits.** This command bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`)\n  and a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`).",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

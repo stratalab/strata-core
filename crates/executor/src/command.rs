@@ -598,6 +598,24 @@ pub enum Command {
         count: Option<u64>,
     },
     /// Sets a JSON value at a document path, creating the document when missing.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Atomic per document.** The write is a single engine commit: the
+    ///   document and its new version apply together or not at all. A reader
+    ///   never observes a partially applied path update.
+    /// - **Creates on demand.** Setting a path in a document that does not
+    ///   exist creates the document; setting the root replaces it whole.
+    /// - **Limits.** This command bears a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`),
+    ///   a path at most **256 segments**
+    ///   (`invalid_argument.engine.json_path_too_long`), and
+    ///   a document at most **16 MiB** serialized
+    ///   (`invalid_argument.engine.json_document_too_large`), nested at most **100**
+    ///   levels (`invalid_argument.engine.json_document_too_deep`), with any single
+    ///   array at most **1,000,000** elements
+    ///   (`invalid_argument.engine.json_array_too_large`).
+    ///   Each is refused before anything is written.
     JsonSet {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -613,6 +631,17 @@ pub enum Command {
         value: Value,
     },
     /// Reads a JSON value at a document path.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Absent and null are different.** A missing document or path returns
+    ///   no value; a path holding JSON `null` returns that null.
+    /// - **Reads never block writers.** A read observes one consistent version
+    ///   of the document; a concurrent write is never half-visible.
+    /// - **Limits.** This command bears a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`)
+    ///   and a path at most **256 segments**
+    ///   (`invalid_argument.engine.json_path_too_long`).
     JsonGet {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -639,6 +668,17 @@ pub enum Command {
         as_of_time: Option<u64>,
     },
     /// Deletes a whole JSON document or one JSON path.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Atomic per document.** Removing a path is a single commit, and
+    ///   removing the root removes the document.
+    /// - **Absent is not an error.** Deleting a document or path that is not
+    ///   there succeeds and reports that nothing was applied.
+    /// - **Limits.** This command bears a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`)
+    ///   and a path at most **256 segments**
+    ///   (`invalid_argument.engine.json_path_too_long`).
     JsonDelete {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -652,6 +692,15 @@ pub enum Command {
         path: String,
     },
     /// Reads full JSON document version history.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Newest first.** Versions are returned in descending commit order,
+    ///   each with the version that produced it.
+    /// - **Deletes are versions.** A removal appears as a version with no
+    ///   value, distinct from a document that never existed.
+    /// - **Limits.** This command bears a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`).
     JsonHistory {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -663,6 +712,13 @@ pub enum Command {
         key: String,
     },
     /// Checks whether a JSON document exists.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Existence only.** Reports whether the document is present without
+    ///   reading or transferring its value.
+    /// - **Limits.** This command bears a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`).
     JsonExists {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -674,6 +730,13 @@ pub enum Command {
         key: String,
     },
     /// Batch-checks JSON document existence.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Positional.** Results are returned in request order, one per key, so
+    ///   a caller can zip them against the keys it sent.
+    /// - **Limits.** Each key bears a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`).
     JsonBatchExists {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -685,6 +748,22 @@ pub enum Command {
         keys: Vec<String>,
     },
     /// Sets multiple JSON values in one engine commit.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **One commit.** Every entry applies together or none does; a reader
+    ///   never observes part of a batch.
+    /// - **Limits.** Each entry bears the single-document limits:
+    ///   a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`),
+    ///   a path at most **256 segments**
+    ///   (`invalid_argument.engine.json_path_too_long`), and
+    ///   a document at most **16 MiB** serialized
+    ///   (`invalid_argument.engine.json_document_too_large`), nested at most **100**
+    ///   levels (`invalid_argument.engine.json_document_too_deep`), with any single
+    ///   array at most **1,000,000** elements
+    ///   (`invalid_argument.engine.json_array_too_large`).
+    ///   One refused entry refuses the batch, and nothing is written.
     JsonBatchSet {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -696,6 +775,17 @@ pub enum Command {
         entries: Vec<BatchJsonEntry>,
     },
     /// Reads multiple JSON values.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Positional.** Results are returned in request order, one per entry,
+    ///   each reporting whether it was found.
+    /// - **One snapshot.** Every entry is read from the same consistent
+    ///   version, so a batch cannot straddle a concurrent write.
+    /// - **Limits.** Each entry bears a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`)
+    ///   and a path at most **256 segments**
+    ///   (`invalid_argument.engine.json_path_too_long`).
     JsonBatchGet {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -707,6 +797,14 @@ pub enum Command {
         entries: Vec<BatchJsonGetEntry>,
     },
     /// Deletes multiple JSON documents or paths.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **One commit.** Every deletion applies together or none does.
+    /// - **Limits.** Each entry bears a document id at most **65,535 bytes**
+    ///   (`invalid_argument.engine.json_document_id`)
+    ///   and a path at most **256 segments**
+    ///   (`invalid_argument.engine.json_path_too_long`).
     JsonBatchDelete {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -766,6 +864,13 @@ pub enum Command {
         as_of_time: Option<u64>,
     },
     /// Scans JSON documents.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Ordering.** Rows are returned in ascending byte-lexicographic key
+    ///   order, stable across calls for unchanged data.
+    /// - **One snapshot.** A page is read from one consistent version; a
+    ///   concurrent write never splits a row across two pages.
     JsonScan {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -781,6 +886,12 @@ pub enum Command {
         limit: Option<u64>,
     },
     /// Counts JSON documents.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Counts documents, not paths.** The result is the number of documents
+    ///   matching the prefix, whatever each one contains.
+    /// - **One snapshot.** The count is taken at one consistent version.
     JsonCount {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -806,6 +917,14 @@ pub enum Command {
         as_of_time: Option<u64>,
     },
     /// Samples JSON documents.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **A sample is not a page.** Rows are drawn from the matching set with
+    ///   no ordering or cursor guarantee, and repeating the call may return
+    ///   different rows.
+    /// - **Bounded by what exists.** Asking for more rows than match returns
+    ///   every match, not an error.
     JsonSample {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -821,6 +940,15 @@ pub enum Command {
         count: Option<u64>,
     },
     /// Creates a JSON secondary index.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Idempotent success.** Creating an index that already exists with the
+    ///   same definition is not an error.
+    /// - **Limits.** This command bears an index name at most **256 bytes**
+    ///   (`invalid_argument.engine.json_index_name`),
+    ///   and the indexed field path bears a path at most **256 segments**
+    ///   (`invalid_argument.engine.json_path_too_long`).
     JsonCreateIndex {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -836,6 +964,13 @@ pub enum Command {
         index_type: JsonIndexType,
     },
     /// Drops a JSON secondary index.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Absent is not an error.** Dropping an index that is not there
+    ///   succeeds and reports that nothing was applied.
+    /// - **Limits.** This command bears an index name at most **256 bytes**
+    ///   (`invalid_argument.engine.json_index_name`).
     JsonDropIndex {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -847,6 +982,12 @@ pub enum Command {
         name: String,
     },
     /// Lists JSON secondary indexes.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Definitions, not statistics.** Each entry reports the index as it was
+    ///   declared; it carries no size or freshness measurement.
+    /// - **One snapshot.** The listing is taken at one consistent version.
     JsonListIndexes {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
