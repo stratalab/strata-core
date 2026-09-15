@@ -56,6 +56,11 @@ const BLESS: &str = "STRATA_OUTPUT_BLESS";
 const FIXED_INSTANT_MICROS: u64 = 1_789_071_584_000_000;
 /// base64 of the single byte `0xFF` — a KV value that is not text.
 const NON_UTF8_BYTES: &str = "/w==";
+/// An identity carrying a real ESC: the shape #3371 reproduced, where
+/// `a<ESC>[2Jb` reached a receipt and a scan row literally and a terminal
+/// executed it as "clear screen". Written with an escape rather than the byte
+/// so this source file stays free of control characters itself.
+const CONTROL_TEXT: &str = "a\u{1b}[2Jb";
 /// The cursor a synthetic `has_more` page carries: base64 of `next` for the
 /// opaque-cursor pages, a sequence number for event pages.
 const FIXED_CURSOR: &str = "bmV4dA==";
@@ -151,7 +156,7 @@ fn compare(name: &str, actual: &Cells) -> Vec<String> {
     red
 }
 
-fn report(what: &str, red: &[String]) {
+fn report(what: &str, red: &[String], remedy: Remedy) {
     if red.is_empty() {
         return;
     }
@@ -165,10 +170,36 @@ fn report(what: &str, red: &[String]) {
         .map(|line| line.lines().next().unwrap_or_default())
         .collect();
     panic!(
-        "{what}: {} red cell(s); bless with {BLESS}=1 if the change is intended\n  {}",
+        "{what}: {} red cell(s); {}\n  {}",
         red.len(),
+        remedy.text(),
         keys.join("\n  ")
     );
+}
+
+/// What the reader should do about a red group. Only the pinned cells can be
+/// blessed: an invariant and the printability sweep are properties of the
+/// render, so re-recording the output changes what is stored and not whether
+/// it is right. Telling someone to bless one of those sends them to run a
+/// command that cannot help, and then to look at a corpus that now records
+/// the defect.
+#[derive(Clone, Copy)]
+enum Remedy {
+    Bless,
+    FixTheRender,
+}
+
+impl Remedy {
+    fn text(self) -> String {
+        match self {
+            Self::Bless => format!("bless with {BLESS}=1 if the change is intended"),
+            Self::FixTheRender => {
+                "this is a property of the render, not a pinned cell: blessing does not \
+                 silence it"
+                    .to_owned()
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +436,54 @@ fn edges(family: &str, primary: &Value) -> Vec<(String, Value)> {
             edges.push(("edge:value=non-utf8".to_owned(), binary));
         }
     }
+    // A listed identity carrying a control character. `items` is where #3371
+    // reproduced — a JSON document id is a plain `string` field, so it never
+    // reaches `displayable_text` the way a `bytes` field does, and the cell
+    // encoding passed every control character but four straight through.
+    //
+    // Kept only where the page still deserializes, which is the same test the
+    // `has_more` cursor edge above uses: a KV page spells its keys base64, so
+    // raw text is not a key it could ever carry. That family's control-byte
+    // behaviour is the `value=non-utf8` edge and `displayable_text`.
+    let mut control = primary.clone();
+    if set_item_text(&mut control["data"], CONTROL_TEXT) > 0
+        && serde_json::from_value::<Output>(control.clone()).is_ok()
+    {
+        edges.push(("edge:item=control".to_owned(), control));
+    }
     edges
+}
+
+/// Replaces every string entry of an `items` array with `replacement`;
+/// returns how many were replaced. Only whole string items are touched, so a
+/// page of records keeps its shape and still deserializes.
+fn set_item_text(value: &mut Value, replacement: &str) -> usize {
+    match value {
+        Value::Object(map) => map
+            .iter_mut()
+            .map(|(key, child)| {
+                if key == "items" {
+                    child.as_array_mut().map_or(0, |items| {
+                        items
+                            .iter_mut()
+                            .filter(|item| item.is_string())
+                            .map(|item| {
+                                *item = Value::from(replacement);
+                                1
+                            })
+                            .sum()
+                    })
+                } else {
+                    set_item_text(child, replacement)
+                }
+            })
+            .sum(),
+        Value::Array(items) => items
+            .iter_mut()
+            .map(|item| set_item_text(item, replacement))
+            .sum(),
+        _ => 0,
+    }
 }
 
 /// Renders one wire in every format: `human` and `raw` become cells (their
@@ -579,12 +657,48 @@ fn in_process_child() {
     for (family, cells) in &by_family {
         red.extend(compare(family, cells));
     }
-    report("in-process cells", &red);
-    report("json/pretty invariants", &invariants);
+    report("in-process cells", &red, Remedy::Bless);
+    report("json/pretty invariants", &invariants, Remedy::FixTheRender);
+    report(
+        "printable cells",
+        &unprintable_cells(&by_family),
+        Remedy::FixTheRender,
+    );
     report(
         "command-examples.json cross-check",
         &examples_cross_check(&root),
+        Remedy::FixTheRender,
     );
+}
+
+/// No rendered cell may carry a character that acts on the terminal printing
+/// it (#3371).
+///
+/// The two exceptions are structure the renderer writes itself: a newline
+/// separates lines of a table or a `fields:` block, and a tab separates the
+/// columns of a `raw` record. Everything else a value contributes is text,
+/// and text that is a control character is encoded.
+///
+/// This sweeps every command × fixture × format rather than naming the
+/// surfaces, because the surfaces are what the bug was about: `escape_cell`
+/// was fixed for table cells and receipts, and nothing said whether some
+/// other path prints a value without it. A command added later is covered the
+/// day it is added.
+fn unprintable_cells(by_family: &BTreeMap<String, Cells>) -> Vec<String> {
+    let mut red = Vec::new();
+    for (family, cells) in by_family {
+        for (key, text) in cells {
+            let found: Vec<String> = text
+                .chars()
+                .filter(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+                .map(|character| format!("U+{:04X}", character as u32))
+                .collect();
+            if !found.is_empty() {
+                red.push(format!("{family} · {key}: carries {}", found.join(", ")));
+            }
+        }
+    }
+    red
 }
 
 /// The parent: builds the scrubbed environment and runs the child.
@@ -769,6 +883,7 @@ fn binary_cells_hold() {
     report(
         "binary cells",
         &compare("binary", &binary_cells(dir.path())),
+        Remedy::Bless,
     );
 }
 
@@ -820,7 +935,7 @@ fn playground_cells_match_the_binary() {
             ));
         }
     }
-    report("playground cells", &red);
+    report("playground cells", &red, Remedy::FixTheRender);
 }
 
 #[test]

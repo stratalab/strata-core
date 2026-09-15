@@ -59,6 +59,14 @@ tenant_a
 default
 tenant_a
 ∎
+### space.list · edge:item=control · human
+a\u001b[2Jb
+a\u001b[2Jb
+∎
+### space.list · edge:item=control · raw
+a\u001b[2Jb
+a\u001b[2Jb
+∎
 ### space.list · edge:items=[] · human
 (empty)
 ∎

@@ -167,6 +167,14 @@ user.updated
 user.created
 user.updated
 ∎
+### event.types · edge:item=control · human
+a\u001b[2Jb
+a\u001b[2Jb
+∎
+### event.types · edge:item=control · raw
+a\u001b[2Jb
+a\u001b[2Jb
+∎
 ### event.types · edge:items=[] · human
 (empty)
 ∎
