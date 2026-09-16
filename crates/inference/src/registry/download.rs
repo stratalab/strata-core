@@ -397,6 +397,8 @@ impl Drop for LockGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::fmt::Write as _;
     use std::io::Read as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -738,8 +740,9 @@ mod tests {
         );
     }
 
-    /// Serializes the tests that point `STRATA_HF_ENDPOINT` at an unroutable
-    /// address: the variable is process-global and tests run in parallel.
+    /// Serializes the tests that set the download environment — the endpoint
+    /// and the tokens: the variables are process-global and tests run in
+    /// parallel.
     static ENDPOINT_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Runs `body` with downloads pointed at `endpoint`. Restores the
@@ -760,6 +763,57 @@ mod tests {
         let _restore = Restore(std::env::var("STRATA_HF_ENDPOINT").ok());
         unsafe { std::env::set_var("STRATA_HF_ENDPOINT", endpoint) };
         body()
+    }
+
+    /// Runs `body` with both token variables set to `values`. Restores them
+    /// afterwards, panic or not.
+    fn with_tokens<T>(values: [Option<&str>; 2], body: impl FnOnce() -> T) -> T {
+        const NAMES: [&str; 2] = ["STRATA_HF_TOKEN", "HF_TOKEN"];
+        struct Restore([Option<String>; 2]);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, previous) in NAMES.iter().zip(self.0.iter_mut()) {
+                    match previous.take() {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                }
+            }
+        }
+        let _serialized = ENDPOINT_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _restore = Restore(NAMES.map(|name| std::env::var(name).ok()));
+        for (name, value) in NAMES.iter().zip(values) {
+            match value {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+        body()
+    }
+
+    /// An absent repo secret reaches the job as an empty variable, not an
+    /// unset one. The `catalog-reachability` step is wired to `HF_TOKEN`
+    /// unconditionally (#3311), so an empty value has to read as no token —
+    /// otherwise the lane would send `Authorization: Bearer ` and the hub
+    /// would answer 401, which this lane reports as an unpublished repo.
+    #[test]
+    fn an_empty_token_variable_is_no_token() {
+        assert_eq!(with_tokens([Some(""), Some("")], hf_token), None);
+        assert_eq!(with_tokens([Some("   "), Some("")], hf_token), None);
+        assert_eq!(with_tokens([None, None], hf_token), None);
+
+        assert_eq!(
+            with_tokens([Some(""), Some("hf_secret")], hf_token),
+            Some("hf_secret".to_owned()),
+            "an empty STRATA_HF_TOKEN does not shadow a real HF_TOKEN"
+        );
+        assert_eq!(
+            with_tokens([Some(" hf_first "), Some("hf_second")], hf_token),
+            Some("hf_first".to_owned()),
+            "STRATA_HF_TOKEN wins, trimmed"
+        );
     }
 
     /// Runs `body` with downloads pointed at a closed loopback port, so a
@@ -951,6 +1005,115 @@ mod tests {
         });
     }
 
+    /// What one HEAD against the hub established about a catalogued file.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum HubAnswer {
+        /// The hub serves the file: 2xx, or the redirect to its CDN.
+        Serves,
+        /// The hub declined to answer: 429 rate limiting, a 5xx of its own, or
+        /// no response at all. This says nothing about the file (#3311).
+        Unanswered,
+        /// The hub answered, and the answer was that it does not serve the
+        /// file: 404 for a missing file, 401 for an unpublished repo, 403 for
+        /// a gated one.
+        DoesNotServe,
+    }
+
+    /// Classifies one HEAD by its status. `None` is a transport error — the
+    /// request produced no response at all, which is no answer either.
+    fn hub_answer(status: Option<u16>) -> HubAnswer {
+        match status {
+            Some(200..=399) => HubAnswer::Serves,
+            Some(429 | 500..=599) | None => HubAnswer::Unanswered,
+            Some(_) => HubAnswer::DoesNotServe,
+        }
+    }
+
+    /// How long to wait before re-asking about a file the hub did not answer
+    /// for. A `retry-after` in seconds is honoured; otherwise the wait doubles
+    /// per attempt. Both are floored at a second so a `retry-after: 0` cannot
+    /// spin, and capped, because the catalogue shares one twenty-minute job
+    /// and a hub asking for an hour is a reason to call the lane inconclusive
+    /// rather than to sit out the timeout.
+    fn retry_delay(retry_after: Option<&str>, attempt: u32) -> Duration {
+        const FLOOR: Duration = Duration::from_secs(1);
+        const CAP: Duration = Duration::from_secs(15);
+        retry_after
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map_or_else(
+                || Duration::from_secs(1u64 << attempt.min(4)),
+                Duration::from_secs,
+            )
+            .clamp(FLOOR, CAP)
+    }
+
+    /// One HEAD's worth of what the probe loop needs from the hub.
+    #[derive(Clone, Debug, Default)]
+    struct HeadOutcome {
+        /// `None` when the request produced no response.
+        status: Option<u16>,
+        retry_after: Option<String>,
+        /// `x-linked-size` on the redirect, else `content-length` on a 2xx.
+        reported_size: Option<u64>,
+        /// How this reads in the report: `HTTP 429 Too Many Requests`,
+        /// `HTTP 401 RepoNotFound`, or the transport error.
+        description: String,
+    }
+
+    /// What the lane learned about one catalogued file.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum Probe {
+        /// The hub serves it, at a size a download would accept.
+        Serves,
+        /// The entry is wrong: the hub answered, and the answer was no.
+        DoesNotServe(String),
+        /// The lane learned nothing: the hub never answered (#3311).
+        Unanswered(String),
+    }
+
+    /// The probe loop, with its HEAD and its waiting supplied.
+    ///
+    /// Injected for the same reason as [`wait_out_lock_within`]: the loop only
+    /// runs against the network, in a nightly job, so nothing observed the
+    /// retry or the rate-limit-versus-missing-file split that this lane exists
+    /// to get right — and a 429 read as "the hub does not serve this file"
+    /// (#3311) is exactly the confusion an unobserved loop lets through.
+    fn probe_within(
+        head: &mut dyn FnMut() -> HeadOutcome,
+        sleep: &dyn Fn(Duration),
+        catalogued_size: u64,
+        attempts: u32,
+    ) -> Probe {
+        let attempts = attempts.max(1);
+        let mut last = HeadOutcome::default();
+        for attempt in 0..attempts {
+            last = head();
+            match hub_answer(last.status) {
+                HubAnswer::Serves => {
+                    let Some(reported) = last.reported_size else {
+                        return Probe::Serves; // the hub did not say how big it is
+                    };
+                    let ratio = reported as f64 / catalogued_size as f64;
+                    return if SIZE_TOLERANCE.contains(&ratio) {
+                        Probe::Serves
+                    } else {
+                        Probe::DoesNotServe(format!(
+                            "the hub reports {reported} bytes, the catalog \
+                             {catalogued_size} — a download would be refused"
+                        ))
+                    };
+                }
+                HubAnswer::DoesNotServe => return Probe::DoesNotServe(last.description),
+                HubAnswer::Unanswered => {
+                    if attempt + 1 < attempts {
+                        sleep(retry_delay(last.retry_after.as_deref(), attempt));
+                    }
+                }
+            }
+        }
+        Probe::Unanswered(last.description)
+    }
+
     /// Every file the catalog names must be on the hub. Two entries were
     /// catalogued against repos that were never published (#3045) and one
     /// variant against a file its repo does not hold (#3300); each surfaced
@@ -963,10 +1126,18 @@ mod tests {
     /// size lies outside `SIZE_TOLERANCE` fails too, because the download
     /// would.
     ///
+    /// A hub that declines to answer — 429 from the anonymous per-IP limit
+    /// this lane shares with every other Actions user, or a 5xx of its own —
+    /// is reported apart from the entries the hub answered about. It is not
+    /// evidence against a catalog entry, and reading it as such (#3311) turns
+    /// a nightly red into one nobody can act on.
+    ///
     /// Network: run by the nightly `catalog-reachability` job.
     #[test]
     #[ignore = "network: the nightly catalog-reachability lane runs it"]
     fn every_catalogued_file_is_published_on_the_hub() {
+        const ATTEMPTS: u32 = 3;
+
         let _serialized = ENDPOINT_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -979,65 +1150,243 @@ mod tests {
         let endpoint = hf_endpoint();
         let token = hf_token();
 
-        let mut failures = Vec::new();
+        let mut does_not_serve = Vec::new();
+        let mut unanswered = Vec::new();
         for entry in CATALOG {
             for variant in entry.variants {
                 let url = hf_download_url(&endpoint, entry.hf_repo, variant.hf_file);
-                let mut request = agent.head(&url);
-                if let Some(token) = &token {
-                    request = request.header("authorization", &format!("Bearer {token}"));
-                }
-                let response = match request.call() {
-                    Ok(response) => response,
-                    Err(error) => {
-                        failures.push(format!("{}:{} {url}: {error}", entry.name, variant.name));
-                        continue;
+                let mut head = || {
+                    let mut request = agent.head(&url);
+                    if let Some(token) = &token {
+                        request = request.header("authorization", &format!("Bearer {token}"));
                     }
-                };
-                let status = response.status();
-                let header = |name: &str| {
-                    response
-                        .headers()
-                        .get(name)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_owned)
-                };
-                if !(status.is_success() || status.is_redirection()) {
+                    let response = match request.call() {
+                        Ok(response) => response,
+                        Err(error) => {
+                            return HeadOutcome {
+                                description: error.to_string(),
+                                ..HeadOutcome::default()
+                            };
+                        }
+                    };
+                    let header = |name: &str| {
+                        response
+                            .headers()
+                            .get(name)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned)
+                    };
+                    let status = response.status();
+                    // The redirect's own content-length is its body, not the
+                    // file's.
+                    let reported_size = header("x-linked-size")
+                        .or_else(|| {
+                            status
+                                .is_success()
+                                .then(|| header("content-length"))
+                                .flatten()
+                        })
+                        .and_then(|size| size.parse::<u64>().ok());
                     // The hub names the reason (RepoNotFound, EntryNotFound,
                     // GatedRepo) when it has one; the status alone otherwise.
                     let code = header("x-error-code").unwrap_or_default();
-                    failures.push(format!(
-                        "{}:{} {url}: HTTP {status} {code}",
-                        entry.name, variant.name
-                    ));
-                    continue;
-                }
-                // The redirect's own content-length is its body, not the file's.
-                let reported = header("x-linked-size")
-                    .or_else(|| {
-                        status
-                            .is_success()
-                            .then(|| header("content-length"))
-                            .flatten()
-                    })
-                    .and_then(|size| size.parse::<u64>().ok());
-                let Some(reported) = reported else {
-                    continue; // the hub did not say how big the file is
+                    HeadOutcome {
+                        status: Some(status.as_u16()),
+                        retry_after: header("retry-after"),
+                        reported_size,
+                        description: format!("HTTP {status} {code}").trim_end().to_owned(),
+                    }
                 };
-                let ratio = reported as f64 / variant.size_bytes as f64;
-                if !SIZE_TOLERANCE.contains(&ratio) {
-                    failures.push(format!(
-                        "{}:{} {url}: the hub reports {reported} bytes, the catalog {} — \
-                         a download would be refused",
-                        entry.name, variant.name, variant.size_bytes
-                    ));
+                let verdict =
+                    probe_within(&mut head, &std::thread::sleep, variant.size_bytes, ATTEMPTS);
+                let named =
+                    |reason: String| format!("{}:{} {url}: {reason}", entry.name, variant.name);
+                match verdict {
+                    Probe::Serves => {}
+                    Probe::DoesNotServe(reason) => does_not_serve.push(named(reason)),
+                    Probe::Unanswered(reason) => unanswered.push(named(reason)),
                 }
             }
         }
-        assert!(
-            failures.is_empty(),
-            "catalogued files the hub does not serve:\n{}",
-            failures.join("\n")
+
+        let mut report = String::new();
+        if !does_not_serve.is_empty() {
+            let _ = writeln!(
+                report,
+                "catalogued files the hub does not serve — each is a catalog entry to \
+                 remove or correct:\n{}",
+                does_not_serve.join("\n")
+            );
+        }
+        if !unanswered.is_empty() {
+            let _ = writeln!(
+                report,
+                "the hub did not answer about these catalogued files, after {ATTEMPTS} \
+                 attempts — rate limiting or a hub outage, which says nothing about the \
+                 entry. The lane learned nothing about them; an `HF_TOKEN` repo secret \
+                 lifts the anonymous per-IP limit this job shares with every other \
+                 Actions runner:\n{}",
+                unanswered.join("\n")
+            );
+        }
+        assert!(report.is_empty(), "{report}");
+    }
+
+    #[test]
+    fn a_status_the_hub_answered_with_is_classified_by_what_it_says() {
+        for serving in [200, 206, 301, 302, 307, 399] {
+            assert_eq!(hub_answer(Some(serving)), HubAnswer::Serves, "{serving}");
+        }
+        // The hub answered, and the answer is about the file.
+        for refusing in [400, 401, 403, 404, 410, 418, 428] {
+            assert_eq!(
+                hub_answer(Some(refusing)),
+                HubAnswer::DoesNotServe,
+                "{refusing}"
+            );
+        }
+        // The hub declined to answer. 429 is the one this lane kept reading as
+        // a bad catalog entry (#3311).
+        for declining in [429, 500, 502, 503, 504, 599] {
+            assert_eq!(
+                hub_answer(Some(declining)),
+                HubAnswer::Unanswered,
+                "{declining}"
+            );
+        }
+        assert_eq!(hub_answer(None), HubAnswer::Unanswered);
+    }
+
+    #[test]
+    fn a_retry_honours_retry_after_and_is_floored_and_capped() {
+        // Honoured, whitespace and all.
+        assert_eq!(retry_delay(Some("5"), 0), Duration::from_secs(5));
+        assert_eq!(retry_delay(Some(" 7 "), 3), Duration::from_secs(7));
+        // Floored, so `retry-after: 0` cannot spin.
+        assert_eq!(retry_delay(Some("0"), 0), Duration::from_secs(1));
+        // Capped, so an hour-long ask does not eat the job's budget.
+        assert_eq!(retry_delay(Some("3600"), 0), Duration::from_secs(15));
+        // The HTTP-date form is legal and not parsed: fall back to backoff.
+        assert_eq!(
+            retry_delay(Some("Wed, 21 Oct 2026 07:28:00 GMT"), 2),
+            Duration::from_secs(4)
+        );
+        // No header: double per attempt, to the same cap.
+        assert_eq!(retry_delay(None, 0), Duration::from_secs(1));
+        assert_eq!(retry_delay(None, 1), Duration::from_secs(2));
+        assert_eq!(retry_delay(None, 2), Duration::from_secs(4));
+        assert_eq!(retry_delay(None, 3), Duration::from_secs(8));
+        assert_eq!(retry_delay(None, 4), Duration::from_secs(15));
+        assert_eq!(retry_delay(None, 99), Duration::from_secs(15));
+    }
+
+    /// Drives `probe_within` with a scripted sequence of HEAD outcomes,
+    /// returning the verdict, how many HEADs it took, and what it waited.
+    fn probe_scripted(
+        script: &[HeadOutcome],
+        catalogued_size: u64,
+        attempts: u32,
+    ) -> (Probe, usize, Vec<Duration>) {
+        let calls = Cell::new(0usize);
+        let waits = RefCell::new(Vec::new());
+        let mut head = || {
+            let index = calls.get();
+            calls.set(index + 1);
+            script[index.min(script.len() - 1)].clone()
+        };
+        let verdict = probe_within(
+            &mut head,
+            &|delay| waits.borrow_mut().push(delay),
+            catalogued_size,
+            attempts,
+        );
+        (verdict, calls.get(), waits.into_inner())
+    }
+
+    fn answered(status: u16, reported_size: Option<u64>) -> HeadOutcome {
+        HeadOutcome {
+            status: Some(status),
+            retry_after: None,
+            reported_size,
+            description: format!("HTTP {status}"),
+        }
+    }
+
+    #[test]
+    fn a_rate_limited_head_is_retried_and_then_believed() {
+        let (verdict, calls, waits) = probe_scripted(
+            &[
+                answered(429, None),
+                answered(429, None),
+                answered(302, Some(100)),
+            ],
+            100,
+            3,
+        );
+        assert_eq!(verdict, Probe::Serves);
+        assert_eq!(calls, 3, "the 429s are re-asked, not believed");
+        assert_eq!(
+            waits,
+            vec![Duration::from_secs(1), Duration::from_secs(2)],
+            "and the wait doubles between them"
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_that_persists_is_inconclusive_not_a_bad_entry() {
+        let (verdict, calls, waits) = probe_scripted(&[answered(429, None)], 100, 3);
+        let Probe::Unanswered(reason) = verdict else {
+            panic!("a persistent 429 is no evidence against the entry: {verdict:?}");
+        };
+        assert!(reason.contains("429"), "{reason}");
+        assert_eq!(calls, 3);
+        assert_eq!(waits.len(), 2, "no wait after the last attempt");
+    }
+
+    #[test]
+    fn a_transport_error_is_inconclusive_too() {
+        let (verdict, calls, _) = probe_scripted(
+            &[HeadOutcome {
+                description: "dns error".to_owned(),
+                ..HeadOutcome::default()
+            }],
+            100,
+            3,
+        );
+        assert_eq!(verdict, Probe::Unanswered("dns error".to_owned()));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn a_missing_file_is_a_bad_entry_on_the_first_answer() {
+        for refusal in [401, 403, 404] {
+            let (verdict, calls, waits) = probe_scripted(&[answered(refusal, None)], 100, 3);
+            assert_eq!(
+                verdict,
+                Probe::DoesNotServe(format!("HTTP {refusal}")),
+                "{refusal}"
+            );
+            assert_eq!(calls, 1, "an answer is not re-asked: {refusal}");
+            assert!(waits.is_empty(), "and not waited on: {refusal}");
+        }
+    }
+
+    #[test]
+    fn a_served_file_whose_size_disagrees_with_the_catalog_is_a_bad_entry() {
+        let (verdict, _, _) = probe_scripted(&[answered(302, Some(10))], 100, 3);
+        let Probe::DoesNotServe(reason) = verdict else {
+            panic!("a tenth of the catalogued size would refuse the download: {verdict:?}");
+        };
+        assert!(reason.contains("10") && reason.contains("100"), "{reason}");
+
+        // Inside the tolerance, and with no size at all, the entry stands.
+        assert_eq!(
+            probe_scripted(&[answered(302, Some(60))], 100, 3).0,
+            Probe::Serves
+        );
+        assert_eq!(
+            probe_scripted(&[answered(200, None)], 100, 3).0,
+            Probe::Serves
         );
     }
 

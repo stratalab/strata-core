@@ -438,8 +438,16 @@ jobs:
     # one variant at a file its repo does not hold (#3300); each surfaced as
     # a `models pull` failure long after the entry landed. One HEAD per
     # catalogued file, nothing downloaded, and the catalog's `size_bytes`
-    # held to the window the downloader itself enforces. A red run here is
-    # a catalog entry to remove or correct.
+    # held to the window the downloader itself enforces.
+    #
+    # A red run says which of two things happened, and they are not the same
+    # (#3311). "The hub does not serve" is a catalog entry to remove or
+    # correct. "The hub did not answer", after three attempts with backoff,
+    # is rate limiting or a hub outage — the lane learned nothing, and the
+    # catalog is not implicated. `HF_TOKEN` lifts the anonymous per-IP limit
+    # this job otherwise shares with every other Actions runner, which is
+    # what made 429s frequent enough to matter; it is read by `hf_token()`
+    # and the step is inert without the secret.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -449,4 +457,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
       - name: Every catalogued file is published on the hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: cargo test --locked -p strata-inference --features download --lib every_catalogued_file_is_published_on_the_hub -- --ignored --nocapture
