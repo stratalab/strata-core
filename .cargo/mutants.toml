@@ -199,6 +199,14 @@ exclude_re = [
     # (expected_sha, sha256_file, hex, asset_name, local_asset_name) stay
     # mutated and are unit-tested.
     "install_release_asset",
+    # #3440: `push_follow_on` indents `init`'s next steps at `INDENT * 2`,
+    # one level under their label. `INDENT` is 2, so `* 2` and `+ 2` are the
+    # same number — an equivalent mutant no test can distinguish, not an
+    # untested branch. Writing `4` to dodge it would hide the relationship
+    # the expression exists to state. The indent itself IS pinned, exactly:
+    # `init_tells_a_reader_what_to_do_next_and_a_script_nothing_new` asserts
+    # the rendered block character for character, so a changed level reds it.
+    "replace \\* with \\+ in push_follow_on",
     # `doctor::inference_report` has two cfg variants, and cargo-mutants
     # mutates source text without evaluating cfg — so it also mutates the
     # `not(all(native, inference))` fallback, which THIS lane never compiles.

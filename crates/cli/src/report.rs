@@ -54,6 +54,7 @@ pub(crate) fn render_report(value: &Value, format: Format) -> Rendered {
                 // The receipt is the whole answer for a reader; a script gets
                 // the facts it was built from (Q17).
                 line!(stdout, "{}", receipt(kind, data).unwrap_or_default());
+                push_follow_on(kind, data, &mut stdout);
             } else {
                 render_record(data, format, &mut stdout);
             }
@@ -106,6 +107,39 @@ fn split(value: &Value) -> (Option<&str>, &Value) {
         // whose fields sit beside it.
         (Some(_), None) => (Some("command"), value),
         (None, _) => (None, value),
+    }
+}
+
+/// What a receipt cannot say in one line, for the reports whose whole purpose
+/// is to tell a reader what to do next.
+///
+/// A receipt answers *what happened*; `init` also has to answer *what now*,
+/// and it is the first command anyone runs. Its four next steps were computed,
+/// shared with the guide and put on the wire, and then shown only to
+/// `--json` — so the human got a path they did not ask for and the agent got
+/// the guidance (#3440). Printed for both branches: "already initialized" is
+/// otherwise a dead end, and a reader who runs `init` twice needs the steps
+/// exactly as much as one who runs it once.
+///
+/// A script sees none of this: `--raw` and `--json` carry `next_steps` as a
+/// field, which is the record this is built from (Q17).
+fn push_follow_on(kind: &str, data: &Value, out: &mut String) {
+    if kind != "init" {
+        return;
+    }
+    let steps = data
+        .get("next_steps")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if steps.is_empty() {
+        return;
+    }
+    push_label(out, INDENT, "next steps");
+    for step in steps {
+        if let Some(step) = step.as_str() {
+            push_indented(out, step, INDENT * 2);
+        }
     }
 }
 
@@ -381,6 +415,56 @@ mod tests {
             human(&json!({"type": "init", "data": {"home": "/h", "created": false}})),
             "/h is already initialized\n"
         );
+    }
+
+    /// `init`'s next steps are the one thing it exists to say, and they used
+    /// to reach `--json` only (#3440). Both branches print them: a reader who
+    /// runs `init` twice needs them exactly as much as one who runs it once.
+    ///
+    /// The script's answer is unchanged — the steps are a field of the record
+    /// it already gets (Q17).
+    #[test]
+    fn init_tells_a_reader_what_to_do_next_and_a_script_nothing_new() {
+        let report = |created: bool| {
+            json!({"type": "init", "data": {
+                "home": "/h",
+                "created": created,
+                "next_steps": ["strata ./my-db kv put greeting hello", "strata agents guide"],
+            }})
+        };
+
+        assert_eq!(
+            human(&report(true)),
+            "initialized /h\n  next steps\n    strata ./my-db kv put greeting hello\n    \
+             strata agents guide\n"
+        );
+        assert_eq!(
+            human(&report(false)),
+            "/h is already initialized\n  next steps\n    strata ./my-db kv put greeting \
+             hello\n    strata agents guide\n"
+        );
+
+        assert_eq!(
+            raw(&report(true)),
+            "created\ttrue\nhome\t/h\nnext_steps\t[\"strata ./my-db kv put greeting hello\",\
+             \"strata agents guide\"]\n"
+        );
+
+        // No steps to give, no header promising them.
+        assert_eq!(
+            human(
+                &json!({"type": "init", "data": {"home": "/h", "created": true, "next_steps": []}})
+            ),
+            "initialized /h\n"
+        );
+
+        // And the follow-on is `init`'s alone: another receipt-shaped report
+        // carrying the same field is unaffected.
+        assert!(!human(&json!({"type": "update", "data": {
+            "current": "1.2.2", "latest": "1.2.2", "update_available": false, "changed": false,
+            "next_steps": ["never printed"],
+        }}))
+        .contains("next steps"));
     }
 
     #[test]
