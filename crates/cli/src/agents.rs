@@ -136,6 +136,8 @@ Client config: {{\"command\":\"strata\",\"args\":[\"<db-path>\",\"mcp\",\"serve\
         next_steps = guidance::NEXT_STEPS.join("\n"),
     );
 
+    push_host_commands(&mut guide)?;
+
     guide.push_str("## Command catalog\n\n");
     let _ = writeln!(
         guide,
@@ -169,6 +171,65 @@ command registers this MCP server with every agent surface in a workspace.\n",
     );
 
     Ok(guide)
+}
+
+/// The guide's host-command section, derived from [`host_commands`].
+fn push_host_commands(guide: &mut String) -> Result<(), CliError> {
+    guide.push_str(
+        "## Host commands\n\nThese run in the CLI itself rather than against a database, so they \
+carry no wire command and are absent from the catalog below. Each documents itself with \
+`--help`.\n\n",
+    );
+    for (name, about) in host_commands()? {
+        let _ = writeln!(guide, "- `strata {name}` — {about}");
+    }
+    guide.push('\n');
+    Ok(())
+}
+
+/// The top-level verbs that run in the CLI rather than against a database,
+/// with the one-line `about` clap already carries for each.
+///
+/// Read off the clap tree and the catalog rather than written out here, for
+/// the reason the guide states about itself: it is generated from the
+/// binary's own metadata, so it cannot drift. That claim held for the
+/// catalogued commands and not for this half, which was hand-written prose —
+/// and it had drifted, with `init`, `start` and `stop` named nowhere in the
+/// guide at all (#3441). Deriving it also makes the list correct per build:
+/// a verb behind `#[cfg(feature = …)]` is listed exactly when it is compiled.
+///
+/// Two exclusions, both from the source rather than a list kept here:
+///
+/// - a verb whose name heads a catalogued path is a database command, and
+///   belongs to the catalog section;
+/// - a `hide = true` verb is a refusal stub for a removed or deferred
+///   surface (`txn`, `compact`, `up`, …). It exists to fail helpfully, not to
+///   be used, so publishing it as a command would be worse than silence.
+fn host_commands() -> Result<Vec<(String, String)>, CliError> {
+    use clap::CommandFactory as _;
+
+    let catalog = crate::catalog::embedded()?;
+    let catalogued: std::collections::BTreeSet<&str> = catalog
+        .commands()
+        .iter()
+        .filter(|entry| entry.surface == "verb")
+        .filter_map(|entry| entry.path.first().map(String::as_str))
+        .collect();
+
+    Ok(crate::options::Cli::command()
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+        .filter(|sub| !catalogued.contains(sub.get_name()))
+        .map(|sub| {
+            let about = sub
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+                .trim_end_matches('.')
+                .to_owned();
+            (sub.get_name().to_owned(), about)
+        })
+        .collect())
 }
 
 // ---- catalogs ---------------------------------------------------------------
@@ -511,5 +572,93 @@ mod tests {
         assert!(rule.starts_with("---\ndescription: Use when working with StrataDB"));
         assert!(rule.contains("alwaysApply: false"));
         assert!(rule.contains("stratadb.open("));
+    }
+}
+
+#[cfg(test)]
+mod surface_guard {
+    use clap::CommandFactory as _;
+
+    use super::{guide_markdown, host_commands};
+
+    /// The guide opens by claiming it "is generated from the installed
+    /// binary's own metadata, so it cannot drift". That was true of the
+    /// catalogued commands and false of the host-surface verbs, which were
+    /// hand-written prose — and had drifted: `init`, `start` and `stop`
+    /// appeared nowhere in it (#3441).
+    ///
+    /// This is that claim, asserted in both directions: every verb the binary
+    /// offers is named, and no verb that exists only to refuse is.
+    #[test]
+    fn the_guide_names_every_verb_the_binary_offers_and_no_refusal_stub() {
+        let guide = guide_markdown().expect("the guide builds");
+        let cli = crate::options::Cli::command();
+
+        // Three spellings, because the two halves name a verb differently: a
+        // host command is listed as `strata init`, a single-word database
+        // command as `ping`, and a family head as the start of `kv put`.
+        let named = |name: &str| {
+            guide.contains(&format!("`strata {name}`"))
+                || guide.contains(&format!("`{name}`"))
+                || guide.contains(&format!("`{name} "))
+        };
+
+        let missing: Vec<&str> = cli
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set())
+            .map(clap::Command::get_name)
+            .filter(|name| !named(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these verbs are offered by the binary and named nowhere in the guide: {missing:?}"
+        );
+
+        // The other direction, and the one a falsification plant proved was
+        // needed: a `hide = true` verb is a refusal stub for a removed or
+        // deferred surface (`txn`, `compact`, `up`, ...). Dropping the
+        // `is_hide_set` filter publishes all of them, and widens the list
+        // without breaking anything above.
+        let hidden: Vec<&str> = cli
+            .get_subcommands()
+            .filter(|sub| sub.is_hide_set())
+            .map(clap::Command::get_name)
+            .collect();
+        assert!(
+            hidden.len() >= 8,
+            "the refusal stubs are gone, so this half proves nothing: {hidden:?}"
+        );
+        let host: Vec<String> = host_commands()
+            .expect("host commands")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(host.contains(&"init".to_owned()), "{host:?}");
+        for name in hidden {
+            assert!(
+                !host.contains(&name.to_owned()),
+                "`{name}` exists only to refuse and must not be published as a command"
+            );
+        }
+
+        // And the two halves do not overlap. Without this the `surface ==
+        // "verb"` filter is unobserved: inverting it still leaves every verb
+        // named and every stub unpublished, so the guide would simply list
+        // `kv` and `ping` as host commands. The mutation lane found exactly
+        // that.
+        let catalogued: Vec<&str> = crate::catalog::embedded()
+            .expect("catalog")
+            .commands()
+            .iter()
+            .filter(|entry| entry.surface == "verb")
+            .filter_map(|entry| entry.path.first().map(String::as_str))
+            .collect();
+        assert!(catalogued.contains(&"kv"), "{catalogued:?}");
+        for name in &host {
+            assert!(
+                !catalogued.contains(&name.as_str()),
+                "`{name}` is a database command and must not be listed as a host command"
+            );
+        }
     }
 }
