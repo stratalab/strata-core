@@ -436,9 +436,15 @@ cursor-before-prefix clamp.
 - **Unread `EventIndex` rows**: written on append (`service.rs:135`) but never read by
   any query (all type filters post-filter event rows). Decide whether they are dead
   weight; add a consistency test or a scope decision (§10).
-- `event_payload_too_large` (16 MiB) + `too long/large to hash`; non-finite float
-  rejection (`contains_non_finite_float`); reverse-direction cursor continuation;
-  multi-raw-page `range` (never crosses 4096).
+- `event_payload_too_large` (16 MiB) + `too long/large to hash`; reverse-direction
+  cursor continuation; multi-raw-page `range` (never crosses 4096).
+- **Not testable, and no longer claimed:** non-finite float rejection. A
+  `serde_json::Value` cannot hold a `NaN` or `±Inf` — `Number::from_f64` returns
+  `None`, `Number::deserialize` refuses a raw f64 NaN, and JSON text has no
+  non-finite literal — so `EventPayload::new` never saw one and the check that
+  looked for them could not fire (#3193). It is deleted; the fact that made it
+  unreachable is pinned by `serde_json_cannot_represent_a_non_finite_float`, and
+  the coercion callers must guard against is documented on `EventPayload::new`.
 
 ### 6.5 Vector — **P1**
 

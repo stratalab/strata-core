@@ -18,6 +18,9 @@ pub struct EventType(String);
 
 impl EventType {
     /// Creates a validated event type.
+    ///
+    /// The type must be non-empty once trimmed, at most **256 bytes**, and free
+    /// of NUL bytes. Each refusal carries `invalid_argument.engine.event_type`.
     pub fn new(event_type: impl Into<String>) -> Result<Self, EngineError> {
         let event_type = event_type.into();
         if event_type.is_empty() || event_type.trim().is_empty() {
@@ -78,17 +81,37 @@ pub struct EventPayload(Value);
 
 impl EventPayload {
     /// Creates a validated event payload.
+    ///
+    /// The payload must be a JSON **object** — an array, string, number,
+    /// boolean or `null` root is refused with
+    /// `invalid_argument.engine.event_payload`. An empty object is valid.
+    /// Encoded, it must not exceed **16 MiB**
+    /// (`invalid_argument.engine.event_payload_too_large`).
+    ///
+    /// # A non-finite float never reaches this constructor
+    ///
+    /// `NaN` and `±Inf` are **not** refused here, because they cannot arrive.
+    /// `serde_json::Value` has no representation for a non-finite number:
+    /// `Number::from_f64` returns `None`, so `json!({ "vx": f64::NAN })` builds
+    /// `{"vx": null}` in the caller's own crate. By the time the value is
+    /// passed here the float is already gone, and the payload is accepted with
+    /// a `null` in its place.
+    ///
+    /// A caller assembling a payload from float data must therefore check
+    /// finiteness *before* building the `Value` — the engine cannot tell a
+    /// coerced `NaN` from a `null` the caller meant to write. Strata's own
+    /// float-bearing entry points check at the boundary where the value is
+    /// still a float, not a `Value`: Arrow import refuses a non-finite cell
+    /// with `invalid_argument.executor.arrow_non_finite_float`, and
+    /// [`VectorEmbedding::from_wire`] refuses one with
+    /// `invalid_argument.engine.vector_embedding`.
+    ///
+    /// [`VectorEmbedding::from_wire`]: crate::VectorEmbedding::from_wire
     pub fn new(value: Value) -> Result<Self, EngineError> {
         if !value.is_object() {
             return Err(EngineError::invalid_input(
                 "invalid_argument.engine.event_payload",
                 "event payload must be a JSON object",
-            ));
-        }
-        if contains_non_finite_float(&value) {
-            return Err(EngineError::invalid_input(
-                "invalid_argument.engine.event_payload",
-                "event payload must not contain non-finite floats",
             ));
         }
         let size = serde_json::to_vec(&value)
@@ -238,18 +261,11 @@ impl EventBatchAppendEntry {
 
 pub(crate) type EventHash = [u8; EVENT_HASH_BYTES];
 
-fn contains_non_finite_float(value: &Value) -> bool {
-    match value {
-        Value::Number(number) => number.as_f64().is_some_and(|value| !value.is_finite()),
-        Value::Array(values) => values.iter().any(contains_non_finite_float),
-        Value::Object(map) => map.values().any(contains_non_finite_float),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde::de::value::{Error as ValueError, F64Deserializer};
+    use serde::Deserialize;
+    use serde_json::{json, Number, Value};
 
     use super::{EventBatchAppendEntry, EventPayload, EventType};
     use crate::diagnostics::EngineErrorClass;
@@ -293,6 +309,47 @@ mod tests {
 
         EventPayload::new(json!({})).expect("empty object accepted");
         EventPayload::new(json!({"nested": [true, 1, "two"]})).expect("nested object accepted");
+    }
+
+    /// The reason `EventPayload::new` carries no finite-float rule: a
+    /// `serde_json::Value` cannot hold a non-finite number, by any route.
+    ///
+    /// This is the guard for the rustdoc on `EventPayload::new`. If
+    /// `serde_json` or this workspace's feature set ever makes a `Number` hold
+    /// a non-finite value, this test goes red — and the constructor needs a
+    /// finiteness check back, because the rustdoc's claim would no longer hold.
+    #[test]
+    fn serde_json_cannot_represent_a_non_finite_float() {
+        for non_finite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            // Constructed: `Number::from_f64` refuses, and the `json!` macro
+            // and `Value::from` fall back to null rather than erroring.
+            assert!(Number::from_f64(non_finite).is_none());
+            assert_eq!(Value::from(non_finite), Value::Null);
+
+            // Deserialized: a binary codec handing serde a raw f64 on
+            // read-back cannot produce one either.
+            let number: Result<Number, ValueError> =
+                Number::deserialize(F64Deserializer::<ValueError>::new(non_finite));
+            assert!(number.is_err());
+            let value: Value = Value::deserialize(F64Deserializer::<ValueError>::new(non_finite))
+                .expect("a Value deserializes");
+            assert_eq!(value, Value::Null);
+        }
+
+        // Parsed: JSON text has no non-finite literal, and an out-of-range
+        // exponent is a parse error rather than an infinity.
+        for text in [r#"{"vx": NaN}"#, r#"{"vx": Infinity}"#, r#"{"vx": 1e400}"#] {
+            assert!(serde_json::from_str::<Value>(text).is_err());
+        }
+    }
+
+    /// The behaviour the rustdoc warns about: a `NaN` is coerced to `null` in
+    /// the caller's crate, and the payload is accepted with the number gone.
+    #[test]
+    fn a_non_finite_float_is_accepted_as_null_not_refused() {
+        let payload = EventPayload::new(json!({"vx": f64::NAN, "vy": f64::INFINITY}))
+            .expect("a coerced payload is accepted, not refused");
+        assert_eq!(payload.as_inner(), &json!({"vx": null, "vy": null}));
     }
 
     #[test]
