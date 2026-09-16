@@ -356,3 +356,36 @@ fn the_config_file_state_distinguishes_absent_from_unusable() {
         strata_hub::ConfigFileState::Unreadable
     );
 }
+
+/// The four words a state reports as. `strata doctor` prints them and
+/// `inference status` puts them on the wire (#3423), so they are a published
+/// vocabulary an agent matches on — not display text.
+///
+/// Pinned here, in the crate that owns the word, because that is the only
+/// place a mutation lane can see: the executor test that holds the wire enum
+/// to these is behind `strata-executor/inference`, which is not a default
+/// feature, so `label` returning `""` for everything survived until this
+/// existed.
+#[test]
+fn every_config_file_state_reports_one_stable_word() {
+    for (state, word) in [
+        (strata_hub::ConfigFileState::Absent, "absent"),
+        (strata_hub::ConfigFileState::Readable, "readable"),
+        (strata_hub::ConfigFileState::Unreadable, "unreadable"),
+        (strata_hub::ConfigFileState::Malformed, "malformed"),
+    ] {
+        assert_eq!(state.label(), word);
+    }
+
+    // And a state is identified by its word: four states, four words.
+    let words: std::collections::BTreeSet<&str> = [
+        strata_hub::ConfigFileState::Absent,
+        strata_hub::ConfigFileState::Readable,
+        strata_hub::ConfigFileState::Unreadable,
+        strata_hub::ConfigFileState::Malformed,
+    ]
+    .into_iter()
+    .map(strata_hub::ConfigFileState::label)
+    .collect();
+    assert_eq!(words.len(), 4, "two states share a word: {words:?}");
+}

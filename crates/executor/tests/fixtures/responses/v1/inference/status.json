@@ -1,5 +1,6 @@
 {
   "data": {
+    "config_file": null,
     "local_execution": true,
     "local_remedy": null,
     "model_download": false,

@@ -80,7 +80,8 @@ pub use runtime::{
 };
 pub(crate) use settings::{base_url_env_var, default_base_url};
 pub use settings::{
-    EnvProviderSettings, ProviderBaseUrl, ProviderKey, ProviderSettings, SettingSource,
+    ConfigFileState, ConfigFileStatus, EnvProviderSettings, ProviderBaseUrl, ProviderKey,
+    ProviderSettings, SettingSource,
 };
 pub use wire::{
     ChatChoice, ChatMessage, ChatRequest, ChatResponse, EmbedInput, EmbeddingItem,
