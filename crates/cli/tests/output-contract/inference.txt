@@ -162,7 +162,7 @@ models	/fake/models (shared by every database)
 	this build cannot download models -- `strata inference install-local` adds downloading along with local execution
 ∎
 ### inference.status · responses/v1/inference/status.json · raw
-{"local_execution":true,"local_remedy":null,"model_download":false,"models_catalogued":3,"models_dir":"/fake/models","models_downloaded":0,"providers":[{"base_url":null,"base_url_env_var":null,"base_url_source":null,"feature_enabled":true,"key_env_var":null,"key_present":false,"key_source":null,"model_prefix":"local:","provider":"local","ready":true,"requires_api_key":false}]}
+{"config_file":null,"local_execution":true,"local_remedy":null,"model_download":false,"models_catalogued":3,"models_dir":"/fake/models","models_downloaded":0,"providers":[{"base_url":null,"base_url_env_var":null,"base_url_source":null,"feature_enabled":true,"key_env_var":null,"key_present":false,"key_source":null,"model_prefix":"local:","provider":"local","ready":true,"requires_api_key":false}]}
 ∎
 ### inference.tokenize · responses/v1/errors/inference/unknown_model.json · human
 inference.unknown_model: command failed∎

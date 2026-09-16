@@ -6,6 +6,10 @@
 //! provider facts — `models list`, `models local`, `cache-status`, and
 //! `capability` — and had no CLI integration coverage. Run under a temp `HOME`
 //! (so no locally-downloaded model leaks in) they are fully deterministic.
+//!
+//! `status` joins them for the fields #3423 added, under a temp config
+//! directory as well: what it says about the user config file is a function of
+//! that file alone.
 
 #![deny(unsafe_code)]
 
@@ -134,4 +138,148 @@ fn capability_reports_static_facts_for_cloud_and_local_specs() {
         "the two fields must now agree rather than contradict"
     );
     assert_eq!(local["data"]["embedding_dim"], 384);
+}
+
+/// Where the binary will look for the user config file, under `env`.
+///
+/// Asked of the binary rather than assembled here: `dirs::config_dir()` is
+/// `$XDG_CONFIG_HOME` on Linux and `$HOME/Library/Application Support` on
+/// macOS, so a path written by hand is right on one platform and invisible on
+/// the other — the test would then assert `absent` and pass for the wrong
+/// reason.
+fn config_path(env: &[(&str, &Path)]) -> std::path::PathBuf {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_strata"));
+    cmd.arg("--json").arg("config").arg("path");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let output = cmd.output().expect("run strata binary");
+    let reported: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+    std::path::PathBuf::from(reported["path"].as_str().expect("a config path"))
+}
+
+/// Runs `strata --db <db> inference status` under `env`, in JSON and human
+/// form, returning both.
+fn status(env: &[(&str, &Path)], db: &Path) -> (Value, String) {
+    let run = |json: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_strata"));
+        cmd.arg("--db").arg(db);
+        if json {
+            cmd.arg("--json");
+        }
+        cmd.arg("inference").arg("status");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let output = cmd
+            .env_remove("STRATA_HOME")
+            .env_remove("STRATA_DB")
+            .output()
+            .expect("run strata binary");
+        assert!(
+            output.status.success(),
+            "inference status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("stdout is UTF-8")
+    };
+    (
+        serde_json::from_str(&run(true)).expect("stdout is JSON"),
+        run(false),
+    )
+}
+
+/// The question #3423 is about: a provider whose stored key cannot be reached
+/// must not read like one that was never configured.
+///
+/// Both halves are asserted against the same file, because the finding is a
+/// *contrast*: every settings read folds a failure into "no value", so the
+/// provider row is byte-identical in the two cases. `config_file` is the only
+/// thing that separates them, and the remedies are opposite — one says set a
+/// key, the other says a key is already there and the file is broken.
+#[test]
+fn status_tells_an_unreachable_stored_key_from_a_key_never_set() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_home = tempfile::tempdir().expect("scratch config home");
+    let env: &[(&str, &Path)] = &[
+        ("HOME", home.path()),
+        ("XDG_CONFIG_HOME", config_home.path()),
+    ];
+    let db = db(&home);
+    let path = config_path(env);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("config dir");
+
+    // No file: the default install.
+    let (json, human) = status(env, &db);
+    assert_eq!(json["data"]["config_file"]["state"], "absent");
+    assert!(
+        !human.contains("config\t"),
+        "an absent file is the default install, not news: {human}"
+    );
+
+    // A key stored in a file that parses. This is the control that makes the
+    // next step mean something: without it, `key_present: false` below could
+    // be because nothing was ever stored.
+    std::fs::write(
+        &path,
+        "[providers.openai]\napi_key = \"sk-not-a-real-key\"\n",
+    )
+    .expect("write config");
+    let (json, human) = status(env, &db);
+    assert_eq!(json["data"]["config_file"]["state"], "readable");
+    assert_eq!(
+        json["data"]["config_file"]["path"],
+        Value::String(path.display().to_string())
+    );
+    assert_eq!(
+        openai(&json)["key_present"],
+        Value::Bool(true),
+        "the stored key must reach the runtime, or the next step proves nothing"
+    );
+    assert!(human.contains("config\t"), "{human}");
+
+    // The same key, in a file that no longer parses.
+    std::fs::write(&path, "[providers.openai]\napi_key = [\"sk-\n").expect("write malformed");
+    let (json, human) = status(env, &db);
+    assert_eq!(json["data"]["config_file"]["state"], "malformed");
+    assert_eq!(
+        openai(&json)["key_present"],
+        Value::Bool(false),
+        "the stored key is unreachable -- which is exactly why the state must be reported"
+    );
+    assert_eq!(openai(&json)["key_source"], Value::Null);
+    assert!(
+        human.contains("not valid TOML"),
+        "the human form must say the file is broken rather than only that no key is set: {human}"
+    );
+
+    // A directory where the file belongs: readable as a path, not as bytes.
+    // The fourth state, and the fourth line the human form can print.
+    std::fs::remove_file(&path).expect("clear the file");
+    std::fs::create_dir_all(&path).expect("directory in the file's place");
+    let (unreadable, unreadable_human) = status(env, &db);
+    assert_eq!(unreadable["data"]["config_file"]["state"], "unreadable");
+    assert!(
+        unreadable_human.contains("cannot be read"),
+        "{unreadable_human}"
+    );
+
+    // And the key itself never rides out on any of it (Rule 31).
+    assert!(!human.contains("sk-not-a-real-key"), "{human}");
+    assert!(
+        !serde_json::to_string(&json)
+            .expect("serializes")
+            .contains("sk-not-a-real-key"),
+        "a key must never reach the wire"
+    );
+}
+
+/// The openai row of an `inference status` response.
+fn openai(status: &Value) -> &Value {
+    status["data"]["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .find(|provider| provider["provider"] == "openai")
+        .expect("openai is a catalogued provider")
 }

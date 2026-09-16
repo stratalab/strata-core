@@ -120,6 +120,47 @@ impl ProviderBaseUrl {
     }
 }
 
+/// What state the configuration file a settings source reads is in.
+///
+/// Every settings read folds a failure into "no value", so a key the user did
+/// store reads back exactly like one they never set: `key_present: false`,
+/// `key_source: null`, and a remedy that says to set a key already there
+/// (#3423). This is the fact that tells the two apart.
+///
+/// Deliberately exhaustive, where Rule 28 makes public *error* enums
+/// `#[non_exhaustive]`, and for the same reason as its counterpart in
+/// `strata-hub`: a `_` arm would let a state added later default to "nothing
+/// is wrong". The two enums are held to one spelling by a test in the
+/// executor, which is the crate that maps between them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "wire-schemas", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFileState {
+    /// No file at that path. The default install, and not a fault.
+    Absent,
+    /// Present, readable, and valid. It may still store nothing.
+    Readable,
+    /// Present but its bytes could not be read: permissions, or a directory
+    /// where a file belongs. Anything stored in it is unreachable.
+    Unreadable,
+    /// Read, but not valid. Anything stored in it is unreachable.
+    Malformed,
+}
+
+/// The configuration file a settings source reads, and what state it is in.
+///
+/// Never its contents — this says where the file is and whether it can be
+/// used, so a caller that sees no key can tell "none was set" from "one was
+/// set and cannot be reached".
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "wire-schemas", derive(schemars::JsonSchema))]
+pub struct ConfigFileStatus {
+    /// Where the file is, whether or not one is there.
+    pub path: PathBuf,
+    /// Whether it can be used.
+    pub state: ConfigFileState,
+}
+
 /// Where the runtime finds provider settings it does not own.
 ///
 /// One source per runtime, injected by [`InferenceRuntime::with_settings`]
@@ -132,6 +173,20 @@ pub trait ProviderSettings: Send + Sync {
     /// The key for `provider`, if this source holds one. `None` for a
     /// provider that needs no key, and for a blank value.
     fn key(&self, provider: ProviderKind) -> Option<ProviderKey>;
+
+    /// The configuration file this source reads, and what state it is in.
+    ///
+    /// `None` when this source reads no file — the environment alone, an
+    /// application's own settings, or a build without the feature that reads
+    /// one. That is a different answer from
+    /// [`ConfigFileState::Absent`], which names a path with no file at it.
+    ///
+    /// Reported by `status` and nowhere else: the runtime does not read a
+    /// file, so it cannot inspect one. The source that reads the file is the
+    /// one that can say what shape it is in.
+    fn config_file(&self) -> Option<ConfigFileStatus> {
+        None
+    }
 
     /// The base URL to reach `provider` at instead of its public endpoint
     /// (#3270): an OpenAI-compatible server, a proxy, a test double. `None`

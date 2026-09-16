@@ -2510,6 +2510,14 @@ pub enum Command {
     ///   set` wrote; the value is never included. `base_url` is the endpoint
     ///   a provider's requests go to and `base_url_source` where that came
     ///   from (`null` for the provider's public endpoint).
+    /// - **Names the config file's state, not only its keys.** `config_file`
+    ///   carries the path provider settings are read from and whether it can
+    ///   be used (`absent` / `readable` / `unreadable` / `malformed`), so a
+    ///   provider with no key can be told apart from one whose stored key is
+    ///   unreachable — which report identically otherwise, and need opposite
+    ///   remedies (#3423). `null` when this runtime reads no file at all,
+    ///   which is not the same as a path with no file at it. The four words
+    ///   are the ones `strata doctor` prints for the same file.
     /// - **The model directory is shared** by every database on the machine, so
     ///   a model downloaded once is available to all of them.
     #[cfg(feature = "inference")]

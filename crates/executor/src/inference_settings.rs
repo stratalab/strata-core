@@ -30,7 +30,8 @@ use strata_inference::{EnvProviderSettings, InferenceRuntime, InferenceRuntimeCo
 use strata_hub::ProviderSetting;
 #[cfg(feature = "hub")]
 use strata_inference::{
-    ProviderBaseUrl, ProviderKey, ProviderKind, ProviderSettings, SettingSource,
+    ConfigFileState, ConfigFileStatus, ProviderBaseUrl, ProviderKey, ProviderKind,
+    ProviderSettings, SettingSource,
 };
 
 /// The inference runtime every executor opens with, and the one `strata
@@ -100,6 +101,31 @@ impl<E: ProviderSettings> ProviderSettings for EnvThenConfig<E> {
             let (path, value) = self.stored(provider, ProviderSetting::BaseUrl)?;
             Some(ProviderBaseUrl::new(value, SettingSource::ConfigFile(path)))
         })
+    }
+
+    fn config_file(&self) -> Option<ConfigFileStatus> {
+        let path = self.config_path.as_deref()?;
+        Some(ConfigFileStatus {
+            path: path.to_path_buf(),
+            state: wire_config_state(strata_hub::inspect_config(path)),
+        })
+    }
+}
+
+/// The wire spelling of a config-file state.
+///
+/// Two enums because `strata-inference` imports nothing from this workspace
+/// (Rule 3): it owns the vocabulary `status` reports, `strata-hub` owns the
+/// looking, and this is the one place they meet. Exhaustive on purpose at
+/// both ends — a state added to either must be decided here rather than
+/// falling through to a default.
+#[cfg(feature = "hub")]
+fn wire_config_state(state: strata_hub::ConfigFileState) -> ConfigFileState {
+    match state {
+        strata_hub::ConfigFileState::Absent => ConfigFileState::Absent,
+        strata_hub::ConfigFileState::Readable => ConfigFileState::Readable,
+        strata_hub::ConfigFileState::Unreadable => ConfigFileState::Unreadable,
+        strata_hub::ConfigFileState::Malformed => ConfigFileState::Malformed,
     }
 }
 
@@ -358,6 +384,126 @@ mod tests {
                 .url(),
             "http://127.0.0.1:1"
         );
+    }
+
+    /// What `inference status` reports about the file, for each state it can
+    /// be in — the answer #3423 exists to give.
+    #[test]
+    fn the_config_file_state_is_reported_for_every_shape_the_file_can_take() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let settings = EnvThenConfig {
+            env: EmptyEnv,
+            config_path: Some(path.clone()),
+        };
+        let state = || settings.config_file().expect("a path was configured").state;
+
+        // Nothing there: the default install, and not a fault.
+        assert_eq!(state(), ConfigFileState::Absent);
+
+        // Present and parses, whether or not it stores anything.
+        config_file(dir.path(), "[hub]\n");
+        assert_eq!(state(), ConfigFileState::Readable);
+        config_file(
+            dir.path(),
+            "[providers.openai]\napi_key = \"sk-not-a-real-key\"\n",
+        );
+        assert_eq!(state(), ConfigFileState::Readable);
+
+        // The case the issue is about: a key IS stored and cannot be reached,
+        // so the provider row alone is indistinguishable from never having
+        // configured one. Both halves are asserted here, because the second
+        // is only interesting given the first.
+        config_file(dir.path(), "[providers.openai]\napi_key = [\"sk-\n");
+        assert_eq!(state(), ConfigFileState::Malformed);
+        assert!(
+            settings.key(ProviderKind::OpenAI).is_none(),
+            "a malformed file yields no key -- which is why the state must be reported"
+        );
+
+        // A directory where the file belongs: readable as a path, not as
+        // bytes.
+        let as_dir = dir.path().join("nested");
+        std::fs::create_dir_all(as_dir.join("config.toml")).expect("directory in the file's place");
+        let settings = EnvThenConfig {
+            env: EmptyEnv,
+            config_path: Some(as_dir.join("config.toml")),
+        };
+        assert_eq!(
+            settings.config_file().expect("a path").state,
+            ConfigFileState::Unreadable
+        );
+    }
+
+    /// The reported path is the file that was consulted, and a runtime that
+    /// consults none says so — which is a different answer from a path with
+    /// no file at it.
+    #[test]
+    fn a_settings_source_that_reads_no_file_reports_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = config_file(dir.path(), "[hub]\n");
+        let reported = EnvThenConfig {
+            env: EmptyEnv,
+            config_path: Some(path.clone()),
+        }
+        .config_file()
+        .expect("a path was configured");
+        assert_eq!(reported.path, path);
+
+        assert_eq!(
+            EnvThenConfig {
+                env: EmptyEnv,
+                config_path: None,
+            }
+            .config_file(),
+            None,
+            "no config directory on this platform: no file is consulted"
+        );
+        assert_eq!(
+            NoProviderSettings.config_file(),
+            None,
+            "the capture runtime reads nothing, so a captured example carries no path (#3389)"
+        );
+        assert_eq!(
+            strata_inference::EnvProviderSettings.config_file(),
+            None,
+            "the environment is not a file"
+        );
+    }
+
+    /// The two enums are separate types — `strata-inference` imports nothing
+    /// from this workspace (Rule 3) — so nothing in the compiler stops them
+    /// spelling a state differently on the wire. An agent that learns these
+    /// four words from `strata doctor` matches them on `inference status`,
+    /// and this is what keeps that true (#3423).
+    #[test]
+    fn the_wire_state_spells_every_state_exactly_as_doctor_does() {
+        for hub_state in [
+            strata_hub::ConfigFileState::Absent,
+            strata_hub::ConfigFileState::Readable,
+            strata_hub::ConfigFileState::Unreadable,
+            strata_hub::ConfigFileState::Malformed,
+        ] {
+            let wire = serde_json::to_value(wire_config_state(hub_state)).expect("serializes");
+            assert_eq!(
+                wire.as_str().expect("a JSON string"),
+                hub_state.label(),
+                "{hub_state:?} is spelled differently by doctor and by the wire"
+            );
+        }
+
+        // And the mapping is injective: four states in, four distinct words
+        // out, so no two states collapse into one answer.
+        let words: std::collections::BTreeSet<&str> = [
+            strata_hub::ConfigFileState::Absent,
+            strata_hub::ConfigFileState::Readable,
+            strata_hub::ConfigFileState::Unreadable,
+            strata_hub::ConfigFileState::Malformed,
+        ]
+        .into_iter()
+        .map(strata_hub::ConfigFileState::label)
+        .collect();
+        assert_eq!(words.len(), 4, "two states share a word: {words:?}");
     }
 
     #[test]

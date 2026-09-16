@@ -24,9 +24,9 @@ use std::sync::{Mutex, MutexGuard};
 use crate::error::RegistryFailure;
 use crate::resolve::{AvailabilityKind, ModelSource, ModelUse, PullAction, ResolvedModel};
 use crate::{
-    generation_provider_feature_enabled, EnvProviderSettings, GenerateRequest, GenerateResponse,
-    InferenceError, ModelInfo, ModelRegistry, ModelTask, ProviderKey, ProviderKind,
-    ProviderSettings, UnsupportedKind,
+    generation_provider_feature_enabled, ConfigFileStatus, EnvProviderSettings, GenerateRequest,
+    GenerateResponse, InferenceError, ModelInfo, ModelRegistry, ModelTask, ProviderKey,
+    ProviderKind, ProviderSettings, UnsupportedKind,
 };
 
 #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
@@ -158,6 +158,15 @@ pub struct InferenceStatus {
     /// What to do when local execution is needed and absent. `None` when this
     /// build already has it.
     pub local_remedy: Option<String>,
+    /// The configuration file provider settings are read from, and whether it
+    /// can be used. `None` when this runtime reads no file at all.
+    ///
+    /// Without it a provider whose stored key is unreachable — the file is
+    /// malformed, or cannot be read — reports identically to one that was
+    /// never configured: `key_present: false`, `key_source: null`. The
+    /// remedy a caller would then offer is the wrong one, because a key is
+    /// already set (#3423).
+    pub config_file: Option<ConfigFileStatus>,
 }
 
 /// Provider/model capability facts.
@@ -502,6 +511,7 @@ impl InferenceRuntime {
             models_downloaded: registry.list_local().len(),
             models_catalogued: registry.list_available().len(),
             local_remedy: (!cfg!(feature = "local")).then(|| LOCAL_UNAVAILABLE_REMEDY.to_owned()),
+            config_file: self.settings.0.config_file(),
         }
     }
 
@@ -1693,6 +1703,90 @@ mod tests {
                 keyed.provider
             );
             assert!(!keyless.ready, "{:?}", keyless.provider);
+        }
+    }
+
+    /// `status` carries the settings' answer about their config file through
+    /// unchanged — the runtime reads no file, so it has nothing of its own to
+    /// say (#3423).
+    #[test]
+    fn status_reports_the_config_file_its_settings_read() {
+        use crate::ConfigFileState;
+
+        struct WithFile(ConfigFileState);
+
+        impl ProviderSettings for WithFile {
+            fn key(&self, _provider: ProviderKind) -> Option<ProviderKey> {
+                None
+            }
+
+            fn config_file(&self) -> Option<ConfigFileStatus> {
+                Some(ConfigFileStatus {
+                    path: PathBuf::from("/home/u/.config/strata/config.toml"),
+                    state: self.0,
+                })
+            }
+        }
+
+        for state in [
+            ConfigFileState::Absent,
+            ConfigFileState::Readable,
+            ConfigFileState::Unreadable,
+            ConfigFileState::Malformed,
+        ] {
+            let status = InferenceRuntime::with_settings(
+                InferenceRuntimeConfig::default(),
+                Arc::new(WithFile(state)),
+            )
+            .status();
+            let reported = status.config_file.expect("the settings named a file");
+            assert_eq!(reported.state, state);
+            assert_eq!(
+                reported.path,
+                PathBuf::from("/home/u/.config/strata/config.toml")
+            );
+        }
+
+        // Settings that read no file report none — a different answer from a
+        // path with no file at it, and the one a runtime built on the
+        // environment alone gives.
+        let status = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::NoKeys),
+        )
+        .status();
+        assert_eq!(status.config_file, None);
+        assert_eq!(
+            InferenceRuntime::new(InferenceRuntimeConfig::default())
+                .status()
+                .config_file,
+            None,
+            "the environment is not a file"
+        );
+    }
+
+    /// The four words the wire uses. `strata doctor` prints the same four for
+    /// the same file, and an executor test holds the two to each other; this
+    /// is the half that lives in the crate that owns the wire (#3423).
+    #[test]
+    fn a_config_file_state_serializes_to_one_lowercase_word() {
+        use crate::ConfigFileState;
+
+        for (state, word) in [
+            (ConfigFileState::Absent, "absent"),
+            (ConfigFileState::Readable, "readable"),
+            (ConfigFileState::Unreadable, "unreadable"),
+            (ConfigFileState::Malformed, "malformed"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(state).expect("serializes"),
+                serde_json::Value::String(word.to_owned())
+            );
+            assert_eq!(
+                serde_json::from_value::<ConfigFileState>(serde_json::json!(word))
+                    .expect("round-trips"),
+                state
+            );
         }
     }
 

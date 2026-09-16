@@ -85,9 +85,13 @@ fn user_config_report(issues: &mut Vec<Value>) -> Value {
     };
     let state = strata_hub::inspect_config(&path);
     let shown = path.display().to_string();
-    let label = match state {
-        strata_hub::ConfigFileState::Absent => "absent",
-        strata_hub::ConfigFileState::Readable => "readable",
+    // The word comes from the state itself, so `doctor` and `inference
+    // status` cannot spell the same state differently (#3423). The match
+    // stays exhaustive because it decides something the label does not:
+    // which states are faults.
+    let label = state.label();
+    match state {
+        strata_hub::ConfigFileState::Absent | strata_hub::ConfigFileState::Readable => {}
         strata_hub::ConfigFileState::Unreadable => {
             issues.push(issue(
                 "failed_precondition.cli.config_unreadable",
@@ -96,7 +100,6 @@ fn user_config_report(issues: &mut Vec<Value>) -> Value {
                      is unavailable; fix its permissions or remove it"
                 ),
             ));
-            "unreadable"
         }
         strata_hub::ConfigFileState::Malformed => {
             issues.push(issue(
@@ -106,9 +109,8 @@ fn user_config_report(issues: &mut Vec<Value>) -> Value {
                      it is unavailable; fix or remove it, then re-run `strata config set`"
                 ),
             ));
-            "malformed"
         }
-    };
+    }
     json!({ "path": shown, "state": label })
 }
 

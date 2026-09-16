@@ -213,6 +213,26 @@ pub enum ConfigFileState {
     Malformed,
 }
 
+impl ConfigFileState {
+    /// The one word this state reports as, on every surface that reports it:
+    /// `strata doctor`'s `config_file.state`, and `inference status`'s
+    /// (#3423).
+    ///
+    /// One spelling, so an agent that learns these four words from one
+    /// command matches them on the other. The `inference` wire enum is a
+    /// separate type — that crate imports nothing from this workspace — and
+    /// an executor test holds its serde names to exactly these.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Readable => "readable",
+            Self::Unreadable => "unreadable",
+            Self::Malformed => "malformed",
+        }
+    }
+}
+
 /// Looks at the user config file without asking it for any particular value.
 ///
 /// Deliberately not built on [`read_provider_setting`]: that answers "is there

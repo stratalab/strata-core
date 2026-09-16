@@ -1,8 +1,62 @@
 {
   "$defs": {
+    "ConfigFileState": {
+      "description": "What state the configuration file a settings source reads is in.\n\nEvery settings read folds a failure into \"no value\", so a key the user did\nstore reads back exactly like one they never set: `key_present: false`,\n`key_source: null`, and a remedy that says to set a key already there\n(#3423). This is the fact that tells the two apart.\n\nDeliberately exhaustive, where Rule 28 makes public *error* enums\n`#[non_exhaustive]`, and for the same reason as its counterpart in\n`strata-hub`: a `_` arm would let a state added later default to \"nothing\nis wrong\". The two enums are held to one spelling by a test in the\nexecutor, which is the crate that maps between them.",
+      "oneOf": [
+        {
+          "const": "absent",
+          "description": "No file at that path. The default install, and not a fault.",
+          "type": "string"
+        },
+        {
+          "const": "readable",
+          "description": "Present, readable, and valid. It may still store nothing.",
+          "type": "string"
+        },
+        {
+          "const": "unreadable",
+          "description": "Present but its bytes could not be read: permissions, or a directory\nwhere a file belongs. Anything stored in it is unreachable.",
+          "type": "string"
+        },
+        {
+          "const": "malformed",
+          "description": "Read, but not valid. Anything stored in it is unreachable.",
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigFileStatus": {
+      "description": "The configuration file a settings source reads, and what state it is in.\n\nNever its contents — this says where the file is and whether it can be\nused, so a caller that sees no key can tell \"none was set\" from \"one was\nset and cannot be reached\".",
+      "properties": {
+        "path": {
+          "description": "Where the file is, whether or not one is there.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ConfigFileState",
+          "description": "Whether it can be used."
+        }
+      },
+      "required": [
+        "path",
+        "state"
+      ],
+      "type": "object"
+    },
     "InferenceStatus": {
       "description": "What this binary can do before anything is attempted (D11).\n\n#3124: every part of this was knowable up front and reported nowhere, so a\nuser learned their build's limits by watching an operation fail.",
       "properties": {
+        "config_file": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfigFileStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The configuration file provider settings are read from, and whether it\ncan be used. `None` when this runtime reads no file at all.\n\nWithout it a provider whose stored key is unreachable — the file is\nmalformed, or cannot be read — reports identically to one that was\nnever configured: `key_present: false`, `key_source: null`. The\nremedy a caller would then offer is the wrong one, because a key is\nalready set (#3423)."
+        },
         "local_execution": {
           "description": "Whether this binary can execute local models.",
           "type": "boolean"
@@ -156,7 +210,7 @@
   "command": "inference.status",
   "request": {
     "additionalProperties": false,
-    "description": "Reports what this binary can do before anything is attempted.\n\n# Guaranteed semantics\n\n- **Answers before the attempt.** Which providers are compiled in,\n  which have a key and where it came from, whether local execution\n  exists in this build, and how many catalogued models are on disk —\n  all knowable without trying an operation and failing (#3124).\n- **Never returns a key.** `key_source` names where a key was read\n  from — the environment variable, or the config file `strata config\n  set` wrote; the value is never included. `base_url` is the endpoint\n  a provider's requests go to and `base_url_source` where that came\n  from (`null` for the provider's public endpoint).\n- **The model directory is shared** by every database on the machine, so\n  a model downloaded once is available to all of them.",
+    "description": "Reports what this binary can do before anything is attempted.\n\n# Guaranteed semantics\n\n- **Answers before the attempt.** Which providers are compiled in,\n  which have a key and where it came from, whether local execution\n  exists in this build, and how many catalogued models are on disk —\n  all knowable without trying an operation and failing (#3124).\n- **Never returns a key.** `key_source` names where a key was read\n  from — the environment variable, or the config file `strata config\n  set` wrote; the value is never included. `base_url` is the endpoint\n  a provider's requests go to and `base_url_source` where that came\n  from (`null` for the provider's public endpoint).\n- **Names the config file's state, not only its keys.** `config_file`\n  carries the path provider settings are read from and whether it can\n  be used (`absent` / `readable` / `unreadable` / `malformed`), so a\n  provider with no key can be told apart from one whose stored key is\n  unreachable — which report identically otherwise, and need opposite\n  remedies (#3423). `null` when this runtime reads no file at all,\n  which is not the same as a path with no file at it. The four words\n  are the ones `strata doctor` prints for the same file.\n- **The model directory is shared** by every database on the machine, so\n  a model downloaded once is available to all of them.",
     "properties": {
       "type": {
         "const": "inference_status",

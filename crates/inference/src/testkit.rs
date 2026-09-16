@@ -819,6 +819,10 @@ impl crate::InferenceService for FakeInferenceService {
             models_downloaded: self.list_local_models().len(),
             models_catalogued: self.list_models().len(),
             local_remedy: None,
+            // The fake reads no settings at all, so it reads no file — and a
+            // replayed fixture must not carry the replaying machine's config
+            // path (#3389).
+            config_file: None,
         }
     }
 }

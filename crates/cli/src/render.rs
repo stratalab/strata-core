@@ -2099,6 +2099,29 @@ fn print_inference_status(data: &Value, out: &mut String) {
         line!(out, "\tlocal models: {remedy}");
     }
 
+    // Only a file that exists earns a line: absent is the default install,
+    // and no file is the normal state of a machine that keys through the
+    // environment. One that exists and cannot be used is the case this line
+    // exists for — without it a broken file reads exactly like no key at all
+    // (#3423), and the remedy printed below would be the wrong one.
+    if let Some(config) = data.get("config_file").filter(|value| !value.is_null()) {
+        let path = config.get("path").and_then(Value::as_str).unwrap_or("-");
+        match config.get("state").and_then(Value::as_str) {
+            Some("malformed") => line!(
+                out,
+                "\nconfig\t{path}\n\tnot valid TOML -- anything stored in it is unavailable; \
+                 fix or remove it, then re-run `strata config set`"
+            ),
+            Some("unreadable") => line!(
+                out,
+                "\nconfig\t{path}\n\tcannot be read -- anything stored in it is unavailable; \
+                 fix its permissions or remove it"
+            ),
+            Some("readable") => line!(out, "\nconfig\t{path}"),
+            _ => {}
+        }
+    }
+
     line!(out, "\nproviders");
     let providers = data.get("providers").and_then(Value::as_array);
     for provider in providers.into_iter().flatten() {
