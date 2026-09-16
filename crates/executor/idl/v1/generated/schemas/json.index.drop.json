@@ -4,7 +4,7 @@
   "command": "json.index.drop",
   "request": {
     "additionalProperties": false,
-    "description": "Drops a JSON secondary index.",
+    "description": "Drops a JSON secondary index.\n\n# Guaranteed semantics\n\n- **Absent is not an error.** Dropping an index that is not there\n  succeeds and reports that nothing was applied.\n- **Limits.** This command bears an index name at most **256 bytes**\n  (`invalid_argument.engine.json_index_name`).",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

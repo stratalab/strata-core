@@ -62,7 +62,7 @@
   "command": "json.index.list",
   "request": {
     "additionalProperties": false,
-    "description": "Lists JSON secondary indexes.",
+    "description": "Lists JSON secondary indexes.\n\n# Guaranteed semantics\n\n- **Definitions, not statistics.** Each entry reports the index as it was\n  declared; it carries no size or freshness measurement.\n- **One snapshot.** The listing is taken at one consistent version.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

@@ -4,7 +4,7 @@
   "command": "json.exists",
   "request": {
     "additionalProperties": false,
-    "description": "Checks whether a JSON document exists.",
+    "description": "Checks whether a JSON document exists.\n\n# Guaranteed semantics\n\n- **Existence only.** Reports whether the document is present without\n  reading or transferring its value.\n- **Limits.** This command bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`).",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

@@ -565,7 +565,7 @@
   "command": "json.batch_get",
   "request": {
     "additionalProperties": false,
-    "description": "Reads multiple JSON values.",
+    "description": "Reads multiple JSON values.\n\n# Guaranteed semantics\n\n- **Positional.** Results are returned in request order, one per entry,\n  each reporting whether it was found.\n- **One snapshot.** Every entry is read from the same consistent\n  version, so a batch cannot straddle a concurrent write.\n- **Limits.** Each entry bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`)\n  and a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`).",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

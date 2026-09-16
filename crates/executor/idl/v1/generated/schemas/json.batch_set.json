@@ -543,7 +543,7 @@
   "command": "json.batch_set",
   "request": {
     "additionalProperties": false,
-    "description": "Sets multiple JSON values in one engine commit.",
+    "description": "Sets multiple JSON values in one engine commit.\n\n# Guaranteed semantics\n\n- **One commit.** Every entry applies together or none does; a reader\n  never observes part of a batch.\n- **Limits.** Each entry bears the single-document limits:\n  a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`),\n  a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`), and\n  a document at most **16 MiB** serialized\n  (`invalid_argument.engine.json_document_too_large`), nested at most **100**\n  levels (`invalid_argument.engine.json_document_too_deep`), with any single\n  array at most **1,000,000** elements\n  (`invalid_argument.engine.json_array_too_large`).\n  One refused entry refuses the batch, and nothing is written.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",
