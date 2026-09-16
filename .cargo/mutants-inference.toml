@@ -31,6 +31,37 @@ exclude_globs = [
 # fixed (compile the lane with `local`, or move the gated code into files the
 # globs above already cover); retire them there.
 exclude_re = [
+    # #3436: three `-> Default::default()` replacements that can never compile,
+    # in any build, because neither return type implements `Default` — proven
+    # with a `needs_default::<T>()` probe, which fails to compile for both
+    # `InferenceStatus` and `ConfigFileStatus`. Unlike the entries below they
+    # are not uncompiled or equivalent: cargo-mutants simply has no viable
+    # replacement to write, the same shape as the `MutexGuard` returns already
+    # excluded here.
+    #
+    # Left in, they are a landmine rather than a gate: every one of these
+    # functions is on a path a future diff will touch, and a diff whose lane-C
+    # slice holds only these reports "generated mutants and not one compiled,
+    # so the lane judged nothing" (#3337) — a red that says nothing about the
+    # change. #3423 is where that first fired.
+    #
+    # Neither type should gain a `Default` to satisfy the tool: both are wire
+    # DTOs, and a `ConfigFileStatus::default()` is an empty path — a value that
+    # must never be reported as an answer, one `unwrap_or_default()` away from
+    # being one.
+    #
+    # Strength mechanism: the facts these functions carry are pinned directly.
+    # `status_reports_the_config_file_its_settings_read` walks all four states
+    # through `InferenceRuntime::status` and asserts the reported path and
+    # state (planting `config_file: None` in `status` reds it); the trait
+    # default is pinned by `a_settings_source_that_reads_no_file_reports_none`,
+    # which asserts `None` for the environment, for a platform with no config
+    # directory, and for the capture runtime; and the fake's `status` is
+    # replayed byte-for-byte by the `inference.status` response fixture and the
+    # output-contract corpus.
+    "replace InferenceRuntime::status -> InferenceStatus with Default::default\\(\\)",
+    "replace ProviderSettings::config_file -> Option<ConfigFileStatus> with Some\\(Default::default\\(\\)\\)",
+    "replace <impl crate::InferenceService for FakeInferenceService>::status -> crate::InferenceStatus with Default::default\\(\\)",
     # #3293 lock wait: `start.elapsed() < max_wait` compares against a clock,
     # so `<` and `<=` differ only when elapsed lands EXACTLY on the bound — a
     # boundary of measure zero on a continuous quantity. The two are
