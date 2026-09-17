@@ -112,6 +112,9 @@ pub(crate) use wal::{
 };
 pub(crate) use wal_watermark::{decode_wal_watermark, encode_wal_watermark};
 #[cfg(any(test, feature = "testkit"))]
+// Named by the `cfg(test)` flush-watermark lifecycle tests and by the
+// `localfs`-gated corpus harvester; under neither, the re-export is unused.
+#[cfg(any(test, all(feature = "localfs", not(target_arch = "wasm32"))))]
 pub(crate) use watermark::{encode_snapshot_watermark, SnapshotWatermark};
 // BS4.2b: the reader consumes the persisted filter frame, so the decode side is a non-test export.
 pub(crate) use table::{decode_filter_frame, TableFilterFrame};

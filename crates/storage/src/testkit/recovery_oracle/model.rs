@@ -217,6 +217,10 @@ impl ExpectedState {
     /// TCP4.11b: drop every logged commit for `branch` — the model side of a
     /// delete-then-recreate cycle (the recreated branch starts with empty
     /// history; keeping the old log would poison the prefix search).
+    // Called only by the whole-db simulation, which additionally requires
+    // `fault-injection`; under `testkit` alone the oracle model is compiled
+    // for the external harness and this method is not reached.
+    #[cfg(all(any(test, feature = "fault-injection"), feature = "localfs"))]
     pub(crate) fn forget_branch(&mut self, branch: BranchId) {
         self.log.retain(|commit| commit.branch != branch);
     }

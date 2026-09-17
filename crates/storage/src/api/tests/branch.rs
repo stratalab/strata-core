@@ -1190,6 +1190,7 @@ fn durable_branch_delete_allows_reopen_after_process_drop() {
     assert_eq!(described.status(), BranchStatus::Deleted);
 }
 
+#[cfg(feature = "localfs")]
 #[test]
 fn branch_delete_refused_while_layerless_fork_children_live() {
     // Durable: the refusal protects RECOVERY, so cache mode (no recovery)
@@ -1244,6 +1245,7 @@ fn branch_delete_refused_while_layerless_fork_children_live() {
         .expect("delete parent after its children are gone");
 }
 
+#[cfg(feature = "localfs")]
 #[test]
 fn branch_delete_of_empty_fork_source_stays_allowed() {
     // A fork of a rowless parent re-materializes nothing at recovery: the
@@ -1274,6 +1276,7 @@ fn branch_delete_of_empty_fork_source_stays_allowed() {
         .expect("an empty fork keeps its parent deletable");
 }
 
+#[cfg(feature = "localfs")]
 #[test]
 fn branch_delete_of_layered_fork_source_stays_allowed() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -1325,6 +1328,7 @@ fn branch_delete_of_layered_fork_source_stays_allowed() {
     );
 }
 
+#[cfg(feature = "localfs")]
 #[test]
 fn fork_parent_deletion_cannot_brick_recovery() {
     let root = temp_dir_for_api_test("branch-fork-parent-delete-recovery");
@@ -1484,6 +1488,7 @@ fn branch_api_has_no_publish_review_method() {
 /// the fence's `<=` boundary (record version == visible-at-fork) is exactly
 /// what this test exercises; the fresh post-fork commit and the inherited
 /// source row pin both legal directions.
+#[cfg(feature = "localfs")]
 #[test]
 fn fork_onto_deleted_name_does_not_resurrect_predecessor_rows_after_reopen() {
     let root = temp_dir_for_api_test("branch-fork-generation-fence");
@@ -1549,6 +1554,7 @@ fn fork_onto_deleted_name_does_not_resurrect_predecessor_rows_after_reopen() {
 /// #2826 (recreate direction): a fresh empty re-creation of a deleted name
 /// must stay empty across reopen — the predecessor's WAL records belong to
 /// a dead generation.
+#[cfg(feature = "localfs")]
 #[test]
 fn recreate_after_delete_does_not_resurrect_predecessor_rows_after_reopen() {
     let root = temp_dir_for_api_test("branch-recreate-generation-fence");
@@ -1614,6 +1620,7 @@ fn recreate_after_delete_does_not_resurrect_predecessor_rows_after_reopen() {
 /// name is deleted and re-created; recovery must not install the dead
 /// generation's checkpoint rows into the fresh branch. Two ghost commits
 /// put the fence's strictly-below and at-boundary arms on the line.
+#[cfg(feature = "localfs")]
 #[test]
 fn recreate_after_checkpoint_does_not_resurrect_predecessor_rows() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -1683,6 +1690,7 @@ fn recreate_after_checkpoint_does_not_resurrect_predecessor_rows() {
 /// tables (durable table manifest) before the delete; the recreate leaves
 /// the stale manifest on disk; recovery must not attach the dead
 /// generation's tables to the fresh branch.
+#[cfg(feature = "localfs")]
 #[test]
 fn recreate_after_flush_does_not_resurrect_predecessor_tables() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -1750,6 +1758,7 @@ fn recreate_after_flush_does_not_resurrect_predecessor_tables() {
 /// vanishes. The initial commit on another branch makes the victim's
 /// `created_at` Some (visible > 0), which is what routes recovery through
 /// the fence at all.
+#[cfg(feature = "localfs")]
 #[test]
 fn legitimate_flushed_branch_survives_reopen_with_created_at_stamped() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -1811,6 +1820,7 @@ fn legitimate_flushed_branch_survives_reopen_with_created_at_stamped() {
 /// resolve a version the generation never had. The fresh-era fork is the
 /// in-test direction control. Kills the fence-inversion (`!` deletion)
 /// mutant in the timeline seeding.
+#[cfg(feature = "localfs")]
 #[test]
 fn recreated_branch_refuses_dead_generation_timestamps_after_reopen() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -1890,6 +1900,7 @@ fn recreated_branch_refuses_dead_generation_timestamps_after_reopen() {
 /// filter fork children (their inherited history sits at or below
 /// `created_at` by design). Kills the `&&`->`||` mutant in the timeline
 /// seeding's parentless qualification.
+#[cfg(feature = "localfs")]
 #[test]
 fn fork_child_keeps_inherited_era_timestamps_after_reopen() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -1956,6 +1967,7 @@ fn fork_child_keeps_inherited_era_timestamps_after_reopen() {
 /// manifest base with the checkpoint's (byte-identical) rows — pre-fix it
 /// refused with `InvalidSnapshotInstall` and the store was permanently
 /// unopenable.
+#[cfg(feature = "localfs")]
 #[test]
 fn checkpoint_then_flush_of_non_seeded_branch_survives_reopen() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -2052,6 +2064,7 @@ fn checkpoint_then_flush_of_non_seeded_branch_survives_reopen() {
 /// (fork-at-version) child whose materialized rows live in its memtable.
 /// Checkpoint captures them, a later flush makes them durable, and reopen
 /// must combine rather than refuse.
+#[cfg(feature = "localfs")]
 #[test]
 fn eager_fork_checkpoint_then_flush_survives_reopen() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -2129,6 +2142,7 @@ fn eager_fork_checkpoint_then_flush_survives_reopen() {
 /// load-bearing: the source flush gives gen 1's layer real tables (else the
 /// recovery rebuild heals the staleness), the child flush durably publishes
 /// gen 1's manifest.
+#[cfg(feature = "localfs")]
 #[test]
 fn eager_refork_over_deleted_name_recovers_current_lineage() {
     let root = temp_dir_for_api_test("triage-eager-refork");
@@ -2233,6 +2247,7 @@ fn eager_refork_over_deleted_name_recovers_current_lineage() {
 
 /// On-disk path of a branch's table-manifest object (`tables/<branch>/manifest`
 /// + the `.object@` suffix).
+#[cfg(feature = "localfs")]
 fn table_manifest_path(root: &std::path::Path, branch_id: BranchId) -> std::path::PathBuf {
     root.join(format!("tables/{branch_id}/manifest.object@"))
 }
@@ -2240,6 +2255,7 @@ fn table_manifest_path(root: &std::path::Path, branch_id: BranchId) -> std::path
 /// #2833 direction control: an eager fork onto a FRESH name (no predecessor,
 /// nothing to remove) still recovers through the fork rebuild — the removal
 /// arm is a `NotFound` no-op there.
+#[cfg(feature = "localfs")]
 #[test]
 fn eager_fork_on_fresh_name_recovers_current_lineage() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -2305,6 +2321,7 @@ fn eager_fork_on_fresh_name_recovers_current_lineage() {
 /// resume ABOVE those anchors, or every version-anchored catalog fact
 /// (generation fences, fork re-materialization) silently refers to different
 /// content on the restarted clock.
+#[cfg(feature = "localfs")]
 #[test]
 fn recovered_commit_clock_stays_above_surviving_catalog_anchors() {
     use crate::testkit::FsModel;
@@ -2362,6 +2379,7 @@ fn recovered_commit_clock_stays_above_surviving_catalog_anchors() {
 /// #2830/#2826 generation fences at the NEXT recovery — an acked row
 /// vanishes (the DST's Gap shape). With the clock fixed the fences stay
 /// sound by construction.
+#[cfg(feature = "localfs")]
 #[test]
 fn post_crash_commits_survive_the_next_reopen_despite_catalog_anchors() {
     use crate::testkit::FsModel;
@@ -2416,6 +2434,7 @@ fn post_crash_commits_survive_the_next_reopen_despite_catalog_anchors() {
 /// watermark, creation stamp) are still allocated versions — the recovered
 /// clock must resume above them too, or the acked-deletion fences judge the
 /// restarted clock's commits against a dead generation's era.
+#[cfg(feature = "localfs")]
 #[test]
 fn recovered_commit_clock_stays_above_deleted_branch_anchors() {
     use crate::testkit::FsModel;
@@ -2475,6 +2494,7 @@ fn recovered_commit_clock_stays_above_deleted_branch_anchors() {
 /// to "no retained history" and silently forked an EMPTY child over a
 /// fully-populated source (the DST's live-step `LostAck` shape: seeds
 /// 83/154/164/178 on tracker #2828).
+#[cfg(feature = "localfs")]
 #[test]
 fn fork_current_captures_content_that_outlives_timeline_coverage() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -2564,6 +2584,7 @@ fn fork_current_captures_content_that_outlives_timeline_coverage() {
 /// vanish into the empty post-elision scan. A fork at a version the surviving
 /// timeline provably covers succeeds; a version past the tip (content present,
 /// mapping shed) keeps refusing.
+#[cfg(feature = "localfs")]
 #[test]
 fn fork_at_version_inside_surviving_timeline_coverage_succeeds_after_lossy_crash() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -2670,6 +2691,7 @@ fn fork_at_version_inside_surviving_timeline_coverage_succeeds_after_lossy_crash
 /// #2852 direction control: the #2521 legitimate-empty-fork case — a source
 /// with NO rows at all — must keep forking an empty child (parent linkage,
 /// fork version zero) rather than start refusing.
+#[cfg(feature = "localfs")]
 #[test]
 fn fork_current_of_a_rowless_source_stays_a_legitimate_empty_fork() {
     let root = temp_dir_for_api_test("fork-current-rowless-source");
@@ -2719,6 +2741,7 @@ fn fork_current_of_a_rowless_source_stays_a_legitimate_empty_fork() {
 /// shape: seeds 94/134/142/180 on tracker #2828). Inherited content is NOT
 /// the checkpoint's job: the fork rebuild re-materializes it from the live
 /// parent.
+#[cfg(feature = "localfs")]
 #[test]
 fn refork_of_a_deleted_name_does_not_resurrect_dead_generation_checkpoint_rows() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -2818,6 +2841,7 @@ fn refork_of_a_deleted_name_does_not_resurrect_dead_generation_checkpoint_rows()
 /// (`version > created_at`). Recovery does not replay the WAL below the
 /// snapshot watermark for non-seeded branches, so the checkpoint is the
 /// child's own row's sole source here — a fence that over-drops loses it.
+#[cfg(feature = "localfs")]
 #[test]
 fn fork_child_own_rows_survive_reopen_through_the_checkpoint() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
@@ -2888,6 +2912,7 @@ fn fork_child_own_rows_survive_reopen_through_the_checkpoint() {
 /// #2820 delete guard exempts it, the parent delete is allowed — and at the
 /// next reopen the child recovers layer-less, the fork rebuild skips its
 /// Deleted parent, and the entire inherited slice silently vanishes.
+#[cfg(feature = "localfs")]
 #[test]
 fn cow_fork_over_a_volatile_source_keeps_inheritance_across_reopen() {
     let root = temp_dir_for_api_test("cow-over-volatile-keeps-inheritance");
@@ -2949,6 +2974,7 @@ fn cow_fork_over_a_volatile_source_keeps_inheritance_across_reopen() {
 /// the `layers == 0` stale-manifest removal never runs, and the next reopen
 /// adopts the DEAD gen-1's manifest as the re-created name's provenance —
 /// serving content the gen-2 lineage never had.
+#[cfg(feature = "localfs")]
 #[test]
 fn refork_over_a_deleted_name_does_not_adopt_the_dead_generations_manifest() {
     use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};

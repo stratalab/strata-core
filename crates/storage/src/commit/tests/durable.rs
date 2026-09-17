@@ -2610,6 +2610,7 @@ fn assert_payload_contains_timeline_rows(record: &WalRecord) {
 }
 
 #[cfg(feature = "perf-trace")]
+#[cfg(all(feature = "localfs", unix))]
 fn assert_real_wal_commit_perf(
     perf: &crate::observability::perf_trace::StoragePerfSnapshot,
     user_rows: u64,

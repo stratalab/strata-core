@@ -58,6 +58,9 @@ pub fn default_inference_runtime() -> InferenceRuntime {
 /// developer's own config path into `command-examples.json` — a corpus that
 /// feeds the published reference pages — and made the replay test fail
 /// permanently on any machine that had run `strata config set` (#3389).
+// Used by `Executor::open_cache_for_capture`, which is `idl-tooling`-only,
+// and by this module's own isolation test.
+#[cfg(any(test, feature = "idl-tooling"))]
 pub(crate) fn isolated_inference_runtime() -> InferenceRuntime {
     InferenceRuntime::with_settings(
         InferenceRuntimeConfig::default(),
@@ -67,8 +70,10 @@ pub(crate) fn isolated_inference_runtime() -> InferenceRuntime {
 
 /// Holds nothing, for [`isolated_inference_runtime`]. `base_url` takes the
 /// trait's `None` default.
+#[cfg(any(test, feature = "idl-tooling"))]
 struct NoProviderSettings;
 
+#[cfg(any(test, feature = "idl-tooling"))]
 impl strata_inference::ProviderSettings for NoProviderSettings {
     fn key(
         &self,

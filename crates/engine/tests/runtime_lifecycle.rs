@@ -2,13 +2,12 @@
 
 mod common;
 
-use common::{
-    assert_no_storage_leak, assert_status, branch, key, open_cache_database, open_durable_database,
-    space, value,
-};
-use strata_engine::{
-    CacheOpenOptions, Database, DurableLocalOpenOptions, EngineError, EngineErrorClass,
-};
+use common::{assert_no_storage_leak, assert_status, branch, open_cache_database, space};
+#[cfg(feature = "localfs")]
+use common::{key, open_durable_database, value};
+#[cfg(feature = "localfs")]
+use strata_engine::DurableLocalOpenOptions;
+use strata_engine::{CacheOpenOptions, Database, EngineError, EngineErrorClass};
 
 fn assert_closed(error: Option<EngineError>) {
     let error = error.expect("accessor must reject a closed handle");

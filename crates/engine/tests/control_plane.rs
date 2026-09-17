@@ -2,12 +2,16 @@
 
 mod common;
 
+#[cfg(feature = "localfs")]
+use strata_engine::DurableLocalOpenOptions;
 use strata_engine::{
-    CacheOpenOptions, ControlHealthStatus, Database, DatabaseOpenTarget, DurableLocalOpenOptions,
-    EngineErrorClass, ProductSpace,
+    CacheOpenOptions, ControlHealthStatus, Database, DatabaseOpenTarget, EngineErrorClass,
+    ProductSpace,
 };
 
-use common::{assert_branch_value, assert_default_branch_exists, branch, key, space, value};
+#[cfg(feature = "localfs")]
+use common::assert_branch_value;
+use common::{assert_default_branch_exists, branch, key, space, value};
 
 #[test]
 fn cache_open_bootstraps_default_branch() {

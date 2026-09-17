@@ -59,6 +59,11 @@ mod lifecycle;
 mod process_crash;
 mod progress_watchdog;
 mod quarantine_fuzz;
+// Its every consumer — the fault, crash, differential and simulation
+// harnesses — is gated on `localfs`, and so is its own export. The `mod`
+// line was the one place that was not, which left the whole subtree
+// compiling unused without the feature (#3446).
+#[cfg(all(feature = "localfs", not(target_arch = "wasm32")))]
 mod recovery_oracle;
 #[cfg(all(
     any(test, feature = "fault-injection"),
@@ -66,6 +71,9 @@ mod recovery_oracle;
     not(target_arch = "wasm32")
 ))]
 mod recovery_read_faults;
+// Both consumers — the compound-fault and dual-mutation harnesses — are
+// `localfs`-gated.
+#[cfg(all(feature = "localfs", not(target_arch = "wasm32")))]
 mod reopen_retry;
 #[cfg(all(
     any(test, feature = "fault-injection"),
@@ -73,6 +81,8 @@ mod reopen_retry;
     not(target_arch = "wasm32")
 ))]
 mod reordering_backend;
+// Every consumer is `localfs`-gated, as for `recovery_oracle` above.
+#[cfg(all(feature = "localfs", not(target_arch = "wasm32")))]
 pub(crate) mod rng;
 mod service_fuzz;
 #[cfg(all(

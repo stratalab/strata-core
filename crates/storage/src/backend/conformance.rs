@@ -1,8 +1,12 @@
 use super::{
-    Backend, BackendErrorKind, DeleteDurability, DeleteStatus, PublishDurability, PublishMode,
-    BASIC_OBJECT_BACKEND_CAPABILITIES, CACHE_MODE_REQUIREMENTS, DURABLE_LOCAL_MODE_REQUIREMENTS,
+    Backend, BackendErrorKind, DeleteStatus, BASIC_OBJECT_BACKEND_CAPABILITIES,
+    CACHE_MODE_REQUIREMENTS, DURABLE_LOCAL_MODE_REQUIREMENTS,
 };
+// Named only by the durable-local assertions below, which are `localfs`-only.
+#[cfg(feature = "localfs")]
+use super::{DeleteDurability, PublishDurability, PublishMode};
 use crate::config::mode::{DurabilityPolicy, StorageModeRequest};
+#[cfg(feature = "localfs")]
 use crate::layout::ObjectLayout;
 use crate::test_support::{
     assert_backend_error_kind, assert_backend_list, object_name as name, range,
@@ -214,6 +218,7 @@ fn assert_durable_local_capability_mismatch(backend: &dyn Backend) {
     );
 }
 
+#[cfg(feature = "localfs")]
 fn assert_durable_local_conformance(backend: &dyn Backend) {
     let capabilities = backend.capabilities();
 
@@ -266,6 +271,7 @@ fn assert_durable_local_conformance(backend: &dyn Backend) {
     assert_eq!(missing_delete.status(), DeleteStatus::AlreadyMissing);
 }
 
+#[cfg(feature = "localfs")]
 fn assert_durable_local_writer_lock_exclusion(first: &dyn Backend, second: &dyn Backend) {
     let lock_name = ObjectLayout::writer_lock().expect("writer lock name");
     let first_guard = first
@@ -293,9 +299,10 @@ fn assert_durable_local_writer_lock_exclusion(first: &dyn Backend, second: &dyn 
 mod tests {
     use super::{
         assert_basic_object_conformance, assert_cache_mode_conformance,
-        assert_durable_local_capability_mismatch, assert_durable_local_conformance,
-        assert_durable_local_writer_lock_exclusion,
+        assert_durable_local_capability_mismatch,
     };
+    #[cfg(all(feature = "localfs", unix))]
+    use super::{assert_durable_local_conformance, assert_durable_local_writer_lock_exclusion};
     use crate::backend::{memory::MemoryBackend, Backend, DeleteDurability};
 
     #[test]

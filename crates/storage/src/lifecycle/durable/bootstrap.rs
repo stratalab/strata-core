@@ -986,7 +986,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
 
     /// Drop every cached table block so the next lazy read is forced to the backend. Lets a test
     /// exercise the cold-read failure path (#3047) after removing an object under a live reader.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "localfs"))]
     pub(crate) fn clear_block_cache_for_test(&self) {
         if let Some(cache) = self.services.table_object().block_cache() {
             cache.clear();

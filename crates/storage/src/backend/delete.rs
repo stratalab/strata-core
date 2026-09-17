@@ -129,6 +129,8 @@ impl DeleteError {
         )
     }
 
+    /// Constructed only by the `local_fs` backend.
+    #[cfg(feature = "localfs")]
     pub(crate) fn removal_unknown(object: &ObjectName, source: BackendError) -> Self {
         Self::new(object.clone(), DeleteFailureKind::RemovalUnknown, source)
     }

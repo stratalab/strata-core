@@ -8,8 +8,9 @@
 #![cfg_attr(not(feature = "native"), allow(dead_code))]
 
 // The parser-only build reads a line through `line::SessionLine` (#3326);
-// `Cli` itself is parsed here only by the binary's entry point and the tests.
-#[cfg(any(feature = "native", test))]
+// `Cli` itself is parsed here only by the binary's entry point and the tests,
+// and the test module is itself `native`-gated — so `test` alone never uses it.
+#[cfg(feature = "native")]
 use clap::Parser;
 use strata_executor::{Command, Executor, ExecutorError, GraphPropertyDef};
 
@@ -69,7 +70,7 @@ use input::{
     parse_optional_filter_argument, parse_optional_json_argument, parse_relaxed_json_argument,
     parse_vector_argument,
 };
-#[cfg(any(feature = "native", test))]
+#[cfg(feature = "native")]
 use options::Cli;
 use options::{
     ArrowCommand, BranchCommand, CommandCommand, ConfigCommand, EventCommand, GraphCommand,
@@ -1037,6 +1038,9 @@ fn redact_key(value: &str) -> String {
 /// executor's provider table so a provider added there is listed here.
 #[cfg(feature = "native")]
 fn settable_config_keys() -> String {
+    // Built as a Vec so the `inference` arm below can extend it; without that
+    // feature it stays a one-element list.
+    #[cfg_attr(not(feature = "inference"), allow(unused_mut, clippy::useless_vec))]
     let mut keys = vec!["hub.url".to_owned()];
     #[cfg(feature = "inference")]
     for info in strata_executor::INFERENCE_CLOUD_PROVIDER_KEYS {
@@ -2671,6 +2675,9 @@ fn parse_tool_choice(value: &str) -> strata_executor::InferenceToolChoice {
 // product code.
 #[cfg(test)]
 #[cfg(feature = "inference")]
+// The config keys it exercises, and the `strata_hub` types it names, are part
+// of the native host surface.
+#[cfg(feature = "native")]
 mod config_key_tests {
     use super::{
         is_user_config_key, provider_setting_target, redact_key, settable_config_keys,

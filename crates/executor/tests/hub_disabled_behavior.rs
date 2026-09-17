@@ -5,7 +5,7 @@
 
 use strata_executor::{Command, Executor, ExecutorError, ExecutorErrorClass, Output};
 
-fn assert_hub_feature_disabled(error: ExecutorError) {
+fn assert_hub_feature_disabled(error: &ExecutorError) {
     // A build without the hub feature is `unsupported` (#2750); the compat
     // class for `unsupported` is `Unavailable`.
     assert_eq!(error.class(), ExecutorErrorClass::Unavailable);
@@ -23,7 +23,7 @@ fn hub_clone_returns_a_stable_feature_disabled_error_without_feature() {
             hub_url: None,
         })
         .expect_err("feature disabled clone fails");
-    assert_hub_feature_disabled(error);
+    assert_hub_feature_disabled(&error);
 }
 
 #[test]
@@ -32,10 +32,10 @@ fn hub_clone_progress_returns_a_stable_feature_disabled_error_without_feature() 
     let mut progress_events = Vec::<Output>::new();
     let error = executor
         .execute_hub_clone_with_progress("titanic", None, "unused", None, &mut |output| {
-            progress_events.push(output)
+            progress_events.push(output);
         })
         .expect_err("feature disabled clone progress fails");
-    assert_hub_feature_disabled(error);
+    assert_hub_feature_disabled(&error);
     assert!(
         progress_events.is_empty(),
         "disabled hub clone must not emit progress events"
@@ -77,6 +77,6 @@ fn hub_browse_commands_return_stable_feature_disabled_errors_without_feature() {
         let error = executor
             .execute(command)
             .expect_err("feature disabled hub browse command fails");
-        assert_hub_feature_disabled(error);
+        assert_hub_feature_disabled(&error);
     }
 }

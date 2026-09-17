@@ -298,7 +298,7 @@ impl StorageRuntime<'static> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "localfs", feature = "perf-trace")))]
     pub(crate) fn submit_runtime_state_background_probe_for_test(
         &self,
         ready: std::sync::Arc<std::sync::Barrier>,
@@ -403,7 +403,7 @@ impl StorageRuntime<'static> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "localfs"))]
     pub(crate) fn pending_lifecycle_maintenance_kinds_for_test(
         &self,
     ) -> Vec<LifecycleMaintenanceTaskKind> {
@@ -416,7 +416,12 @@ impl StorageRuntime<'static> {
     }
 
     #[cfg(test)]
-    #[cfg_attr(not(feature = "perf-trace"), allow(dead_code))]
+    // Read by the scaled background closed-loop test, which needs a durable
+    // store: under `perf-trace` alone that test compiles away.
+    #[cfg_attr(
+        not(all(feature = "perf-trace", feature = "localfs")),
+        allow(dead_code)
+    )]
     pub(crate) fn pending_flush_watermark_candidate_for_test(&self) -> Option<CommitVersion> {
         match &self.inner {
             StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => None,
@@ -2647,12 +2652,12 @@ impl<'a> StorageRuntime<'a> {
     /// only); returns whether a manual clock was reached. Test / `fault-injection`-only
     /// — the seam the simulation driver uses to drive time deterministically. Lives in
     /// the lifetime-generic impl so it is callable on a borrowed-backend runtime.
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(all(any(test, feature = "fault-injection"), feature = "localfs"))]
     pub(crate) fn advance_maintenance_clock_for_test(&self, by: std::time::Duration) -> bool {
         self.advance_maintenance_clock_for_current_runtime(by)
     }
 
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(all(any(test, feature = "fault-injection"), feature = "localfs"))]
     fn advance_maintenance_clock_for_current_runtime(&self, by: std::time::Duration) -> bool {
         match &self.inner {
             StorageRuntimeInner::Cache(slot) => slot.advance_maintenance_clock(by),
@@ -3128,7 +3133,7 @@ impl<'a> StorageRuntime<'a> {
     /// W3.1b oracle: whether the branch's retained-timeline index claims
     /// complete coverage (a checkpoint-seeded index must arrive complete
     /// BEFORE any read scan-seeds it).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "localfs"))]
     pub(crate) fn retained_timeline_complete_for_test(
         &self,
         branch_id: BranchId,
@@ -3158,7 +3163,7 @@ impl<'a> StorageRuntime<'a> {
     /// fork rebuilt from the catalog manifest and a corruption-guard poison
     /// both produce. Wall-clock resolution has no scan fallback, so this is the
     /// only way to exercise its refusal through the real API.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "localfs"))]
     pub(crate) fn mark_retained_timeline_incomplete_for_test(
         &self,
         branch_id: BranchId,
@@ -3323,7 +3328,7 @@ impl<'a> StorageRuntime<'a> {
 
     /// Drop the table-object block cache so the next lazy read hits the backend (#3047 cold-read
     /// exercise). Cache mode is non-durable and has no such cache, so it is a no-op there.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "localfs"))]
     pub(crate) fn clear_block_cache_for_test(&mut self) {
         match &mut self.inner {
             StorageRuntimeInner::DurableOwned(slot) => slot.lock().clear_block_cache_for_test(),

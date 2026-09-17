@@ -76,11 +76,13 @@ pub(crate) fn run_update(
 ///
 /// The release publishes two builds per target: the lean default and this one,
 /// which carries the vendored llama.cpp needed to execute GGUF models.
+#[cfg(feature = "inference")]
 fn local_asset_name(version: &str, triple: &str) -> String {
     format!("strata-v{version}-{triple}-local.tar.gz")
 }
 
 /// Whether this binary already executes local models.
+#[cfg(feature = "inference")]
 const fn has_local_execution() -> bool {
     cfg!(feature = "inference-local")
 }
@@ -99,6 +101,7 @@ const fn has_local_execution() -> bool {
 ///
 /// Idempotent on purpose. An agent that cannot tell whether it already ran this
 /// can run it again and get a clean no-op rather than a redundant download.
+#[cfg(feature = "inference")]
 pub(crate) fn run_install_local() -> Result<Value, CliError> {
     let exe = std::env::current_exe().map_err(|error| {
         CliError::usage(format!("could not locate the running binary: {error}"))
@@ -374,10 +377,11 @@ impl Drop for TempDir {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_name, check_exit_code, decide, expected_sha, has_local_execution, hex, is_newer,
-        is_up_to_date, local_asset_name, parse_version, rejects_db_target, sha256_file,
-        target_triple, Action, CURRENT,
+        asset_name, check_exit_code, decide, expected_sha, hex, is_newer, is_up_to_date,
+        parse_version, rejects_db_target, sha256_file, target_triple, Action,
     };
+    #[cfg(feature = "inference")]
+    use super::{has_local_execution, local_asset_name, CURRENT};
     use std::io::Write as _;
 
     #[test]
@@ -488,6 +492,7 @@ def456  strata-v1.2.0-aarch64-apple-darwin.tar.gz
     /// `-local`, which is exactly what the release matrix publishes. If these
     /// two ever disagree the command fails at the checksum step with "no
     /// checksum entry", which is a confusing way to learn about a typo.
+    #[cfg(feature = "inference")]
     #[test]
     fn the_local_asset_is_the_default_asset_plus_a_suffix() {
         let triple = "x86_64-unknown-linux-gnu";
@@ -504,6 +509,7 @@ def456  strata-v1.2.0-aarch64-apple-darwin.tar.gz
 
     /// `install-local` fetches the version it is running, not the latest:
     /// adding a capability must not also move you across releases.
+    #[cfg(feature = "inference")]
     #[test]
     fn the_local_asset_is_pinned_to_the_running_version() {
         let triple = "x86_64-unknown-linux-gnu";
@@ -516,6 +522,7 @@ def456  strata-v1.2.0-aarch64-apple-darwin.tar.gz
     /// The lean build is the one that needs `install-local`; the local build
     /// short-circuits to a no-op, which is what makes the command safe for an
     /// agent to run without first checking.
+    #[cfg(feature = "inference")]
     #[test]
     fn only_a_build_without_local_execution_needs_installing() {
         assert_eq!(has_local_execution(), cfg!(feature = "inference-local"));

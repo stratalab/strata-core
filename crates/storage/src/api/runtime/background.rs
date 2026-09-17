@@ -325,7 +325,7 @@ impl<R> RuntimeSlot<R> {
             .map(BackgroundRuntimeController::now)
     }
 
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(all(any(test, feature = "fault-injection"), feature = "localfs"))]
     pub(super) fn advance_maintenance_clock(&self, by: Duration) -> bool {
         match self.background.as_ref() {
             Some(background) => {
@@ -558,7 +558,7 @@ impl BackgroundRuntimeController {
         self.clock.now()
     }
 
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(all(any(test, feature = "fault-injection"), feature = "localfs"))]
     fn advance_clock(&self, by: Duration) {
         self.clock.advance(by);
     }

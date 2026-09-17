@@ -7,9 +7,13 @@
 
 mod common;
 
-use common::{assert_status, branch, open_cache_database, open_durable_database, space};
+#[cfg(feature = "localfs")]
+use common::open_durable_database;
+use common::{assert_status, branch, open_cache_database, space};
 use strata_engine::testkit::StorageFaultKind;
-use strata_engine::{AdminHealthStatus, ControlHealthStatus, EngineErrorClass, KvKey, KvValue};
+use strata_engine::{AdminHealthStatus, ControlHealthStatus, EngineErrorClass};
+#[cfg(feature = "localfs")]
+use strata_engine::{KvKey, KvValue};
 
 /// When a branch operation fails and its pending-marker cleanup also fails, the
 /// control plane fails closed: inspection still works and reports the plane as

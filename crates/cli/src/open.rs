@@ -17,6 +17,7 @@ pub(crate) enum OpenIntent {
     /// session instead of refusing — `strata inference status` answers from
     /// any directory. An explicit target is honored exactly as for
     /// [`OneShot`](Self::OneShot); the current directory is never opened.
+    #[cfg(feature = "inference")]
     InferenceOneShot,
     /// An interactive TTY session: falls back to an ephemeral cache session.
     Interactive,
@@ -116,7 +117,13 @@ pub(crate) fn open_connection(
     }
 
     match intent {
-        OpenIntent::Interactive | OpenIntent::InferenceOneShot => Ok(OpenedConnection {
+        OpenIntent::Interactive => Ok(OpenedConnection {
+            connection: Connection::cache(Executor::open_cache()?),
+            implicit_cache: true,
+            implicit_cwd: None,
+        }),
+        #[cfg(feature = "inference")]
+        OpenIntent::InferenceOneShot => Ok(OpenedConnection {
             connection: Connection::cache(Executor::open_cache()?),
             implicit_cache: true,
             implicit_cwd: None,
@@ -250,6 +257,7 @@ mod tests {
         for intent in [
             OpenIntent::OneShot,
             OpenIntent::Pipe,
+            #[cfg(feature = "inference")]
             OpenIntent::InferenceOneShot,
         ] {
             assert_eq!(
