@@ -6,7 +6,7 @@
 //! survive vacuously (their strength mechanism is `hub_disabled_behavior`
 //! in the no-default-features lane).
 
-use super::{Executor, ExecutorResult, Output};
+use super::{Executor, Output};
 use crate::ExecutorError;
 
 impl Executor {

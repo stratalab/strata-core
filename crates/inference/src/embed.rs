@@ -615,7 +615,7 @@ mod tests {
     // --- Smoke tests: load miniLM and produce embeddings ---
 
     #[test]
-    #[ignore]
+    #[ignore = "real model: needs a downloaded miniLM GGUF"]
     fn smoke_embed_minilm() {
         let Some(path) = crate::registry::ModelRegistry::downloaded_catalog_path("miniLM") else {
             eprintln!("skipping smoke_embed_minilm: miniLM is not downloaded");
@@ -686,7 +686,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "real model: needs a downloaded miniLM GGUF"]
+    // Six independent properties of `embed_batch`, asserted against one loaded
+    // model. Splitting them into six tests would load miniLM six times, which
+    // is the cost this test is `#[ignore]`d for in the first place.
+    #[allow(clippy::too_many_lines)]
     fn smoke_embed_batch_minilm() {
         let Some(path) = crate::registry::ModelRegistry::downloaded_catalog_path("miniLM") else {
             eprintln!("skipping smoke_embed_batch_minilm: miniLM is not downloaded");

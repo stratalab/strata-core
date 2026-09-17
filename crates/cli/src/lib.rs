@@ -72,10 +72,13 @@ use input::{
 #[cfg(any(feature = "native", test))]
 use options::Cli;
 use options::{
-    ArrowCommand, BranchCommand, CloneProgressFormat, CommandCommand, ConfigCommand, EventCommand,
-    GraphCommand, GraphOntologyCommand, HubCommand, JsonCommand, KvCommand, SpaceCommand,
-    VectorCollectionCommand, VectorCommand,
+    ArrowCommand, BranchCommand, CommandCommand, ConfigCommand, EventCommand, GraphCommand,
+    GraphOntologyCommand, JsonCommand, KvCommand, SpaceCommand, VectorCollectionCommand,
+    VectorCommand,
 };
+// `clone` and `hub` are host verbs: only the `native` surface dispatches them.
+#[cfg(feature = "native")]
+use options::{CloneProgressFormat, HubCommand};
 #[cfg(feature = "native")]
 use render::{print_output, render_error, render_value};
 

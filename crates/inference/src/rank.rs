@@ -292,7 +292,7 @@ mod tests {
     /// No catalogued model ranks (#3045), so the reranker under test is named
     /// by path: `STRATA_SMOKE_RANK_GGUF=/path/to/reranker.gguf`.
     #[test]
-    #[ignore]
+    #[ignore = "real model: needs a downloaded reranker GGUF"]
     fn smoke_rank_gguf_path() {
         let Some(path) = std::env::var_os("STRATA_SMOKE_RANK_GGUF") else {
             eprintln!("skipping smoke_rank_gguf_path: STRATA_SMOKE_RANK_GGUF is not set");

@@ -129,18 +129,18 @@ pub(crate) fn run_child_workload_from_env() -> Result<(), TestkitError> {
 
 /// Counters describing one kill/reopen round.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ProcessCrashOutcome {
+pub(crate) struct ProcessCrashOutcome {
     acked_commits: usize,
     in_doubt_commits: usize,
 }
 
 impl ProcessCrashOutcome {
     #[must_use]
-    pub const fn acked_commits(&self) -> usize {
+    pub(crate) const fn acked_commits(&self) -> usize {
         self.acked_commits
     }
     #[must_use]
-    pub const fn in_doubt_commits(&self) -> usize {
+    pub(crate) const fn in_doubt_commits(&self) -> usize {
         self.in_doubt_commits
     }
 }

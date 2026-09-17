@@ -1178,7 +1178,10 @@ impl DiagnosticsOutcome {
         clippy::too_many_arguments,
         reason = "diagnostics outcome is a flat API snapshot"
     )]
-    #[expect(
+    // `allow`, not `expect`: the type is over the by-value threshold on a
+    // 64-bit host and under it on wasm32, so an `expect` is unfulfilled on
+    // one of the two targets whichever way it is written.
+    #[allow(
         clippy::large_types_passed_by_value,
         reason = "constructor stores the maintenance summary; callers move it in"
     )]

@@ -93,7 +93,7 @@ fn graph_name() -> GraphName {
 /// Opens the graph service, seeds it via `seed`, then returns the db ready for
 /// an armed corruption on the next scan.
 fn graph_db_with(seed: impl FnOnce(&mut strata_engine::GraphService)) -> strata_engine::Database {
-    let mut db = open_cache_database().expect("cache database opens");
+    let db = open_cache_database().expect("cache database opens");
     {
         let mut graph = db
             .graph(branch("default"), space("default"))

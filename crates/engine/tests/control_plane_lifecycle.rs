@@ -167,12 +167,11 @@ fn fork_failure_after_storage_creation_rolls_back_and_leaves_name_reusable() {
 fn pre_v1_database_layout_is_rejected_with_layout_code() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     std::fs::write(tempdir.path().join("strata.toml"), b"pre-v1").expect("marker");
-    let error = match strata_engine::Database::open_local(
+    let Err(error) = strata_engine::Database::open_local(
         tempdir.path(),
         strata_engine::DurableLocalOpenOptions::new(),
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("pre-V1 layout must refuse"),
+    ) else {
+        panic!("pre-V1 layout must refuse");
     };
     assert_eq!(error.code(), "failed_precondition.engine.layout_version");
     assert!(

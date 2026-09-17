@@ -166,8 +166,9 @@ impl RetainedCommitTimeline {
         self.inner.read().complete
     }
 
-    /// W3.1b oracle alias.
-    #[cfg(any(test, feature = "testkit"))]
+    /// W3.1b oracle alias. `pub(crate)` and reached only from `cfg(test)`
+    /// callers, so the `testkit` feature would only compile it unused.
+    #[cfg(test)]
     pub(crate) fn is_complete_for_test(&self) -> bool {
         self.is_complete()
     }

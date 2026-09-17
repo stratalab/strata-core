@@ -18,9 +18,11 @@ use time::format_description::well_known::Rfc3339;
 #[cfg(feature = "hub")]
 use time::OffsetDateTime;
 
+#[cfg(feature = "hub")]
 use super::{Executor, Output};
 #[cfg(feature = "hub")]
 use crate::types::{HubCloneProgress, HubCloneProgressStage, HubDatasetSort};
+#[cfg(feature = "hub")]
 use crate::ExecutorError;
 
 #[cfg(feature = "hub")]

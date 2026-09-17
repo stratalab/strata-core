@@ -247,6 +247,7 @@ impl Executor {
     /// between two renders of the same wire output under different volatile
     /// masks, and a provider setting is not a wire field, so both renders
     /// agree and there is nothing to elide.
+    #[cfg(feature = "idl-tooling")]
     pub(crate) fn open_cache_for_capture() -> Result<Self, ExecutorError> {
         #[cfg_attr(
             not(feature = "inference"),
@@ -290,6 +291,7 @@ impl Executor {
     /// loss that then recovers via the owner's socket must not be reported as
     /// an engine failure (#3071); only a definitive open failure is converted
     /// (and logged) by the caller.
+    #[cfg(feature = "ipc")]
     pub(crate) fn open_durable_local_quiet(
         path: impl Into<PathBuf>,
         options: DurableLocalOpenOptions,
@@ -314,6 +316,7 @@ impl Executor {
 
     /// A shared handle to the store-state watermark, for observers (IPC
     /// version-tick subscriptions) that poll it without holding the executor.
+    #[cfg(feature = "ipc")]
     pub(crate) fn state_version_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
         self.state_version.clone()
     }

@@ -52,6 +52,7 @@ mod leak;
 mod lifecycle;
 #[cfg(all(
     any(test, feature = "fault-injection"),
+    test,
     feature = "localfs",
     not(target_arch = "wasm32")
 ))]
@@ -184,12 +185,6 @@ pub use lifecycle::{
     LifecycleRowPruningContractOutcome, LifecycleScaffoldOutcome,
     LifecycleTableRewriteContractOutcome,
 };
-#[cfg(all(
-    any(test, feature = "fault-injection"),
-    feature = "localfs",
-    not(target_arch = "wasm32")
-))]
-pub use process_crash::ProcessCrashOutcome;
 pub use progress_watchdog::{ProgressTicker, ProgressWatchdog};
 pub use quarantine_fuzz::{run_quarantine_service_script, QuarantineServiceFuzzOutcome};
 #[cfg(all(feature = "localfs", not(target_arch = "wasm32")))]
