@@ -1,7 +1,7 @@
 ---
 title: "Sample JSON documents"
 description: "Sample visible JSON documents."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: json
 ---
 

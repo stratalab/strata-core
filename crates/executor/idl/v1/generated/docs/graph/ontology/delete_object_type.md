@@ -1,7 +1,7 @@
 ---
 title: "Delete graph object type"
 description: "Delete a draft object type."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: graph
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Add graph node"
 description: "Add or replace a graph node."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: graph
 ---
 

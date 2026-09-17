@@ -1,7 +1,7 @@
 ---
 title: "Download a model"
 description: "Download an inference model locally."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: inference
 ---
 

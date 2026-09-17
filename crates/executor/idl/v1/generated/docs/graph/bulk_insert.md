@@ -1,7 +1,7 @@
 ---
 title: "Bulk insert graph data"
 description: "Bulk-load nodes and edges in chunks."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: graph
 ---
 

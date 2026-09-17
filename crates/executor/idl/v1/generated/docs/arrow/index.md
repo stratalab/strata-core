@@ -1,7 +1,7 @@
 ---
 title: "arrow commands"
 description: "Command reference for the arrow family."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: arrow
 ---
 

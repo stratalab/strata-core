@@ -1,7 +1,7 @@
 ---
 title: "Delete branch"
 description: "Delete an active branch and release its storage claims."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: branch
 ---
 

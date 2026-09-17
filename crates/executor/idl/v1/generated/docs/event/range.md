@@ -1,7 +1,7 @@
 ---
 title: "Read event sequence range"
 description: "Read a range of events by sequence number."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: event
 ---
 

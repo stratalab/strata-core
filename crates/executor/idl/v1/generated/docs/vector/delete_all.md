@@ -1,7 +1,7 @@
 ---
 title: "Delete all vectors"
 description: "Delete all vectors in a collection."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: vector
 ---
 

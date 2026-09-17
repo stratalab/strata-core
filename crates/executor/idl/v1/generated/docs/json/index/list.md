@@ -1,7 +1,7 @@
 ---
 title: "List JSON indexes"
 description: "List JSON secondary indexes."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: json
 ---
 
