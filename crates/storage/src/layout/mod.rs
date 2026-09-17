@@ -18,6 +18,9 @@ const QUARANTINE_MANIFEST_OBJECT_ID: &str = "manifest";
 /// Root-level file names whose presence identifies a pre-V1 database layout
 /// (hard rule 42). V1 layouts keep the manifest inside a `manifest/`
 /// directory and never create either name, so these are unambiguous markers.
+/// Read only by `reject_pre_v1_layout`, which is `localfs`-only: without a
+/// filesystem there is no on-disk layout to reject.
+#[cfg(feature = "localfs")]
 pub(crate) const PRE_V1_LAYOUT_MARKER_FILES: &[&str] = &["strata.toml", "MANIFEST"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

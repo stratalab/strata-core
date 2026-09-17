@@ -2806,6 +2806,7 @@ mod tests {
     /// reports a missing object as an error whose source kind is `NotFound`
     /// (unlike the in-memory fixtures' `AlreadyMissing` success), so this
     /// leg exercises the guard itself.
+    #[cfg(feature = "localfs")]
     #[test]
     fn table_manifest_service_remove_tolerates_absent_on_local_fs() {
         let dir = tempfile::tempdir().expect("tmp");

@@ -8,13 +8,18 @@
 //! real socket session: every write-class command is rejected on a read
 //! session, and no read-class command ever trips the gate.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+// Named only by `Session::open`, which needs `ipc` + unix.
+#[cfg(all(feature = "ipc", unix))]
+use std::path::Path;
 
 use strata_executor::Command;
 
 /// A catalog entry paired with its decoded request fixture.
 struct CatalogCommand {
     id: String,
+    /// Read only by the socket-session test, which needs `ipc` + unix.
+    #[cfg_attr(not(all(feature = "ipc", unix)), allow(dead_code))]
     family: String,
     access: String,
     fixture_json: String,
@@ -88,6 +93,7 @@ fn is_write_matches_the_idl_access_facet_for_every_command() {
 
 /// Minimal wire framing (4-byte big-endian length + payload), hand-rolled so
 /// this test speaks to the owner exactly as an external client would.
+#[cfg(all(feature = "ipc", unix))]
 mod raw_wire {
     use std::io::{Read, Write};
 
@@ -109,11 +115,13 @@ mod raw_wire {
 
 /// One protocol-revision-2 session over a real socket, declared with the
 /// given access.
+#[cfg(all(feature = "ipc", unix))]
 struct Session {
     stream: std::os::unix::net::UnixStream,
     next_id: u64,
 }
 
+#[cfg(all(feature = "ipc", unix))]
 impl Session {
     fn open(socket: &Path, access: &str) -> Self {
         let mut stream = std::os::unix::net::UnixStream::connect(socket).expect("connect");
@@ -147,6 +155,8 @@ impl Session {
     }
 }
 
+// Drives the IPC server directly; the socket transport is `ipc` + unix.
+#[cfg(all(feature = "ipc", unix))]
 #[test]
 fn a_read_session_rejects_every_cataloged_write_and_gates_no_read() {
     let (commands, _) = load_catalog();

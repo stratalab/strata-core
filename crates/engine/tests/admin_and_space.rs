@@ -8,7 +8,9 @@ use strata_engine::{
     VectorCollectionName, VectorConfig, VectorDistanceMetric, VectorEmbedding, VectorKey,
 };
 
-use common::{branch, key, open_cache_database, open_durable_database, space, value};
+#[cfg(feature = "localfs")]
+use common::open_durable_database;
+use common::{branch, key, open_cache_database, space, value};
 
 #[test]
 fn admin_reports_sanitized_database_and_primitive_facts() {

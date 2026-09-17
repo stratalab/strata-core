@@ -139,6 +139,27 @@ jobs:
           cargo hack --locked --feature-powerset --depth 2
           --exclude-features local,inference-local,ingest,python,differential
           check --workspace
+      - name: Feature lint (each feature, all targets)
+        # The powerset above runs `check` and, crucially, WITHOUT
+        # `--all-targets` — so it compiles each crate's lib and never a test
+        # file. `check`'s own clippy step lints only DEFAULT features. Between
+        # them, no lane had ever compiled a test target off the default
+        # feature set, and 58 compile errors plus ~60 lints had rotted in that
+        # gap (#3446, following #3437).
+        #
+        # `--each-feature` rather than `--feature-powerset`: linear in the
+        # number of features instead of exponential, ~1 minute here against
+        # the powerset's many, and it catches this entire class — every fix in
+        # #3446 was found by exactly this invocation. The same exclusions
+        # apply, for the same build-cost reasons.
+        #
+        # `--all-targets` sits AFTER `clippy`: cargo-hack forwards trailing
+        # flags to the subcommand, and placed before it the flag reaches
+        # `cargo` itself, which rejects it.
+        run: >
+          cargo hack --locked --each-feature
+          --exclude-features local,inference-local,ingest,python,differential
+          clippy --workspace --all-targets -- -D warnings
 
   hub-ingest:
     # The stratahub-facing surface their ingest CLI compiles against:

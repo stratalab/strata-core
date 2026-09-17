@@ -8,9 +8,11 @@ use strata_engine::{
     BranchName, Database, EngineErrorClass, KvKey, KvScanRow, KvService, ProductSpace,
 };
 
+#[cfg(feature = "localfs")]
+use common::open_durable_database;
 use common::{
     assert_branch_value, assert_default_branch_exists, assert_no_storage_type_in_engine_error,
-    branch, key, open_cache_database, open_durable_database, space, value,
+    branch, key, open_cache_database, space, value,
 };
 
 /// #3112 S4: history rows carry their own commit's wall-clock instant.

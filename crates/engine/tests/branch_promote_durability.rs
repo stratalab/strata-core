@@ -8,7 +8,7 @@
 //!
 //! The fault seam and durable reopen both need testkit + localfs, so the binary
 //! compiles away without them.
-#![cfg(feature = "testkit")]
+#![cfg(all(feature = "testkit", feature = "localfs"))]
 
 mod common;
 

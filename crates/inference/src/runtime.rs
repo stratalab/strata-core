@@ -26,8 +26,11 @@ use crate::resolve::{AvailabilityKind, ModelSource, ModelUse, PullAction, Resolv
 use crate::{
     generation_provider_feature_enabled, ConfigFileStatus, EnvProviderSettings, GenerateRequest,
     GenerateResponse, InferenceError, ModelInfo, ModelRegistry, ModelTask, ProviderKey,
-    ProviderKind, ProviderSettings, UnsupportedKind,
+    ProviderKind, ProviderSettings,
 };
+// Named only by the cloud-provider resolution arms.
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+use crate::UnsupportedKind;
 
 #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
 use crate::error::ProviderFailure;
