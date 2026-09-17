@@ -170,10 +170,25 @@ pub struct LlamaChatMessage {
 // Statically linked extern "C" symbols
 // ---------------------------------------------------------------------------
 
+/// `ggml_log_callback` from ggml.h: a level, a NUL-terminated line, and the
+/// `user_data` passed to [`llama_log_set`].
+pub type GgmlLogCallback =
+    unsafe extern "C" fn(level: i32, text: *const c_char, user_data: *mut c_void);
+
 extern "C" {
     // Backend
     pub fn llama_backend_init();
     pub fn llama_backend_free();
+
+    /// Routes every future llama.cpp *and* ggml log line to `log_callback`.
+    /// One call covers both: `llama_log_set` calls `ggml_log_set` itself
+    /// (`src/llama-impl.cpp`, b10766). Passing null restores the default,
+    /// which writes everything to stderr.
+    pub fn llama_log_set(log_callback: Option<GgmlLogCallback>, user_data: *mut c_void);
+
+    /// Reads back whatever [`llama_log_set`] installed. Used only to assert
+    /// that the default stderr logger is no longer the one in place.
+    pub fn ggml_log_get(log_callback: *mut Option<GgmlLogCallback>, user_data: *mut *mut c_void);
 
     // Model
     pub fn llama_model_default_params() -> LlamaModelParams;
@@ -315,12 +330,103 @@ impl std::fmt::Debug for LlamaCppApi {
 unsafe impl Send for LlamaCppApi {}
 unsafe impl Sync for LlamaCppApi {}
 
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+/// `enum ggml_log_level` (ggml.h, b10766).
+const GGML_LOG_LEVEL_NONE: i32 = 0;
+const GGML_LOG_LEVEL_DEBUG: i32 = 1;
+const GGML_LOG_LEVEL_INFO: i32 = 2;
+const GGML_LOG_LEVEL_WARN: i32 = 3;
+const GGML_LOG_LEVEL_ERROR: i32 = 4;
+/// Not a level: the line continues the previous one, at the previous level.
+const GGML_LOG_LEVEL_CONT: i32 = 5;
+
+/// The level a continuation belongs to — the last real level llama.cpp used.
+static LAST_LOG_LEVEL: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(GGML_LOG_LEVEL_INFO);
+
+/// Where one llama.cpp line goes in Strata's own levels.
+///
+/// llama.cpp's INFO is the loader dump — ~900 lines per model load, which is
+/// what made a successful local `generate` unreadable (#3234). It is
+/// diagnostics about our dependency, not news for the person who asked a
+/// question, so it lands at `debug`: nothing by default, everything under
+/// `STRATA_LOG=debug`. Warnings and errors keep their own level, because a
+/// failed load has to stay findable.
+///
+/// `NONE` is llama.cpp's "no level" and is dropped. `CONT` is not a level at
+/// all — the line continues the previous one (the loader's `....` progress
+/// bar is emitted this way) — so it takes the level of whatever it continues,
+/// which keeps a multi-line error whole instead of splitting its tail into
+/// `debug`.
+///
+/// A pure function on purpose: the callback itself can only be exercised by
+/// llama.cpp, in a build with `local`, and the mapping is the part with a
+/// decision in it.
+fn tracing_level_for(level: i32, last: i32) -> Option<tracing::Level> {
+    let effective = if level == GGML_LOG_LEVEL_CONT {
+        last
+    } else {
+        level
+    };
+    match effective {
+        GGML_LOG_LEVEL_ERROR => Some(tracing::Level::ERROR),
+        GGML_LOG_LEVEL_WARN => Some(tracing::Level::WARN),
+        GGML_LOG_LEVEL_INFO => Some(tracing::Level::DEBUG),
+        GGML_LOG_LEVEL_DEBUG => Some(tracing::Level::TRACE),
+        _ => None,
+    }
+}
+
+/// Receives every llama.cpp and ggml log line and forwards it to `tracing`.
+///
+/// Installed once, before anything can load a model, so the default logger —
+/// which writes all of it to stderr at full verbosity — never runs.
+unsafe extern "C" fn forward_log_to_tracing(
+    level: i32,
+    text: *const c_char,
+    _user_data: *mut c_void,
+) {
+    use std::sync::atomic::Ordering;
+
+    if level != GGML_LOG_LEVEL_CONT {
+        LAST_LOG_LEVEL.store(level, Ordering::Relaxed);
+    }
+    let Some(target) = tracing_level_for(level, LAST_LOG_LEVEL.load(Ordering::Relaxed)) else {
+        return;
+    };
+    if text.is_null() {
+        return;
+    }
+    // SAFETY: llama.cpp passes a NUL-terminated buffer that outlives the call.
+    let Ok(line) = (unsafe { CStr::from_ptr(text) }).to_str() else {
+        return; // a line that is not UTF-8 is not worth a lossy allocation
+    };
+    let line = line.trim_end_matches('\n');
+    if line.is_empty() {
+        return;
+    }
+    match target {
+        tracing::Level::ERROR => tracing::error!(target: "llama_cpp", "{line}"),
+        tracing::Level::WARN => tracing::warn!(target: "llama_cpp", "{line}"),
+        tracing::Level::DEBUG => tracing::debug!(target: "llama_cpp", "{line}"),
+        _ => tracing::trace!(target: "llama_cpp", "{line}"),
+    }
+}
+
 impl LlamaCppApi {
     /// Initialise the llama.cpp backend (once) and verify struct layout probes.
     pub fn load() -> Result<Self, String> {
         use std::sync::Once;
         static BACKEND_INIT: Once = Once::new();
-        BACKEND_INIT.call_once(|| unsafe { llama_backend_init() });
+        BACKEND_INIT.call_once(|| unsafe {
+            // Before `llama_backend_init`, so the backend's own startup lines
+            // go through the callback too rather than straight to stderr.
+            llama_log_set(Some(forward_log_to_tracing), std::ptr::null_mut());
+            llama_backend_init();
+        });
 
         // Runtime layout probes: verify struct layout by checking default params.
         let mparams = unsafe { llama_model_default_params() };
@@ -364,7 +470,15 @@ impl LlamaCppApi {
     ) -> Result<LlamaModel, String> {
         let model = unsafe { llama_model_load_from_file(path.as_ptr(), params) };
         if model.is_null() {
-            return Err(format!("llama_model_load_from_file failed for {:?}", path));
+            // llama.cpp's own reason ("invalid magic characters", a missing
+            // tensor, …) is logged, not returned — and since #3234 it is
+            // logged through `tracing` rather than sprayed on stderr, so the
+            // reader has to be told where it went. Capturing it into this
+            // error is the better answer and is tracked separately.
+            return Err(format!(
+                "llama_model_load_from_file failed for {path:?} (set STRATA_LOG=error for \
+                 llama.cpp's reason)"
+            ));
         }
         Ok(model)
     }
@@ -985,5 +1099,88 @@ mod tests {
                 panic!("load() failed: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod log_routing_tests {
+    use super::{
+        tracing_level_for, GGML_LOG_LEVEL_CONT, GGML_LOG_LEVEL_DEBUG, GGML_LOG_LEVEL_ERROR,
+        GGML_LOG_LEVEL_INFO, GGML_LOG_LEVEL_NONE, GGML_LOG_LEVEL_WARN,
+    };
+
+    /// Where each of llama.cpp's levels lands, and why it matters that INFO
+    /// is not one of ours: INFO is the ~900-line loader dump that made a
+    /// successful local `generate` unreadable (#3234).
+    #[test]
+    fn a_llama_line_lands_where_its_level_says() {
+        let at = |level| tracing_level_for(level, GGML_LOG_LEVEL_INFO);
+
+        assert_eq!(at(GGML_LOG_LEVEL_ERROR), Some(tracing::Level::ERROR));
+        assert_eq!(at(GGML_LOG_LEVEL_WARN), Some(tracing::Level::WARN));
+        // The loader dump: diagnostics about a dependency, not an answer.
+        assert_eq!(at(GGML_LOG_LEVEL_INFO), Some(tracing::Level::DEBUG));
+        assert_eq!(at(GGML_LOG_LEVEL_DEBUG), Some(tracing::Level::TRACE));
+        // Not a level, and not ours to guess at.
+        assert_eq!(at(GGML_LOG_LEVEL_NONE), None);
+        assert_eq!(at(9_999), None);
+    }
+
+    /// A continuation takes the level of the line it continues, so a
+    /// multi-line error stays an error instead of having its tail demoted to
+    /// `debug` — and the loader's `....` progress bar, which is emitted as a
+    /// continuation of an INFO line, stays out of the way.
+    #[test]
+    fn a_continuation_inherits_the_line_it_continues() {
+        assert_eq!(
+            tracing_level_for(GGML_LOG_LEVEL_CONT, GGML_LOG_LEVEL_ERROR),
+            Some(tracing::Level::ERROR)
+        );
+        assert_eq!(
+            tracing_level_for(GGML_LOG_LEVEL_CONT, GGML_LOG_LEVEL_INFO),
+            Some(tracing::Level::DEBUG)
+        );
+        assert_eq!(
+            tracing_level_for(GGML_LOG_LEVEL_CONT, GGML_LOG_LEVEL_NONE),
+            None,
+            "a continuation of nothing is still nothing"
+        );
+    }
+}
+
+/// The property the fix rests on: after the backend is initialised, ggml's
+/// log callback is *ours*, so llama.cpp's default logger — which writes every
+/// line to stderr at full verbosity — never runs (#3234).
+///
+/// Asserted against the real library rather than inferred from the call
+/// site, because `llama_backend_init` runs once per process behind a `Once`:
+/// installing the callback after it, or on a path some other caller reaches
+/// first, would leave the default logger in place for exactly the load that
+/// prints the 900 lines.
+#[cfg(all(test, feature = "local"))]
+mod log_installation_tests {
+    use super::{forward_log_to_tracing, ggml_log_get, GgmlLogCallback, LlamaCppApi};
+    use std::os::raw::c_void;
+
+    #[test]
+    fn the_backend_hands_its_logging_to_us_not_to_stderr() {
+        let mut before: Option<GgmlLogCallback> = None;
+        let mut user_data: *mut c_void = std::ptr::null_mut();
+        // SAFETY: both out-pointers are valid for the length of the call.
+        unsafe { ggml_log_get(&raw mut before, &raw mut user_data) };
+
+        LlamaCppApi::load().expect("the backend initialises");
+
+        let mut installed: Option<GgmlLogCallback> = None;
+        // SAFETY: as above.
+        unsafe { ggml_log_get(&raw mut installed, &raw mut user_data) };
+
+        let installed = installed.expect("a callback is installed");
+        assert!(
+            std::ptr::fn_addr_eq(installed, forward_log_to_tracing as GgmlLogCallback),
+            "ggml is logging through something other than our callback, so the \
+             default stderr logger may still be in place"
+        );
+        assert!(user_data.is_null(), "we pass no user data");
     }
 }
