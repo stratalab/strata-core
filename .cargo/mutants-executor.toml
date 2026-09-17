@@ -23,6 +23,20 @@ exclude_globs = [
 ]
 
 exclude_re = [
+    # #3204, same class as #3436: an `Ok(Default::default())` replacement for a
+    # return type that has no `Default` — proven with a `needs_default::<T>()`
+    # probe, which fails to compile for `Output`. cargo-mutants has no viable
+    # replacement to write, so the lane reports "No mutants were viable" and
+    # `mutation-vacuity` reads that as the lane judging nothing (#3337).
+    #
+    # `Output` should not gain a `Default` to satisfy the tool: it is the wire
+    # result enum, and a default variant is a value no command ever returns.
+    #
+    # Strength mechanism: the hub list path is covered by `hub_neutrality` and
+    # the clone-flow suites, and the filter it builds is asserted by
+    # `crates/hub/tests/phase_a_conformance.rs`.
+    "replace Executor::execute_hub_list_datasets -> Result<Output, ExecutorError> with Ok\\(Default::default\\(\\)\\)",
+
     # verify_case (idl_tooling::verify): the fixture-verifier orchestrator — it
     # reads every response fixture, replays it against a scratch executor, and
     # diffs. Its strength mechanism is the `verify-fixtures` CI gate (which runs

@@ -96,3 +96,38 @@ fn engine_info_is_stable_and_semver_shaped() {
     }
     assert_eq!(info.supported_primitives.len(), 5);
 }
+
+/// #3204: a dataset card naming the `graph` primitive must deserialize.
+///
+/// The CLI was pinned to a stratahub whose `PrimitiveType` predated `graph`,
+/// and the enum deserializes strictly — so a graph-bearing dataset card did
+/// not degrade to a partial listing, it failed the whole clone with
+/// `unavailable.executor.hub_transport`.
+#[test]
+fn a_dataset_card_naming_graph_deserializes() {
+    use stratahub_protocol::wire::PrimitiveType;
+
+    let parsed: Vec<PrimitiveType> =
+        serde_json::from_str(r#"["branches","graph","json","kv"]"#).expect("graph is a primitive");
+    assert!(parsed.contains(&PrimitiveType::Graph));
+
+    // And every spelling that already worked still does, at its own name —
+    // the bump appends, it does not renumber.
+    for (wire, expected) in [
+        ("kv", PrimitiveType::Kv),
+        ("json", PrimitiveType::Json),
+        ("vectors", PrimitiveType::Vectors),
+        ("events", PrimitiveType::Events),
+        ("branches", PrimitiveType::Branches),
+        ("graph", PrimitiveType::Graph),
+    ] {
+        let one: PrimitiveType =
+            serde_json::from_str(&format!("\"{wire}\"")).expect("known primitive");
+        assert_eq!(one, expected, "{wire}");
+        assert_eq!(
+            serde_json::to_string(&expected).expect("serializes"),
+            format!("\"{wire}\""),
+            "{wire} round-trips"
+        );
+    }
+}

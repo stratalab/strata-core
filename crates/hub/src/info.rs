@@ -5,8 +5,13 @@ use stratahub_protocol::wire::PrimitiveType;
 /// Capability registry version 1: kv, json, vectors, events, branches.
 ///
 /// Registry versions are monotonic supersets — a later version never
-/// removes a capability (coordination doc §3.8 invariant 2). The graph
-/// data model joins the registry once `PrimitiveType` can carry it.
+/// removes a capability (coordination doc §3.8 invariant 2).
+///
+/// `PrimitiveType` can now carry `graph` (stratahub#11), so this engine can
+/// *read* a graph-bearing dataset card. Advertising graph here is the
+/// separate half: it grows the registry, which is a version bump stratahub
+/// validates `required_capabilities` against, so it is coordinated rather
+/// than appended (#3449).
 pub const CAPABILITY_REGISTRY_VERSION: u32 = 1;
 
 /// What the engine reports about itself (M8E2 `EngineInfo` shape).

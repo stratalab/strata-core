@@ -29,9 +29,9 @@ time = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 toml = "0.8"
 url = "2"
-stratahub-client = { git = "https://github.com/stratalab/stratahub", rev = "283ca9ce500b43090aa81309014d14674c74ecae" }
-stratahub-ingest = { git = "https://github.com/stratalab/stratahub", rev = "283ca9ce500b43090aa81309014d14674c74ecae", optional = true }
-stratahub-protocol = { git = "https://github.com/stratalab/stratahub", rev = "283ca9ce500b43090aa81309014d14674c74ecae" }
+stratahub-client = { git = "https://github.com/stratalab/stratahub", rev = "ad0eca4395afbfb45117d24b61cd44f6cb730e58" }
+stratahub-ingest = { git = "https://github.com/stratalab/stratahub", rev = "ad0eca4395afbfb45117d24b61cd44f6cb730e58", optional = true }
+stratahub-protocol = { git = "https://github.com/stratalab/stratahub", rev = "ad0eca4395afbfb45117d24b61cd44f6cb730e58" }
 
 [features]
 # The stratahub-ingest Engine trait impl (HB5). Off by default: their
@@ -49,7 +49,7 @@ required-features = ["ingest"]
 futures-util = "0.3"
 
 tiny_http = "0.12"
-stratahub-testkit = { git = "https://github.com/stratalab/stratahub", rev = "283ca9ce500b43090aa81309014d14674c74ecae" }
+stratahub-testkit = { git = "https://github.com/stratalab/stratahub", rev = "ad0eca4395afbfb45117d24b61cd44f6cb730e58" }
 
 [lints]
 workspace = true

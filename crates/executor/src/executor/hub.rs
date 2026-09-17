@@ -131,6 +131,11 @@ impl Executor {
         validate_dataset_list_query(size_min_bytes, size_max_bytes, limit)?;
         let transport = hub_transport(hub_url)?;
         let filter = DatasetFilter {
+            // Full-catalog text search, new in the bumped protocol
+            // (#3204). `hub list-datasets` exposes structured facets and no
+            // free-text query, so there is nothing to pass; adding one is
+            // new command surface, not part of the pin bump.
+            q: None,
             tasks,
             tags,
             primitives,
