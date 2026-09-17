@@ -1233,7 +1233,7 @@ impl<'a> StorageRuntime<'a> {
 
     /// Load a branch's published snapshot off-lock, for the BS2.4b snapshot-lifetime probe (holding
     /// an `Arc<BranchReadView>` across compaction/flush installs). `None` if the branch has no slot.
-    #[cfg(any(test, feature = "testkit"))]
+    #[cfg(test)]
     pub(crate) fn load_snapshot_for_test(
         &self,
         branch_id: BranchId,

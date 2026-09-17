@@ -18,7 +18,7 @@
 //! seeds alongside the compounding corpus cache (`fuzz.yml`), so discovered
 //! inputs and committed real-artifact seeds recombine across nights.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use strata_core::{BranchId, CommitVersion, Timestamp};
 
@@ -402,6 +402,8 @@ pub fn harvest_format_corpus(root: &Path) -> Result<Vec<HarvestSeed>, TestkitErr
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]

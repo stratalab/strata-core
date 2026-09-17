@@ -438,7 +438,7 @@ mod tests {
     /// embed() calls llama_encode() instead of llama_decode(). Without this,
     /// llama.cpp logs "cannot decode batches with this context" per batch.
     #[test]
-    #[ignore]
+    #[ignore = "real model: needs a downloaded miniLM GGUF"]
     fn test_issue_1769_bert_model_uses_encode() {
         let Some(path) = crate::registry::ModelRegistry::downloaded_catalog_path("miniLM") else {
             eprintln!("skipping test_issue_1769: miniLM is not downloaded");

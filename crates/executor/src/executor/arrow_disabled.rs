@@ -9,9 +9,7 @@
 //! in the no-arrow feature-matrix leg).
 
 use super::admin_convert::arrow_feature_disabled;
-use super::{
-    ArrowExportPrimitive, ArrowFileFormat, ArrowImportTarget, Executor, ExecutorResult, Output,
-};
+use super::{ArrowExportPrimitive, ArrowFileFormat, ArrowImportTarget, Executor, Output};
 use crate::ExecutorError;
 
 impl Executor {

@@ -1051,7 +1051,7 @@ mod tests {
     // --- Smoke test: load and verify symbol resolution ---
 
     #[test]
-    #[ignore]
+    #[ignore = "real backend: loads llama.cpp and probes its symbols"]
     fn smoke_test_load_api() {
         match LlamaCppApi::load() {
             Ok(api) => {

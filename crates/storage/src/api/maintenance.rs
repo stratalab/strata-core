@@ -542,7 +542,8 @@ impl MaintenanceQueueSummary {
 }
 
 impl MaintenanceDrainSummary {
-    #[expect(
+    // See the note in `diagnostics.rs`: target-dependent, so `allow`.
+    #[allow(
         clippy::large_types_passed_by_value,
         reason = "constructor stores the queue summary; callers move it in"
     )]

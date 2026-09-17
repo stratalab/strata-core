@@ -33,6 +33,36 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Clippy with features enabled
+        # The step above lints DEFAULT features only, so everything behind a
+        # feature flag went unlinted — `testkit`, `fault-injection`,
+        # `idl-tooling`, the lot. `feature-matrix` does walk the powerset, but
+        # with `check` rather than `clippy` and without `--all-targets`, so it
+        # never compiled a test file either. Between them, 21 lints had rotted
+        # invisibly (#3437), including dead harnesses and mis-gated helpers.
+        #
+        # One invocation per crate at its full light feature set. The heavy
+        # ones are excluded for build cost, not by principle: `local`/
+        # `inference-local` need a llama.cpp cmake build and `differential`
+        # needs RocksDB — `local` is #3267's problem, and both are nightly's.
+        run: |
+          set -e
+          specs=(
+            "-p strata-core --all-features"
+            "-p strata-storage --all-features"
+            "-p strata-engine --all-features"
+            "-p strata-hub --all-features"
+            "-p strata-gpu-cache --all-features"
+            "-p stratadb --all-features"
+            "-p strata-inference --features anthropic,download,google,openai,testkit,wire-schemas"
+            "-p strata-executor --features arrow,hub,idl-tooling,inference,inference-anthropic,inference-google,inference-openai,ipc,jsonschema,localfs,testkit"
+            "-p strata-cli --features cloud,inference,inference-anthropic,inference-google,inference-openai,native,testkit"
+          )
+          for spec in "${specs[@]}"; do
+            echo "::group::clippy $spec"
+            cargo clippy --locked $spec --all-targets -- -D warnings
+            echo "::endgroup::"
+          done
       - name: Lockfile consistency
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Advisory + license + source check
@@ -382,6 +412,11 @@ jobs:
           # Pinned to the wasm-bindgen version in Cargo.lock — the runner
           # refuses a version mismatch, so bumps must move in lockstep.
           tool: wasm-bindgen-cli@0.2.118
+      - name: Clippy for the browser target
+        # wasm compiles a different cfg of executor and cli — `hub` off,
+        # `native` off — and nothing linted it, so unused imports and
+        # unreachable items accumulated there unseen (#3437).
+        run: cargo clippy --locked -p strata-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: Browser target tests
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner

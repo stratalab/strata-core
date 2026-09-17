@@ -12,7 +12,7 @@ use stratahub_ingest::engine::{Engine, EngineError};
 use tokio::io::AsyncReadExt;
 
 fn build_fixture(path: &std::path::Path) {
-    let mut db = Database::open_local(path, DurableLocalOpenOptions::new())
+    let db = Database::open_local(path, DurableLocalOpenOptions::new())
         .expect("fixture opens")
         .into_database();
     let branch = || BranchName::new("default").expect("branch");

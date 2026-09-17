@@ -288,6 +288,10 @@ fn drive_interleaved(
 struct FaultCaseRun {
     fired: bool,
     violation: Option<RecoveryOracleViolation>,
+    /// Read by the derived `Debug`, which every assertion in this file prints
+    /// on failure (`"scheduled fault did not fire: {run:?}"`). Dead-code
+    /// analysis ignores derived impls, and says so in its own note.
+    #[allow(dead_code)]
     facts: FaultCaseFacts,
 }
 
@@ -381,6 +385,10 @@ struct CrashCaseRun {
     perturbed: bool,
     fail_loud: bool,
     violation: Option<RecoveryOracleViolation>,
+    /// Read by the derived `Debug`, which every assertion in this file prints
+    /// on failure (`"scheduled fault did not fire: {run:?}"`). Dead-code
+    /// analysis ignores derived impls, and says so in its own note.
+    #[allow(dead_code)]
     facts: CrashCaseFacts,
 }
 

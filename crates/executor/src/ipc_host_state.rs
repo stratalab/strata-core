@@ -54,16 +54,19 @@ impl IpcClientRegistry {
     }
 
     /// Record a connection (called by the server's connection guard).
+    #[cfg(feature = "ipc")]
     pub(crate) fn register(&self, id: u64, entry: IpcClientEntry) {
         self.lock().insert(id, entry);
     }
 
     /// Replace a connection's entry (a hello upgrading the anonymous record).
+    #[cfg(feature = "ipc")]
     pub(crate) fn update(&self, id: u64, entry: IpcClientEntry) {
         self.lock().insert(id, entry);
     }
 
     /// Forget a connection (guard drop on any exit path).
+    #[cfg(feature = "ipc")]
     pub(crate) fn deregister(&self, id: u64) {
         self.lock().remove(&id);
     }
