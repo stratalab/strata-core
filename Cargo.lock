@@ -488,7 +488,7 @@ dependencies = [
  "http 0.2.12",
  "http 1.4.0",
  "http-body 1.0.1",
- "lru",
+ "lru 0.16.4",
  "percent-encoding",
  "regex-lite",
  "sha2 0.11.0",
@@ -1196,19 +1196,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "console"
-version = "0.15.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ccb5b10f9f2cbf51eb355ca1d05c2d279ce1804688d0db74b4733a5aeafd8"
-dependencies = [
- "encode_unicode",
- "libc",
- "once_cell",
- "unicode-width 0.2.2",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1413,7 +1400,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1455,12 +1442,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
-
-[[package]]
 name = "endian-type"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1479,7 +1460,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2190,19 +2171,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indicatif"
-version = "0.17.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "183b3088984b400f4cfac3620d5e076c84da5364016b4f49473de574b2586235"
-dependencies = [
- "console",
- "number_prefix",
- "portable-atomic",
- "unicode-width 0.2.2",
- "web-time",
-]
-
-[[package]]
 name = "indoc"
 version = "2.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2466,6 +2434,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.18.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
+dependencies = [
+ "hashbrown 0.17.0",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2615,7 +2592,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2703,12 +2680,6 @@ dependencies = [
  "autocfg",
  "libm",
 ]
-
-[[package]]
-name = "number_prefix"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "once_cell"
@@ -3063,7 +3034,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.4",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3379,7 +3350,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3883,8 +3854,8 @@ dependencies = [
 
 [[package]]
 name = "strata-core"
-version = "1.0.0"
-source = "git+https://github.com/stratalab/strata-core.git?rev=4c9c7f15e2a943b88cc434572e210a11d422f861#4c9c7f15e2a943b88cc434572e210a11d422f861"
+version = "1.2.1"
+source = "git+https://github.com/stratalab/strata-core.git?rev=acff6cb416d3e4320ee4fd3e509e5929c715ff90#acff6cb416d3e4320ee4fd3e509e5929c715ff90"
 dependencies = [
  "serde",
 ]
@@ -3901,16 +3872,16 @@ dependencies = [
 
 [[package]]
 name = "strata-engine"
-version = "1.0.0"
-source = "git+https://github.com/stratalab/strata-core.git?rev=4c9c7f15e2a943b88cc434572e210a11d422f861#4c9c7f15e2a943b88cc434572e210a11d422f861"
+version = "1.2.1"
+source = "git+https://github.com/stratalab/strata-core.git?rev=acff6cb416d3e4320ee4fd3e509e5929c715ff90#acff6cb416d3e4320ee4fd3e509e5929c715ff90"
 dependencies = [
  "fast-hnsw",
  "getrandom 0.2.17",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "strata-core 1.0.0",
- "strata-storage 1.0.0",
+ "strata-core 1.2.1",
+ "strata-storage 1.2.1",
  "uuid",
  "web-time",
 ]
@@ -3935,14 +3906,14 @@ dependencies = [
 
 [[package]]
 name = "strata-executor"
-version = "1.0.0"
-source = "git+https://github.com/stratalab/strata-core.git?rev=4c9c7f15e2a943b88cc434572e210a11d422f861#4c9c7f15e2a943b88cc434572e210a11d422f861"
+version = "1.2.1"
+source = "git+https://github.com/stratalab/strata-core.git?rev=acff6cb416d3e4320ee4fd3e509e5929c715ff90#acff6cb416d3e4320ee4fd3e509e5929c715ff90"
 dependencies = [
  "base64",
  "serde",
  "serde_json",
- "strata-core 1.0.0",
- "strata-engine 1.0.0",
+ "strata-core 1.2.1",
+ "strata-engine 1.2.1",
  "thiserror 1.0.69",
  "tracing",
  "web-time",
@@ -4030,16 +4001,17 @@ dependencies = [
 
 [[package]]
 name = "strata-storage"
-version = "1.0.0"
-source = "git+https://github.com/stratalab/strata-core.git?rev=4c9c7f15e2a943b88cc434572e210a11d422f861#4c9c7f15e2a943b88cc434572e210a11d422f861"
+version = "1.2.1"
+source = "git+https://github.com/stratalab/strata-core.git?rev=acff6cb416d3e4320ee4fd3e509e5929c715ff90#acff6cb416d3e4320ee4fd3e509e5929c715ff90"
 dependencies = [
  "arc-swap",
  "crc32fast",
  "fs2",
+ "loom",
  "parking_lot",
  "serde",
  "sha2 0.10.9",
- "strata-core 1.0.0",
+ "strata-core 1.2.1",
  "tracing",
  "web-time",
  "zstd",
@@ -4091,12 +4063,12 @@ dependencies = [
 [[package]]
 name = "stratahub-client"
 version = "0.1.0"
-source = "git+https://github.com/stratalab/stratahub?rev=283ca9ce500b43090aa81309014d14674c74ecae#283ca9ce500b43090aa81309014d14674c74ecae"
+source = "git+https://github.com/stratalab/stratahub?rev=ad0eca4395afbfb45117d24b61cd44f6cb730e58#ad0eca4395afbfb45117d24b61cd44f6cb730e58"
 dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
- "rand 0.10.2",
+ "rand 0.9.4",
  "reqwest",
  "serde",
  "serde_json",
@@ -4111,7 +4083,7 @@ dependencies = [
 [[package]]
 name = "stratahub-config"
 version = "0.1.0"
-source = "git+https://github.com/stratalab/stratahub?rev=283ca9ce500b43090aa81309014d14674c74ecae#283ca9ce500b43090aa81309014d14674c74ecae"
+source = "git+https://github.com/stratalab/stratahub?rev=ad0eca4395afbfb45117d24b61cd44f6cb730e58#ad0eca4395afbfb45117d24b61cd44f6cb730e58"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -4122,39 +4094,36 @@ dependencies = [
 [[package]]
 name = "stratahub-ingest"
 version = "0.1.0"
-source = "git+https://github.com/stratalab/stratahub?rev=283ca9ce500b43090aa81309014d14674c74ecae#283ca9ce500b43090aa81309014d14674c74ecae"
+source = "git+https://github.com/stratalab/stratahub?rev=ad0eca4395afbfb45117d24b61cd44f6cb730e58#ad0eca4395afbfb45117d24b61cd44f6cb730e58"
 dependencies = [
- "anyhow",
  "async-trait",
  "bytes",
- "clap",
  "futures-core",
  "futures-util",
- "indicatif",
  "semver",
+ "serde",
  "serde_json",
- "stratahub-config",
+ "serde_yaml",
  "stratahub-metadata",
  "stratahub-protocol",
- "stratahub-server",
  "stratahub-storage",
  "thiserror 2.0.18",
  "time",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
 name = "stratahub-metadata"
 version = "0.1.0"
-source = "git+https://github.com/stratalab/stratahub?rev=283ca9ce500b43090aa81309014d14674c74ecae#283ca9ce500b43090aa81309014d14674c74ecae"
+source = "git+https://github.com/stratalab/stratahub?rev=ad0eca4395afbfb45117d24b61cd44f6cb730e58#ad0eca4395afbfb45117d24b61cd44f6cb730e58"
 dependencies = [
  "async-trait",
  "serde",
  "serde_json",
- "strata-executor 1.0.0",
+ "strata-executor 1.2.1",
  "stratahub-protocol",
  "thiserror 2.0.18",
  "time",
@@ -4165,7 +4134,7 @@ dependencies = [
 [[package]]
 name = "stratahub-protocol"
 version = "0.1.0"
-source = "git+https://github.com/stratalab/stratahub?rev=283ca9ce500b43090aa81309014d14674c74ecae#283ca9ce500b43090aa81309014d14674c74ecae"
+source = "git+https://github.com/stratalab/stratahub?rev=ad0eca4395afbfb45117d24b61cd44f6cb730e58#ad0eca4395afbfb45117d24b61cd44f6cb730e58"
 dependencies = [
  "blake3",
  "proptest",
@@ -4181,14 +4150,14 @@ dependencies = [
 [[package]]
 name = "stratahub-server"
 version = "0.1.0"
-source = "git+https://github.com/stratalab/stratahub?rev=283ca9ce500b43090aa81309014d14674c74ecae#283ca9ce500b43090aa81309014d14674c74ecae"
+source = "git+https://github.com/stratalab/stratahub?rev=ad0eca4395afbfb45117d24b61cd44f6cb730e58#ad0eca4395afbfb45117d24b61cd44f6cb730e58"
 dependencies = [
  "anyhow",
  "axum",
  "bytes",
  "hyper 1.10.1",
  "hyper-util",
- "lru",
+ "lru 0.18.4",
  "prometheus",
  "serde",
  "serde_json",
@@ -4210,7 +4179,7 @@ dependencies = [
 [[package]]
 name = "stratahub-storage"
 version = "0.1.0"
-source = "git+https://github.com/stratalab/stratahub?rev=283ca9ce500b43090aa81309014d14674c74ecae#283ca9ce500b43090aa81309014d14674c74ecae"
+source = "git+https://github.com/stratalab/stratahub?rev=ad0eca4395afbfb45117d24b61cd44f6cb730e58#ad0eca4395afbfb45117d24b61cd44f6cb730e58"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -4233,7 +4202,7 @@ dependencies = [
 [[package]]
 name = "stratahub-testkit"
 version = "0.1.0"
-source = "git+https://github.com/stratalab/stratahub?rev=283ca9ce500b43090aa81309014d14674c74ecae#283ca9ce500b43090aa81309014d14674c74ecae"
+source = "git+https://github.com/stratalab/stratahub?rev=ad0eca4395afbfb45117d24b61cd44f6cb730e58#ad0eca4395afbfb45117d24b61cd44f6cb730e58"
 dependencies = [
  "async-trait",
  "axum",
@@ -4320,7 +4289,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5151,7 +5120,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

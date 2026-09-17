@@ -465,9 +465,8 @@ fn content_derived_created(max_micros: Option<u64>) -> Result<OffsetDateTime, Bu
 
 fn capability_for(model: &str) -> String {
     // Engine artifact models map onto the protocol's primitive vocabulary
-    // (`PrimitiveType`'s lowercase wire strings). The graph data model has
-    // no variant yet (flagged cross-repo); until then it is declared with
-    // the same lowercase convention.
+    // (`PrimitiveType`'s lowercase wire strings). `graph` gained its variant
+    // in stratahub#11 and falls through `other` at the same spelling.
     match model {
         "event" => "events".to_owned(),
         "vector" => "vectors".to_owned(),
