@@ -31,7 +31,6 @@ stored as text rather than refused.
 - The agents guide lists the host commands (`init`, `doctor`, `start`,
   `stop`, `mcp`, `command`, …), derived from the CLI itself rather than
   hand-written, so a new verb cannot ship undocumented.
-- An Intel Mac (`x86_64-apple-darwin`) build ships with every release.
 - The JSON family documents its six enforced limits — document size, nesting
   depth, array size, path segments, id and index-name lengths — each pinned
   to the engine constant it describes.
@@ -69,6 +68,14 @@ stored as text rather than refused.
 - `strata clone` reads a dataset card naming the `graph` primitive, instead
   of failing the whole clone on an unknown enum variant.
 - The LICENSE ships inside the binary tarball it licenses.
+
+### Removed
+
+- The Intel Mac (`x86_64-apple-darwin`) release target. It was added during
+  this cycle and never successfully built — the `macos-13` runner it needs no
+  longer schedules — and Apple has not sold an Intel Mac in five years.
+  `install.sh` names the targets a release does carry, so an Intel user gets a
+  clear refusal rather than a broken download.
 
 ### Changed
 

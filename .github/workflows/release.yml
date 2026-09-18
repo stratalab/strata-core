@@ -61,16 +61,15 @@ jobs:
             variant: default
             suffix: ""
             features: ""
-          # Intel Macs. `install.sh` has always resolved this target and the
-          # release never built it, so an Intel-Mac user was told the installer
-          # works and got a 404 (#3011, #3060). A native Intel runner keeps the
-          # no-cross rule above; llama.cpp's cmake build for the `-local`
-          # variant is why that rule is worth keeping.
-          - target: x86_64-apple-darwin
-            runner: macos-13
-            variant: default
-            suffix: ""
-            features: ""
+          # No Intel Mac. It was added in #3011 and never once built: the
+          # `macos-13` runner it needs sat queued for seven hours on the
+          # v1.2.3 dry run without starting, and GitHub queues indefinitely
+          # against a label with no runners rather than failing — so a tag
+          # would hang `package` and publish nothing at all. Apple has not
+          # sold an Intel Mac in five years, so the target is dropped rather
+          # than cross-compiled. `install.sh` reads the release manifest
+          # (#3060), so an Intel user gets a named refusal listing the
+          # targets that do exist, not a 404.
           # D2: the build `strata inference install-local` swaps in. Same
           # version, plus vendored llama.cpp for local GGUF execution. It is on
           # the release critical path on purpose: a release that cannot produce
@@ -87,11 +86,6 @@ jobs:
             features: "--features inference-local"
           - target: aarch64-apple-darwin
             runner: macos-14
-            variant: local
-            suffix: "-local"
-            features: "--features inference-local"
-          - target: x86_64-apple-darwin
-            runner: macos-13
             variant: local
             suffix: "-local"
             features: "--features inference-local"
@@ -195,7 +189,6 @@ jobs:
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
           - aarch64-apple-darwin
-          - x86_64-apple-darwin
         suffix: ["", "-local"]
 
     steps:
@@ -332,7 +325,6 @@ jobs:
         run: |
           cd artifacts
           echo "arm64=$(sha256sum strata-v${{ steps.version.outputs.version }}-aarch64-apple-darwin.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "intel64=$(sha256sum strata-v${{ steps.version.outputs.version }}-x86_64-apple-darwin.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "linux_x86_64=$(sha256sum strata-v${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "linux_arm64=$(sha256sum strata-v${{ steps.version.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
@@ -347,7 +339,6 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           SHA_ARM64: ${{ steps.sha.outputs.arm64 }}
-          SHA_INTEL64: ${{ steps.sha.outputs.intel64 }}
           SHA_LINUX_X86_64: ${{ steps.sha.outputs.linux_x86_64 }}
           SHA_LINUX_ARM64: ${{ steps.sha.outputs.linux_arm64 }}
         run: |
@@ -362,10 +353,6 @@ jobs:
               on_arm do
                 url "https://github.com/stratalab/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-aarch64-apple-darwin.tar.gz"
                 sha256 "SHA_ARM64_PLACEHOLDER"
-              end
-              on_intel do
-                url "https://github.com/stratalab/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-x86_64-apple-darwin.tar.gz"
-                sha256 "SHA_INTEL64_PLACEHOLDER"
               end
             end
 
@@ -396,7 +383,6 @@ jobs:
           # Replace placeholders with actual values
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" homebrew-tap/Formula/strata.rb
           sed -i "s/SHA_ARM64_PLACEHOLDER/${SHA_ARM64}/g" homebrew-tap/Formula/strata.rb
-          sed -i "s/SHA_INTEL64_PLACEHOLDER/${SHA_INTEL64}/g" homebrew-tap/Formula/strata.rb
           sed -i "s/SHA_LINUX_X86_64_PLACEHOLDER/${SHA_LINUX_X86_64}/g" homebrew-tap/Formula/strata.rb
           sed -i "s/SHA_LINUX_ARM64_PLACEHOLDER/${SHA_LINUX_ARM64}/g" homebrew-tap/Formula/strata.rb
           # A placeholder that survives substitution ships a formula whose
