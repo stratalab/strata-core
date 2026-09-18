@@ -1,7 +1,7 @@
 ---
 title: "Freeze graph ontology"
 description: "Freeze the graph ontology."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: graph
 ---
 

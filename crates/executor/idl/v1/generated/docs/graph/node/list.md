@@ -1,7 +1,7 @@
 ---
 title: "List graph nodes"
 description: "List graph nodes."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: graph
 ---
 

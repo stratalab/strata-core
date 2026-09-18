@@ -1,7 +1,7 @@
 ---
 title: "Count KV keys"
 description: "Count visible KV keys."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: kv
 ---
 

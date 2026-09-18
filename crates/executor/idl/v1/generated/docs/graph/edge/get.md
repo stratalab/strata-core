@@ -1,7 +1,7 @@
 ---
 title: "Get graph edge"
 description: "Read one graph edge."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: graph
 ---
 

@@ -4,6 +4,88 @@ All notable changes to StrataDB are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.3] - 2026-09-17
+
+A correctness-and-honesty release: thirty-four fixes, none of which add a
+capability. What changes is that surfaces now say what is true — a refusal
+names the right condition, a report distinguishes "not set" from "set and
+unreachable", and the commands that exist to teach the surface teach all of
+it.
+
+Two data-loss bugs are fixed. An event appended with an ordinary `f64` was
+permanently unreadable, and a JSON-shaped string that did not parse was
+stored as text rather than refused.
+
+### Added
+
+- `inference status` reports `config_file` — the path provider settings are
+  read from and whether it can be used (`absent` / `readable` / `unreadable`
+  / `malformed`). Without it, a provider whose stored key sits in a broken
+  file was indistinguishable from one never configured, and the obvious
+  remedy was the wrong one.
+- `examples/` holds runnable scenarios — agent memory, tool-activity events,
+  time travel, branch isolation — each mirroring a guide on stratadb.org and
+  executed against the real binary in CI, so an example that lies fails the
+  build.
+- `strata init` prints its next steps to a reader, not only to `--json`.
+- The agents guide lists the host commands (`init`, `doctor`, `start`,
+  `stop`, `mcp`, `command`, …), derived from the CLI itself rather than
+  hand-written, so a new verb cannot ship undocumented.
+- An Intel Mac (`x86_64-apple-darwin`) build ships with every release.
+- The JSON family documents its six enforced limits — document size, nesting
+  depth, array size, path segments, id and index-name lengths — each pinned
+  to the engine constant it describes.
+
+### Fixed
+
+- An event appended with an ordinary `f64` payload was permanently
+  unreadable: the value round-tripped through a codec that could not return
+  it. **Data loss.**
+- JSON-shaped text that does not parse is refused at write time rather than
+  silently stored as a string.
+- A write too large to encode, a key no table entry could hold, and a value
+  over the cache/durable size ceiling are all caller errors now, reported at
+  write time with the condition named — not availability failures surfaced
+  later.
+- A database held by another opener reports contention, not a backend
+  outage; a fork source with live children says so instead of "try again
+  later"; an in-flight maintenance task counts as progress rather than churn.
+- `kv history` shows the handle `--as-of` actually takes.
+- A promotion reports the value the caller wrote, across every capability —
+  JSON and vector previously leaked their storage envelope.
+- A graph edge shows its properties, as a node does.
+- A stored value cannot act on the terminal printing it: control sequences
+  are escaped in every cell.
+- A JSON cell spells its own type, so a consumer can tell a number from a
+  string from `null`.
+- A malformed user config is reported rather than quoted back — the parse
+  error no longer renders the line, which could contain a provider key.
+- Error remedies follow the condition they describe rather than the spelling
+  of the code, and retry policies agree with the remedy beside them.
+- The model download lock is exclusive: two writers cannot share a file.
+- The IPC handshake has its own deadline rather than borrowing the command's.
+- On a local build, llama.cpp's loader no longer writes ~900 lines to stderr
+  before the answer; its output goes to `STRATA_LOG` at `debug`.
+- `strata clone` reads a dataset card naming the `graph` primitive, instead
+  of failing the whole clone on an unknown enum variant.
+- The LICENSE ships inside the binary tarball it licenses.
+
+### Changed
+
+- `EventPayload` documents what it actually enforces. A non-finite float
+  never reaches it — `serde_json` cannot represent one — so the check that
+  claimed to reject them is gone, and the coercion callers must guard against
+  is documented instead.
+- `rustls` moves to 0.23.45 (RUSTSEC-2026-0285).
+
+### Internal
+
+- Clippy runs across every crate's full feature set and the wasm target, and
+  a per-feature lint lane compiles every crate's *test* targets — neither had
+  ever run off default features, and ~80 lints had rotted there.
+- The nightly catalog lane tells "the hub did not answer" from "the hub does
+  not serve", so a rate-limited night is no longer a false red.
+
 ## [1.2.2] - 2026-09-13
 
 One human output mode for the CLI, derived from the IDL rather than

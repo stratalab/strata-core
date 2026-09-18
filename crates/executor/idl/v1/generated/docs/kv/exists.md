@@ -1,7 +1,7 @@
 ---
 title: "Check KV existence"
 description: "Check whether one KV key exists."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: kv
 ---
 

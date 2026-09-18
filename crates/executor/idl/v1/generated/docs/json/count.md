@@ -1,7 +1,7 @@
 ---
 title: "Count JSON documents"
 description: "Count visible JSON documents."
-source: strata-core@1.2.2
+source: strata-core@1.2.3
 section: json
 ---
 
