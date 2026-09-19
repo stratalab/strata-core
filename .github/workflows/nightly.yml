@@ -460,3 +460,39 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: cargo test --locked -p strata-inference --features download --lib every_catalogued_file_is_published_on_the_hub -- --ignored --nocapture
+
+  # #3309: a red lane must notify someone — five streaks (6-22 nights) were
+  # found only by chance before this job existed. One reporter at the end:
+  # files a `nightly-red` issue per failed lane, or comments the new run on
+  # the open one, so a streak is one issue with a growing tail. The decision
+  # lives in scripts/nightly-red-reporter.sh so a test can run it against a
+  # fake `gh` (crates/storage/tests/nightly_red_reporter.rs, the same shape
+  # as the #3225 mutation-verdict extraction), and the script reads the
+  # run's own job list from the API so a lane missing from `needs` below is
+  # still reported. `always()` + an explicit failure check, never a plain
+  # `if: failure()`: a skipped lane would skip the reporter too, and a
+  # reporter that can be skipped is the original gap again.
+  nightly-red-reporter:
+    needs:
+      - memory-safety-miri
+      - memory-safety-address-sanitizer
+      - memory-safety-thread-sanitizer
+      - failure-during-failure-soak
+      - storage-soak-lanes
+      - coverage-baseline
+      - release-mode-tests
+      - differential
+      - catalog-reachability
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report failed lanes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/nightly-red-reporter.sh "${{ github.repository }}" "${{ github.run_id }}"
