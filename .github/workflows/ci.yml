@@ -308,9 +308,14 @@ jobs:
         # to that lane's own filtered list, so every lane is spread across
         # the eight shards independently.
         #
-        # Exit 3 (timeout-only, no missed mutants) passes: a mutant whose test
-        # run never completes was killed by hang — the behavior change was
-        # detected, just not by an assertion. Exit 2 (missed) still fails.
+        # A lane's verdict is read off `mutants.out/missed.txt`, never off the
+        # exit code, and `scripts/mutation-verdict.sh` is the one place that
+        # reads it. cargo-mutants reports timeout AHEAD of missed, so exit 3
+        # is also what a run returns when it hung on one mutant and left others
+        # alive — which used to pass, handing a free pass on every missed
+        # mutant to any PR whose diff carried a hanging mutant (#3225). The
+        # decision lives in a script so a test can run it; see
+        # crates/storage/tests/mutation_gate_verdict.rs.
         #
         # A lane that builds mutants and finds none of them viable tested
         # NOTHING, and cargo-mutants exits 0 for it — the failure mode #3337
@@ -343,17 +348,22 @@ jobs:
             else
               echo "$1 none" >> lane-verdicts.txt
             fi
-            if [ "$2" -ne 0 ] && [ "$2" -ne 3 ]; then
-              exit "$2"
-            fi
+            scripts/mutation-verdict.sh "$1" "$2" || exit $?
           }
+          # Each lane clears mutants.out first: nothing else does, and a lane
+          # whose slice holds no mutants exits 0 without touching the directory,
+          # so the next lane would read the previous lane's missed.txt as its
+          # own verdict.
+          rm -rf mutants.out
           cargo mutants "${common[@]}" > mutants-a.log 2>&1
           check a $?
+          rm -rf mutants.out
           cargo mutants "${common[@]}" \
             --config .cargo/mutants-executor.toml \
             --package strata-executor \
             --features idl-tooling,inference,testkit > mutants-b.log 2>&1
           check b $?
+          rm -rf mutants.out
           cargo mutants "${common[@]}" \
             --config .cargo/mutants-inference.toml \
             --package strata-inference \
