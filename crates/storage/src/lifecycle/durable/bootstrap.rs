@@ -508,11 +508,11 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             initial_branch_id,
         )?;
 
-        // Validate the WAL package against the catalog (multi-branch aware).
-        validate_recovered_wal_package(&branch_catalog, recovery.wal().records())?;
-
-        // Dispatch WAL replay by branch_id into per-branch catalog slots.
+        // Dispatch WAL replay by branch_id into per-branch catalog slots,
+        // streaming the tail and validating each record in the same pass
+        // (multi-branch aware; formerly `validate_recovered_wal_package`).
         let report = replay_wal_into_catalog(
+            self.services.wal(),
             &mut branch_catalog,
             &self.commit_config,
             &mut self.allocator,
@@ -577,8 +577,8 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         // created_at now feeds the replay generation fence.
         let mut branch_catalog =
             LifecycleBranchCatalog::with_existing_branch(&self.branch, branch_generation, None)?;
-        validate_recovered_wal_package(&branch_catalog, recovery.wal().records())?;
         replay_wal_into_catalog(
+            self.services.wal(),
             &mut branch_catalog,
             &self.commit_config,
             &mut self.allocator,
@@ -2829,36 +2829,6 @@ fn commit_durability_class_for_mode(mode: StorageMode) -> LifecycleResult<Commit
 /// resurrection attempt and must fail closed. Records must remain strictly
 /// ordered by commit version across all branches — the WAL is a single
 /// durable log.
-fn validate_recovered_wal_package(
-    catalog: &LifecycleBranchCatalog,
-    records: &[WalRecord],
-) -> LifecycleResult<()> {
-    use crate::lifecycle::LifecycleBranchStatus;
-    let mut previous = None;
-    for record in records {
-        let branch_id = record.branch_id();
-        let descriptor = catalog
-            .lookup(branch_id)
-            .map_err(|_| LifecycleError::RecoveryFailed {
-                reason: "recovered WAL package references an unknown branch",
-            })?;
-        if descriptor.status() == LifecycleBranchStatus::Deleted
-            && !deleted_branch_allows_recovered_version(descriptor, record.commit_version())
-        {
-            return Err(LifecycleError::RecoveryFailed {
-                reason: "recovered WAL package references a deleted branch",
-            });
-        }
-        if previous.is_some_and(|previous| record.commit_version() <= previous) {
-            return Err(LifecycleError::RecoveryFailed {
-                reason: "recovered WAL package must be strictly ordered",
-            });
-        }
-        previous = Some(record.commit_version());
-    }
-    Ok(())
-}
-
 fn deleted_branch_allows_recovered_version(
     descriptor: crate::lifecycle::LifecycleBranchDescriptor,
     version: CommitVersion,
@@ -3531,7 +3501,109 @@ pub(crate) fn descriptor_version_anchor(
         .max(descriptor.deleted_at().unwrap_or(CommitVersion::ZERO))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the streamed replay adds the WAL service to the explicit inputs"
+)]
+/// What the fused package validation decided for one recovered record.
+enum RecoveredRecordDisposition {
+    Replay,
+    /// Legal but not replayable: a deleted branch's pre-deletion record, or
+    /// one fenced by the #2826 generation check. Its version still counts
+    /// (`replayed_max`, the ordering fence) — the versions were really
+    /// allocated.
+    Skip,
+}
+
+/// The former `validate_recovered_wal_package`, fused per record into the
+/// streamed replay (#3319): unknown branch, deleted-branch resurrection, and
+/// strict commit-version ordering — followed by the #2826 generation fence.
+/// WAL records carry no generation, so a record for a branch id whose name
+/// was deleted and re-created (or re-forked) is indistinguishable from the
+/// current generation's by id alone — and replaying it resurrects
+/// acknowledged-deleted rows. `created_at` is the globally visible version
+/// when the CURRENT generation was created; the allocator is globally
+/// monotonic, so every predecessor-generation record is `<= created_at` and
+/// every own record is `> created_at`.
+fn admit_recovered_record(
+    branch_catalog: &LifecycleBranchCatalog,
+    record: &WalRecord,
+    previous: Option<CommitVersion>,
+) -> LifecycleResult<RecoveredRecordDisposition> {
+    let descriptor =
+        branch_catalog
+            .lookup(record.branch_id())
+            .map_err(|_| LifecycleError::RecoveryFailed {
+                reason: "recovered WAL package references an unknown branch",
+            })?;
+    let deleted = descriptor.status() == crate::lifecycle::LifecycleBranchStatus::Deleted;
+    if deleted && !deleted_branch_allows_recovered_version(descriptor, record.commit_version()) {
+        return Err(LifecycleError::RecoveryFailed {
+            reason: "recovered WAL package references a deleted branch",
+        });
+    }
+    if previous.is_some_and(|previous| record.commit_version() <= previous) {
+        return Err(LifecycleError::RecoveryFailed {
+            reason: "recovered WAL package must be strictly ordered",
+        });
+    }
+    if deleted
+        || record_predates_current_generation(record.commit_version(), descriptor.created_at())
+    {
+        return Ok(RecoveredRecordDisposition::Skip);
+    }
+    Ok(RecoveredRecordDisposition::Replay)
+}
+
+/// Replays one admitted record into its branch's catalog slot, reusing the
+/// per-branch read view (see the capture rationale at the call site).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the streamed replay's per-record inputs, spelled explicitly"
+)]
+fn replay_admitted_record<S>(
+    branch_catalog: &mut LifecycleBranchCatalog,
+    commit_config: &crate::commit::CommitRuntimeConfig,
+    allocator: &mut CommitFactAllocator<S>,
+    visible: &mut VisibleVersionTracker,
+    durable_gate: &CommitUnresolvedDurableGate,
+    durability: CommitDurabilityClass,
+    branch_views: &mut Vec<(strata_core::BranchId, crate::branch::read::BranchReadView)>,
+    record: &WalRecord,
+) -> LifecycleResult<crate::commit::CommitReplayReport> {
+    let branch_id = record.branch_id();
+    let generation = branch_catalog
+        .registry()
+        .lookup(branch_id)
+        .map_err(commit_error)?
+        .generation();
+    let target_branch = branch_catalog
+        .branch_state_mut(branch_id, CommitBranchGenerationGuard::exact(generation))?;
+    if !branch_views.iter().any(|(cached, _)| *cached == branch_id) {
+        branch_views.push((
+            branch_id,
+            target_branch.capture_read_view().map_err(branch_error)?,
+        ));
+    }
+    // Rationale: the entry was just inserted above when absent.
+    let read_view = branch_views
+        .iter()
+        .find_map(|(cached, view)| (*cached == branch_id).then_some(view))
+        .expect("replay read view present after insert");
+    let replay = CommitReplayRequest::new(record.clone(), durability);
+    CommitReplayRuntime::new(
+        commit_config,
+        allocator,
+        target_branch,
+        visible,
+        durable_gate,
+    )
+    .replay_with_view(&replay, read_view)
+    .map_err(commit_error)
+}
+
 fn replay_wal_into_catalog<S>(
+    wal: &crate::service::WalService<'_>,
     branch_catalog: &mut LifecycleBranchCatalog,
     commit_config: &crate::commit::CommitRuntimeConfig,
     allocator: &mut CommitFactAllocator<S>,
@@ -3553,54 +3625,55 @@ fn replay_wal_into_catalog<S>(
     // restructured during bootstrap replay, so the view stays valid.
     let mut branch_views: Vec<(strata_core::BranchId, crate::branch::read::BranchReadView)> =
         Vec::new();
-    for record in recovery.wal().records() {
+    // #2567 S3a (#3319): the replay STREAMS the WAL tail (the recovered-WAL
+    // package no longer carries it), and the package validation that used to
+    // pre-walk the whole tail (`validate_recovered_wal_package`) runs fused,
+    // per record, in the same pass: unknown branch, deleted-branch
+    // resurrection, and strict commit-version ordering. A failed check
+    // surfaces the same error it always has; partial in-memory replay before
+    // it is discarded with the failed open, exactly as a mid-replay commit
+    // failure always was.
+    let replay_start = recovery.wal().replay_start();
+    let replay_ceiling = recovery.wal().replay_ceiling();
+    let mut previous: Option<CommitVersion> = None;
+    let mut failure: Option<LifecycleError> = None;
+    let mut replay_one = |record: &WalRecord| -> LifecycleResult<()> {
         replayed_max = replayed_max.max(record.commit_version());
-        let branch_id = record.branch_id();
-        let descriptor = branch_catalog.lookup(branch_id)?;
-        if descriptor.status() == crate::lifecycle::LifecycleBranchStatus::Deleted {
-            continue;
+        let disposition = admit_recovered_record(branch_catalog, record, previous)?;
+        previous = Some(record.commit_version());
+        if matches!(disposition, RecoveredRecordDisposition::Skip) {
+            return Ok(());
         }
-        // #2826: generation fence. WAL records carry no generation, so a
-        // record for a branch id whose name was deleted and re-created (or
-        // re-forked) is indistinguishable from the current generation's by
-        // id alone — and replaying it resurrects acknowledged-deleted rows.
-        // `created_at` is the globally visible version when the CURRENT
-        // generation was created; the allocator is globally monotonic, so
-        // every predecessor-generation record is `<= created_at` and every
-        // own record is `> created_at`. `replayed_max` above deliberately
-        // still counts fenced records: their versions were really allocated.
-        if record_predates_current_generation(record.commit_version(), descriptor.created_at()) {
-            continue;
-        }
-        let generation = branch_catalog
-            .registry()
-            .lookup(branch_id)
-            .map_err(commit_error)?
-            .generation();
-        let target_branch = branch_catalog
-            .branch_state_mut(branch_id, CommitBranchGenerationGuard::exact(generation))?;
-        if !branch_views.iter().any(|(cached, _)| *cached == branch_id) {
-            branch_views.push((
-                branch_id,
-                target_branch.capture_read_view().map_err(branch_error)?,
-            ));
-        }
-        // Rationale: the entry was just inserted above when absent.
-        let read_view = branch_views
-            .iter()
-            .find_map(|(cached, view)| (*cached == branch_id).then_some(view))
-            .expect("replay read view present after insert");
-        let replay = CommitReplayRequest::new(record.clone(), durability);
-        let replay_report = CommitReplayRuntime::new(
+        let replay_report = replay_admitted_record(
+            branch_catalog,
             commit_config,
             allocator,
-            target_branch,
             visible,
             durable_gate,
-        )
-        .replay_with_view(&replay, read_view)
-        .map_err(commit_error)?;
+            durability,
+            &mut branch_views,
+            record,
+        )?;
         report.record_replay(&replay_report);
+        Ok(())
+    };
+    wal.visit_records_after(replay_start, &mut |record| {
+        // The contiguity fence (recovering past a lost table-manifest base):
+        // records above it are the orphaned tail recovery deliberately drops.
+        if replay_ceiling.is_some_and(|ceiling| record.commit_version() > ceiling) {
+            return std::ops::ControlFlow::Continue(());
+        }
+        match replay_one(record) {
+            Ok(()) => std::ops::ControlFlow::Continue(()),
+            Err(error) => {
+                failure = Some(error);
+                std::ops::ControlFlow::Break(())
+            }
+        }
+    })
+    .map_err(super::wal_error)?;
+    if let Some(error) = failure {
+        return Err(error);
     }
     // Fold in the highest committed version present in the restored branch states. Flushed
     // tables can be ahead of both the checkpoint watermark and the surviving WAL (e.g. a

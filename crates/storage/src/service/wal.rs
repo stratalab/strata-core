@@ -1676,6 +1676,52 @@ impl<'a> WalService<'a> {
         Ok(WalRead::new(records, read.truncation))
     }
 
+    /// #2567 S3a (#3319): streaming read of every record above `watermark`,
+    /// in segment-id then append order, WITHOUT materializing the tail:
+    /// segments are read in fixed-size ranged chunks and each record is
+    /// decoded, visited, and dropped. The buffer grows past one chunk only
+    /// when a single envelope straddles chunks — bounded by the largest
+    /// record, never the tail. Truncation semantics are identical to
+    /// `read_all`: a short final envelope on the LATEST segment stops the
+    /// visit and reports the repairable tail; the same shape anywhere else
+    /// is hard corruption. Recovery is the intended caller — its peak was
+    /// O(unreclaimed WAL) through `read_after_commit_version` and the kernel
+    /// OOM killer was the backstop (#3319's 18 GiB field case).
+    /// The visitor returns `ControlFlow::Break` to stop early (the caller
+    /// owns whatever failure it captured); truncation detection past the
+    /// break point is skipped, which only an aborting caller can reach.
+    pub(crate) fn visit_records_after(
+        &self,
+        watermark: CommitVersion,
+        visit: &mut dyn FnMut(&WalRecord) -> std::ops::ControlFlow<()>,
+    ) -> WalServiceResult<Option<WalTruncation>> {
+        let segments = list_segments(&self.backend)?;
+        let latest_segment_id = segments.last().map(|(segment_id, _)| *segment_id);
+        let mut filtered = |record: &WalRecord| {
+            if record.commit_version() > watermark {
+                visit(record)
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        };
+        for (segment_id, object) in segments {
+            let is_latest = latest_segment_id == Some(segment_id);
+            let truncation = visit_segment_records(
+                &self.backend,
+                self.database_id,
+                segment_id,
+                &object,
+                is_latest,
+                self.codec_id,
+                &mut filtered,
+            )?;
+            if truncation.is_some() {
+                return Ok(truncation);
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn growth_facts(&self) -> WalServiceResult<WalGrowthFacts> {
         let sealed = self.sealed_retention_facts()?;
         let retained_segments = sealed.segments.saturating_add(1);
@@ -2094,12 +2140,28 @@ fn open_or_create_segment(
     let object = segment_object(segment_id)?;
     match backend.object_metadata(&object) {
         Ok(metadata) => {
-            let read = read_segment(backend, database_id, segment_id, &object, true, codec_id)?;
-            let segment_size = read
-                .truncation
+            // #2567 S3a (#3319): the resume scan needs only the valid end
+            // offset and the per-record metadata facts — stream them instead
+            // of materializing the active segment's bytes and every decoded
+            // record (on a store whose tail is one segment, that read was a
+            // second whole-tail materialization on the open path).
+            let mut active_metadata = SegmentMetadata::empty(segment_id);
+            let truncation = visit_segment_records(
+                backend,
+                database_id,
+                segment_id,
+                &object,
+                true,
+                codec_id,
+                &mut |record| {
+                    active_metadata
+                        .track_record(record.commit_version(), record.commit_timestamp());
+                    std::ops::ControlFlow::Continue(())
+                },
+            )?;
+            let segment_size = truncation
                 .as_ref()
                 .map_or(metadata.size_bytes(), WalTruncation::valid_end_offset);
-            let active_metadata = segment_metadata_from_records(segment_id, &read.records);
             Ok((object, segment_size, active_metadata))
         }
         Err(source) if source.kind() == BackendErrorKind::NotFound => {
@@ -2375,6 +2437,186 @@ fn parse_segment_object(object: ObjectName) -> WalServiceResult<WalSegmentObject
         });
     }
     Ok((segment_id, object))
+}
+
+/// One ranged read per refill; the transient the recovery path holds is one
+/// chunk (plus at most one straddling envelope), never the tail.
+const RECOVERY_READ_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
+
+/// A WAL segment object read in ranged chunks: `bytes()` is the undecoded
+/// window, `advance` consumes decoded envelopes, `refill` pulls the next
+/// chunk (compacting the consumed prefix first). `at_object_end` is what
+/// distinguishes "short envelope: fetch more" from "short envelope: torn
+/// tail / corruption".
+struct ChunkedSegment<'a> {
+    backend: &'a dyn Backend,
+    object: &'a ObjectName,
+    object_len: u64,
+    buffer: Vec<u8>,
+    /// Absolute object offset of `buffer[0]`.
+    buffer_start: u64,
+    /// Bytes of `buffer` already decoded.
+    consumed: usize,
+}
+
+impl<'a> ChunkedSegment<'a> {
+    fn open(backend: &'a dyn Backend, object: &'a ObjectName) -> WalServiceResult<Self> {
+        let object_len = backend
+            .object_metadata(object)
+            .map_err(|source| WalServiceError::Backend {
+                operation: WalOperation::Read,
+                object: object.clone(),
+                source,
+            })?
+            .size_bytes();
+        Ok(Self {
+            backend,
+            object,
+            object_len,
+            buffer: Vec::new(),
+            buffer_start: 0,
+            consumed: 0,
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buffer[self.consumed..]
+    }
+
+    /// Absolute object offset of the next undecoded byte.
+    fn absolute_offset(&self) -> u64 {
+        self.buffer_start + self.consumed as u64
+    }
+
+    fn advance(&mut self, decoded: usize) {
+        self.consumed += decoded;
+    }
+
+    /// Whether the buffer already ends at the object's last byte — a decode
+    /// that still wants more bytes here is a tail fact, not a short chunk.
+    fn at_object_end(&self) -> bool {
+        self.buffer_start + self.buffer.len() as u64 >= self.object_len
+    }
+
+    /// Pulls the next chunk. Returns false when the object is exhausted.
+    fn refill(&mut self) -> WalServiceResult<bool> {
+        let fetched_to = self.buffer_start + self.buffer.len() as u64;
+        if fetched_to >= self.object_len {
+            return Ok(false);
+        }
+        self.buffer.drain(..self.consumed);
+        self.buffer_start += self.consumed as u64;
+        self.consumed = 0;
+        let take = RECOVERY_READ_CHUNK_BYTES.min(self.object_len - fetched_to);
+        let chunk = self
+            .backend
+            .read_range(self.object, BackendRange::new(fetched_to, take))
+            .map_err(|source| WalServiceError::Backend {
+                operation: WalOperation::Read,
+                object: self.object.clone(),
+                source,
+            })?;
+        if chunk.len() as u64 != take {
+            return Err(WalServiceError::UnexpectedObjectSize {
+                object: self.object.clone(),
+                expected: self.object_len,
+                actual: fetched_to + chunk.len() as u64,
+            });
+        }
+        self.buffer.extend_from_slice(&chunk);
+        Ok(true)
+    }
+}
+
+/// The streaming twin of `read_segment` + `decode_segment_bytes`: identical
+/// decode steps, error mapping, and truncation semantics, but each record —
+/// EVERY record, unfiltered, exactly like `read_segment` — is handed to
+/// `visit` and dropped instead of accumulated.
+#[allow(clippy::too_many_arguments, reason = "mirrors read_segment's inputs")]
+fn visit_segment_records(
+    backend: &dyn Backend,
+    database_id: [u8; 16],
+    segment_id: u64,
+    object: &ObjectName,
+    is_latest: bool,
+    codec_id: &str,
+    visit: &mut dyn FnMut(&WalRecord) -> std::ops::ControlFlow<()>,
+) -> WalServiceResult<Option<WalTruncation>> {
+    let mut segment = ChunkedSegment::open(backend, object)?;
+    let header = loop {
+        match decode_wal_segment_header(segment.bytes(), Some(segment_id)) {
+            Ok((header, header_len)) => {
+                segment.advance(header_len);
+                break header;
+            }
+            Err(FormatError::InsufficientBytes { .. }) if !segment.at_object_end() => {
+                segment.refill()?;
+            }
+            Err(source) => {
+                return Err(WalServiceError::Format {
+                    operation: WalOperation::Read,
+                    object: object.clone(),
+                    source,
+                });
+            }
+        }
+    };
+    if header.database_id() != &database_id {
+        return Err(WalServiceError::DatabaseMismatch {
+            object: object.clone(),
+            segment_id,
+        });
+    }
+
+    while segment.absolute_offset() < segment.object_len {
+        let (envelope, envelope_len) = match decode_wal_record_envelope(segment.bytes()) {
+            Ok(decoded) => decoded,
+            Err(FormatError::InsufficientBytes { .. }) if !segment.at_object_end() => {
+                segment.refill()?;
+                continue;
+            }
+            Err(FormatError::InsufficientBytes { .. }) if is_latest => {
+                // A short FINAL envelope on the latest segment is the
+                // repairable mid-append tail — decode_segment_bytes's exact
+                // contract, offsets included.
+                return Ok(Some(WalTruncation::new(
+                    segment_id,
+                    segment.absolute_offset(),
+                    segment.object_len,
+                )));
+            }
+            Err(source) => {
+                return Err(WalServiceError::Format {
+                    operation: WalOperation::Read,
+                    object: object.clone(),
+                    source,
+                });
+            }
+        };
+        let decoded_record = decode_wal_codec_bytes(codec_id, envelope.encoded_record())?;
+        let (record, consumed) = decode_wal_record(decoded_record.as_ref()).map_err(|source| {
+            WalServiceError::Format {
+                operation: WalOperation::Read,
+                object: object.clone(),
+                source,
+            }
+        })?;
+        if consumed != decoded_record.len() {
+            return Err(WalServiceError::Format {
+                operation: WalOperation::Read,
+                object: object.clone(),
+                source: FormatError::TrailingData {
+                    format: "wal_record",
+                    remaining: decoded_record.len() - consumed,
+                },
+            });
+        }
+        if let std::ops::ControlFlow::Break(()) = visit(&record) {
+            return Ok(None);
+        }
+        segment.advance(envelope_len);
+    }
+    Ok(None)
 }
 
 fn read_segment(

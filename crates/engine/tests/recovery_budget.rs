@@ -177,6 +177,55 @@ fn phase_kb(output: &str, marker: &str, field: &str) -> u64 {
         .unwrap_or_else(|| panic!("{marker} line missing {field}: {line}"))
 }
 
+/// Sums the on-disk WAL bytes the recovery phases will replay.
+fn wal_bytes(dir: &Path) -> u64 {
+    let wal = dir.join("db").join("wal");
+    std::fs::read_dir(&wal)
+        .unwrap_or_else(|err| panic!("read {}: {err}", wal.display()))
+        .map(|entry| {
+            entry
+                .expect("wal entry")
+                .metadata()
+                .expect("wal metadata")
+                .len()
+        })
+        .sum()
+}
+
+/// #3319 / #2567 S3a: the recovery TRANSIENT is bounded — replaying a WAL
+/// tail must not materialize whole-tail decode buffers on top of the
+/// installed state.
+///
+/// Today `recover_wal` decodes the entire tail into one `Vec`, copies it,
+/// and carries it to bootstrap replay: the peak is ~3x the tail (~200 MB
+/// for a ~64 MB WAL). With streamed, windowed replay the peak is the
+/// installed state (the replayed rows' memtables, ~1x the tail — bounding
+/// THAT under the budget is the S3b replay-flush slice, tracked by
+/// `pin_2567_*`) plus a small window. The 1.5x ceiling sits between the
+/// two regimes with margin on both sides.
+#[test]
+fn recovery_transient_stays_within_a_small_multiple_of_the_wal_tail() {
+    let dir = tempfile::tempdir().expect("tmp");
+    run_phase("phase_seed", dir.path());
+    let tail_kb = wal_bytes(dir.path()) / 1024;
+    assert!(
+        tail_kb > 3 * RECOVERY_BUDGET / 1024,
+        "seed must leave a WAL tail several times the budget (got {tail_kb} kB)"
+    );
+
+    let budgeted = run_phase("phase_recover_budgeted", dir.path());
+    let budgeted_peak_kb = phase_kb(&budgeted, "PHASE-RECOVER-BUDGETED", "after_open_kb")
+        - phase_kb(&budgeted, "PHASE-RECOVER-BUDGETED", "before_kb");
+
+    let ceiling_kb = tail_kb + tail_kb / 2;
+    assert!(
+        budgeted_peak_kb <= ceiling_kb,
+        "recovery transient is unbounded: replaying a {tail_kb} kB WAL tail \
+         peaked at {budgeted_peak_kb} kB (> {ceiling_kb} kB = 1.5x the tail) — \
+         the tail is being materialized wholesale instead of streamed"
+    );
+}
+
 /// #2567 pin (shrink-only): recovery memory ignores the configured budget.
 ///
 /// Asserts today's violation exactly: the recovery-phase RSS peak exceeds

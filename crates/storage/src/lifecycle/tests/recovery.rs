@@ -52,7 +52,7 @@ fn recovery_empty_database_returns_healthy_package_without_replay() {
     assert_eq!(outcome.checkpoint().row_count(), 0);
     assert!(outcome.checkpoint().install_outcome().is_none());
     assert_eq!(outcome.wal().replay_start(), CommitVersion::ZERO);
-    assert!(outcome.wal().records().is_empty());
+    assert_eq!(outcome.wal().record_count(), 0);
     assert!(outcome.wal().truncation().is_none());
     assert!(outcome.wal().repair().is_none());
     assert!(outcome.quarantine().object().is_some());
@@ -430,7 +430,13 @@ fn bootstrap_rejects_recovered_log_record_for_unopened_branch() {
         .recover(&request)
         .expect("recovery outcome");
 
-    assert_eq!(outcome.wal().records(), std::slice::from_ref(&record));
+    assert_eq!(
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records"),
+        std::slice::from_ref(&record)
+    );
     assert_eq!(
         shell
             .complete_recovery(&outcome)
@@ -438,6 +444,84 @@ fn bootstrap_rejects_recovered_log_record_for_unopened_branch() {
         LifecycleError::RecoveryFailed {
             reason: "recovered WAL package references an unknown branch",
         }
+    );
+}
+
+/// #2567 S3a (#3319): the streamed bootstrap replay HONORS the contiguity
+/// fence — records above `replay_ceiling` are the orphaned tail recovery
+/// deliberately drops (recovering past a lost table-manifest base), and they
+/// must neither be counted nor reach the branch state. The fence is lowered
+/// directly (the test seam) so enforcement is observable without fabricating
+/// a whole orphaned-delta store.
+#[test]
+fn bootstrap_replay_honors_the_contiguity_ceiling() {
+    let backend: &'static RecoveryTestBackend =
+        crate::testkit::leak_static(RecoveryTestBackend::new());
+    let branch = branch_id(0x4c);
+    let mut shell = assemble_shell(open_plan(RecoveryStrictness::Strict), branch, backend)
+        .expect("durable shell");
+    for (version, key) in [
+        (1, b"first".as_slice()),
+        (2, b"second"),
+        (3, b"above-fence"),
+    ] {
+        let record = wal_record(branch, version, key, b"value");
+        shell
+            .services_mut()
+            .wal_mut()
+            .append(&record)
+            .expect("append record");
+    }
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let mut outcome = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect("recovery outcome");
+    outcome
+        .wal_mut_for_test()
+        .set_replay_ceiling_for_test(Some(CommitVersion::new(2)));
+
+    assert_eq!(
+        outcome.wal().record_count(),
+        3,
+        "the count is pre-fence: every record above replay_start was visited"
+    );
+    let replayable = outcome
+        .wal()
+        .collect_replay_records_for_test(shell.services().wal())
+        .expect("collect replay records");
+    assert_eq!(
+        replayable
+            .iter()
+            .map(|record| record.commit_version().as_u64())
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "the collector mirrors the fence bootstrap enforces"
+    );
+    let runtime = shell.complete_recovery(&outcome).expect("bootstrap");
+
+    assert_eq!(
+        runtime.bootstrap_report().records_seen(),
+        2,
+        "the record above the fence must never reach replay"
+    );
+    let view = runtime
+        .branch_catalog()
+        .branch_state(branch)
+        .expect("branch state")
+        .capture_read_view()
+        .expect("read view");
+    assert!(
+        view.latest(&physical_key(branch, b"second"))
+            .expect("read second")
+            .is_some(),
+        "records at or below the fence replay"
+    );
+    assert!(
+        view.latest(&physical_key(branch, b"above-fence"))
+            .expect("read above-fence")
+            .is_none(),
+        "the orphaned tail above the fence must not be replayed"
     );
 }
 
@@ -466,7 +550,13 @@ fn bootstrap_rejects_recovered_log_records_not_strictly_ordered() {
         .recover(&request)
         .expect("recovery outcome");
 
-    assert_eq!(outcome.wal().records(), &[newer, older]);
+    assert_eq!(
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records"),
+        &[newer, older]
+    );
     assert_eq!(
         shell
             .complete_recovery(&outcome)
@@ -502,7 +592,13 @@ fn bootstrap_rejects_recovered_log_records_with_duplicate_commit_versions() {
         .recover(&request)
         .expect("recovery outcome");
 
-    assert_eq!(outcome.wal().records(), &[first, second]);
+    assert_eq!(
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records"),
+        &[first, second]
+    );
     assert_eq!(
         shell
             .complete_recovery(&outcome)
@@ -800,7 +896,13 @@ fn recovery_loads_checkpoint_installs_rows_and_packages_only_wal_tail() {
     assert_eq!(outcome.checkpoint().row_count(), 1);
     assert!(outcome.checkpoint().install_outcome().is_some());
     assert_eq!(outcome.wal().replay_start(), CommitVersion::new(3));
-    assert_eq!(outcome.wal().records(), std::slice::from_ref(&replayed));
+    assert_eq!(
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records"),
+        std::slice::from_ref(&replayed)
+    );
     assert!(outcome.wal().truncation().is_none());
     assert!(outcome.wal().repair().is_none());
 
@@ -852,7 +954,13 @@ fn recovery_keeps_checkpoint_covered_wal_segment_without_replay_or_cleanup() {
 
     assert_eq!(outcome.health(), &RecoveryHealth::Healthy);
     assert_eq!(outcome.wal().replay_start(), CommitVersion::new(3));
-    assert_eq!(outcome.wal().records(), std::slice::from_ref(&replayed));
+    assert_eq!(
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records"),
+        std::slice::from_ref(&replayed)
+    );
     assert!(outcome.wal().truncation().is_none());
     assert!(outcome.wal().repair().is_none());
     assert!(
@@ -929,7 +1037,13 @@ fn recovery_repairs_latest_partial_log_tail_with_data_loss_fault_when_lossy() {
         .recover(&request)
         .expect("partial tail recovery");
 
-    assert_eq!(outcome.wal().records(), std::slice::from_ref(&record));
+    assert_eq!(
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records"),
+        std::slice::from_ref(&record)
+    );
     let truncation = outcome.wal().truncation().expect("truncation fact");
     assert_eq!(truncation.segment_id(), 1);
     assert_eq!(truncation.valid_end_offset(), valid_end);
@@ -1506,7 +1620,13 @@ fn recovery_allows_explicit_lossy_missing_snapshot_without_trusting_watermark() 
     assert_eq!(outcome.checkpoint().snapshot_id(), Some(7));
     assert_eq!(outcome.checkpoint().trusted_watermark(), None);
     assert_eq!(outcome.wal().replay_start(), CommitVersion::ZERO);
-    assert_eq!(outcome.wal().records(), &[replayed]);
+    assert_eq!(
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records"),
+        &[replayed]
+    );
 }
 
 #[test]
@@ -1545,7 +1665,13 @@ fn lossy_missing_snapshot_allows_uncertain_flush_watermark_as_degraded_data_loss
     assert_eq!(outcome.checkpoint().snapshot_id(), Some(7));
     assert_eq!(outcome.checkpoint().trusted_watermark(), None);
     assert_eq!(outcome.wal().replay_start(), CommitVersion::ZERO);
-    assert_eq!(outcome.wal().records(), &[replayed]);
+    assert_eq!(
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records"),
+        &[replayed]
+    );
 }
 
 #[test]
@@ -4000,7 +4126,11 @@ fn recovery_repairs_latest_partial_log_tail_in_strict_mode_without_faults() {
         "an unacknowledged torn tail is not data loss"
     );
     assert_eq!(
-        outcome.wal().records().len(),
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records")
+            .len(),
         1,
         "the intact record survives the repair"
     );
@@ -4044,6 +4174,70 @@ fn strict_recovery_still_refuses_a_torn_tail_the_commit_watermark_attests() {
         backend.object_bytes(&wal_object).expect("WAL bytes after"),
         before,
         "a refused recovery must not mutate the torn tail — the bytes are forensic evidence"
+    );
+}
+
+/// #2567 S3a: the attestation backstop sees only the REPLAYED max under the
+/// contiguity fence. An orphaned-delta recovery drops the tail above the
+/// fence; a durable commit watermark attested INSIDE that dropped tail must
+/// still refuse (strict) — letting the dropped records satisfy the #2690
+/// check would silently reopen without attested commits.
+#[test]
+fn strict_recovery_refuses_attested_commits_hidden_in_the_orphaned_tail() {
+    let backend: &'static RecoveryTestBackend =
+        crate::testkit::leak_static(RecoveryTestBackend::new());
+    // Attested through 4; the only surviving WAL record is version 4, above
+    // the gap at 1..=3, so the contiguity fence drops it.
+    backend.write_raw(
+        ObjectLayout::wal_watermark().expect("watermark object"),
+        crate::format::encode_wal_watermark(4).expect("watermark bytes"),
+    );
+    let branch = branch_id(0x4d);
+    // An orphaned delta: rowless snapshot at watermark 3 whose recorded
+    // table-manifest base floor (2) sits below it, and no per-branch table
+    // manifest survives — recovery must fall back to the WAL-contiguous
+    // prefix (empty here).
+    let snapshot = crate::format::SnapshotContainer::new(
+        crate::format::SnapshotHeader::new(
+            8,
+            CommitVersion::new(3),
+            Timestamp::from_micros(1_100),
+            DATABASE_ID,
+            "identity",
+        )
+        .expect("header"),
+        Vec::new(),
+    );
+    backend.write_raw(
+        ObjectLayout::snapshot(8).expect("snapshot object"),
+        crate::format::encode_snapshot_container(&snapshot).expect("snapshot bytes"),
+    );
+    write_manifest(
+        backend,
+        &DatabaseManifest::new(DATABASE_ID, "identity")
+            .expect("database root")
+            .with_recovery_facts(1, Some(3), Some(8), Some(CommitVersion::new(2)))
+            .expect("database root facts"),
+    );
+    let mut shell = assemble_shell(open_plan(RecoveryStrictness::Strict), branch, backend)
+        .expect("durable shell");
+    let record = wal_record(branch, 4, b"above-gap", b"value");
+    shell
+        .services_mut()
+        .wal_mut()
+        .append(&record)
+        .expect("append above-gap record");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+
+    let error = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect_err("attested commits inside the dropped orphan tail must refuse");
+
+    assert_eq!(
+        error.code(),
+        "corruption.lifecycle.recovery_corruption",
+        "the watermark backstop, not a fault demotion, must refuse: {error:?}"
     );
 }
 
