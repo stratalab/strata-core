@@ -677,11 +677,12 @@ fn recovery_accepts_flush_watermark_above_checkpoint_when_table_manifest_covers(
         .expect("recover");
 
     assert_eq!(outcome.wal().replay_start(), CommitVersion::new(5));
-    assert_eq!(outcome.wal().records().len(), 1);
-    assert_eq!(
-        outcome.wal().records()[0].commit_version(),
-        CommitVersion::new(6)
-    );
+    let replayable = outcome
+        .wal()
+        .collect_replay_records_for_test(shell.services().wal())
+        .expect("collect replay records");
+    assert_eq!(replayable.len(), 1);
+    assert_eq!(replayable[0].commit_version(), CommitVersion::new(6));
     let view = shell.branch_state().capture_read_view().expect("read view");
     assert_eq!(
         view.latest(table_row.physical_key())
@@ -722,11 +723,12 @@ fn recovery_accepts_flush_watermark_without_checkpoint_when_table_manifest_cover
         .expect("recover");
 
     assert_eq!(outcome.wal().replay_start(), CommitVersion::new(5));
-    assert_eq!(outcome.wal().records().len(), 1);
-    assert_eq!(
-        outcome.wal().records()[0].commit_version(),
-        CommitVersion::new(6)
-    );
+    let replayable = outcome
+        .wal()
+        .collect_replay_records_for_test(shell.services().wal())
+        .expect("collect replay records");
+    assert_eq!(replayable.len(), 1);
+    assert_eq!(replayable[0].commit_version(), CommitVersion::new(6));
     let view = shell.branch_state().capture_read_view().expect("read view");
     assert_eq!(
         view.latest(table_row.physical_key())

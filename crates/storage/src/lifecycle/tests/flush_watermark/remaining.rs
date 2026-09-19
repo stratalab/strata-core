@@ -659,11 +659,12 @@ fn recovery_uses_table_manifest_flush_watermark_as_replay_start_after_validation
         .expect("recover");
 
     assert_eq!(outcome.wal().replay_start(), CommitVersion::new(5));
-    assert_eq!(outcome.wal().records().len(), 1);
-    assert_eq!(
-        outcome.wal().records()[0].commit_version(),
-        CommitVersion::new(6)
-    );
+    let replayable = outcome
+        .wal()
+        .collect_replay_records_for_test(shell.services().wal())
+        .expect("collect replay records");
+    assert_eq!(replayable.len(), 1);
+    assert_eq!(replayable[0].commit_version(), CommitVersion::new(6));
 }
 
 #[test]
@@ -696,7 +697,11 @@ fn recovery_replays_wal_tail_above_table_manifest_flush_watermark() {
         .expect("recover");
 
     assert_eq!(
-        outcome.wal().records()[0].commit_version(),
+        outcome
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .expect("collect replay records")[0]
+            .commit_version(),
         CommitVersion::new(6)
     );
 }

@@ -18,7 +18,7 @@ use crate::branch::state::snapshot::{
 use crate::branch::state::BranchLocalState;
 use crate::format::{
     decode_snapshot_row_payload, decode_snapshot_timeline_payload, encode_snapshot_row_section,
-    FormatError, SnapshotContainer, SnapshotSection, WalRecord, SNAPSHOT_ROW_SECTION_KIND,
+    FormatError, SnapshotContainer, SnapshotSection, SNAPSHOT_ROW_SECTION_KIND,
     SNAPSHOT_TIMELINE_SECTION_KIND, SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY,
 };
 use crate::object::ObjectName;
@@ -80,7 +80,12 @@ pub(crate) struct LifecycleRecoveredCheckpoint {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LifecycleRecoveredWal {
     replay_start: CommitVersion,
-    records: Vec<WalRecord>,
+    /// #2567 S3a: the contiguity fence when recovering past a lost
+    /// table-manifest base — bootstrap replays only records at or below it.
+    /// `None` replays the whole tail. The records themselves are STREAMED,
+    /// never carried here (the whole-tail `Vec` was #3319's transient).
+    replay_ceiling: Option<CommitVersion>,
+    record_count: usize,
     truncation: Option<WalTruncation>,
     repair: Option<WalRepair>,
 }
@@ -393,17 +398,12 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
         checkpoint: &LifecycleRecoveredCheckpoint,
         trusted_flush_watermark: Option<CommitVersion>,
         replay_start: CommitVersion,
-        records: &[WalRecord],
+        wal_max: u64,
         faults: &mut Vec<RecoveryFault>,
     ) -> LifecycleResult<()> {
         let Some(attested) = self.shell.services().wal().durable_commit_watermark() else {
             return Ok(());
         };
-        let wal_max = records
-            .iter()
-            .map(|record| record.commit_version().as_u64())
-            .max()
-            .unwrap_or(0);
         let recoverable = [
             Some(replay_start.as_u64()),
             checkpoint.trusted_watermark().map(CommitVersion::as_u64),
@@ -439,44 +439,61 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
         trusted_flush_watermark: Option<CommitVersion>,
         faults: &mut Vec<RecoveryFault>,
     ) -> LifecycleResult<LifecycleRecoveredWal> {
-        let read = self
+        // #2567 S3a (#3319): a single STREAMING pass, retaining O(1) — the
+        // whole-tail `Vec` (plus its contiguity `BTreeSet`) was the recovery
+        // transient that tracked the unreclaimed WAL and OOM-killed the
+        // 18 GiB field reopen. Replay itself streams again in bootstrap
+        // (`replay_wal_into_catalog`), bounded by the ceiling computed here.
+        let mut wal_max: u64 = 0;
+        let mut contiguous_upper: u64 = replay_start.as_u64();
+        let mut record_count: usize = 0;
+        let truncation = self
             .shell
             .services()
             .wal()
-            .read_after_commit_version(replay_start)
+            .visit_records_after(replay_start, &mut |record| {
+                let version = record.commit_version().as_u64();
+                wal_max = wal_max.max(version);
+                // The replay stream is strictly ascending (bootstrap refuses
+                // otherwise), so the contiguous run from `replay_start + 1`
+                // is a single forward walk — no version set required. An
+                // out-of-order tail computes a smaller fence and then fails
+                // bootstrap's ordering check exactly as it always has.
+                if contiguous_upper
+                    .checked_add(1)
+                    .is_some_and(|next| next == version)
+                {
+                    contiguous_upper = version;
+                }
+                record_count += 1;
+                std::ops::ControlFlow::Continue(())
+            })
             .map_err(wal_recovery_error)?;
-        let truncation = read.truncation().cloned();
 
-        let mut records = read.records().to_vec();
-        if require_contiguous {
-            // Recovering past a lost table-manifest base: keep only the run of commit versions
-            // contiguous from `replay_start + 1`, dropping any orphaned tail above the first
-            // gap. Replaying a tail that sits above the unrecoverable base would reintroduce
-            // the very gap recovery is avoiding.
-            let present: std::collections::BTreeSet<u64> = records
-                .iter()
-                .map(|record| record.commit_version().as_u64())
-                .collect();
-            let mut upper = replay_start.as_u64();
-            while upper
-                .checked_add(1)
-                .is_some_and(|next| present.contains(&next))
-            {
-                upper += 1;
-            }
-            records.retain(|record| record.commit_version().as_u64() <= upper);
-        }
+        // Recovering past a lost table-manifest base: replay only the run of
+        // commit versions contiguous from `replay_start + 1`, dropping any
+        // orphaned tail above the first gap. Replaying a tail that sits above
+        // the unrecoverable base would reintroduce the very gap recovery is
+        // avoiding.
+        let replay_ceiling = require_contiguous.then(|| CommitVersion::new(contiguous_upper));
 
         // The attestation backstop runs BEFORE any repair touches the tail: a
         // refusal must leave the torn bytes on disk for forensics, and the
         // surviving record set is identical before and after the repair (a
-        // torn suffix never parses as a record).
+        // torn suffix never parses as a record). Under the contiguity fence
+        // the attestation must see only the REPLAYED max — an orphaned tail
+        // above the fence is dropped, so letting it satisfy the #2690
+        // watermark would silently reopen without attested commits.
+        let attestable_wal_max = match replay_ceiling {
+            Some(ceiling) => wal_max.min(ceiling.as_u64()),
+            None => wal_max,
+        };
         self.verify_commit_watermark_recoverable(
             request,
             checkpoint,
             trusted_flush_watermark,
             replay_start,
-            &records,
+            attestable_wal_max,
             faults,
         )?;
 
@@ -512,7 +529,8 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
 
         Ok(LifecycleRecoveredWal {
             replay_start,
-            records,
+            replay_ceiling,
+            record_count,
             truncation,
             repair,
         })
@@ -750,6 +768,12 @@ impl LifecycleRecoveryOutcome {
         &self.checkpoint
     }
 
+    /// See [`LifecycleRecoveredWal::set_replay_ceiling_for_test`].
+    #[cfg(test)]
+    pub(crate) fn wal_mut_for_test(&mut self) -> &mut LifecycleRecoveredWal {
+        &mut self.wal
+    }
+
     pub(crate) const fn wal(&self) -> &LifecycleRecoveredWal {
         &self.wal
     }
@@ -835,8 +859,42 @@ impl LifecycleRecoveredWal {
         self.replay_start
     }
 
-    pub(crate) fn records(&self) -> &[WalRecord] {
-        &self.records
+    pub(crate) const fn replay_ceiling(&self) -> Option<CommitVersion> {
+        self.replay_ceiling
+    }
+
+    /// Lowers the fence so bootstrap's ceiling ENFORCEMENT is observable
+    /// without fabricating a whole orphaned-delta store.
+    #[cfg(test)]
+    pub(crate) fn set_replay_ceiling_for_test(&mut self, ceiling: Option<CommitVersion>) {
+        self.replay_ceiling = ceiling;
+    }
+
+    /// Collects exactly the records bootstrap will replay — verification
+    /// only: production replay streams the tail (#3319) and must never
+    /// materialize it.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn collect_replay_records_for_test(
+        &self,
+        wal: &crate::service::WalService<'_>,
+    ) -> Result<Vec<crate::format::WalRecord>, crate::service::WalServiceError> {
+        let mut records = Vec::new();
+        wal.visit_records_after(self.replay_start, &mut |record| {
+            if self
+                .replay_ceiling
+                .is_none_or(|ceiling| record.commit_version() <= ceiling)
+            {
+                records.push(record.clone());
+            }
+            std::ops::ControlFlow::Continue(())
+        })?;
+        Ok(records)
+    }
+
+    /// Records visited above `replay_start` — counted BEFORE the contiguity
+    /// fence (an orphaned tail is visited, fenced, then dropped at replay).
+    pub(crate) const fn record_count(&self) -> usize {
+        self.record_count
     }
 
     pub(crate) const fn truncation(&self) -> Option<&WalTruncation> {

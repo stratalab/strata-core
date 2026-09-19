@@ -216,7 +216,7 @@ fn check_empty_recovery(
         "empty recovery not healthy",
     )?;
     ensure(
-        recovered.wal().records().is_empty(),
+        recovered.wal().record_count() == 0,
         "empty recovery returned log records",
     )?;
     ensure(
@@ -281,7 +281,11 @@ fn check_checkpoint_and_tail(
         "checkpoint watermark not trusted after validation",
     )?;
     ensure(
-        recovered.wal().records() == std::slice::from_ref(&tail),
+        recovered
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .map_err(|error| testkit_error(&error))?
+            == std::slice::from_ref(&tail),
         "recovered log tail did not preserve record",
     )?;
     ensure(
@@ -476,7 +480,11 @@ fn check_input_derived_checkpoint_and_tail(
         "input-derived checkpoint watermark not trusted",
     )?;
     ensure(
-        recovered.wal().records() == expected_tail.as_slice(),
+        recovered
+            .wal()
+            .collect_replay_records_for_test(shell.services().wal())
+            .map_err(|error| testkit_error(&error))?
+            == expected_tail.as_slice(),
         "input-derived WAL tail filtering mismatch",
     )?;
     outcome.input_derived_checkpoint_cases += 1;
@@ -1436,6 +1444,8 @@ mod tests {
     fn recovery_contract_holds_with_all_scenarios_counted() {
         let outcome = check_lifecycle_recovery_contract(b"lifecycle-default-lane-pin")
             .expect("recovery contract holds");
+        assert!(outcome.empty_recovery_cases() > 0);
+        assert!(outcome.log_tail_cases() > 0);
         assert!(outcome.checkpoint_recovery_cases() > 0);
         assert!(outcome.strict_failure_cases() > 0);
         assert!(outcome.lossy_degradation_cases() > 0);

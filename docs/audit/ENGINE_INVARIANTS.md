@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (11, one retired), SCALE (11), DUR (16) = 78 entries, 77 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (11, one retired), SCALE (11), DUR (17) = 79 entries, 78 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -1302,6 +1302,36 @@ the typed race through unwrapped. Dispatcher — `is_rewrite_output_sweep_race` 
 directions `fresh_flush_output_vanishing_mid_build_still_fails_closed`,
 `fresh_rewrite_output_vanishing_mid_build_still_fails_closed`,
 `adopted_rewrite_output_with_conflicting_bytes_still_fails_closed`.
+
+### DUR-017: Recovery streams the WAL tail — the transient is bounded
+
+Recovery must never materialize the unreclaimed WAL tail: the decoded-record
+working set was O(tail) three times over (service read, recovery copy,
+carried replay package) and the kernel OOM killer was the backstop for a
+large-tail reopen (#3319's 18 GiB field case; #2567 path D).
+`WalService::visit_records_after` is the ONLY replay read path: chunked
+ranged reads, incremental decode, records visited and dropped. Its contract
+is byte-equivalence with the materializing read — same records, same order,
+same watermark filter, same truncation facts — and both recovery passes
+(recover_wal's fence/attestation scan and bootstrap's fused validate+replay)
+consume it. The contiguity fence and the #2690 attestation input are
+computed incrementally and must equal their whole-tail formulations
+(attestation sees only the replayed max under the fence). The INSTALLED
+state (replayed memtables) is still O(tail) — bounding it under the memory
+budget is the S3b replay-flush slice, tracked by `pin_2567_*`
+(`crates/engine/tests/recovery_budget.rs`) until it lands.
+
+**Audit**: `recover_wal` and `replay_wal_into_catalog` hold no
+`Vec<WalRecord>` of the tail (`LifecycleRecoveredWal` carries the fence and
+counts, never records); `visit_records_after` is their only record source.
+Equivalence: `visit_records_after_matches_the_materializing_read` and
+`visit_records_after_reports_the_same_torn_tail`
+(`service/wal/tests/read.rs`). Transient bound:
+`recovery_transient_stays_within_a_small_multiple_of_the_wal_tail`
+(`crates/engine/tests/recovery_budget.rs`). Fence enforcement:
+`bootstrap_replay_honors_the_contiguity_ceiling`; fence-aware attestation:
+`strict_recovery_refuses_attested_commits_hidden_in_the_orphaned_tail`
+(`lifecycle/tests/recovery.rs`).
 
 ## How to Use This Catalog
 
