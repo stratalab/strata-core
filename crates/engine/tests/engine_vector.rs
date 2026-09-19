@@ -688,6 +688,111 @@ fn assert_dot_product_search_fixture(vectors: &mut strata_engine::VectorService<
     );
 }
 
+/// Every input of a time-travel read is resolved at the selector, existence
+/// included.
+///
+/// `count_at` and `list_keys_at` validated the collection at **head** and then
+/// read rows at the snapshot (#3229), so the two halves of one answer came from
+/// two different moments. `query_at` and `get_at` in the same file already read
+/// the config at the selector, which is what made the disagreement visible.
+fn exercise_vector_snapshot_existence_contract(database: &mut Database) {
+    let mut vectors = vector_service(database, "default", "default");
+
+    // A commit that predates the collection under test, so its timestamp names
+    // a moment when that collection did not yet exist.
+    let anchor = collection("snapshot-anchor");
+    vectors
+        .create_collection(anchor.clone(), config(2, VectorDistanceMetric::Cosine))
+        .expect("anchor collection create succeeds");
+    let before = vectors
+        .upsert(anchor.clone(), vector_key("x"), embedding([1.0, 0.0]), None)
+        .expect("anchor upsert succeeds");
+    let before = before.commit().timestamp();
+
+    // (1) Created after T. Reading at T must refuse, not answer "empty" — an
+    // empty page is indistinguishable from a collection that existed and held
+    // nothing, which is a different fact.
+    let late = collection("snapshot-late");
+    vectors
+        .create_collection(late.clone(), config(2, VectorDistanceMetric::Cosine))
+        .expect("late collection create succeeds");
+    vectors
+        .upsert(late.clone(), vector_key("a"), embedding([1.0, 0.0]), None)
+        .expect("late upsert succeeds");
+    assert_eq!(
+        vectors
+            .count_at(&late, before)
+            .expect_err("count before the collection existed is not-found")
+            .code(),
+        "not_found.engine.vector_collection",
+        "count_at answered for a collection that did not exist at that snapshot"
+    );
+    assert_eq!(
+        vectors
+            .list_keys_at(&late, None, None, 10, before)
+            .expect_err("keys before the collection existed is not-found")
+            .code(),
+        "not_found.engine.vector_collection",
+        "list_keys_at answered for a collection that did not exist at that snapshot"
+    );
+    // The same reads at head still answer, so the refusal is about the snapshot
+    // and not about the collection.
+    assert_eq!(vectors.count(&late).expect("count at head succeeds"), 1);
+
+    // (2) Dropped after T. Reading at T must still answer, because the
+    // collection existed then and its rows are still reachable — this is the
+    // half `query_at`/`get_at` already got right.
+    let dropped = collection("snapshot-dropped");
+    vectors
+        .create_collection(dropped.clone(), config(2, VectorDistanceMetric::Cosine))
+        .expect("dropped collection create succeeds");
+    let alive = vectors
+        .upsert(
+            dropped.clone(),
+            vector_key("a"),
+            embedding([1.0, 0.0]),
+            None,
+        )
+        .expect("upsert into the soon-dropped collection succeeds");
+    let alive = alive.commit().timestamp();
+    assert!(vectors
+        .delete_collection(&dropped)
+        .expect("collection delete succeeds"));
+
+    assert_eq!(
+        vectors
+            .count_at(&dropped, alive)
+            .expect("count at a moment the collection was alive succeeds"),
+        1,
+        "count_at refused a collection that existed at that snapshot"
+    );
+    assert_eq!(
+        key_strings(
+            vectors
+                .list_keys_at(&dropped, None, None, 10, alive)
+                .expect("keys at a moment the collection was alive succeeds")
+                .keys()
+        ),
+        vec!["a"],
+        "list_keys_at refused a collection that existed at that snapshot"
+    );
+    // Direction control: at head the collection is gone, and both still refuse.
+    assert_eq!(
+        vectors
+            .count(&dropped)
+            .expect_err("count at head is not-found")
+            .code(),
+        "not_found.engine.vector_collection"
+    );
+    assert_eq!(
+        vectors
+            .list_keys(&dropped, None, None, 10)
+            .expect_err("keys at head is not-found")
+            .code(),
+        "not_found.engine.vector_collection"
+    );
+}
+
 fn exercise_vector_timestamp_reads(database: &mut Database) {
     let mut vectors = vector_service(database, "default", "default");
     let collection = collection("history");

@@ -411,8 +411,13 @@ impl<'a> VectorService<'a> {
         timestamp: Timestamp,
     ) -> Result<u64, EngineError> {
         let record = self.branch_record()?;
-        self.require_collection_config(&record, name)?;
-        self.count_with_record(&record, name, ReadSelector::AtTimestamp(timestamp))
+        // Existence is an input of the read, so it is resolved at the selector
+        // like the rows are (#3229). Checking it at head answers "0" for a
+        // collection that did not exist yet, which is indistinguishable from
+        // one that existed and held nothing.
+        let selector = ReadSelector::AtTimestamp(timestamp);
+        self.require_collection_config_with_selector(&record, name, selector)?;
+        self.count_with_record(&record, name, selector)
     }
 
     /// Upserts one vector entry.
@@ -621,7 +626,9 @@ impl<'a> VectorService<'a> {
         selector: ReadSelector,
     ) -> Result<VectorKeyPage, EngineError> {
         let record = self.branch_record()?;
-        self.require_collection_config(&record, collection)?;
+        // The selector this function already takes governs existence too
+        // (#3229), not just the rows below it.
+        self.require_collection_config_with_selector(&record, collection, selector)?;
         if limit == 0 {
             return Ok(VectorKeyPage::new(Vec::new(), false, None));
         }
