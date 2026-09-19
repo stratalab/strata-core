@@ -3347,7 +3347,11 @@ fn build_and_publish_fork_unsealed_table(
         "fork unsealed slice exceeds generated artifact budget",
     )?;
     let branch_component = child.to_string();
-    let object_facts = publish_or_load_existing(
+    // The adoption marker drives the maintenance dispatcher's benign-race
+    // deferral (#3382); this fork publish surfaces failures to the fork
+    // caller directly, which retries at its own level, so the marker is
+    // unused here.
+    let (object_facts, _adopted) = publish_or_load_existing(
         services.table_object(),
         &branch_component,
         0,

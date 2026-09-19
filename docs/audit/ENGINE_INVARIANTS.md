@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (11, one retired), SCALE (11), DUR (15) = 77 entries, 76 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (11, one retired), SCALE (11), DUR (16) = 78 entries, 77 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -1270,6 +1270,38 @@ not browse the store it has not yet recovered.
 **Audit**: The testkit pin (`testkit/lifecycle/durable.rs`, the two-scan listing law in
 `check_durable_standard_create`) instruments the backend and fails on any third listing.
 Verify the pin still asserts exactly two and the fault-injection CI lane runs it.
+
+### DUR-016: An adopted publish output raced by the sweep defers, never fails
+
+Flush and rewrite builds publish outputs under content-deterministic ids and ADOPT an
+existing id (idempotent-retry dedupe). An adopted object may be an orphan of an abandoned
+attempt — legitimate garbage a concurrent table-object sweep is entitled to delete at any
+moment, because build-stage deletion I/O runs off the runtime lock. Every consumer of an
+adopted object must therefore classify "the adopted object is gone" as the typed benign
+race (`RewriteOutputRacedSweep`), which the dispatcher DEFERS (the retry publishes fresh
+bytes once the sweep completes; DUR-009's law: a legal race is not a failure). This holds
+at BOTH phases: install (#2553 — the staged-set + existence check in
+`verify_output_objects_not_swept`) and the off-lock build's own reads of the adopted
+object (#3382 — exact-bytes, reader reopen, cache warm, row verify). Fail-closed stays
+for everything else: a FRESH output's read failure (its name is sweep-pinned by the
+in-flight registry, so it cannot legally vanish) and an adopted object that still EXISTS
+with conflicting bytes (a content conflict on a content-deterministic id is corruption).
+
+**Audit**: Flush — `adopted_output_swept` (`lifecycle/flush.rs`) guards the reader-open,
+warm, and row-verify arms of both prepare paths, and `publish_or_load_existing` returns
+the adoption marker. Rewrite — `adopted_read_failure_error`
+(`lifecycle/rewrite_publication.rs`) guards the adoption exact-bytes check and the
+adopted reopen/warm arms of `publish_rewrite_artifact`; `partial_publish_error` passes
+the typed race through unwrapped. Dispatcher — `is_rewrite_output_sweep_race` arms in
+`finish_background_build_error`, `begin_flush_publish`, `begin_compaction_publish`
+(`lifecycle/durable/maintenance.rs`) and `FlushDrainOutcome::record_error`
+(`lifecycle/flush.rs`) all defer. Tests:
+`adopted_flush_output_vanishing_mid_build_is_a_sweep_race_not_a_failure`,
+`adopted_rewrite_output_vanishing_mid_build_is_a_sweep_race_not_a_failure`,
+`background_build_sweep_race_defers_instead_of_recording_failure`, and the fail-closed
+directions `fresh_flush_output_vanishing_mid_build_still_fails_closed`,
+`fresh_rewrite_output_vanishing_mid_build_still_fails_closed`,
+`adopted_rewrite_output_with_conflicting_bytes_still_fails_closed`.
 
 ## How to Use This Catalog
 

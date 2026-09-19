@@ -2188,10 +2188,17 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         // A stale compaction candidate is a benign scheduling race, not a
         // task failure: concurrent maintenance superseded the candidate's
         // inputs between enqueue and build, and coverage re-derives fresh
-        // candidates on the next pass. Everything else stays Failed.
+        // candidates on the next pass. So is a build whose adopted output a
+        // concurrent table-object sweep deleted mid-read (#3382, the
+        // build-phase leg of #2553): the retried task publishes fresh bytes
+        // once the sweep completes. Everything else stays Failed.
         let outcome = if error.is_stale_compaction_candidate() {
             MaintenanceOutcome::new(task.kind(), MaintenanceOutcomeStatus::Deferred)
                 .with_reason("compaction candidate superseded by concurrent maintenance")
+                .with_stats(LifecycleStats::new(0, 0, 1, 1, 0))
+        } else if error.is_rewrite_output_sweep_race() {
+            MaintenanceOutcome::new(task.kind(), MaintenanceOutcomeStatus::Deferred)
+                .with_reason("build output raced a table-object sweep")
                 .with_stats(LifecycleStats::new(0, 0, 1, 1, 0))
         } else {
             MaintenanceOutcome::new(task.kind(), MaintenanceOutcomeStatus::Failed)

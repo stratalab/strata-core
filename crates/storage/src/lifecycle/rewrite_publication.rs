@@ -907,7 +907,11 @@ fn publish_rewrite_artifact(
         &table_facts,
     )?;
     let object_facts = object.facts;
-    if !object.exact_bytes_validated {
+    // `exact_bytes_validated` marks an ADOPTED output (content-identical
+    // dedupe of an earlier attempt's object) — read failures on it classify
+    // as the #3382 build-phase sweep race when the object is gone.
+    let adopted = object.exact_bytes_validated;
+    if !adopted {
         reader_service
             .require_exact_bytes(&object_facts, &bytes)
             .map_err(|source| {
@@ -928,17 +932,21 @@ fn publish_rewrite_artifact(
             TableReaderConfig::default().deny_runtime_materialization(),
         )
         .map_err(|source| {
-            orphaned_published_object_error(
-                &object_facts,
-                "table rewrite published output before lazy reader reopen failed",
-                source,
-            )
+            adopted_read_failure_error(table_service, adopted, &object_facts, source, |source| {
+                orphaned_published_object_error(
+                    &object_facts,
+                    "table rewrite published output before lazy reader reopen failed",
+                    source,
+                )
+            })
         })?;
     perf_trace::record_table_rewrite_reader_reopen_performed();
     // W2.4: warm the block cache from the just-encoded bytes (no-evict inserts
     // only), so rewriting a table does not turn its hot blocks cold. Bounds
     // are index-derived over byte-exact-validated bytes — a failure here means
     // a corrupt index and fails the publish closed.
+    // (No sweep-race arm: warming reads no backend bytes — the encoded input
+    // is in hand and the bounds were read at open.)
     reader
         .warm_data_blocks_from_encoded(&bytes)
         .map_err(|source| {
@@ -1079,7 +1087,15 @@ fn publish_or_load_rewrite_output(
             .map_err(rewrite_table_service_error)?;
             reader_service
                 .require_exact_bytes(&object_facts, bytes)
-                .map_err(rewrite_existing_table_error)?;
+                .map_err(|error| {
+                    adopted_read_failure_error(
+                        table_service,
+                        true,
+                        &object_facts,
+                        error,
+                        rewrite_existing_table_error,
+                    )
+                })?;
             Ok(PublishedRewriteObject {
                 facts: object_facts,
                 exact_bytes_validated: true,
@@ -1087,6 +1103,31 @@ fn publish_or_load_rewrite_output(
         }
         Err(error) => Err(rewrite_table_service_error(error)),
     }
+}
+
+/// #3382: the build-phase leg of the #2553 sweep race, rewrite side. A read
+/// failure on an ADOPTED (content-identical dedupe) output whose object is
+/// now gone means a concurrent table-object sweep deleted the orphan the
+/// retry adopted — the same benign race `verify_rewrite_outputs_not_swept`
+/// catches at install, one phase earlier. A fresh (non-adopted) output, an
+/// object that still exists (a genuine byte conflict or corruption), and a
+/// failed probe all keep the caller's fail-closed classification via
+/// `fail_closed`.
+fn adopted_read_failure_error<E>(
+    table_service: &TableObjectService<'_>,
+    adopted: bool,
+    object_facts: &TableObjectFacts,
+    error: E,
+    fail_closed: impl FnOnce(E) -> LifecycleError,
+) -> LifecycleError {
+    if adopted {
+        if let Ok(false) = table_service.object_exists(object_facts.object()) {
+            return LifecycleError::RewriteOutputRacedSweep {
+                object: object_facts.object().clone(),
+            };
+        }
+    }
+    fail_closed(error)
 }
 
 fn published_object_names(published: &[PublishedRewriteTable]) -> Vec<String> {
@@ -1131,6 +1172,10 @@ fn partial_publish_error(
         return error;
     }
     match error {
+        // #3382: the benign sweep race must reach the dispatcher typed — the
+        // earlier outputs of this attempt are unreferenced and the sweep
+        // reclaims them, exactly as after any deferral-after-publish.
+        error @ LifecycleError::RewriteOutputRacedSweep { .. } => error,
         LifecycleError::RewritePublicationOrphaned {
             mut objects,
             reason,

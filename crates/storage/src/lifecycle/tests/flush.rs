@@ -1445,6 +1445,93 @@ fn durable_flush_retries_existing_matching_object() {
 }
 
 #[test]
+fn adopted_flush_output_vanishing_mid_build_is_a_sweep_race_not_a_failure() {
+    let branch = branch_id(0x74);
+    let backend: &'static FlushBackend = crate::testkit::leak_static(FlushBackend::new());
+    let row = put_row(branch, b"swept-adopt", 9, 9_000, b"value");
+    let request = flush_request(branch, None);
+    // An abandoned earlier attempt: the object is published, the frozen state
+    // on the real branch still queued (the throwaway state stands in for the
+    // attempt whose install never landed).
+    let mut abandoned = frozen_branch(branch, row.clone());
+    let first_outcome = flush_durable_branch(
+        &mut abandoned,
+        &TableObjectService::new(backend),
+        &TableObjectReaderService::new(backend),
+        &request,
+    )
+    .expect("first flush");
+    let object = first_outcome.table_object().expect("object").clone();
+    // The retry adopts the existing content-identical object; a concurrent
+    // table-object sweep — for which the abandoned object is legitimate
+    // garbage — unlinks it between the adoption and the build's read of it.
+    backend.vanish_object_on_next_read(object);
+    let mut retry = frozen_branch(branch, row);
+    let before = retry.clone();
+
+    let error = flush_durable_branch(
+        &mut retry,
+        &TableObjectService::new(backend),
+        &TableObjectReaderService::new(backend),
+        &request,
+    )
+    .expect_err("adopted object swept mid-build is the benign sweep race");
+
+    assert!(
+        error.is_rewrite_output_sweep_race(),
+        "expected the sweep-race classification, got: {error:?}"
+    );
+    assert_eq!(
+        error.code(),
+        "unavailable.lifecycle.rewrite_output_sweep_race"
+    );
+    assert_eq!(retry, before);
+}
+
+#[test]
+fn fresh_flush_output_vanishing_mid_build_still_fails_closed() {
+    let branch = branch_id(0x75);
+    let row = put_row(branch, b"fresh-vanish", 11, 11_000, b"value");
+    let request = flush_request(branch, None);
+    // Learn the deterministic object name from a scout run on a separate
+    // backend (identical content derives an identical name).
+    let scout_backend: &'static FlushBackend = crate::testkit::leak_static(FlushBackend::new());
+    let mut scout = frozen_branch(branch, row.clone());
+    let scout_outcome = flush_durable_branch(
+        &mut scout,
+        &TableObjectService::new(scout_backend),
+        &TableObjectReaderService::new(scout_backend),
+        &request,
+    )
+    .expect("scout flush");
+    let object = scout_outcome.table_object().expect("object").clone();
+    // A FRESH publish whose object disappears before the build's read is not
+    // the adoption race — nothing else may touch a reserved fresh output, so
+    // this keeps failing closed.
+    let backend: &'static FlushBackend = crate::testkit::leak_static(FlushBackend::new());
+    backend.vanish_object_on_next_read(object);
+    let mut state = frozen_branch(branch, row);
+
+    let outcome = flush_durable_branch(
+        &mut state,
+        &TableObjectService::new(backend),
+        &TableObjectReaderService::new(backend),
+        &request,
+    )
+    .expect("fresh vanish outcome");
+
+    assert!(outcome.published_not_installed());
+    assert_eq!(
+        outcome
+            .maintenance_outcome()
+            .source_error()
+            .expect("source error")
+            .code(),
+        "ambiguous_commit.lifecycle.flush_publication_orphan"
+    );
+}
+
+#[test]
 fn flush_identity_is_deterministic_and_tracks_commit_facts() {
     let branch = branch_id(0x73);
     let request = flush_request(branch, None);
@@ -1928,6 +2015,10 @@ struct FlushBackend {
     range_failure: bool,
     invalid_publish_metadata: bool,
     replacement_bytes: Option<Vec<u8>>,
+    /// The next read (data or metadata) of this object deletes it and reports
+    /// `NotFound` — a concurrent table-object sweep unlinking an orphan between
+    /// a retry's adoption of it and the build's read of it.
+    vanish_on_read: Mutex<Option<ObjectName>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1966,7 +2057,22 @@ impl FlushBackend {
             range_failure: false,
             invalid_publish_metadata: false,
             replacement_bytes: None,
+            vanish_on_read: Mutex::new(None),
         }
+    }
+
+    fn vanish_object_on_next_read(&self, object: ObjectName) {
+        *self.vanish_on_read.lock().expect("vanish") = Some(object);
+    }
+
+    fn take_vanish(&self, name: &ObjectName) -> bool {
+        let mut vanish = self.vanish_on_read.lock().expect("vanish");
+        if vanish.as_ref() == Some(name) {
+            *vanish = None;
+            self.objects.lock().expect("objects").remove(name);
+            return true;
+        }
+        false
     }
 
     fn with_publish_failure(kind: PublishFailureKind) -> Self {
@@ -2037,6 +2143,12 @@ impl Backend for FlushBackend {
     }
 
     fn read_object(&self, name: &ObjectName) -> BackendResult<Vec<u8>> {
+        if self.take_vanish(name) {
+            return Err(BackendError::new(
+                BackendErrorKind::NotFound,
+                "object not found",
+            ));
+        }
         self.objects
             .lock()
             .expect("objects")
@@ -2087,6 +2199,12 @@ impl Backend for FlushBackend {
 
     fn object_metadata(&self, name: &ObjectName) -> BackendResult<BackendMetadata> {
         self.record(FlushOperation::Metadata(name.clone()));
+        if self.take_vanish(name) {
+            return Err(BackendError::new(
+                BackendErrorKind::NotFound,
+                "object not found",
+            ));
+        }
         self.objects
             .lock()
             .expect("objects")
@@ -2382,6 +2500,62 @@ fn segmented_flush_installs_key_disjoint_outputs() {
             CommitVersion::new(3),
         ),
         "interleaved segment commit ranges must union-cover the flushed interval",
+    );
+}
+
+#[test]
+fn adopted_segmented_flush_output_vanishing_mid_build_is_a_sweep_race() {
+    let branch = branch_id(0x85);
+    let backend: &'static FlushBackend = crate::testkit::leak_static(FlushBackend::new());
+    let rows = vec![
+        put_row(branch, b"aa", 1, 100, b"low"),
+        put_row(branch, b"zz", 2, 200, b"high"),
+    ];
+    let request = flush_request(branch, None);
+    // The abandoned earlier attempt publishes both segment objects; its
+    // install never lands (the prepared value is dropped).
+    let abandoned = one_frozen_table_branch(branch, rows.clone());
+    let prepared = prepare_durable_flush_with_cuts_for_test(
+        &abandoned,
+        &TableObjectService::new(backend),
+        &TableObjectReaderService::new(backend),
+        &request,
+        None,
+        None,
+        None,
+        &[encoded_physical(branch, b"zz")],
+    )
+    .expect("prepare abandoned segmented flush")
+    .expect("prepared flush");
+    drop(prepared);
+    let first_object = backend
+        .operations()
+        .into_iter()
+        .find_map(|operation| match operation {
+            FlushOperation::Publish(name, _) => Some(name),
+            _ => None,
+        })
+        .expect("first published segment");
+    // The retry adopts the first segment's content-identical object; a
+    // concurrent sweep unlinks it between the adoption and the build's read.
+    backend.vanish_object_on_next_read(first_object);
+    let state = one_frozen_table_branch(branch, rows);
+
+    let error = prepare_durable_flush_with_cuts_for_test(
+        &state,
+        &TableObjectService::new(backend),
+        &TableObjectReaderService::new(backend),
+        &request,
+        None,
+        None,
+        None,
+        &[encoded_physical(branch, b"zz")],
+    )
+    .expect_err("adopted segment swept mid-build is the benign sweep race");
+
+    assert!(
+        error.is_rewrite_output_sweep_race(),
+        "expected the sweep-race classification, got: {error:?}"
     );
 }
 

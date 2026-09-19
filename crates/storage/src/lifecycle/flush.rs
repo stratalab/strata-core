@@ -981,7 +981,7 @@ fn prepare_single_output_flush(
     let branch_component = request.branch_id().to_string();
     let object_id = derived_object_id(request, &table_facts);
     reserve_inflight_flush_output(inflight, request, &branch_component, &object_id)?;
-    let object_facts = publish_or_load_existing(
+    let (object_facts, adopted) = publish_or_load_existing(
         table_service,
         &branch_component,
         request.target_level().raw().into(),
@@ -1006,6 +1006,9 @@ fn prepare_single_output_flush(
     ) {
         Ok(reader) => reader,
         Err(error) => {
+            if let Some(race) = adopted_output_swept(table_service, adopted, &object_facts) {
+                return Err(race);
+            }
             return Ok(Some(published_not_installed_flush(
                 request,
                 frozen_index,
@@ -1020,7 +1023,9 @@ fn prepare_single_output_flush(
     // inserts only) — a fresh L0 table serves the hottest recent keys and
     // should not start cold. Best-effort is wrong here for the same reason as
     // the rewrite path: bounds are index-derived over just-published bytes,
-    // so a failure means a corrupt index and fails closed.
+    // so a failure means a corrupt index and fails closed. (No sweep-race
+    // arm: warming reads no backend bytes — the encoded input is in hand and
+    // the bounds were read at open.)
     if let Err(error) = reader.warm_data_blocks_from_encoded(artifact.bytes()) {
         return Ok(Some(published_not_installed_flush(
             request,
@@ -1046,6 +1051,10 @@ fn prepare_single_output_flush(
                     object_facts,
                     table,
                 }])
+            } else if let Some(race) = adopted_output_swept(table_service, adopted, &object_facts) {
+                // The row walk reads through the reader; an adopted object
+                // deleted mid-verify reads as a mismatch.
+                return Err(race);
             } else {
                 Err(FlushFrozenOutcome::published_not_installed_outcome(
                     request,
@@ -1179,6 +1188,7 @@ fn prepare_segmented_flush(
     let branch_component = request.branch_id().to_string();
     let mut outputs: Vec<PreparedFlushOutput> = Vec::with_capacity(segments.len());
     let mut published: Vec<(TableRuntimeFacts, TableObjectFacts)> = Vec::new();
+    let mut adopted_outputs: Vec<TableObjectFacts> = Vec::new();
     for segment in segments {
         if segment.is_empty() {
             continue;
@@ -1211,8 +1221,8 @@ fn prepare_segmented_flush(
             artifact.bytes(),
             &table_facts,
         );
-        let object_facts = match publish {
-            Ok(facts) => facts,
+        let (object_facts, adopted) = match publish {
+            Ok(published_output) => published_output,
             // Nothing published yet: propagate like the single path.
             Err(error) if published.is_empty() => return Err(error),
             Err(error) => {
@@ -1234,6 +1244,9 @@ fn prepare_segmented_flush(
         ) {
             Ok(reader) => reader,
             Err(error) => {
+                if let Some(race) = adopted_output_swept(table_service, adopted, &object_facts) {
+                    return Err(race);
+                }
                 published.push((table_facts, object_facts));
                 return Ok(Some(published_not_installed_flush_outputs(
                     request,
@@ -1244,6 +1257,8 @@ fn prepare_segmented_flush(
                 )));
             }
         };
+        // No sweep-race arm: warming reads no backend bytes (see the single
+        // path).
         if let Err(error) = reader.warm_data_blocks_from_encoded(artifact.bytes()) {
             published.push((table_facts, object_facts));
             return Ok(Some(published_not_installed_flush_outputs(
@@ -1253,6 +1268,9 @@ fn prepare_segmented_flush(
                 published,
                 table_error(error),
             )));
+        }
+        if adopted {
+            adopted_outputs.push(object_facts.clone());
         }
         let extras = artifact.extras().clone();
         match branch_owned_table(branch.branch_id(), identity, reader, extras) {
@@ -1280,6 +1298,13 @@ fn prepare_segmented_flush(
     let outputs = if frozen_rows_match_tables(&refs, frozen) {
         Ok(outputs)
     } else {
+        // The row walk reads through the readers; an adopted segment deleted
+        // mid-verify reads as a mismatch.
+        for object_facts in &adopted_outputs {
+            if let Some(race) = adopted_output_swept(table_service, true, object_facts) {
+                return Err(race);
+            }
+        }
         Err(FlushFrozenOutcome::published_not_installed_outcome(
             request,
             frozen_index,
@@ -1866,6 +1891,12 @@ fn derived_object_id(request: &FlushFrozenRequest, table_facts: &TableRuntimeFac
     )
 }
 
+/// Publishes the table object, or — when a content-identical id already
+/// exists (idempotent retry) — adopts it. The second tuple field reports the
+/// adoption: an adopted object may be an orphan of an abandoned attempt that
+/// a concurrent table-object sweep is entitled to delete, so the caller must
+/// classify read failures on it as the #2553 sweep race, not as its own
+/// publication failure.
 pub(crate) fn publish_or_load_existing(
     table_service: &TableObjectService<'_>,
     branch_component: &str,
@@ -1873,16 +1904,43 @@ pub(crate) fn publish_or_load_existing(
     object_id: &str,
     bytes: &[u8],
     table_facts: &TableRuntimeFacts,
-) -> LifecycleResult<TableObjectFacts> {
+) -> LifecycleResult<(TableObjectFacts, bool)> {
     match table_service.publish_create(branch_component, level, object_id, bytes) {
-        Ok(facts) => Ok(facts),
+        Ok(facts) => Ok((facts, false)),
         Err(TableObjectServiceError::Publish { source, .. })
             if source.kind() == PublishFailureKind::PreconditionFailed =>
         {
             TableObjectService::facts_for_table(branch_component, level, object_id, table_facts)
+                .map(|facts| (facts, true))
                 .map_err(table_service_error)
         }
         Err(error) => Err(table_service_error(error)),
+    }
+}
+
+/// #3382: the build-phase leg of the #2553 sweep race. A read failure on an
+/// ADOPTED object whose object is now gone means a concurrent table-object
+/// sweep deleted the orphan the retry adopted — the same benign scheduling
+/// race the install-time `verify_output_objects_not_swept` check catches, one
+/// phase earlier. Returns the typed race for the caller to propagate; `None`
+/// (fresh publish, object still present, or probe failure) keeps the caller's
+/// fail-closed classification.
+fn adopted_output_swept(
+    table_service: &TableObjectService<'_>,
+    adopted: bool,
+    object_facts: &TableObjectFacts,
+) -> Option<LifecycleError> {
+    if !adopted {
+        return None;
+    }
+    match table_service.object_exists(object_facts.object()) {
+        Ok(false) => Some(LifecycleError::RewriteOutputRacedSweep {
+            object: object_facts.object().clone(),
+        }),
+        // A still-present object means the read failure is the object's own
+        // (corruption/conflict — fail closed); a probe failure must not mask
+        // the original error either.
+        Ok(true) | Err(_) => None,
     }
 }
 
