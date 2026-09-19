@@ -256,6 +256,120 @@ fn exercise_vector_metadata_patch_contract(database: &mut Database) {
     );
 }
 
+/// The mirror of the metadata patch: an embedding update keeps the metadata.
+///
+/// `upsert` writes the whole record, which is what every `put` verb in the
+/// product does — so re-embedding a document through `upsert` drops whatever
+/// metadata the caller did not restate. `update_metadata` has always preserved
+/// the embedding it did not touch; until #3120 there was no verb that did the
+/// reverse, so the only way to change an embedding was to replace the record.
+fn exercise_vector_embedding_update_contract(database: &mut Database) {
+    let mut vectors = vector_service(database, "default", "default");
+    let docs = collection("embedding-update");
+    vectors
+        .create_collection(docs.clone(), config(2, VectorDistanceMetric::Cosine))
+        .expect("collection create succeeds");
+    vectors
+        .upsert(
+            docs.clone(),
+            vector_key("doc"),
+            embedding([1.0, 0.0]),
+            Some(metadata(json!({"lang": "en", "tier": 1}))),
+        )
+        .expect("upsert succeeds");
+
+    // The re-embedding case from #3120: the metadata must survive untouched.
+    let updated = vectors
+        .update_embedding(&docs, vector_key("doc"), embedding([0.5, 0.5]))
+        .expect("embedding update succeeds");
+    assert!(updated.updated());
+    assert_eq!(updated.vector_revision(), Some(2));
+    assert!(updated.commit().is_some());
+
+    let entry = vectors
+        .get(&docs, &vector_key("doc"))
+        .expect("read succeeds")
+        .expect("entry exists");
+    assert_eq!(entry.embedding().as_slice(), &[0.5, 0.5]);
+    assert_eq!(
+        entry.metadata().expect("metadata survives").as_inner(),
+        &json!({"lang": "en", "tier": 1}),
+        "an embedding update must not disturb metadata — that asymmetry is the \
+         bug this verb exists to close"
+    );
+
+    // A vector carrying no metadata stays that way rather than gaining an
+    // empty object: the update touches one half and states nothing about the
+    // other.
+    vectors
+        .upsert(
+            docs.clone(),
+            vector_key("bare"),
+            embedding([0.0, 1.0]),
+            None,
+        )
+        .expect("bare upsert succeeds");
+    vectors
+        .update_embedding(&docs, vector_key("bare"), embedding([1.0, 1.0]))
+        .expect("bare embedding update succeeds");
+    let bare = vectors
+        .get(&docs, &vector_key("bare"))
+        .expect("read succeeds")
+        .expect("entry exists");
+    assert_eq!(bare.embedding().as_slice(), &[1.0, 1.0]);
+    assert!(
+        bare.metadata().is_none(),
+        "a vector with no metadata must not acquire any"
+    );
+
+    // Missing key: reported, not created. Same shape as the metadata patch,
+    // so an embedding update can never insert a vector by the back door.
+    let missing = vectors
+        .update_embedding(&docs, vector_key("missing"), embedding([1.0, 0.0]))
+        .expect("missing embedding update succeeds");
+    assert!(!missing.updated());
+    assert_eq!(missing.vector_revision(), None);
+    assert_eq!(missing.commit(), None);
+    assert!(
+        vectors
+            .get(&docs, &vector_key("missing"))
+            .expect("read succeeds")
+            .is_none(),
+        "an update against a missing key must not create it"
+    );
+
+    // The dimension is still the collection's, not the caller's.
+    assert_eq!(
+        vectors
+            .update_embedding(&docs, vector_key("doc"), embedding([1.0, 0.0, 0.0]))
+            .expect_err("wrong dimension rejected")
+            .code(),
+        "invalid_argument.engine.vector_dimension"
+    );
+    assert_eq!(
+        vectors
+            .get(&docs, &vector_key("doc"))
+            .expect("read succeeds")
+            .expect("entry exists")
+            .embedding()
+            .as_slice(),
+        &[0.5, 0.5],
+        "a rejected update must leave the stored embedding alone"
+    );
+
+    assert_eq!(
+        vectors
+            .update_embedding(
+                &collection("missing"),
+                vector_key("doc"),
+                embedding([1.0, 0.0])
+            )
+            .expect_err("missing collection rejected")
+            .code(),
+        "not_found.engine.vector_collection"
+    );
+}
+
 fn exercise_vector_batch_contracts(database: &mut Database) {
     let mut vectors = vector_service(database, "default", "default");
     let collection = collection("batch");

@@ -1098,6 +1098,26 @@ pub(crate) enum VectorCommand {
         #[arg(short = 'f', long, conflicts_with = "patch")]
         file: Option<PathBuf>,
     },
+    /// Replace a vector's embedding, keeping its metadata.
+    UpdateEmbedding {
+        /// Collection name.
+        collection: String,
+        /// Vector key.
+        key: String,
+        /// Vector as JSON array, comma-separated floats, or @path.
+        vector: Option<String>,
+        /// Read vector from a file.
+        #[arg(short = 'f', long, conflicts_with = "vector")]
+        file: Option<PathBuf>,
+        /// Embed this text with the collection's recorded model instead of
+        /// supplying a vector.
+        ///
+        /// The collection must record a model — `--embedding-model` at
+        /// create, or `vector collection set-embedding-model` later — which
+        /// is what says which model to call.
+        #[arg(long, conflicts_with_all = ["vector", "file"])]
+        text: Option<String>,
+    },
     /// Delete one vector.
     #[command(alias = "del")]
     Delete {
@@ -2575,6 +2595,7 @@ pub(crate) mod tests {
         "vector query",
         "vector sample",
         "vector scan",
+        "vector update-embedding",
         "vector update-metadata",
         "vector upsert",
     ];

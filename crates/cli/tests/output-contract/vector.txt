@@ -238,6 +238,32 @@ deleted 1 vector from docs
 ### vector.delete_by_filter · responses/v1/vector/delete_by_filter_applied.json · raw
 1
 ∎
+### vector.embedding.update · edge:applied=false · human
+∎
+### vector.embedding.update · edge:applied=false · human · stderr
+no such vector: doc-a
+∎
+### vector.embedding.update · edge:applied=false · raw
+∎
+### vector.embedding.update · edge:applied=false · raw · stderr
+no such vector: doc-a
+∎
+### vector.embedding.update · edge:committed_at=fixed · human
+updated doc-a in docs
+∎
+### vector.embedding.update · edge:committed_at=fixed · raw
+doc-a
+∎
+### vector.embedding.update · responses/v1/errors/vector/vector_input.json · human
+invalid_argument.executor.vector_input: command failed∎
+### vector.embedding.update · responses/v1/errors/vector/vector_input.json · raw
+invalid_argument.executor.vector_input: command failed∎
+### vector.embedding.update · responses/v1/vector/embedding_update_applied.json · human
+updated doc-a in docs
+∎
+### vector.embedding.update · responses/v1/vector/embedding_update_applied.json · raw
+doc-a
+∎
 ### vector.exists · responses/v1/vector/exists_true.json · human
 true
 ∎

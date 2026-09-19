@@ -1709,6 +1709,26 @@ fn vector_command(command: VectorCommand, scope: &Scope) -> Result<Command, CliE
             key,
             patch: parse_json_argument(patch.as_deref(), file.as_ref(), "metadata patch")?,
         },
+        VectorCommand::UpdateEmbedding {
+            collection,
+            key,
+            vector,
+            file,
+            text,
+        } => Command::VectorUpdateEmbedding {
+            branch: scope.branch.clone(),
+            space: scope.space.clone(),
+            collection,
+            key,
+            // Clap already refuses `--text` alongside a vector or a file, so
+            // an empty vector here means the text form was chosen.
+            vector: if text.is_some() {
+                Vec::new()
+            } else {
+                parse_vector_argument(vector.as_deref(), file.as_ref(), "vector")?
+            },
+            text,
+        },
         VectorCommand::Delete { collection, key } => Command::VectorDelete {
             branch: scope.branch.clone(),
             space: scope.space.clone(),

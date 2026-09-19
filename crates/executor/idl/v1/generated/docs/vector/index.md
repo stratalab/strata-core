@@ -22,6 +22,7 @@ section: vector
 | [Delete vector](/docs/vector/delete) | Delete one vector key. |
 | [Delete all vectors](/docs/vector/delete_all) | Delete all vectors in a collection. |
 | [Delete vectors by filter](/docs/vector/delete_by_filter) | Delete vectors matching a metadata filter. |
+| [Update vector embedding](/docs/vector/embedding/update) | Replace the embedding for one vector, keeping its metadata. |
 | [Check vector existence](/docs/vector/exists) | Check whether one vector key exists. |
 | [Get vector](/docs/vector/get) | Read one vector by key. |
 | [Read vector history](/docs/vector/history) | Read retained vector history for one key. |

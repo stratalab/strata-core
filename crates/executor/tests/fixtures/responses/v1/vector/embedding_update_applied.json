@@ -1,0 +1,22 @@
+{
+  "data": {
+    "collection": "docs",
+    "commit": {
+      "committed_at": null,
+      "delete_count": 0,
+      "durability": "not_durable",
+      "put_count": 1,
+      "timestamp": 6,
+      "version": 6
+    },
+    "effect": {
+      "affected_count": 1,
+      "applied": true,
+      "kind": "updated",
+      "matched": true
+    },
+    "key": "doc-a",
+    "vector_revision": 2
+  },
+  "type": "vector_embedding_update_result"
+}

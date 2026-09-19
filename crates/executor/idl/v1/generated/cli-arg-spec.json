@@ -1060,6 +1060,17 @@
         "start": "start"
       }
     },
+    "vector update-embedding": {
+      "positionals": [
+        "collection",
+        "key",
+        "vector"
+      ],
+      "flags": {
+        "file": "file",
+        "text": "text"
+      }
+    },
     "vector update-metadata": {
       "positionals": [
         "collection",

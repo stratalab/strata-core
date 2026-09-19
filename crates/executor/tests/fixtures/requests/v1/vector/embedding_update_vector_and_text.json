@@ -1,0 +1,10 @@
+{
+  "type": "vector_update_embedding",
+  "collection": "docs",
+  "key": "doc-a",
+  "vector": [
+    0.5,
+    0.5
+  ],
+  "text": "both forms supplied"
+}

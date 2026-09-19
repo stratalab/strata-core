@@ -1,0 +1,5 @@
+{
+  "type": "vector_update_embedding",
+  "collection": "docs",
+  "key": "doc-a"
+}

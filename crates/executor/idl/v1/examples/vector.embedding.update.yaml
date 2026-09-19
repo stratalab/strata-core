@@ -1,0 +1,13 @@
+caption: Re-embed a vector without restating its metadata.
+steps:
+  - call: vector.collection.create
+    args: { collection: docs, dimension: 3, metric: cosine }
+  - call: vector.upsert
+    args: { collection: docs, key: a, vector: [1.0, 0.0, 0.0], metadata: { lang: en, tier: 1 } }
+  - call: vector.embedding.update
+    args: { collection: docs, key: a, vector: [0.0, 1.0, 0.0] }
+  # Querying with the new embedding proves both halves at once: the score is
+  # 1.0 against the vector just written, and the metadata is still attached.
+  - call: vector.query
+    args: { collection: docs, query: [0.0, 1.0, 0.0], k: 1 }
+    returns: ["a"]

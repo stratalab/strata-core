@@ -2008,6 +2008,28 @@
         "reproducible": true
       }
     ],
+    "vector.embedding.update": [
+      {
+        "in": "strata vector collection create docs 3 --metric cosine",
+        "out": "created collection docs (3 dimensions, cosine)",
+        "reproducible": true
+      },
+      {
+        "in": "strata vector upsert docs a '[1.0,0.0,0.0]' --metadata '{\"lang\":\"en\",\"tier\":1}'",
+        "out": "created a in docs",
+        "reproducible": true
+      },
+      {
+        "in": "strata vector update-embedding docs a '[0.0,1.0,0.0]'",
+        "out": "updated a in docs",
+        "reproducible": true
+      },
+      {
+        "in": "strata vector query docs '[0.0,1.0,0.0]' --k 1",
+        "out": "KEY  SCORE  METADATA\na      1.0  {\"lang\":\"en\",\"tier\":1}",
+        "reproducible": true
+      }
+    ],
     "vector.exists": [
       {
         "in": "strata vector collection create docs 3 --metric cosine",

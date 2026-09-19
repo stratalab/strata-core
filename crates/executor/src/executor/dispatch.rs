@@ -481,6 +481,21 @@ impl Executor {
                 key,
                 patch,
             ),
+            Command::VectorUpdateEmbedding {
+                branch,
+                space,
+                collection,
+                key,
+                vector,
+                text,
+            } => self.execute_vector_update_embedding(
+                branch.as_deref(),
+                space.as_deref(),
+                collection,
+                key,
+                vector,
+                text,
+            ),
             Command::VectorDelete {
                 branch,
                 space,

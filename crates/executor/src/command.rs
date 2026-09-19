@@ -1277,6 +1277,36 @@ pub enum Command {
         /// Top-level metadata patch.
         patch: Value,
     },
+    /// Replaces one vector's embedding, leaving its metadata as it stands.
+    ///
+    /// The mirror of `VectorUpdateMetadata`. `VectorUpsert` writes the whole
+    /// record, so re-embedding through it drops metadata the caller did not
+    /// restate (#3120); this changes one half. A missing key is reported, never
+    /// created.
+    VectorUpdateEmbedding {
+        /// Target branch. Defaults to the executor handle branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// Target product space. Defaults to `"default"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Collection name.
+        collection: String,
+        /// Vector key.
+        key: String,
+        /// Dense embedding. Accepted at wire (f64) precision and narrowed to the
+        /// stored f32; a value that underflows or overflows f32 is rejected.
+        ///
+        /// Empty when `text` is supplied instead, on the same terms as
+        /// `VectorUpsert`: a vector carries no model, so supplying one is the
+        /// caller's statement that the collection's recorded model produced it.
+        #[serde(default)]
+        vector: Vec<f64>,
+        /// Text to embed with the collection's recorded model, instead of
+        /// supplying a vector. Exactly one of `vector` or `text`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
     /// Deletes one vector.
     VectorDelete {
         /// Target branch. Defaults to the executor handle branch.
@@ -2602,6 +2632,7 @@ impl Command {
             Self::VectorListKeys { .. } => "vector_list_keys",
             Self::VectorScan { .. } => "vector_scan",
             Self::VectorUpdateMetadata { .. } => "vector_update_metadata",
+            Self::VectorUpdateEmbedding { .. } => "vector_update_embedding",
             Self::VectorDelete { .. } => "vector_delete",
             Self::VectorDeleteByFilter { .. } => "vector_delete_by_filter",
             Self::VectorDeleteAll { .. } => "vector_delete_all",
@@ -2713,6 +2744,7 @@ impl Command {
                 | Self::VectorSetEmbeddingModel { .. }
                 | Self::VectorUpsert { .. }
                 | Self::VectorUpdateMetadata { .. }
+                | Self::VectorUpdateEmbedding { .. }
                 | Self::VectorDelete { .. }
                 | Self::VectorDeleteByFilter { .. }
                 | Self::VectorDeleteAll { .. }

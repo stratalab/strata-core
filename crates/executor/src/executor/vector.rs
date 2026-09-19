@@ -510,6 +510,41 @@ impl Executor {
         })
     }
 
+    pub(super) fn execute_vector_update_embedding(
+        &mut self,
+        branch: Option<&str>,
+        space: Option<&str>,
+        collection: String,
+        key: String,
+        vector: Vec<f64>,
+        text: Option<String>,
+    ) -> Result<Output, ExecutorError> {
+        let collection = vector_collection(collection)?;
+        let key = vector_key(key)?;
+        let vector = resolve_vector_or_text(vector, text, |text| {
+            // A write lands at the head of the branch, so the model that
+            // governs it is the one recorded now — the same rule as upsert.
+            self.embed_with_collection_model(
+                branch,
+                space,
+                &collection,
+                text,
+                EmbedPurpose::Document,
+                None,
+            )
+        })?;
+        let embedding = vector_embedding(vector)?;
+        let mut service = self.vector_service(branch, space)?;
+        let outcome = service.update_embedding(&collection, key.clone(), embedding)?;
+        Ok(Output::VectorEmbeddingUpdateResult {
+            collection: collection.as_str().to_owned(),
+            key: outcome.key().as_str().to_owned(),
+            effect: update_effect(outcome.updated()),
+            commit: outcome.commit().map(commit_receipt),
+            vector_revision: outcome.vector_revision(),
+        })
+    }
+
     pub(super) fn execute_vector_delete(
         &mut self,
         branch: Option<&str>,
