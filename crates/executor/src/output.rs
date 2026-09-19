@@ -289,6 +289,24 @@ pub enum Output {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         vector_revision: Option<u64>,
     },
+    /// Vector embedding update acknowledgement.
+    ///
+    /// The mirror of `VectorMetadataUpdateResult`: the same shape, because the
+    /// two verbs differ only in which half of the record they touch.
+    VectorEmbeddingUpdateResult {
+        /// Collection name.
+        collection: String,
+        /// Vector key.
+        key: String,
+        /// Mutation effect facts.
+        effect: MutationEffect,
+        /// Commit receipt when an update was applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<CommitReceipt>,
+        /// Product vector revision when an update was applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vector_revision: Option<u64>,
+    },
     /// Vector delete acknowledgement.
     VectorDeleteResult {
         /// Collection name.

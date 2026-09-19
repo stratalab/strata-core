@@ -184,6 +184,7 @@ const REQUIRED_VECTOR: &[&str] = &[
     "vector.keys",
     "vector.scan",
     "vector.sample",
+    "vector.embedding.update",
     "vector.metadata.update",
     "vector.delete",
     "vector.delete_by_filter",

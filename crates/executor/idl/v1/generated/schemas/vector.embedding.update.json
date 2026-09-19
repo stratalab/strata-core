@@ -1,0 +1,245 @@
+{
+  "$defs": {
+    "CommitDurability": {
+      "description": "Per-commit durability, as storage attested it at acknowledgement time.\n\n`standard` is an admission fact, not a survival guarantee: the commit\nbecomes durable at the next sync point (close, threshold, rotation) and\ncan be lost to process kill until then. Only `always` attests the commit\nwas synced before acknowledgement. `uncertain` means storage could not\nattest either way (#2756: the former `durable` boolean reported\n`standard` commits as durable, so SDK callers treated unsynced\nacknowledgements as crash-safe).",
+      "oneOf": [
+        {
+          "const": "not_durable",
+          "description": "Volatile commit (cache mode): gone when the process exits.",
+          "type": "string"
+        },
+        {
+          "const": "standard",
+          "description": "Durable after the next sync point; lost with the process until then.",
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "Synced to durable storage before acknowledgement.",
+          "type": "string"
+        },
+        {
+          "const": "uncertain",
+          "description": "Storage could not attest this commit's durability.",
+          "type": "string"
+        }
+      ]
+    },
+    "CommitReceipt": {
+      "description": "Commit facts returned by mutating operations.",
+      "properties": {
+        "committed_at": {
+          "default": null,
+          "description": "The wall-clock instant the commit was applied (UTC epoch microseconds) —\nthe value to format as a calendar date. `null` when unknown (a replayed\nor imported commit). Distinct from the logical `timestamp` (#3112).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "delete_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "durability": {
+          "$ref": "#/$defs/CommitDurability"
+        },
+        "put_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timestamp": {
+          "description": "Commit's position on the logical commit timeline: a monotonic counter\nassigned per commit, so a fresh database starts small (near 1) and it is\nnever a calendar date. Pass it to `--as-of` and match it against\n`history`; do not format it as a Unix/epoch timestamp. For the real\nwall-clock time, use `committed_at`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "timestamp",
+        "durability",
+        "put_count",
+        "delete_count"
+      ],
+      "type": "object"
+    },
+    "MutationEffect": {
+      "description": "Normalized mutation effect facts.",
+      "properties": {
+        "affected_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "applied": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/MutationEffectKind"
+        },
+        "matched": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "applied",
+        "kind",
+        "matched",
+        "affected_count"
+      ],
+      "type": "object"
+    },
+    "MutationEffectKind": {
+      "description": "High-level mutation effect for idempotent and conditional operations.",
+      "oneOf": [
+        {
+          "const": "created",
+          "description": "A new logical entity was created.",
+          "type": "string"
+        },
+        {
+          "const": "updated",
+          "description": "An existing logical entity was updated.",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "description": "An existing logical entity was deleted.",
+          "type": "string"
+        },
+        {
+          "const": "unchanged",
+          "description": "The operation matched but left state unchanged.",
+          "type": "string"
+        },
+        {
+          "const": "not_found",
+          "description": "The operation did not match a visible entity.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://stratadb.org/idl/v1/schemas/vector.embedding.update.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "command": "vector.embedding.update",
+  "request": {
+    "additionalProperties": false,
+    "description": "Replaces one vector's embedding, leaving its metadata as it stands.\n\nThe mirror of `VectorUpdateMetadata`. `VectorUpsert` writes the whole\nrecord, so re-embedding through it drops metadata the caller did not\nrestate (#3120); this changes one half. A missing key is reported, never\ncreated.",
+    "properties": {
+      "branch": {
+        "description": "Target branch. Defaults to the executor handle branch.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "collection": {
+        "description": "Collection name.",
+        "type": "string"
+      },
+      "key": {
+        "description": "Vector key.",
+        "type": "string"
+      },
+      "space": {
+        "description": "Target product space. Defaults to `\"default\"`.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "text": {
+        "description": "Text to embed with the collection's recorded model, instead of\nsupplying a vector. Exactly one of `vector` or `text`.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "type": {
+        "const": "vector_update_embedding",
+        "type": "string"
+      },
+      "vector": {
+        "default": [],
+        "description": "Dense embedding. Accepted at wire (f64) precision and narrowed to the\nstored f32; a value that underflows or overflows f32 is rejected.\n\nEmpty when `text` is supplied instead, on the same terms as\n`VectorUpsert`: a vector carries no model, so supplying one is the\ncaller's statement that the collection's recorded model produced it.",
+        "items": {
+          "format": "double",
+          "type": "number"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "type",
+      "collection",
+      "key"
+    ],
+    "type": "object"
+  },
+  "response": {
+    "description": "Vector embedding update acknowledgement.\n\nThe mirror of `VectorMetadataUpdateResult`: the same shape, because the\ntwo verbs differ only in which half of the record they touch.",
+    "properties": {
+      "data": {
+        "properties": {
+          "collection": {
+            "description": "Collection name.",
+            "type": "string"
+          },
+          "commit": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CommitReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Commit receipt when an update was applied."
+          },
+          "effect": {
+            "$ref": "#/$defs/MutationEffect",
+            "description": "Mutation effect facts."
+          },
+          "key": {
+            "description": "Vector key.",
+            "type": "string"
+          },
+          "vector_revision": {
+            "description": "Product vector revision when an update was applied.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "collection",
+          "key",
+          "effect"
+        ],
+        "type": "object"
+      },
+      "type": {
+        "const": "vector_embedding_update_result",
+        "type": "string"
+      }
+    },
+    "required": [
+      "type",
+      "data"
+    ],
+    "type": "object"
+  }
+}

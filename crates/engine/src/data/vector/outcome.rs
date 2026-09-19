@@ -465,6 +465,58 @@ impl VectorMetadataUpdateOutcome {
     }
 }
 
+/// Embedding update outcome.
+///
+/// The mirror of [`VectorMetadataUpdateOutcome`]: the same four facts, because
+/// the two verbs differ only in which half of the record they touch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VectorEmbeddingUpdateOutcome {
+    key: VectorKey,
+    updated: bool,
+    vector_revision: Option<u64>,
+    commit: Option<CommitOutcome>,
+}
+
+impl VectorEmbeddingUpdateOutcome {
+    pub(crate) const fn new(
+        key: VectorKey,
+        updated: bool,
+        vector_revision: Option<u64>,
+        commit: Option<CommitOutcome>,
+    ) -> Self {
+        Self {
+            key,
+            updated,
+            vector_revision,
+            commit,
+        }
+    }
+
+    #[must_use]
+    /// Returns the vector key.
+    pub const fn key(&self) -> &VectorKey {
+        &self.key
+    }
+
+    #[must_use]
+    /// Returns true when a row was updated.
+    pub const fn updated(&self) -> bool {
+        self.updated
+    }
+
+    #[must_use]
+    /// Returns the vector revision when updated.
+    pub const fn vector_revision(&self) -> Option<u64> {
+        self.vector_revision
+    }
+
+    #[must_use]
+    /// Returns commit facts when a row was updated.
+    pub const fn commit(&self) -> Option<CommitOutcome> {
+        self.commit
+    }
+}
+
 /// Vector delete outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VectorDeleteOutcome {

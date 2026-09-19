@@ -161,6 +161,7 @@
 - [Delete vector](https://stratadb.org/docs/vector/delete.md): Delete one vector key.
 - [Delete all vectors](https://stratadb.org/docs/vector/delete_all.md): Delete all vectors in a collection.
 - [Delete vectors by filter](https://stratadb.org/docs/vector/delete_by_filter.md): Delete vectors matching a metadata filter.
+- [Update vector embedding](https://stratadb.org/docs/vector/embedding/update.md): Replace the embedding for one vector, keeping its metadata.
 - [Check vector existence](https://stratadb.org/docs/vector/exists.md): Check whether one vector key exists.
 - [Get vector](https://stratadb.org/docs/vector/get.md): Read one vector by key.
 - [Read vector history](https://stratadb.org/docs/vector/history.md): Read retained vector history for one key.

@@ -4,11 +4,11 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "e14ad530e9fb06dbbd419ba73606e3f4897323fbccefdb57a3da43ee78550032",
+    "checksum_sha256": "94931179f32cea49d06fe372bf235a323c86636397cc4f52660b3e9e3aa3f187",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
-  "command_count": 137,
+  "command_count": 138,
   "families": [
     {
       "id": "admin",
@@ -186,7 +186,7 @@
     },
     {
       "id": "vector",
-      "command_count": 23,
+      "command_count": 24,
       "commands": [
         "vector.batch_delete",
         "vector.batch_exists",
@@ -209,6 +209,7 @@
         "vector.query",
         "vector.sample",
         "vector.scan",
+        "vector.embedding.update",
         "vector.metadata.update",
         "vector.upsert"
       ]
@@ -10820,6 +10821,188 @@
       "encoding": "page"
     },
     {
+      "id": "vector.embedding.update",
+      "path": [
+        "vector",
+        "update-embedding"
+      ],
+      "path_display": "vector update-embedding",
+      "surface": "verb",
+      "family": "vector",
+      "op": "embedding.update",
+      "kind": "mutation.metadata_update",
+      "title": "Update vector embedding",
+      "summary": "Replace the embedding for one vector, keeping its metadata.",
+      "description": "Replaces one visible vector's embedding and leaves its metadata as it stands — the mirror of `vector update-metadata`, which patches metadata and leaves the embedding. Use this to re-embed a document after a model change, a re-chunk or a backfill; `vector upsert` writes the whole record, so metadata not restated there is removed. Missing vectors return a no-op mutation acknowledgement and are never created. With `text` instead of a vector, the text is embedded through the collection's recorded model on the same inference path as `vector upsert`, so the `inference.*` failures listed below apply only to that form.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
+      "docs": "/docs/vector/embedding/update",
+      "feature": "core",
+      "access": "write",
+      "commit": "commits_on_success",
+      "pagination": "none",
+      "batch": "none",
+      "input": "Command::VectorUpdateEmbedding",
+      "wire": "vector_update_embedding",
+      "outputs": [
+        "Output::VectorEmbeddingUpdateResult"
+      ],
+      "response_model": "MutationAck",
+      "errors": [
+        {
+          "code": "failed_precondition.engine.runtime_closed",
+          "docs": "https://stratadb.org/e/failed_precondition.engine.runtime_closed"
+        },
+        {
+          "code": "not_found.engine.branch",
+          "docs": "https://stratadb.org/e/not_found.engine.branch"
+        },
+        {
+          "code": "invalid_argument.engine.product_space",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.product_space"
+        },
+        {
+          "code": "invalid_argument.engine.vector_collection",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.vector_collection"
+        },
+        {
+          "code": "invalid_argument.engine.vector_key",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.vector_key"
+        },
+        {
+          "code": "not_found.engine.vector_collection",
+          "docs": "https://stratadb.org/e/not_found.engine.vector_collection"
+        },
+        {
+          "code": "invalid_argument.engine.vector_dimension",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.vector_dimension"
+        },
+        {
+          "code": "invalid_argument.engine.vector_embedding",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.vector_embedding"
+        },
+        {
+          "code": "invalid_argument.executor.vector_dimension",
+          "docs": "https://stratadb.org/e/invalid_argument.executor.vector_dimension"
+        },
+        {
+          "code": "invalid_argument.executor.vector_input",
+          "docs": "https://stratadb.org/e/invalid_argument.executor.vector_input"
+        },
+        {
+          "code": "failed_precondition.engine.embedding_model_missing",
+          "docs": "https://stratadb.org/e/failed_precondition.engine.embedding_model_missing"
+        },
+        {
+          "code": "inference.invalid_request",
+          "docs": "https://stratadb.org/e/inference.invalid_request"
+        },
+        {
+          "code": "inference.unsupported_operation",
+          "docs": "https://stratadb.org/e/inference.unsupported_operation"
+        },
+        {
+          "code": "inference.missing_model",
+          "docs": "https://stratadb.org/e/inference.missing_model"
+        },
+        {
+          "code": "inference.unknown_model",
+          "docs": "https://stratadb.org/e/inference.unknown_model"
+        },
+        {
+          "code": "inference.io_failure",
+          "docs": "https://stratadb.org/e/inference.io_failure"
+        },
+        {
+          "code": "inference.model_load_failed",
+          "docs": "https://stratadb.org/e/inference.model_load_failed"
+        },
+        {
+          "code": "inference.local_runtime_failed",
+          "docs": "https://stratadb.org/e/inference.local_runtime_failed"
+        },
+        {
+          "code": "inference.registry_corrupt",
+          "docs": "https://stratadb.org/e/inference.registry_corrupt"
+        },
+        {
+          "code": "inference.missing_api_key",
+          "docs": "https://stratadb.org/e/inference.missing_api_key"
+        },
+        {
+          "code": "inference.provider_auth_failed",
+          "docs": "https://stratadb.org/e/inference.provider_auth_failed"
+        },
+        {
+          "code": "inference.provider_unavailable",
+          "docs": "https://stratadb.org/e/inference.provider_unavailable"
+        },
+        {
+          "code": "inference.provider_timeout",
+          "docs": "https://stratadb.org/e/inference.provider_timeout"
+        },
+        {
+          "code": "inference.provider_rate_limited",
+          "docs": "https://stratadb.org/e/inference.provider_rate_limited"
+        },
+        {
+          "code": "inference.provider_quota_exhausted",
+          "docs": "https://stratadb.org/e/inference.provider_quota_exhausted"
+        },
+        {
+          "code": "inference.provider_model_not_found",
+          "docs": "https://stratadb.org/e/inference.provider_model_not_found"
+        },
+        {
+          "code": "inference.provider_malformed_response",
+          "docs": "https://stratadb.org/e/inference.provider_malformed_response"
+        },
+        {
+          "code": "inference.unsupported_provider",
+          "docs": "https://stratadb.org/e/inference.unsupported_provider"
+        },
+        {
+          "code": "inference.unsupported_parameter",
+          "docs": "https://stratadb.org/e/inference.unsupported_parameter"
+        }
+      ],
+      "fixtures": {
+        "request": "requests/v1/vector/embedding_update.json",
+        "response": "responses/v1/vector/embedding_update_applied.json",
+        "setup": [
+          "requests/v1/vector/collection_create.json",
+          "requests/v1/vector/upsert.json",
+          "requests/v1/setup/vector_upsert_doc_b.json"
+        ],
+        "error_cases": [
+          {
+            "setup": [
+              "requests/v1/vector/collection_create.json",
+              "requests/v1/vector/upsert.json"
+            ],
+            "request": "requests/v1/vector/embedding_update_vector_and_text.json",
+            "expected_error": "responses/v1/errors/vector/vector_input.json"
+          },
+          {
+            "setup": [
+              "requests/v1/vector/collection_create.json",
+              "requests/v1/vector/upsert.json"
+            ],
+            "request": "requests/v1/vector/embedding_update_neither.json",
+            "expected_error": "responses/v1/errors/vector/vector_input.json"
+          }
+        ]
+      },
+      "wire_status": "stable",
+      "render": "mutation_ack",
+      "display": {
+        "receipt": "{verb} {/data/key} in {/data/collection}",
+        "noun": "vector",
+        "identity": [
+          "/data/key"
+        ]
+      },
+      "encoding": null
+    },
+    {
       "id": "vector.metadata.update",
       "path": [
         "vector",
@@ -11221,16 +11404,17 @@
       "vector.delete": 124,
       "vector.delete_all": 125,
       "vector.delete_by_filter": 126,
+      "vector.embedding.update": 135,
       "vector.exists": 127,
       "vector.get": 128,
       "vector.history": 129,
       "vector.index.query": 130,
       "vector.keys": 131,
-      "vector.metadata.update": 135,
+      "vector.metadata.update": 136,
       "vector.query": 132,
       "vector.sample": 133,
       "vector.scan": 134,
-      "vector.upsert": 136
+      "vector.upsert": 137
     },
     "by_path": {
       "arrow export": "arrow.export",
@@ -11368,6 +11552,7 @@
       "vector query": "vector.query",
       "vector sample": "vector.sample",
       "vector scan": "vector.scan",
+      "vector update-embedding": "vector.embedding.update",
       "vector update-metadata": "vector.metadata.update",
       "vector upsert": "vector.upsert"
     }

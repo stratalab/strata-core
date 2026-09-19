@@ -2890,6 +2890,38 @@ fn vector_delete_by_filter_replay_observes_a_declared_output() {
     support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/delete_by_filter.json", &["vector_bulk_delete_result"]);
 }
 
+// ---- vector.embedding.update ----
+
+#[test]
+fn vector_embedding_update_request_wire_roundtrip_is_idempotent() {
+    support::request_roundtrip_idempotent("requests/v1/vector/embedding_update.json");
+}
+
+#[test]
+fn vector_embedding_update_response_wire_roundtrip_is_idempotent() {
+    support::response_roundtrip_idempotent("responses/v1/vector/embedding_update_applied.json");
+}
+
+#[test]
+fn vector_embedding_update_request_rejects_unknown_keys_at_closed_objects() {
+    support::unknown_keys_rejected("requests/v1/vector/embedding_update.json", &[""]);
+}
+
+#[test]
+fn vector_embedding_update_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json"], "requests/v1/vector/embedding_update_vector_and_text.json", "responses/v1/errors/vector/vector_input.json");
+}
+
+#[test]
+fn vector_embedding_update_error_case_1_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json"], "requests/v1/vector/embedding_update_neither.json", "responses/v1/errors/vector/vector_input.json");
+}
+
+#[test]
+fn vector_embedding_update_replay_observes_a_declared_output() {
+    support::replay_observes_declared(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json", "requests/v1/setup/vector_upsert_doc_b.json"], "requests/v1/vector/embedding_update.json", &["vector_embedding_update_result"]);
+}
+
 // ---- vector.exists ----
 
 #[test]

@@ -13,9 +13,10 @@ mod types;
 pub use index::{VectorArtifactSourceDiagnostic, VectorIndexDiagnostics};
 pub use outcome::{
     VectorBatchDeleteOutcome, VectorBatchGetOutcome, VectorBatchUpsertOutcome,
-    VectorBulkDeleteOutcome, VectorCollectionInfo, VectorDeleteOutcome, VectorEntry, VectorHistory,
-    VectorHistoryRow, VectorKeyPage, VectorMetadataUpdateOutcome, VectorSearchMatch,
-    VectorSearchResult, VectorVersionedEntry, VectorWriteOutcome,
+    VectorBulkDeleteOutcome, VectorCollectionInfo, VectorDeleteOutcome,
+    VectorEmbeddingUpdateOutcome, VectorEntry, VectorHistory, VectorHistoryRow, VectorKeyPage,
+    VectorMetadataUpdateOutcome, VectorSearchMatch, VectorSearchResult, VectorVersionedEntry,
+    VectorWriteOutcome,
 };
 pub use service::VectorService;
 pub use types::{

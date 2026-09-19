@@ -16,6 +16,11 @@ fn vector_metadata_patch_contract_runs_in_cache_and_durable_modes() {
 }
 
 #[test]
+fn vector_embedding_update_contract_runs_in_cache_and_durable_modes() {
+    run_database_modes(exercise_vector_embedding_update_contract);
+}
+
+#[test]
 fn vector_batch_contracts_run_in_cache_and_durable_modes() {
     run_database_modes(exercise_vector_batch_contracts);
 }

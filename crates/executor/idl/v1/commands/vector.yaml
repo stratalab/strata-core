@@ -324,6 +324,43 @@ commands:
         - requests/v1/setup/vector_upsert_doc_b.json
       request: requests/v1/vector/metadata_update.json
       response: responses/v1/vector/metadata_update_applied.json
+  - id: vector.embedding.update
+    kind: mutation.metadata_update
+    title: Update vector embedding
+    cli_path: ["vector", "update-embedding"]
+    input: Command::VectorUpdateEmbedding
+    output: Output::VectorEmbeddingUpdateResult
+    prose: commands/vector.embedding.update.md
+    errors+:
+      - invalid_argument.engine.vector_dimension
+      - invalid_argument.engine.vector_embedding
+      - invalid_argument.executor.vector_dimension
+      - invalid_argument.executor.vector_input
+      - failed_precondition.engine.embedding_model_missing
+      - set:inference.model_runtime
+    display:
+      receipt: "{verb} {/data/key} in {/data/collection}"
+      noun: vector
+      identity:
+        - /data/key
+    fixtures:
+      setup:
+        - requests/v1/vector/collection_create.json
+        - requests/v1/vector/upsert.json
+        - requests/v1/setup/vector_upsert_doc_b.json
+      request: requests/v1/vector/embedding_update.json
+      response: responses/v1/vector/embedding_update_applied.json
+      error_cases:
+        - setup:
+            - requests/v1/vector/collection_create.json
+            - requests/v1/vector/upsert.json
+          request: requests/v1/vector/embedding_update_vector_and_text.json
+          expected_error: responses/v1/errors/vector/vector_input.json
+        - setup:
+            - requests/v1/vector/collection_create.json
+            - requests/v1/vector/upsert.json
+          request: requests/v1/vector/embedding_update_neither.json
+          expected_error: responses/v1/errors/vector/vector_input.json
   - id: vector.delete
     kind: mutation.delete
     title: Delete vector

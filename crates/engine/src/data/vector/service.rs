@@ -29,12 +29,12 @@ use super::{
     VectorArtifactRef, VectorArtifactSourceDiagnostic, VectorArtifactStore,
     VectorBatchDeleteOutcome, VectorBatchGetOutcome, VectorBatchUpsertOutcome,
     VectorBulkDeleteOutcome, VectorCollectionInfo, VectorCollectionName, VectorConfig,
-    VectorDeleteOutcome, VectorEmbedding, VectorEntry, VectorFilter, VectorFlatArtifactIdentity,
-    VectorFlatArtifactSourceInput, VectorHistory, VectorHistoryRow, VectorHnswArtifactSourceInput,
-    VectorIndexDiagnostics, VectorIndexManifest, VectorIndexManifestLookup, VectorIndexPolicy,
-    VectorKey, VectorKeyPage, VectorMetadata, VectorMetadataPatch, VectorMetadataUpdateOutcome,
-    VectorRecord, VectorSearchResult, VectorSourceId, VectorTombstone, VectorUpsertEntry,
-    VectorVersionedEntry, VectorWriteOutcome,
+    VectorDeleteOutcome, VectorEmbedding, VectorEmbeddingUpdateOutcome, VectorEntry, VectorFilter,
+    VectorFlatArtifactIdentity, VectorFlatArtifactSourceInput, VectorHistory, VectorHistoryRow,
+    VectorHnswArtifactSourceInput, VectorIndexDiagnostics, VectorIndexManifest,
+    VectorIndexManifestLookup, VectorIndexPolicy, VectorKey, VectorKeyPage, VectorMetadata,
+    VectorMetadataPatch, VectorMetadataUpdateOutcome, VectorRecord, VectorSearchResult,
+    VectorSourceId, VectorTombstone, VectorUpsertEntry, VectorVersionedEntry, VectorWriteOutcome,
 };
 
 #[cfg(any(test, feature = "testkit"))]
@@ -733,6 +733,55 @@ impl<'a> VectorService<'a> {
             vec![RowMutation::put(address, encode_vector_record(&vector)?)],
         )?;
         Ok(VectorMetadataUpdateOutcome::new(
+            key,
+            true,
+            Some(revision),
+            Some(commit),
+        ))
+    }
+
+    /// Replaces one vector's embedding, leaving its metadata as it stands.
+    ///
+    /// The mirror of [`Self::update_metadata`]. `upsert` writes the whole
+    /// record — the product-wide meaning of a `put` verb — so re-embedding
+    /// through it drops metadata the caller did not restate (#3120). This is
+    /// the verb that changes one half.
+    ///
+    /// A missing key is reported, never created: an update cannot insert a
+    /// vector by the back door, which is what keeps it distinct from `upsert`.
+    pub fn update_embedding(
+        &mut self,
+        collection: &VectorCollectionName,
+        key: VectorKey,
+        embedding: VectorEmbedding,
+    ) -> Result<VectorEmbeddingUpdateOutcome, EngineError> {
+        let record = self.branch_record()?;
+        let config = self.require_collection_config(&record, collection)?;
+        embedding.validate_dimension(config.dimension())?;
+        let address = self.vector_address(&record, collection, &key);
+        let Some(row) = self
+            .persistence
+            .read_row(address.clone(), ReadSelector::Latest)?
+        else {
+            return Ok(VectorEmbeddingUpdateOutcome::new(key, false, None, None));
+        };
+        if row.is_tombstone() {
+            return Ok(VectorEmbeddingUpdateOutcome::new(key, false, None, None));
+        }
+        let current = Self::vector_record_from_row(collection, &key, &row)?;
+        let revision = current.vector_revision().saturating_add(1);
+        let vector = VectorRecord::new(
+            collection.clone(),
+            key.clone(),
+            embedding,
+            current.metadata().cloned(),
+            revision,
+        );
+        let commit = self.commit_batch(
+            &record,
+            vec![RowMutation::put(address, encode_vector_record(&vector)?)],
+        )?;
+        Ok(VectorEmbeddingUpdateOutcome::new(
             key,
             true,
             Some(revision),
