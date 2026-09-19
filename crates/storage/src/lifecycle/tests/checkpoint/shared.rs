@@ -205,6 +205,10 @@ pub(in crate::lifecycle::tests) struct CheckpointTestBackend {
     table_manifest_replace_calls: AtomicUsize,
     table_object_create_calls: AtomicUsize,
     lock_held: Arc<AtomicBool>,
+    /// The next read (data or metadata) of this object deletes it and reports
+    /// `NotFound` — a concurrent table-object sweep unlinking an orphan between
+    /// a retry's adoption of it and the build's read of it.
+    vanish_on_read: Mutex<Option<ObjectName>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,7 +256,33 @@ impl CheckpointTestBackend {
             table_manifest_replace_calls: AtomicUsize::new(0),
             table_object_create_calls: AtomicUsize::new(0),
             lock_held: Arc::new(AtomicBool::new(false)),
+            vanish_on_read: Mutex::new(None),
         }
+    }
+
+    pub(in crate::lifecycle::tests) fn vanish_object_on_next_read(&self, object: ObjectName) {
+        *self.vanish_on_read.lock().expect("vanish") = Some(object);
+    }
+
+    pub(in crate::lifecycle::tests) fn replace_object_bytes(
+        &self,
+        object: &ObjectName,
+        bytes: Vec<u8>,
+    ) {
+        self.objects
+            .lock()
+            .expect("objects")
+            .insert(object.clone(), bytes);
+    }
+
+    fn take_vanish(&self, name: &ObjectName) -> bool {
+        let mut vanish = self.vanish_on_read.lock().expect("vanish");
+        if vanish.as_ref() == Some(name) {
+            *vanish = None;
+            self.objects.lock().expect("objects").remove(name);
+            return true;
+        }
+        false
     }
 
     pub(in crate::lifecycle::tests) fn fail_wal_listing(&self) {
@@ -590,6 +620,12 @@ impl Backend for CheckpointTestBackend {
     }
 
     fn read_object(&self, name: &ObjectName) -> BackendResult<Vec<u8>> {
+        if self.take_vanish(name) {
+            return Err(BackendError::new(
+                BackendErrorKind::NotFound,
+                "object not found",
+            ));
+        }
         self.objects
             .lock()
             .expect("objects")
@@ -663,6 +699,12 @@ impl Backend for CheckpointTestBackend {
     }
 
     fn object_metadata(&self, name: &ObjectName) -> BackendResult<BackendMetadata> {
+        if self.take_vanish(name) {
+            return Err(BackendError::new(
+                BackendErrorKind::NotFound,
+                "object not found",
+            ));
+        }
         self.objects
             .lock()
             .expect("objects")

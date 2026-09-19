@@ -211,6 +211,18 @@ fn durable_compaction_validates_output_facts_before_install() {
         error.code(),
         "ambiguous_commit.lifecycle.rewrite_publication_orphan"
     );
+    // The FRESH output's byte-exact validation is the stage that catches a
+    // corrupt publish — not a later reopen. A valid-format object with wrong
+    // content would reopen cleanly, so skipping this stage for fresh outputs
+    // would install wrong bytes (#3382 pinned the `!adopted` gate).
+    assert!(
+        matches!(
+            &error,
+            LifecycleError::RewritePublicationOrphaned { reason, .. }
+                if *reason == "table rewrite published output before byte-exact validation failed"
+        ),
+        "expected the byte-exact validation stage, got: {error:?}"
+    );
     assert_eq!(runtime.branch_state().owned_table_count(), 2);
 }
 
@@ -626,6 +638,117 @@ fn durable_compaction_output_identities_are_retry_stable() {
     }
 
     assert_eq!(backend.table_object_names(), first_objects);
+}
+
+#[test]
+fn adopted_rewrite_output_vanishing_mid_build_is_a_sweep_race_not_a_failure() {
+    let branch = branch_id(0xf1);
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    {
+        // The abandoned earlier attempt: same inputs, output published; the
+        // discarded runtime stands in for the install that never landed.
+        let mut runtime = open_runtime(branch, backend);
+        install_compaction_inputs(runtime.branch_state_mut(), branch, "swept-adopt");
+        runtime
+            .compact_branch_tables(&compaction_request(branch, "swept-adopt"))
+            .expect("first compaction");
+    }
+    let object = backend
+        .table_object_names()
+        .into_iter()
+        .next()
+        .expect("published output");
+    let mut runtime = open_runtime(branch, backend);
+    *runtime.branch_state_mut() = BranchLocalState::empty(branch);
+    install_compaction_inputs(runtime.branch_state_mut(), branch, "swept-adopt");
+    // The retry adopts the existing content-identical output; a concurrent
+    // table-object sweep — for which the abandoned output is legitimate
+    // garbage — unlinks it between the adoption and the build's read of it.
+    backend.vanish_object_on_next_read(object);
+
+    let error = runtime
+        .compact_branch_tables(&compaction_request(branch, "swept-adopt"))
+        .expect_err("adopted output swept mid-build is the benign sweep race");
+
+    assert_eq!(
+        error.code(),
+        "unavailable.lifecycle.rewrite_output_sweep_race"
+    );
+}
+
+#[test]
+fn adopted_rewrite_output_with_conflicting_bytes_still_fails_closed() {
+    let branch = branch_id(0xf2);
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    {
+        let mut runtime = open_runtime(branch, backend);
+        install_compaction_inputs(runtime.branch_state_mut(), branch, "conflict-adopt");
+        runtime
+            .compact_branch_tables(&compaction_request(branch, "conflict-adopt"))
+            .expect("first compaction");
+    }
+    let object = backend
+        .table_object_names()
+        .into_iter()
+        .next()
+        .expect("published output");
+    let mut runtime = open_runtime(branch, backend);
+    *runtime.branch_state_mut() = BranchLocalState::empty(branch);
+    install_compaction_inputs(runtime.branch_state_mut(), branch, "conflict-adopt");
+    // The existing object is present but holds different bytes (corrupted
+    // after open, so recovery's own fact verification does not fire first): a
+    // byte conflict on a content-deterministic id is corruption, not the
+    // sweep race — it must keep failing closed.
+    backend.replace_object_bytes(&object, b"conflicting bytes".to_vec());
+
+    let error = runtime
+        .compact_branch_tables(&compaction_request(branch, "conflict-adopt"))
+        .expect_err("conflicting adopted bytes fail closed");
+
+    assert_eq!(
+        error.code(),
+        "failed_precondition.lifecycle.rewrite_publication"
+    );
+}
+
+#[test]
+fn fresh_rewrite_output_vanishing_mid_build_still_fails_closed() {
+    // Learn the deterministic output name from a scout run on a separate
+    // backend (identical inputs derive an identical name).
+    let branch = branch_id(0xf3);
+    let scout_backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    {
+        let mut scout = open_runtime(branch, scout_backend);
+        install_compaction_inputs(scout.branch_state_mut(), branch, "fresh-vanish");
+        scout
+            .compact_branch_tables(&compaction_request(branch, "fresh-vanish"))
+            .expect("scout compaction");
+    }
+    let object = scout_backend
+        .table_object_names()
+        .into_iter()
+        .next()
+        .expect("published output");
+    // A FRESH publish whose object disappears before the build's read is not
+    // the adoption race — nothing else may touch a reserved fresh output, so
+    // this keeps failing closed as a publication orphan.
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let mut runtime = open_runtime(branch, backend);
+    install_compaction_inputs(runtime.branch_state_mut(), branch, "fresh-vanish");
+    backend.vanish_object_on_next_read(object);
+
+    let error = runtime
+        .compact_branch_tables(&compaction_request(branch, "fresh-vanish"))
+        .expect_err("fresh vanish fails closed");
+
+    assert_eq!(
+        error.code(),
+        "ambiguous_commit.lifecycle.rewrite_publication_orphan"
+    );
 }
 
 #[test]

@@ -2984,6 +2984,50 @@ fn table_object_mark_and_sweep_run_during_active_build() {
     }
 }
 
+/// #3382: a background build whose adopted output a concurrent table-object
+/// sweep deleted mid-read reports the typed race, and the dispatcher DEFERS
+/// the task — the build-phase analog of the #2553 install-time arm. A
+/// deferral is not a failure: nothing lands in the failure ring, so the
+/// nightly stress oracle (`recent_failures` must stay empty) holds.
+#[test]
+fn background_build_sweep_race_defers_instead_of_recording_failure() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x78);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_put_batch(branch, b"sweep-race-row", b"value"),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    runtime
+        .rotate_active_for_maintenance()
+        .expect("rotate active");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::flush(branch))
+        .expect("enqueue flush");
+    let step = runtime
+        .start_next_background_flush_maintenance()
+        .expect("start background flush")
+        .expect("background flush step");
+    let pending_build = match step {
+        DurableBackgroundMaintenanceStep::Build(pending) => *pending,
+        _ => panic!("expected a build step"),
+    };
+    let task = pending_build.task();
+    let object =
+        ObjectLayout::table_object(&branch.to_string(), 0, "swept-mid-build").expect("object");
+
+    let outcome = runtime
+        .finish_background_build_error(task, LifecycleError::RewriteOutputRacedSweep { object })
+        .expect("build error outcome");
+
+    assert_eq!(outcome.status(), MaintenanceOutcomeStatus::Deferred);
+    assert_eq!(runtime.maintenance_status().stats().failed(), 0);
+    assert_eq!(runtime.maintenance_status().stats().deferred(), 1);
+}
+
 /// #2524: reservations release when a build is abandoned — the published
 /// outputs become ordinary orphans and the next mark/sweep cycle reclaims
 /// them (the crash-window analog: the registry is in-memory by design).

@@ -1253,8 +1253,24 @@ impl LifecycleError {
     /// of recording a task failure — coverage re-derives fresh candidates.
     /// #2553: whether this error is the rewrite-output/sweep adoption race —
     /// deferred by the dispatcher exactly like a stale compaction candidate.
+    /// Walks the whole source chain (#3382): a build-phase race is sometimes
+    /// wrapped (e.g. by the partial-publication accumulator) before it
+    /// reaches a dispatcher arm, and a wrapped legal race must not lose its
+    /// deferral classification.
     pub(crate) fn is_rewrite_output_sweep_race(&self) -> bool {
-        matches!(self, Self::RewriteOutputRacedSweep { .. })
+        if matches!(self, Self::RewriteOutputRacedSweep { .. }) {
+            return true;
+        }
+        let mut source: Option<&(dyn Error + 'static)> = self.source();
+        while let Some(error) = source {
+            if let Some(lifecycle) = error.downcast_ref::<Self>() {
+                if matches!(lifecycle, Self::RewriteOutputRacedSweep { .. }) {
+                    return true;
+                }
+            }
+            source = error.source();
+        }
+        false
     }
 
     pub(crate) fn is_stale_compaction_candidate(&self) -> bool {
@@ -1395,6 +1411,32 @@ mod tests {
 
     fn object_name() -> crate::object::ObjectName {
         crate::layout::ObjectLayout::snapshot(1).expect("snapshot name")
+    }
+
+    /// #3382: a wrapped legal race keeps its deferral classification — the
+    /// sweep-race predicate walks the source chain, so an orphan wrapper
+    /// around the typed race still classifies as the race, while an orphan
+    /// around an unrelated source does not.
+    #[test]
+    fn sweep_race_classification_survives_wrapping() {
+        let race = LifecycleError::RewriteOutputRacedSweep {
+            object: object_name(),
+        };
+        assert!(race.is_rewrite_output_sweep_race());
+        let wrapped = LifecycleError::flush_publication_orphaned_with(
+            None,
+            "flush published table object before install failed",
+            LifecycleError::RewriteOutputRacedSweep {
+                object: object_name(),
+            },
+        );
+        assert!(wrapped.is_rewrite_output_sweep_race());
+        let unrelated = LifecycleError::flush_publication_orphaned_with(
+            None,
+            "flush published table object before install failed",
+            LifecycleError::recovery_corruption("not a race"),
+        );
+        assert!(!unrelated.is_rewrite_output_sweep_race());
     }
 
     /// Reason-only variants compare by their reason, so two corruptions with
