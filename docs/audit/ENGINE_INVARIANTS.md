@@ -1303,7 +1303,7 @@ directions `fresh_flush_output_vanishing_mid_build_still_fails_closed`,
 `fresh_rewrite_output_vanishing_mid_build_still_fails_closed`,
 `adopted_rewrite_output_with_conflicting_bytes_still_fails_closed`.
 
-### DUR-017: Recovery streams the WAL tail — the transient is bounded
+### DUR-017: Recovery memory is bounded — streamed reads, flushed installs
 
 Recovery must never materialize the unreclaimed WAL tail: the decoded-record
 working set was O(tail) three times over (service read, recovery copy,
@@ -1316,10 +1316,22 @@ same watermark filter, same truncation facts — and both recovery passes
 (recover_wal's fence/attestation scan and bootstrap's fused validate+replay)
 consume it. The contiguity fence and the #2690 attestation input are
 computed incrementally and must equal their whole-tail formulations
-(attestation sees only the replayed max under the fence). The INSTALLED
-state (replayed memtables) is still O(tail) — bounding it under the memory
-budget is the S3b replay-flush slice, tracked by `pin_2567_*`
-(`crates/engine/tests/recovery_budget.rs`) until it lands.
+(attestation sees only the replayed max under the fence).
+
+The INSTALLED state is bounded too (S3b): replay's appends rotate at the
+budget-derived threshold, and the streamed replay pre-rotates at HALF that
+threshold (so every sealed table's flush artifact fits its own
+generated-artifact budget — the #2541 tension) and drains the frozen
+backlog to disk-resident L0 tables immediately
+(`flush_replayed_state_if_over_threshold`, `lifecycle/durable/bootstrap.rs`).
+Flushed tables are RECORDED in the durable catalog but the manifest publish
+is deferred to the post-open machinery (a mid-recovery publish walks the
+checkpoint-recovered volatile base and refuses — #2855's class). Both
+crash-window legs are sound: live, the sweep's in-memory-reachability
+mapping (`object_for_identity`) pins the recorded objects; after a crash,
+the unlisted objects are unreferenced sweep fodder and the intact WAL
+replays their rows again. Replay flush failures fail the open closed — an
+I/O refusal at open time, where the unbounded path OOM-killed.
 
 **Audit**: `recover_wal` and `replay_wal_into_catalog` hold no
 `Vec<WalRecord>` of the tail (`LifecycleRecoveredWal` carries the fence and
@@ -1327,8 +1339,13 @@ counts, never records); `visit_records_after` is their only record source.
 Equivalence: `visit_records_after_matches_the_materializing_read` and
 `visit_records_after_reports_the_same_torn_tail`
 (`service/wal/tests/read.rs`). Transient bound:
-`recovery_transient_stays_within_a_small_multiple_of_the_wal_tail`
-(`crates/engine/tests/recovery_budget.rs`). Fence enforcement:
+`recovery_transient_stays_within_a_small_multiple_of_the_wal_tail`; the
+full envelope (budget + documented allowance, and budgeted materially below
+unbudgeted): `budgeted_recovery_peak_stays_within_the_budget_envelope`,
+whose budgeted phase also proves read-back completeness and post-recovery
+operability (write + close over the replay-flushed tables) — both in
+`crates/engine/tests/recovery_budget.rs` (the retired `pin_2567_*`'s
+replacement). Fence enforcement:
 `bootstrap_replay_honors_the_contiguity_ceiling`; fence-aware attestation:
 `strict_recovery_refuses_attested_commits_hidden_in_the_orphaned_tail`
 (`lifecycle/tests/recovery.rs`).

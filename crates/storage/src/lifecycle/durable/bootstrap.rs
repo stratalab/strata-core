@@ -22,6 +22,9 @@ use crate::lifecycle::admission_ramp::{
     admission_mode_from_env, LifecycleAdmissionMode, WriteRateBucket,
 };
 use crate::lifecycle::background::{MaintenanceClock, RealMaintenanceClock};
+use crate::lifecycle::flush::{
+    flush_branch_drain_with, flush_drain_request_for_branch, flush_durable_branch_with_budget,
+};
 use crate::lifecycle::{
     branch_resident_bytes, compaction_lane_cap, estimate_commit_batch_active_bytes,
     maintenance_ready_for_recovery_health, projected_commit_rotation_would_exceed_frozen_budget,
@@ -390,17 +393,12 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
     /// Build the runtime catalog, replay durable manifests, and dispatch
     /// WAL replay per branch. Runs inside `complete_recovery`; any error
     /// here triggers the bootstrap-failure transition in the caller.
-    fn prepare_catalog_and_replay(
-        &mut self,
+    /// Shared prelude of both replay entry points: recovery-step admission,
+    /// failed-package refusal, and the mode-derived durability facts.
+    fn replay_preconditions(
+        &self,
         recovery: &LifecycleRecoveryOutcome,
-    ) -> LifecycleResult<(
-        LifecycleRecoveryBootstrapReport,
-        LifecycleBranchCatalog,
-        u64,
-        u64,
-        Vec<crate::branch::facts::BranchReleasePlan>,
-        BranchId,
-    )> {
+    ) -> LifecycleResult<(CommitDurabilityClass, CommitVersion)> {
         require_admitted(self.state, LifecycleOperationKind::RecoveryStep)?;
         if matches!(recovery.health(), RecoveryHealth::Failed { .. }) {
             return Err(LifecycleError::RecoveryFailed {
@@ -412,6 +410,21 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             .checkpoint()
             .trusted_watermark()
             .unwrap_or(CommitVersion::ZERO);
+        Ok((durability, checkpoint_watermark))
+    }
+
+    fn prepare_catalog_and_replay(
+        &mut self,
+        recovery: &LifecycleRecoveryOutcome,
+    ) -> LifecycleResult<(
+        LifecycleRecoveryBootstrapReport,
+        LifecycleBranchCatalog,
+        u64,
+        u64,
+        Vec<crate::branch::facts::BranchReleasePlan>,
+        BranchId,
+    )> {
+        let (durability, checkpoint_watermark) = self.replay_preconditions(recovery)?;
 
         // Build the catalog from the seeded branch's post-checkpoint state.
         let initial_branch_id = self.branch.branch_id();
@@ -511,8 +524,16 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         // Dispatch WAL replay by branch_id into per-branch catalog slots,
         // streaming the tail and validating each record in the same pass
         // (multi-branch aware; formerly `validate_recovered_wal_package`).
+        let mut flush_context = ReplayFlushContext {
+            table_object: self.services.table_object(),
+            table_reader: self.services.table_reader(),
+            table_catalog: &mut self.table_catalog,
+            budget: &self.budget,
+            data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
+        };
         let report = replay_wal_into_catalog(
             self.services.wal(),
+            &mut flush_context,
             &mut branch_catalog,
             &self.commit_config,
             &mut self.allocator,
@@ -557,17 +578,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         &mut self,
         recovery: &LifecycleRecoveryOutcome,
     ) -> LifecycleResult<LifecycleRecoveryBootstrapReport> {
-        require_admitted(self.state, LifecycleOperationKind::RecoveryStep)?;
-        if matches!(recovery.health(), RecoveryHealth::Failed { .. }) {
-            return Err(LifecycleError::RecoveryFailed {
-                reason: "failed recovery package cannot be opened",
-            });
-        }
-        let durability = commit_durability_class_for_mode(self.assembly_facts().mode())?;
-        let checkpoint_watermark = recovery
-            .checkpoint()
-            .trusted_watermark()
-            .unwrap_or(CommitVersion::ZERO);
+        let (durability, checkpoint_watermark) = self.replay_preconditions(recovery)?;
         let branch_generation = self
             .registry
             .lookup(self.branch.branch_id())
@@ -577,8 +588,16 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         // created_at now feeds the replay generation fence.
         let mut branch_catalog =
             LifecycleBranchCatalog::with_existing_branch(&self.branch, branch_generation, None)?;
+        let mut flush_context = ReplayFlushContext {
+            table_object: self.services.table_object(),
+            table_reader: self.services.table_reader(),
+            table_catalog: &mut self.table_catalog,
+            budget: &self.budget,
+            data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
+        };
         replay_wal_into_catalog(
             self.services.wal(),
+            &mut flush_context,
             &mut branch_catalog,
             &self.commit_config,
             &mut self.allocator,
@@ -3501,10 +3520,94 @@ pub(crate) fn descriptor_version_anchor(
         .max(descriptor.deleted_at().unwrap_or(CommitVersion::ZERO))
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the streamed replay adds the WAL service to the explicit inputs"
-)]
+/// Everything a mid-replay durable flush needs (#3319 S3b), bundled so the
+/// streamed replay can drain a branch's replayed backlog to disk-resident
+/// tables — the maintenance flush runner's publish/install recipe, with the
+/// manifest publish deferred to the post-open machinery.
+struct ReplayFlushContext<'a> {
+    table_object: &'a crate::service::TableObjectService<'static>,
+    table_reader: &'a crate::service::TableObjectReaderService<'static>,
+    table_catalog: &'a mut LifecycleDurableTableCatalog,
+    budget: &'a StorageBudgetLedger,
+    data_block_bytes: Option<u32>,
+}
+
+/// #3319 S3b: replay cannot refuse (recovery has no backpressure), so the
+/// memory budget is enforced by DRAINING — past the budget-derived rotation
+/// threshold the branch's replayed rows seal and flush to L0. A crash
+/// between flushes is already sound: the flushed objects are unlisted by
+/// any manifest, so the sweep reclaims them and the intact WAL replays
+/// their rows again. Flush failures fail the open closed — an I/O refusal
+/// at open time, where pre-S3b the same store OOM-killed instead.
+fn flush_replayed_state_if_over_threshold(
+    context: &mut ReplayFlushContext<'_>,
+    branch_catalog: &mut LifecycleBranchCatalog,
+    branch_id: strata_core::BranchId,
+) -> LifecycleResult<()> {
+    let generation = branch_catalog
+        .registry()
+        .lookup(branch_id)
+        .map_err(commit_error)?
+        .generation();
+    let branch = branch_catalog
+        .branch_state_mut(branch_id, CommitBranchGenerationGuard::exact(generation))?;
+    // Replay's own appends rotate at the budget-derived threshold
+    // (`branch/state/append.rs`) — but a table sealed at the FULL threshold
+    // builds a flush artifact just over the generated-artifact pool derived
+    // from the same budget (the #2541 tension, cache-mode's half-pool bound).
+    // Replay therefore pre-rotates at HALF the threshold, so every sealed
+    // table's artifact fits its own budget check, and drains whatever is
+    // frozen immediately.
+    if branch.active().approximate_size_bytes() >= branch.config().active_rotation_bytes() / 2 {
+        branch.rotate_active();
+    }
+    if branch.frozen_table_count() == 0 {
+        return Ok(());
+    }
+    let request = flush_drain_request_for_branch(branch_id)?;
+    let table_catalog = &mut *context.table_catalog;
+    let outcome = flush_branch_drain_with(branch, &request, |branch, request| {
+        let outcome = flush_durable_branch_with_budget(
+            branch,
+            context.table_object,
+            context.table_reader,
+            request,
+            Some(context.budget),
+            context.data_block_bytes,
+        )?;
+        // Record each flushed table in the durable catalog, but leave the
+        // MANIFEST publish to the post-open machinery: a mid-recovery
+        // publish walks the branch and refuses on the checkpoint-recovered
+        // volatile base (#2855's class), and the catalog's
+        // `manifest_publish_pending` debt is exactly the state the runtime
+        // already reconciles after open. A crash before that publish is
+        // sound: the unlisted objects are sweep fodder and the WAL replays
+        // their rows again.
+        if outcome.completed() {
+            for table in outcome.tables() {
+                let Some(object_facts) = table.object_facts() else {
+                    continue;
+                };
+                table_catalog.record_table(table.table_identity().clone(), object_facts.clone())?;
+            }
+        }
+        Ok(outcome.maintenance_outcome())
+    })?;
+    let maintenance = outcome.maintenance_outcome();
+    if maintenance.status() == crate::lifecycle::MaintenanceOutcomeStatus::Failed {
+        return Err(maintenance.source_error().cloned().unwrap_or(
+            LifecycleError::MaintenanceTaskFailed {
+                reason: "replay flush failed without a typed source",
+            },
+        ));
+    }
+    // The cached replay read view is untouched: its Arc-snapshot pins at
+    // most the FIRST sealed memtable per branch (~half the rotation
+    // threshold) — later memtables are new objects the view never captured,
+    // so the flushed rows' memory is genuinely released.
+    Ok(())
+}
+
 /// What the fused package validation decided for one recovered record.
 enum RecoveredRecordDisposition {
     Replay,
@@ -3602,8 +3705,13 @@ fn replay_admitted_record<S>(
     .map_err(commit_error)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the streamed replay adds the WAL service to the explicit inputs"
+)]
 fn replay_wal_into_catalog<S>(
     wal: &crate::service::WalService<'_>,
+    flush_context: &mut ReplayFlushContext<'_>,
     branch_catalog: &mut LifecycleBranchCatalog,
     commit_config: &crate::commit::CommitRuntimeConfig,
     allocator: &mut CommitFactAllocator<S>,
@@ -3621,8 +3729,10 @@ fn replay_wal_into_catalog<S>(
     // table-heavy close). A pre-replay capture classifies every later record
     // correctly: replayed commit versions are unique/ascending, so a
     // record's (key, version) row can only pre-exist from a pre-crash apply,
-    // which the first capture observed. Branch states are not rotated or
-    // restructured during bootstrap replay, so the view stays valid.
+    // which the first capture observed. S3b's mid-replay rotation and flush
+    // restructure the BRANCH, not the view: the view's Arc-snapshot handles
+    // are immune to installs and removals beneath it, and replayed versions
+    // are unique, so the classification stays exact.
     let mut branch_views: Vec<(strata_core::BranchId, crate::branch::read::BranchReadView)> =
         Vec::new();
     // #2567 S3a (#3319): the replay STREAMS the WAL tail (the recovered-WAL
@@ -3655,6 +3765,9 @@ fn replay_wal_into_catalog<S>(
             record,
         )?;
         report.record_replay(&replay_report);
+        // #3319 S3b: bound the INSTALLED state too — past the budget-derived
+        // rotation threshold the replayed rows seal and flush to L0.
+        flush_replayed_state_if_over_threshold(flush_context, branch_catalog, record.branch_id())?;
         Ok(())
     };
     wal.visit_records_after(replay_start, &mut |record| {
