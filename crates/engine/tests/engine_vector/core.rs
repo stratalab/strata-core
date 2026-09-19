@@ -36,6 +36,11 @@ fn vector_timestamp_reads_track_overwrite_filter_and_delete() {
 }
 
 #[test]
+fn vector_snapshot_existence_contract_runs_in_cache_and_durable_modes() {
+    run_database_modes(exercise_vector_snapshot_existence_contract);
+}
+
+#[test]
 fn vector_branch_and_space_isolation_match_other_primitives() {
     let mut database = open_cache_database().expect("cache open succeeds");
     {
