@@ -2,10 +2,13 @@ name: apt-install
 description: >
   Install Ubuntu packages without letting the runner image's third-party
   repos fail the job (#3272): `apt-get update` refreshes ONLY the Ubuntu
-  archives (`sources.list.d` disabled for the update, third-party indexes
-  left untouched), with transport retries. Every package we install comes
-  from Ubuntu main/universe, so a chrome-stable Hash Sum mismatch must
-  never cost a lane — or a tag.
+  archives, with transport retries. On current ubuntu-latest images the
+  Ubuntu entries themselves live in sources.list.d/ubuntu.sources, so the
+  update points AT that file and disables the rest of sources.list.d —
+  disabling sourceparts wholesale refreshes nothing and installs then 404
+  against the image's stale baked indexes (found live on this action's own
+  first CI run). Every package we install comes from Ubuntu main/universe,
+  so a chrome-stable Hash Sum mismatch must never cost a lane — or a tag.
 inputs:
   packages:
     description: Space-separated Ubuntu packages to install.
@@ -16,8 +19,16 @@ runs:
     - name: Update Ubuntu archives and install
       shell: bash
       run: |
-        sudo apt-get update \
-          -o Dir::Etc::sourceparts=- \
-          -o APT::Get::List-Cleanup=0 \
-          -o Acquire::Retries=3
+        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+          sudo apt-get update \
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- \
+            -o APT::Get::List-Cleanup=0 \
+            -o Acquire::Retries=3
+        else
+          sudo apt-get update \
+            -o Dir::Etc::sourceparts=- \
+            -o APT::Get::List-Cleanup=0 \
+            -o Acquire::Retries=3
+        fi
         sudo apt-get install -y --no-install-recommends ${{ inputs.packages }}

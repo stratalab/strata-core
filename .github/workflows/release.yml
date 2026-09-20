@@ -113,8 +113,13 @@ jobs:
             brew install cmake
           else
             # #3272: refresh only the Ubuntu archives — a third-party repo
-            # index mismatch must not fail a tag build.
-            sudo apt-get update -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o Acquire::Retries=3
+            # index mismatch must not fail a tag build. On current images the
+            # Ubuntu entries live in sources.list.d/ubuntu.sources.
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o Acquire::Retries=3
+            else
+              sudo apt-get update -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o Acquire::Retries=3
+            fi
             sudo apt-get install -y --no-install-recommends cmake
           fi
       - name: Build release binary
