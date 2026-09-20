@@ -2006,8 +2006,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         // already covered and the next pass reclaims the rest (truncation tasks coalesce).
         let state = self.state;
         let maintenance = &mut self.maintenance;
-        let manifest = self.services.manifest();
-        let wal = self.services.wal();
+        let (manifest, wal) = self.services.manifest_and_wal_mut();
         let mut runner = DurableWalTruncationMaintenanceRunner { manifest, wal };
         maintenance.run_next_matching(state, &mut runner, |task| {
             task.kind() == MaintenanceTaskKind::WalTruncation
@@ -2055,6 +2054,25 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                     return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
                 }
             };
+        // Reclaim rotation (#3494) happens HERE, under the lock, before the
+        // retention clone is taken: rotation mutates writer state (active
+        // pointer, watermark publish) and must never run off-lock, while the
+        // segment it seals is immutable from that point on — exactly what the
+        // off-lock delete pass below is allowed to touch.
+        if let Err(error) = self
+            .services
+            .wal_mut()
+            .rotate_active_segment_for_reclaim(proof.covered_through())
+        {
+            let outcome = MaintenanceOutcome::new(
+                crate::lifecycle::MaintenanceTaskKind::WalTruncation,
+                MaintenanceOutcomeStatus::Failed,
+            )
+            .with_source_error(wal_error(error));
+            let outcome = self.maintenance.finish_started(task, outcome, false)?;
+            self.record_optional_maintenance_health(&Ok(Some(outcome.clone())));
+            return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
+        }
         Ok(Some(DurableBackgroundMaintenanceStep::Build(Box::new(
             DurableBackgroundMaintenanceBuild::WalTruncation {
                 task,
@@ -4535,7 +4553,7 @@ pub(super) const fn checkpoint_created_at(
 
 struct DurableWalTruncationMaintenanceRunner<'a, 'b> {
     manifest: &'a crate::service::DatabaseManifestService<'b>,
-    wal: &'a crate::service::WalService<'b>,
+    wal: &'a mut crate::service::WalService<'b>,
 }
 
 struct DurableFlushWatermarkMaintenanceRunner<'a, 'b> {
@@ -4557,6 +4575,12 @@ impl MaintenanceTaskRunner for DurableWalTruncationMaintenanceRunner<'_, '_> {
             )
             .with_reason("WAL truncation has no retention proof"));
         };
+        // Reclaim rotation (#3494): a fully-covered active segment is sealed
+        // first, so the delete pass below — which protects the active id —
+        // can release it in the same run.
+        self.wal
+            .rotate_active_segment_for_reclaim(request.covered_through())
+            .map_err(wal_error)?;
         Ok(truncate_wal(self.wal, request)?.maintenance_outcome())
     }
 }

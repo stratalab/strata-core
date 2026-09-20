@@ -344,3 +344,75 @@ fn fork_with_unflushed_rows_is_cow_and_survives_reopen() {
         "the fork-time unsealed slice survives the reopen",
     );
 }
+
+/// #3494 safety guard: WAL reclaim must NOT drop time-travel history. Opens
+/// with an aggressive reclaim policy (checkpoint + truncation on every commit)
+/// so the reclaim rotation fires constantly, then asserts a PRE-fork as-of read
+/// still resolves across a reopen. An earlier boot-time reclaim variant failed
+/// exactly this (pruned pre-fork timeline history); operation-time reclaim must
+/// preserve it. Deterministic-inline scheduling makes the reclaim run in-thread.
+#[test]
+fn aggressive_reclaim_preserves_pre_fork_as_of_across_reopens() {
+    fn open_reclaiming(root: std::path::PathBuf) -> StorageRuntime<'static> {
+        let backend: &'static StorageBackend = Box::leak(Box::new(StorageBackend::local_fs(root)));
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+                .with_maintenance_scheduling_policy(
+                    StorageMaintenanceSchedulingPolicy::DeterministicInline,
+                )
+                .with_wal_growth_policy(StorageWalGrowthPolicy::Thresholds {
+                    max_retained_wal_bytes: 1,
+                    max_retained_wal_segments: 1,
+                    max_commits_since_checkpoint: 1,
+                }),
+            backend,
+        )
+        .expect("open reclaiming runtime")
+        .into_runtime()
+    }
+
+    let root = temp_dir_for_api_test("reclaim-as-of-reopen");
+    let fork = fork_branch_id(0xC1);
+
+    {
+        let mut runtime = open_reclaiming(root.clone());
+        put(&mut runtime, default_branch(), b"paris", 10);
+        put(&mut runtime, default_branch(), b"london", 20);
+        runtime.drain_maintenance().expect("drain reclaim");
+        runtime.close().expect("close");
+    }
+    {
+        let mut runtime = open_reclaiming(root.clone());
+        fork_current(&mut runtime, fork, default_branch());
+        put(&mut runtime, fork, b"tokyo", 30);
+        runtime.drain_maintenance().expect("drain reclaim");
+        runtime.close().expect("close");
+    }
+
+    let runtime = open_reclaiming(root);
+    let pre_fork = ReadBound::AtTimestamp(Timestamp::from_micros(10));
+    assert_eq!(
+        read_at(&runtime, default_branch(), pre_fork),
+        Some(b"paris".to_vec()),
+        "parent pre-fork as-of survives aggressive reclaim",
+    );
+    assert_eq!(
+        read_at(&runtime, fork, pre_fork),
+        Some(b"paris".to_vec()),
+        "fork pre-fork as-of survives aggressive reclaim (the #3494 regression)",
+    );
+    assert_eq!(
+        read_at(
+            &runtime,
+            fork,
+            ReadBound::AtTimestamp(Timestamp::from_micros(20))
+        ),
+        Some(b"london".to_vec()),
+        "mid-history as-of survives aggressive reclaim",
+    );
+    assert_eq!(
+        read_at(&runtime, fork, ReadBound::Latest),
+        Some(b"tokyo".to_vec()),
+        "the fork head still reads its own write",
+    );
+}

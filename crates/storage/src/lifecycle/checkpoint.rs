@@ -1525,6 +1525,30 @@ impl LifecycleWalTruncationOutcome {
         if let Some(health) = self.recovery_health.clone() {
             outcome = outcome.with_recovery_health(health);
         }
+        if self.failed_segments > 0 {
+            // A failed segment delete must surface as a TYPED task failure —
+            // without a source error the summary reads as an absorbed,
+            // untyped failure (the compound-fault harness's exact charge).
+            // Latent before #3494: with the active segment protected forever,
+            // no covered segment was ever deletable here, so the failure arm
+            // was unreachable. Per-segment detail stays in `delete_failures`.
+            outcome = outcome.with_source_error(LifecycleError::MaintenanceTaskFailed {
+                reason: "WAL truncation failed to delete one or more covered segments",
+            });
+        } else if self
+            .sidecar_deletes
+            .iter()
+            .any(|sidecar| sidecar.failure().is_some())
+        {
+            // Sidecar deletion is deliberately best-effort — an orphan
+            // metadata sidecar must not turn authoritative WAL retention into
+            // a failure — but the fault is still real residue: surface the
+            // typed source on the COMPLETED outcome so telemetry and the
+            // compound-fault harness see it rather than a silent absorb.
+            outcome = outcome.with_source_error(LifecycleError::MaintenanceTaskFailed {
+                reason: "WAL truncation left an orphan segment metadata sidecar",
+            });
+        }
         outcome
     }
 }

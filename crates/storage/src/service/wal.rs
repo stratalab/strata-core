@@ -607,6 +607,19 @@ impl WalGroupSyncTicket<'_> {
     }
 }
 
+/// Whether the active WAL segment can be rotated away for reclamation: it
+/// must hold at least one record (rotating an empty segment reclaims nothing
+/// and churns segment ids), and every record in it must sit at or below the
+/// coverage watermark — otherwise the segment still carries the only copy of
+/// un-covered commits and must stay active (#3494).
+pub(crate) const fn active_segment_is_reclaimable(
+    record_count: u64,
+    max_commit_version: CommitVersion,
+    covered_through: CommitVersion,
+) -> bool {
+    record_count > 0 && max_commit_version.as_u64() <= covered_through.as_u64()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WalGrowthFacts {
     retained_segments: usize,
@@ -1740,6 +1753,30 @@ impl<'a> WalService<'a> {
             self.dirty_bytes,
             self.dirty_records,
         ))
+    }
+
+    /// Rotates the active segment when everything it holds is already covered
+    /// by `covered_through`, so a following [`Self::delete_covered_segments`]
+    /// pass can release it (#3494). Without this, a database whose WAL never
+    /// crosses the size-based rotation threshold keeps one active segment
+    /// forever, and the delete pass — which protects the active id — can
+    /// never reclaim a byte. Returns whether a rotation happened. Reuses
+    /// [`Self::rotate_segment`], so the #2690 ordering (bytes durable, then
+    /// commit watermark published, then the active pointer advances) holds
+    /// unchanged.
+    pub(crate) fn rotate_active_segment_for_reclaim(
+        &mut self,
+        covered_through: CommitVersion,
+    ) -> WalServiceResult<bool> {
+        if !active_segment_is_reclaimable(
+            self.active_metadata.record_count(),
+            self.active_metadata.max_commit_version(),
+            covered_through,
+        ) {
+            return Ok(false);
+        }
+        self.rotate_segment()?;
+        Ok(true)
     }
 
     /// Returns the cached sealed-segment retention totals, refreshing them from a

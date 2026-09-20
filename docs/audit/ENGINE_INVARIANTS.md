@@ -1350,6 +1350,60 @@ replacement). Fence enforcement:
 `strict_recovery_refuses_attested_commits_hidden_in_the_orphaned_tail`
 (`lifecycle/tests/recovery.rs`).
 
+### DUR-018: Covered WAL is released — a fully-covered active segment seals at truncation
+
+Retained WAL whose every record sits at or below the retention watermark is
+reclaimable debt, and the truncation pass must be ABLE to release it: before
+#3494, `delete_covered_segments`' active-id protection plus the size-based
+rotation threshold (64 MiB cap) meant a database whose WAL never crossed the
+threshold retained it FOREVER — a 2.53 MB dataset written four times held
+111 MB with no reclaim path, while the flush-chained truncation task ran
+after every flush and deleted nothing. Both truncation entry points now
+seal a fully-covered active segment first (`rotate_active_segment_for_reclaim`,
+reusing `rotate_segment`'s #2690 ordering — bytes durable, commit watermark
+published, then the pointer advances), on the LOCK in both paths: the sync
+runner before its delete pass, the background start before the retention
+clone (rotation mutates writer state and must never run off-lock; the sealed
+segment is immutable, exactly what the off-lock delete pass touches). The
+converse is absolute: an active segment holding ANY commit above the proof's
+watermark is the only copy of that data and is never sealed away by reclaim.
+Truncation failures surface TYPED: a failed segment delete is a Failed
+outcome with a source error; a failed best-effort sidecar delete stays
+Completed but carries the source (never a silent absorb).
+
+This entry establishes the reclaim MECHANISM (seal a covered active segment so
+the existing truncation delete pass can free it) and its safety envelope. What
+should DRIVE reclaim autonomously for a small database — a trigger that fires
+when the WAL grows disproportionate to the live data — is DEFERRED: it is
+entangled with the recovery-memory contract (DUR-017) and time-travel
+retention, and every prototype trigger surfaced a distinct hazard (a boot-time
+flush pruned pre-fork as-of history and masked a recovery-scan fault; a
+checkpoint-driven operation-time trigger regressed the DUR-017 bounded-recovery
+envelope). Two invariants bound any future trigger: reclaim must run ONLY
+during operation, never at open; and it must not create recovery state whose
+decode is unbounded under a small budget. The safety oracle for the first is
+`aggressive_reclaim_preserves_pre_fork_as_of_across_reopens` (reclaim on every
+commit must still resolve a pre-fork as-of read); for the second, the
+`recovery_budget` envelope tests (`crates/engine/tests/recovery_budget.rs`).
+
+**Audit**: `active_segment_is_reclaimable` requires records present AND
+`max_commit <= covered_through`; both `run_next_wal_truncation_maintenance`
+and `start_next_background_wal_truncation_maintenance` call
+`rotate_active_segment_for_reclaim` with the validated proof's watermark
+(`lifecycle/durable/maintenance.rs`). Tests
+(`lifecycle/tests/commit_hardening.rs`):
+`wal_truncation_reclaims_a_covered_active_segment`,
+`wal_truncation_leaves_an_uncovered_active_tail_in_place`,
+`background_wal_truncation_start_rotates_a_covered_active_segment`,
+`covered_wal_is_reclaimed_as_flushes_advance_the_watermark` (convergence once a
+flush advances the watermark — the safe reclaim path), and the time-travel
+safety guard `aggressive_reclaim_preserves_pre_fork_as_of_across_reopens`
+(`api/tests/fork_reopen.rs`: reclaim must never prune as-of history — an
+earlier boot-time reclaim variant did, and this pins that it cannot recur),
+`active_segment_reclaim_eligibility_is_watermark_gated`; typed surfacing:
+the compound-fault harness's maintenance sweep
+(`maintenance_publish_faults_surface_typed_and_resume`).
+
 ## How to Use This Catalog
 
 ### After a code change
