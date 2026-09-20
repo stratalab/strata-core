@@ -1,6 +1,7 @@
 //! Lifecycle configuration facts.
 
 use super::{LifecycleError, LifecycleResult, StorageRuntimeBudget};
+use crate::format::TableCompression;
 
 const DEFAULT_MAX_MAINTENANCE_QUEUE_DEPTH: usize = 1024;
 const DEFAULT_MAX_RECOVERY_FAULTS: usize = 64;
@@ -49,6 +50,12 @@ pub(crate) struct LifecycleConfig {
     // layer (4 KiB minimum, encoded-block ceiling).
     data_block_bytes: Option<u32>,
     cache_preheat_policy: LifecycleCachePreheatPolicy,
+    // #3499: compression codec for lifecycle-built L0/compacted tables. Zstd by
+    // default (the codec self-describes per block, so mixed uncompressed/Zstd
+    // tables read correctly); an edge/measurement deployment can opt out to
+    // Uncompressed. Applies to flush and compaction; backpressure, the WAL, and
+    // recovery are unaffected.
+    table_compression: TableCompression,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -229,9 +236,21 @@ impl LifecycleConfig {
             write_throttle_policy: LifecycleWriteThrottlePolicy::default(),
             data_block_bytes: None,
             cache_preheat_policy: LifecycleCachePreheatPolicy::default(),
+            table_compression: TableCompression::Zstd,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// #3499: the compression codec for lifecycle-built tables.
+    pub(crate) const fn table_compression(&self) -> TableCompression {
+        self.table_compression
+    }
+
+    /// #3499: override the table compression codec (Zstd by default).
+    pub(crate) const fn with_table_compression(mut self, compression: TableCompression) -> Self {
+        self.table_compression = compression;
+        self
     }
 
     /// B2: override the data-block byte target for lifecycle-built tables.

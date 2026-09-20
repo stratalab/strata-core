@@ -137,6 +137,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             budget: &self.budget,
             table_catalog: &mut self.table_catalog,
             data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
+            table_compression: self.open_plan.lifecycle_config().table_compression(),
         };
         let mut observed_health = Vec::new();
         let mut active_tasks = 0_usize;
@@ -311,6 +312,7 @@ struct DurableCloseMaintenanceRunner<'a, 'b> {
     budget: &'a StorageBudgetLedger,
     table_catalog: &'a mut crate::lifecycle::LifecycleDurableTableCatalog,
     data_block_bytes: Option<u32>,
+    table_compression: crate::format::TableCompression,
 }
 
 impl MaintenanceTaskRunner for DurableCloseMaintenanceRunner<'_, '_> {
@@ -331,6 +333,7 @@ impl MaintenanceTaskRunner for DurableCloseMaintenanceRunner<'_, '_> {
                             request,
                             Some(self.budget),
                             self.data_block_bytes,
+                            self.table_compression,
                         )?;
                         let maintenance_outcome = outcome.maintenance_outcome();
                         if let Some(error) = publish_table_manifest_after_flush(
