@@ -57,6 +57,12 @@ jobs:
             "-p strata-inference --features anthropic,download,google,openai,testkit,wire-schemas"
             "-p strata-executor --features arrow,hub,idl-tooling,inference,inference-anthropic,inference-google,inference-openai,ipc,jsonschema,localfs,testkit"
             "-p strata-cli --features cloud,inference,inference-anthropic,inference-google,inference-openai,native,testkit"
+            # #3302: the MINIMAL CLI shape. Every other spec lints a maximal
+            # feature set, so an item that exists only for `inference` but is
+            # not gated on it rots invisibly (six had, one a hard clippy
+            # error) — this is the only spec where those gates are load-
+            # bearing. feature-matrix `check`s this shape but never lints it.
+            "-p strata-cli --no-default-features --features native"
           )
           for spec in "${specs[@]}"; do
             echo "::group::clippy $spec"
