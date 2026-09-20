@@ -437,7 +437,7 @@ jobs:
             if grep -qx "$lane viable" all-verdicts.txt; then
               echo "lane $lane: judged at least one viable mutant"
             elif grep -qx "$lane unviable" all-verdicts.txt; then
-              echo "::error::lane $lane generated mutants for this diff and not one of them compiled, so the lane judged nothing (#3337). Spell the return type out as Result<T, E> rather than a crate alias, or add a reasoned exclusion to that lane's config."
+              echo "::error::lane $lane generated mutants for this diff and not one of them compiled, so the lane judged nothing (#3337). Spell the return type out as Result<T, E> rather than a crate alias; if the type IS spelled out but its payload or error type has no Default, add the error type to that lane config's error_values (#3258, with its mirror test); or add a reasoned exclusion to that lane's config."
               failed=1
             else
               echo "lane $lane: no mutants in this diff"

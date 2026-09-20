@@ -9,6 +9,15 @@
 # adding to it, so the default config never applies to this lane. See the
 # partition table in `.cargo/mutants.toml`.
 
+# Constructible `Err(..)` replacement for `Result`-returning functions
+# (#3258; rationale in `.cargo/mutants.toml`). An unregistered code renders
+# the registered `internal.executor.unregistered_code` fallback, so the
+# mutant still carries a wrong-code error any class/code assertion kills.
+# Mirrored verbatim by `mutation_gate_error_value` in the executor crate.
+error_values = [
+    'crate::ExecutorError::new("mutated", "mutated")',
+]
+
 exclude_globs = [
     # The default-feature executor slice compiles the hub- and arrow-enabled
     # handlers; the inverse feature-disabled stubs are cfg-disabled here, so a
