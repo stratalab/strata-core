@@ -1739,3 +1739,69 @@ fn wal_growth_pacing_waits_only_on_evaluations_that_enqueued_maintenance() {
         LifecycleWalGrowthStatus::NoDurableAction
     ));
 }
+
+/// Sum of the on-disk table DATA object bytes (`tables/<branch>/l*/`) — the
+/// compressed block footprint, manifests excluded.
+#[cfg(feature = "localfs")]
+fn table_data_object_bytes(root: &std::path::Path) -> u64 {
+    table_data_object_files(root)
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+/// #3499 end-to-end compression observation: a Zstd-configured durable open
+/// writes materially smaller table blocks than an Uncompressed one for a highly
+/// compressible payload. Reads succeed under either codec (the block frame is
+/// self-describing), so only an on-disk size assertion proves the codec
+/// actually reached the table builder — this is the test that fails if any link
+/// in options → lifecycle config → builder → flush stops threading it. It runs
+/// at default features so the per-diff mutation gate (lane A) exercises it.
+#[cfg(feature = "localfs")]
+#[test]
+fn zstd_flush_shrinks_on_disk_tables_versus_uncompressed() {
+    let payload = vec![b'a'; 4096];
+
+    let flush_and_measure = |name: &str, compression: crate::format::TableCompression| -> u64 {
+        let root = temp_dir_for_api_test(name);
+        let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+                .with_table_compression_for_test(compression),
+            backend,
+        )
+        .expect("open durable runtime")
+        .into_runtime();
+        for index in 0..256u32 {
+            let key = format!("z-{index:08}");
+            runtime
+                .commit(&put_batch(key.as_bytes(), &payload))
+                .expect("commit compressible row");
+        }
+        runtime
+            .flush_default_branch_for_test()
+            .expect("flush L0 table");
+        table_data_object_bytes(&root)
+    };
+
+    let zstd_bytes = flush_and_measure("compress-zstd", crate::format::TableCompression::Zstd);
+    let plain_bytes = flush_and_measure(
+        "compress-plain",
+        crate::format::TableCompression::Uncompressed,
+    );
+
+    assert!(
+        plain_bytes > 0 && zstd_bytes > 0,
+        "both flushes must produce L0 tables (zstd={zstd_bytes} B, plain={plain_bytes} B)"
+    );
+    // ~1 MiB of a single repeated byte compresses to a tiny fraction. Half the
+    // uncompressed footprint is a deliberately loose ceiling — the real ratio is
+    // far better — so allocator/framing overhead can never flake it.
+    assert!(
+        zstd_bytes * 2 < plain_bytes,
+        "Zstd table footprint ({zstd_bytes} B) must be under half the uncompressed \
+         footprint ({plain_bytes} B) for a highly compressible payload — the \
+         compression codec is not reaching the table builder"
+    );
+}

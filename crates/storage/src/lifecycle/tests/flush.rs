@@ -1938,7 +1938,11 @@ fn branch_id(byte: u8) -> BranchId {
 fn build_bytes_from_frozen(identity: TableIdentity, frozen: &crate::table::FrozenTable) -> Vec<u8> {
     // W2.2: mirror the production flush build (bloom filter included).
     ImmutableTableBuilder::new(
-        crate::lifecycle::compaction::lifecycle_table_builder_config(None, crate::format::TableCompression::Uncompressed).expect("builder config"),
+        crate::lifecycle::compaction::lifecycle_table_builder_config(
+            None,
+            crate::format::TableCompression::Uncompressed,
+        )
+        .expect("builder config"),
     )
     .expect("builder")
     .build_from_frozen(identity, frozen)
@@ -1952,7 +1956,11 @@ fn built_bytes_for_row(identity: &str, row: StorageRow) -> Vec<u8> {
     sort_table_rows_by_key(&mut rows);
     // W2.2: mirror the production flush build (bloom filter included).
     ImmutableTableBuilder::new(
-        crate::lifecycle::compaction::lifecycle_table_builder_config(None, crate::format::TableCompression::Uncompressed).expect("builder config"),
+        crate::lifecycle::compaction::lifecycle_table_builder_config(
+            None,
+            crate::format::TableCompression::Uncompressed,
+        )
+        .expect("builder config"),
     )
     .expect("builder")
     .build_from_rows(identity, &rows)

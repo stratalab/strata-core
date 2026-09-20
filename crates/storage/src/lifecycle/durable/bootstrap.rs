@@ -3332,7 +3332,10 @@ fn build_and_publish_fork_unsealed_table(
     ))
     .map_err(crate::lifecycle::flush::table_error)?;
     let artifact = crate::table::ImmutableTableBuilder::new(
-        crate::lifecycle::compaction::lifecycle_table_builder_config(data_block_bytes, compression)?,
+        crate::lifecycle::compaction::lifecycle_table_builder_config(
+            data_block_bytes,
+            compression,
+        )?,
     )
     .map_err(crate::lifecycle::flush::table_error)?
     .build_from_storage_rows(identity.clone(), rows)

@@ -501,11 +501,10 @@ impl LifecycleCompactionRequest {
             request = request.with_max_pass_input_bytes(self.l0_pass_max_input_bytes);
         }
         // W2.2: every lifecycle-built table persists a bloom filter.
-        request = request
-            .with_table_builder_config(lifecycle_table_builder_config(
-                self.data_block_bytes,
-                self.table_compression,
-            )?);
+        request = request.with_table_builder_config(lifecycle_table_builder_config(
+            self.data_block_bytes,
+            self.table_compression,
+        )?);
         // W1.3a: every pass cuts its outputs by grandparent overlap. Kinds
         // whose output level is bottommost get no hints downstream (the
         // grandparent level is empty), so applying the bound universally is

@@ -762,7 +762,13 @@ pub(crate) fn flush_cache_branch_with_budget(
     let Some(frozen_index) = select_frozen_index(branch, request)? else {
         return Ok(FlushFrozenOutcome::deferred(request));
     };
-    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes, crate::format::TableCompression::Uncompressed)?;
+    let artifact = build_frozen_artifact(
+        branch,
+        request,
+        frozen_index,
+        data_block_bytes,
+        crate::format::TableCompression::Uncompressed,
+    )?;
     require_optional_generated_artifact_budget(
         budget,
         artifact.byte_count(),
@@ -815,7 +821,13 @@ pub(crate) fn prepare_cache_flush_with_budget(
     let Some(frozen_index) = select_frozen_index(branch, request)? else {
         return Ok(None);
     };
-    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes, crate::format::TableCompression::Uncompressed)?;
+    let artifact = build_frozen_artifact(
+        branch,
+        request,
+        frozen_index,
+        data_block_bytes,
+        crate::format::TableCompression::Uncompressed,
+    )?;
     require_optional_generated_artifact_budget(
         budget,
         artifact.byte_count(),
@@ -879,7 +891,15 @@ pub(crate) fn flush_durable_branch(
     reader_service: &TableObjectReaderService<'static>,
     request: &FlushFrozenRequest,
 ) -> LifecycleResult<FlushFrozenOutcome> {
-    flush_durable_branch_with_budget(branch, table_service, reader_service, request, None, None, crate::format::TableCompression::Uncompressed)
+    flush_durable_branch_with_budget(
+        branch,
+        table_service,
+        reader_service,
+        request,
+        None,
+        None,
+        crate::format::TableCompression::Uncompressed,
+    )
 }
 
 pub(crate) fn flush_durable_branch_with_budget(
@@ -966,7 +986,8 @@ fn prepare_single_output_flush(
     inflight: Option<&super::durable::InFlightOutputsGuard>,
     frozen_index: usize,
 ) -> LifecycleResult<Option<PreparedDurableFlush>> {
-    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes, compression)?;
+    let artifact =
+        build_frozen_artifact(branch, request, frozen_index, data_block_bytes, compression)?;
     require_optional_generated_artifact_budget(
         budget,
         artifact.byte_count(),

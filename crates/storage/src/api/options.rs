@@ -426,13 +426,20 @@ impl StorageOpenOptions {
     }
 
     /// #3499: the compression codec for durable lifecycle-built tables.
-    pub const fn table_compression(&self) -> crate::format::TableCompression {
+    /// `pub(crate)` to match `TableCompression`'s visibility — the codec is a
+    /// storage-internal type; engine opts in through its own surface.
+    pub(crate) const fn table_compression(&self) -> crate::format::TableCompression {
         self.table_compression
     }
 
-    /// #3499: override the durable table compression codec (Zstd by default;
-    /// set `Uncompressed` for an edge/measurement deployment).
-    pub const fn with_table_compression(
+    /// #3499: override the durable table compression codec (Zstd by default).
+    /// Test-only: the production opt-out belongs on the engine's
+    /// `DurableLocalOpenOptions` (deferred, tracked separately) — no shipping
+    /// caller overrides the default yet, so gating this to tests keeps the lib
+    /// free of dead code while still letting the storage suite pin both codecs.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_table_compression_for_test(
         mut self,
         compression: crate::format::TableCompression,
     ) -> Self {

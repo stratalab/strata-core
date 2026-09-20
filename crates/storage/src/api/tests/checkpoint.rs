@@ -411,3 +411,78 @@ fn forced_checkpoint_at_scale_load_and_recovery() {
         assert_sampled_point_reads(&runtime, prefix, total_rows, value);
     }
 }
+
+/// #3499 cross-version guard: a store whose tables were written UNCOMPRESSED
+/// must reopen and read correctly under a compression-enabled config, and a
+/// later compressed flush must coexist with the old uncompressed tables (the
+/// per-block codec is self-describing). Proves enabling compression never
+/// strands existing data, and that mixed uncompressed+Zstd tables read back.
+#[cfg(all(unix, feature = "localfs", feature = "perf-trace"))]
+#[test]
+fn uncompressed_tables_read_back_under_compression_and_mix() {
+    let root = temp_dir_for_api_test("xversion-compression");
+    let value_a: &[u8] = b"uncompressed-era-value-aaaaaaaa";
+    let value_b: &[u8] = b"compressed-era-value-bbbbbbbbbb";
+    let (prefix_a, prefix_b) = ("vA-", "vB-");
+    let rows = 64usize;
+
+    let open = |root: std::path::PathBuf, compression: crate::format::TableCompression| {
+        let backend: &'static StorageBackend =
+            crate::testkit::leak_static(StorageBackend::local_fs(root));
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+                .with_maintenance_scheduling_policy(
+                    StorageMaintenanceSchedulingPolicy::DeterministicInline,
+                )
+                .with_table_compression_for_test(compression),
+            backend,
+        )
+        .expect("durable inline open")
+        .into_runtime()
+    };
+    let flush_then_checkpoint = |runtime: &mut StorageRuntime<'static>, snapshot_id: u64| {
+        runtime
+            .enqueue_lifecycle_maintenance_for_test(
+                crate::lifecycle::MaintenanceTaskRequest::flush(
+                    StorageRuntime::default_branch_id_for_test(),
+                ),
+            )
+            .expect("flush enqueue");
+        // Truncate the WAL so recovery must serve era-1 rows from the table
+        // blocks, not the log — the point of the cross-version read.
+        force_checkpoint_inline(runtime, snapshot_id, true).expect("checkpoint");
+    };
+
+    // Era 1 — uncompressed tables.
+    {
+        let mut runtime = open(root.clone(), crate::format::TableCompression::Uncompressed);
+        runtime
+            .commit(&background_put_batch_range(prefix_a, 0, rows, value_a))
+            .expect("commit era-1");
+        flush_then_checkpoint(&mut runtime, 1);
+        drop(runtime);
+    }
+    // Era 2 — reopen with Zstd; read era-1 from uncompressed tables; write + flush era-2 (Zstd).
+    {
+        let mut runtime = open(root.clone(), crate::format::TableCompression::Zstd);
+        assert_background_closed_loop_reads(&runtime, prefix_a, rows, value_a);
+        runtime
+            .commit(&background_put_batch_range(prefix_b, 0, rows, value_b))
+            .expect("commit era-2");
+        flush_then_checkpoint(&mut runtime, 2);
+        drop(runtime);
+    }
+    // Era 3 — reopen; both eras (mixed uncompressed + Zstd tables) read correctly.
+    // A fresh-created store would answer these reads with zero rows, so the read
+    // assertions themselves prove the reopen recovered the prior eras.
+    {
+        let outcome = StorageRuntime::open_local(root).expect("reopen");
+        assert_eq!(
+            outcome.summary().disposition(),
+            StorageOpenDisposition::OpenedExisting
+        );
+        let runtime = outcome.into_runtime();
+        assert_background_closed_loop_reads(&runtime, prefix_a, rows, value_a);
+        assert_background_closed_loop_reads(&runtime, prefix_b, rows, value_b);
+    }
+}

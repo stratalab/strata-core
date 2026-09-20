@@ -3375,10 +3375,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             Some(budget),
         ) {
             // B2: stamp the per-database data-block byte target at dispatch.
-            Ok(Some(request)) => {
-                request.with_data_block_bytes(self.open_plan.lifecycle_config().data_block_bytes())
-                    .with_table_compression(self.open_plan.lifecycle_config().table_compression())
-            }
+            Ok(Some(request)) => request
+                .with_data_block_bytes(self.open_plan.lifecycle_config().data_block_bytes())
+                .with_table_compression(self.open_plan.lifecycle_config().table_compression()),
             Ok(None) => {
                 crate::observability::perf_trace::record_lifecycle_background_candidate_stale_deferred(
                 );
