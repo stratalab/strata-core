@@ -90,7 +90,6 @@ jobs:
         run: |
           cargo test --locked -p strata-storage --test format_golden
           cargo test --locked -p strata-engine --test capability_conformance
-          cargo test --locked -p strata-executor --features testkit --test error_contract
           # #3290: ten engine test files are testkit-gated (five whole-file,
           # five item-level) — 809 tests that no default-features run
           # compiles. The #3437 clippy matrix LINTS this shape; this is the
@@ -109,10 +108,17 @@ jobs:
           cargo run --locked -p strata-executor --features idl-tooling,inference,testkit --bin strata-idl -- check-tests
           cargo run --locked -p strata-executor --features idl-tooling,inference,testkit --bin strata-idl -- verify-examples
           cargo run --locked -p strata-executor --features idl-tooling,inference,testkit --bin strata-idl -- verify-fixtures
-          cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --test idl_kv_vector_overlay
-          cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --test idl_display
-          cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --test idl_response_model
-          cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --test generated_conformance
+      - name: Executor feature-gated tests
+        # #3317: EVERY executor integration target under the full light
+        # feature set — never a hand-kept `--test <name>` list. That list was
+        # a copy of the `#![cfg]` attributes in crates/executor/tests/ and
+        # rotted twice: three targets (22 tests) were never added, and
+        # idl_response_model had to be added by hand after the issue was
+        # filed. A new gated target is covered the day it lands. The
+        # executor's default-feature targets run twice per PR (workspace step
+        # + here); the suite is small and the doubled minutes buy the
+        # impossible-to-forget property.
+        run: cargo test --locked -p strata-executor --features idl-tooling,inference,testkit --tests
       - name: Inference feature lanes (offline)
         # The download module and the deterministic testkit are feature-gated
         # and invisible to the default workspace run; both are offline and

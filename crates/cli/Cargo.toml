@@ -44,7 +44,8 @@ inference-openai = ["inference", "strata-executor/inference-openai"]
 # every `--workspace` build with dev-dependencies active (clippy
 # `--all-targets`, `cargo test --workspace`) — switching engine's test seams
 # on for every crate under test. The executor's own testkit tests run the same
-# way: an explicit `--features testkit` lane in CI.
+# way: the "Executor feature-gated tests" step in ci.yml runs every executor
+# integration target under the full light feature set (#3317).
 testkit = ["strata-executor/testkit"]
 
 [dependencies]
