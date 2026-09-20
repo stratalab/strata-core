@@ -6,6 +6,15 @@
 # adding to it, so the default config never applies to this lane. See the
 # partition table in `.cargo/mutants.toml`.
 
+# Constructible `Err(..)` replacement for `Result`-returning functions
+# (#3258; rationale in `.cargo/mutants.toml`). This is the lane the issue
+# caught red-handed: `parse_model_spec`'s whole diff produced two unviable
+# mutants (`ProviderKind` has no `Default`) and the gate passed green.
+# Mirrored verbatim by `mutation_gate_error_value` in the inference crate.
+error_values = [
+    'crate::InferenceError::InvalidSpec(String::from("mutated"))',
+]
+
 exclude_globs = [
     # `local`-gated execution: these files need cmake and model artifacts no CI
     # lane has, so they are not compiled here and their mutants are untestable

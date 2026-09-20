@@ -22,6 +22,27 @@
 # `mutation_partition_guard.rs` now fails on an exclusion that names a symbol
 # its own lane cannot reach, so the mistake is caught at `cargo test` time.
 #
+# Constructible `Err(..)` replacements for `Result`-returning functions
+# (#3258). Without these, a function whose Ok payload or error type has no
+# `Default` gets ONLY unviable body mutants — the gate proves nothing about
+# it, and an entire diff once passed with zero viable mutants. cargo-mutants
+# substitutes each expression below into every `Result`-returning function in
+# the diff; the ones that don't typecheck for a given function are unviable
+# noise, the one that does becomes a viable mutant that any success-path test
+# kills. Each entry is mirrored VERBATIM by a `mutation_gate_error_value`
+# unit test in its crate, so a renamed variant reds `cargo test` instead of
+# leaving the entry silently inert. Residual blind spot: a function returning
+# a bare non-Default enum (not a `Result`) still gets no viable mutants —
+# that needs upstream support, not configuration.
+error_values = [
+    'crate::EngineError::new("internal.engine.persistence", "mutated")',
+    'crate::lifecycle::LifecycleError::WriterLockHeld',
+    'crate::format::FormatError::InvalidEscape { field: "mutated" }',
+    'crate::testkit::TestkitError::new("mutated")',
+    'crate::CliError::Usage(String::from("mutated"))',
+    'crate::BranchIdError::InvalidText',
+]
+
 # Keep the partition and ci.yml in sync: a package excluded here must have a
 # lane of its own there, and vice versa — the guard asserts both directions.
 exclude_globs = [
