@@ -141,6 +141,9 @@ pub struct StorageOpenOptions {
     background_maintenance: StorageBackgroundMaintenanceOptions,
     wal_segment_size_for_test: Option<u64>,
     data_block_bytes: Option<u32>,
+    /// #3499: compression codec for durable lifecycle-built tables (Zstd by
+    /// default). Cache mode ignores it (its in-memory tables stay uncompressed).
+    table_compression: crate::format::TableCompression,
     cache_preheat_policy: StorageCachePreheatPolicy,
     #[cfg(any(test, feature = "testkit"))]
     storage_budget_for_test: Option<StorageRuntimeBudget>,
@@ -255,6 +258,7 @@ impl StorageOpenOptions {
             background_maintenance: StorageBackgroundMaintenanceOptions::product_default(),
             wal_segment_size_for_test: None,
             data_block_bytes: None,
+            table_compression: crate::format::TableCompression::Zstd,
             cache_preheat_policy: StorageCachePreheatPolicy::WhenIdle,
             #[cfg(any(test, feature = "testkit"))]
             storage_budget_for_test: None,
@@ -282,6 +286,7 @@ impl StorageOpenOptions {
             background_maintenance: StorageBackgroundMaintenanceOptions::product_default(),
             wal_segment_size_for_test: None,
             data_block_bytes: None,
+            table_compression: crate::format::TableCompression::Zstd,
             cache_preheat_policy: StorageCachePreheatPolicy::WhenIdle,
             #[cfg(any(test, feature = "testkit"))]
             storage_budget_for_test: None,
@@ -300,6 +305,7 @@ impl StorageOpenOptions {
             background_maintenance: StorageBackgroundMaintenanceOptions::product_default(),
             wal_segment_size_for_test: None,
             data_block_bytes: None,
+            table_compression: crate::format::TableCompression::Zstd,
             cache_preheat_policy: StorageCachePreheatPolicy::WhenIdle,
             #[cfg(any(test, feature = "testkit"))]
             storage_budget_for_test: None,
@@ -318,6 +324,7 @@ impl StorageOpenOptions {
             background_maintenance: StorageBackgroundMaintenanceOptions::product_default(),
             wal_segment_size_for_test: None,
             data_block_bytes: None,
+            table_compression: crate::format::TableCompression::Zstd,
             cache_preheat_policy: StorageCachePreheatPolicy::WhenIdle,
             #[cfg(any(test, feature = "testkit"))]
             storage_budget_for_test: None,
@@ -415,6 +422,21 @@ impl StorageOpenOptions {
     #[must_use]
     pub const fn with_data_block_bytes(mut self, data_block_bytes: u32) -> Self {
         self.data_block_bytes = Some(data_block_bytes);
+        self
+    }
+
+    /// #3499: the compression codec for durable lifecycle-built tables.
+    pub const fn table_compression(&self) -> crate::format::TableCompression {
+        self.table_compression
+    }
+
+    /// #3499: override the durable table compression codec (Zstd by default;
+    /// set `Uncompressed` for an edge/measurement deployment).
+    pub const fn with_table_compression(
+        mut self,
+        compression: crate::format::TableCompression,
+    ) -> Self {
+        self.table_compression = compression;
         self
     }
 

@@ -236,7 +236,11 @@ impl LifecycleConfig {
             write_throttle_policy: LifecycleWriteThrottlePolicy::default(),
             data_block_bytes: None,
             cache_preheat_policy: LifecycleCachePreheatPolicy::default(),
-            table_compression: TableCompression::Zstd,
+            // Uncompressed at this layer keeps internal/test scaffolding
+            // byte-stable and golden-safe; the production default (Zstd) is
+            // applied at the options layer via `with_table_compression`, and
+            // #3499's compaction-request default is Zstd there.
+            table_compression: TableCompression::Uncompressed,
         };
         config.validate()?;
         Ok(config)

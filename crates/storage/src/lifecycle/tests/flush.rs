@@ -1791,6 +1791,7 @@ fn prepared_durable_flush_installs_by_identity_after_frozen_set_shifts() {
         &request,
         None,
         None,
+        crate::format::TableCompression::Uncompressed,
         None,
     )
     .expect("prepare flush")
@@ -1835,6 +1836,7 @@ fn prepared_durable_flush_fails_closed_when_its_frozen_table_is_gone() {
         &request,
         None,
         None,
+        crate::format::TableCompression::Uncompressed,
         None,
     )
     .expect("prepare flush")
@@ -1936,7 +1938,7 @@ fn branch_id(byte: u8) -> BranchId {
 fn build_bytes_from_frozen(identity: TableIdentity, frozen: &crate::table::FrozenTable) -> Vec<u8> {
     // W2.2: mirror the production flush build (bloom filter included).
     ImmutableTableBuilder::new(
-        crate::lifecycle::compaction::lifecycle_table_builder_config(None).expect("builder config"),
+        crate::lifecycle::compaction::lifecycle_table_builder_config(None, crate::format::TableCompression::Uncompressed).expect("builder config"),
     )
     .expect("builder")
     .build_from_frozen(identity, frozen)
@@ -1950,7 +1952,7 @@ fn built_bytes_for_row(identity: &str, row: StorageRow) -> Vec<u8> {
     sort_table_rows_by_key(&mut rows);
     // W2.2: mirror the production flush build (bloom filter included).
     ImmutableTableBuilder::new(
-        crate::lifecycle::compaction::lifecycle_table_builder_config(None).expect("builder config"),
+        crate::lifecycle::compaction::lifecycle_table_builder_config(None, crate::format::TableCompression::Uncompressed).expect("builder config"),
     )
     .expect("builder")
     .build_from_rows(identity, &rows)
@@ -2477,6 +2479,7 @@ fn segmented_flush_installs_key_disjoint_outputs() {
         &request,
         None,
         None,
+        crate::format::TableCompression::Uncompressed,
         None,
         &[encoded_physical(branch, b"zz")],
     )
@@ -2522,6 +2525,7 @@ fn adopted_segmented_flush_output_vanishing_mid_build_is_a_sweep_race() {
         &request,
         None,
         None,
+        crate::format::TableCompression::Uncompressed,
         None,
         &[encoded_physical(branch, b"zz")],
     )
@@ -2548,6 +2552,7 @@ fn adopted_segmented_flush_output_vanishing_mid_build_is_a_sweep_race() {
         &request,
         None,
         None,
+        crate::format::TableCompression::Uncompressed,
         None,
         &[encoded_physical(branch, b"zz")],
     )
@@ -2582,6 +2587,7 @@ fn segmented_flush_publish_failure_reports_every_published_output() {
         &request,
         None,
         None,
+        crate::format::TableCompression::Uncompressed,
         None,
         &[encoded_physical(branch, b"zz")],
     )

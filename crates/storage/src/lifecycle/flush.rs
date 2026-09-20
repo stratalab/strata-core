@@ -750,7 +750,7 @@ pub(crate) fn flush_cache_branch(
     branch: &mut BranchLocalState,
     request: &FlushFrozenRequest,
 ) -> LifecycleResult<FlushFrozenOutcome> {
-    flush_cache_branch_with_budget(branch, request, None, None, crate::format::TableCompression::Zstd)
+    flush_cache_branch_with_budget(branch, request, None, None)
 }
 
 pub(crate) fn flush_cache_branch_with_budget(
@@ -758,12 +758,11 @@ pub(crate) fn flush_cache_branch_with_budget(
     request: &FlushFrozenRequest,
     budget: Option<&StorageBudgetLedger>,
     data_block_bytes: Option<u32>,
-    compression: crate::format::TableCompression,
 ) -> LifecycleResult<FlushFrozenOutcome> {
     let Some(frozen_index) = select_frozen_index(branch, request)? else {
         return Ok(FlushFrozenOutcome::deferred(request));
     };
-    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes, compression)?;
+    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes, crate::format::TableCompression::Uncompressed)?;
     require_optional_generated_artifact_budget(
         budget,
         artifact.byte_count(),
@@ -812,12 +811,11 @@ pub(crate) fn prepare_cache_flush_with_budget(
     request: &FlushFrozenRequest,
     budget: Option<&StorageBudgetLedger>,
     data_block_bytes: Option<u32>,
-    compression: crate::format::TableCompression,
 ) -> LifecycleResult<Option<PreparedCacheFlush>> {
     let Some(frozen_index) = select_frozen_index(branch, request)? else {
         return Ok(None);
     };
-    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes, compression)?;
+    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes, crate::format::TableCompression::Uncompressed)?;
     require_optional_generated_artifact_budget(
         budget,
         artifact.byte_count(),
@@ -881,7 +879,7 @@ pub(crate) fn flush_durable_branch(
     reader_service: &TableObjectReaderService<'static>,
     request: &FlushFrozenRequest,
 ) -> LifecycleResult<FlushFrozenOutcome> {
-    flush_durable_branch_with_budget(branch, table_service, reader_service, request, None, None, crate::format::TableCompression::Zstd)
+    flush_durable_branch_with_budget(branch, table_service, reader_service, request, None, None, crate::format::TableCompression::Uncompressed)
 }
 
 pub(crate) fn flush_durable_branch_with_budget(

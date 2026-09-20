@@ -366,7 +366,10 @@ impl LifecycleCompactionRequest {
             l0_pass_max_input_bytes: L0_PASS_MAX_INPUT_BYTES,
             output_grandparent_overlap_max_bytes: OUTPUT_GRANDPARENT_OVERLAP_MAX_BYTES,
             data_block_bytes: None,
-            table_compression: crate::format::TableCompression::Zstd,
+            // Uncompressed default keeps request-construction byte-stable; the
+            // production codec (Zstd) is stamped from the lifecycle config at
+            // dispatch via `with_table_compression` (#3499).
+            table_compression: crate::format::TableCompression::Uncompressed,
         };
         request.branch_request()?;
         Ok(request)

@@ -302,9 +302,6 @@ impl CacheBackgroundMaintenanceBuild {
                         // knob; cache-mode tables are memory-resident and
                         // keep the built-in default.
                         None,
-                        // #3499: compression is a durable-disk knob; cache-mode
-                        // tables are in-memory, so keep the zero-copy path.
-                        crate::format::TableCompression::Uncompressed,
                     )?,
                     elapsed: started_at.elapsed(),
                 })
@@ -958,7 +955,7 @@ impl<S> LifecycleCacheRuntime<S> {
             let branch = self
                 .branch_catalog
                 .branch_state_mut(branch_id, CommitBranchGenerationGuard::exact(generation))?;
-            flush_cache_branch_with_budget(branch, request, Some(&self.budget), None, crate::format::TableCompression::Uncompressed)
+            flush_cache_branch_with_budget(branch, request, Some(&self.budget), None)
         };
         // BS2.3: flush sealed frozen into an L0 table; republish the branch snapshot.
         self.publish_branch_snapshot(branch_id);
@@ -2365,7 +2362,6 @@ impl MaintenanceTaskRunner for CacheCloseRunner<'_> {
                             request,
                             Some(self.budget),
                             None,
-                            crate::format::TableCompression::Uncompressed,
                         )?
                         .maintenance_outcome())
                     })?
@@ -2454,7 +2450,7 @@ impl MaintenanceTaskRunner for CacheFlushMaintenanceRunner<'_> {
                 &request,
                 |branch, request| {
                     Ok(
-                        flush_cache_branch_with_budget(branch, request, Some(self.budget), None, crate::format::TableCompression::Uncompressed)?
+                        flush_cache_branch_with_budget(branch, request, Some(self.budget), None)?
                             .maintenance_outcome(),
                     )
                 },
