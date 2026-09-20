@@ -492,7 +492,9 @@ fn budgeted_replay_drains_the_backlog_to_durable_tables() {
         .recover(&request)
         .expect("recovery outcome");
 
-    let runtime = shell.complete_recovery(&outcome).expect("budgeted bootstrap");
+    let runtime = shell
+        .complete_recovery(&outcome)
+        .expect("budgeted bootstrap");
 
     let state = runtime
         .branch_catalog()
@@ -516,7 +518,10 @@ fn budgeted_replay_drains_the_backlog_to_durable_tables() {
     for version in [1, record_count / 2, record_count] {
         let key = format!("bulk-{version:03}");
         let row = view
-            .latest(&physical_key(branch, Box::leak(key.into_bytes().into_boxed_slice())))
+            .latest(&physical_key(
+                branch,
+                Box::leak(key.into_bytes().into_boxed_slice()),
+            ))
             .expect("read")
             .unwrap_or_else(|| panic!("replayed row {version} lost by the budgeted replay"));
         assert_eq!(row.row().value(), value, "row {version} value intact");
