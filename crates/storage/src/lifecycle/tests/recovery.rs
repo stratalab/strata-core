@@ -447,6 +447,87 @@ fn bootstrap_rejects_recovered_log_record_for_unopened_branch() {
     );
 }
 
+/// #3319 S3b at the storage level (the mutation gate judges storage mutants
+/// with storage tests only): a budgeted replay of a WAL several times the
+/// rotation threshold must DRAIN the replayed backlog to durable L0 tables
+/// mid-bootstrap — not accumulate it as memtables — and the recovered
+/// branch must serve every replayed row. This observes the whole
+/// `flush_replayed_state_if_over_threshold` seam: the half-threshold
+/// pre-rotation (a full-threshold seal overflows the artifact pool and
+/// fails the open), the drain trigger, and the fail-closed error path (a
+/// drain failure aborts bootstrap, which this test's success shape pins in
+/// reverse).
+#[test]
+fn budgeted_replay_drains_the_backlog_to_durable_tables() {
+    let backend: &'static RecoveryTestBackend =
+        crate::testkit::leak_static(RecoveryTestBackend::new());
+    let branch = branch_id(0x4e);
+    let budget = StorageRuntimeBudget::from_total_bytes(16 * 1024 * 1024).expect("budget");
+    let branch_config = branch_config_with_storage_budget(BranchRuntimeConfig::default(), budget)
+        .expect("budget branch config");
+    let rotation_bytes = branch_config.active_rotation_bytes();
+    let mut shell = assemble_shell_with_branch_config(
+        open_plan_with_budget(RecoveryStrictness::Strict, budget),
+        branch,
+        backend,
+        branch_config,
+    )
+    .expect("budgeted durable shell");
+    // A replayed working set several times the rotation threshold.
+    let record_count: u64 = 64;
+    let value: &'static [u8] = Box::leak(vec![b'x'; 96 * 1024].into_boxed_slice());
+    for version in 1..=record_count {
+        let key: &'static [u8] =
+            Box::leak(format!("bulk-{version:03}").into_bytes().into_boxed_slice());
+        let record = wal_record(branch, version, key, value);
+        shell
+            .services_mut()
+            .wal_mut()
+            .append(&record)
+            .expect("append bulk record");
+    }
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let outcome = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect("recovery outcome");
+
+    let runtime = shell
+        .complete_recovery(&outcome)
+        .expect("budgeted bootstrap");
+
+    let state = runtime
+        .branch_catalog()
+        .branch_state(branch)
+        .expect("branch state");
+    assert!(
+        state.owned_table_count() >= 2,
+        "the replayed backlog must drain to durable L0 tables (got {})",
+        state.owned_table_count()
+    );
+    assert_eq!(
+        state.frozen_table_count(),
+        0,
+        "nothing stays frozen once the drain runs"
+    );
+    assert!(
+        state.active().approximate_size_bytes() < rotation_bytes,
+        "the residual active memtable stays under the rotation threshold"
+    );
+    let view = state.capture_read_view().expect("read view");
+    for version in [1, record_count / 2, record_count] {
+        let key = format!("bulk-{version:03}");
+        let row = view
+            .latest(&physical_key(
+                branch,
+                Box::leak(key.into_bytes().into_boxed_slice()),
+            ))
+            .expect("read")
+            .unwrap_or_else(|| panic!("replayed row {version} lost by the budgeted replay"));
+        assert_eq!(row.row().value(), value, "row {version} value intact");
+    }
+}
+
 /// #2567 S3a (#3319): the streamed bootstrap replay HONORS the contiguity
 /// fence — records above `replay_ceiling` are the orphaned tail recovery
 /// deliberately drops (recovering past a lost table-manifest base), and they
@@ -3617,13 +3698,24 @@ fn assemble_shell(
     branch: BranchId,
     backend: &'static RecoveryTestBackend,
 ) -> LifecycleResult<LifecycleDurableLocalShell<'static>> {
+    assemble_shell_with_branch_config(plan, branch, backend, BranchRuntimeConfig::default())
+}
+
+/// #3319 S3b: the replay-flush tests need the branch config PRODUCTION
+/// derives from the budget (the rotation threshold), not the default.
+fn assemble_shell_with_branch_config(
+    plan: StorageOpenPlan,
+    branch: BranchId,
+    backend: &'static RecoveryTestBackend,
+    branch_config: BranchRuntimeConfig,
+) -> LifecycleResult<LifecycleDurableLocalShell<'static>> {
     LifecycleDurableLocalShell::assemble(
         LifecycleDurableLocalOpenRequest::new(
             plan,
             DATABASE_ID,
             branch,
             CommitBranchGeneration::new(1).expect("generation"),
-            BranchRuntimeConfig::default(),
+            branch_config,
             CommitRuntimeConfig::default(),
             WalServiceConfig::default(),
         )?,

@@ -2,12 +2,11 @@
 //!
 //! The memory budget is a product contract (`with_memory_budget` bounds the
 //! database's working memory; graded admission enforces it on the write
-//! path), but #2567 showed recovery is outside it: a 1B-key crash-recovery
-//! open consumed ~56 GB RSS and was OOM-killed. This harness re-finds that
-//! at CI scale (gate 7) and pins it: recovering a ~64 MB database under a
-//! 16 MB budget peaks at ~200 MB RSS — ~12× the budget — and the peak is
-//! byte-identical with **no budget at all**, so the budget is not leaked
-//! past but ignored entirely on the recovery path.
+//! path), and #2567 showed recovery was outside it: a 1B-key crash-recovery
+//! open consumed ~56 GB RSS and was OOM-killed. This harness re-found that
+//! at CI scale (gate 7) — recovering a ~64 MB database under a 16 MB budget
+//! peaked at ~200 MB RSS, byte-identical with no budget at all — and now
+//! holds the fixed contract: the envelope below.
 //!
 //! Measurement: each phase runs in its own subprocess (the TCP2.1
 //! re-invoke-self pattern) so `VmHWM` — the kernel's own high-water mark —
@@ -16,12 +15,13 @@
 //! is recovery's memory, and seeding under a small budget just measures
 //! write-path back-pressure (which BS5's graded admission already covers).
 //!
-//! The pin (`pin_2567_*`) asserts today's violation exactly, shrink-only:
-//! when the fix lands, recovery peaks must land within the budget envelope,
-//! the pin breaks, and it must be replaced by the contract assertion its
-//! failure message spells out. The correctness half is permanent: recovery
-//! under a small budget must still recover *all* the data, however much
-//! memory it uses.
+//! History: the `pin_2567_*` gate-7 pin held today's violation exactly
+//! (budgeted peak ~12x the budget, byte-identical unbudgeted) until the fix
+//! landed in two slices — the streamed replay transient (S3a, #3478) and
+//! the replay-time flush of the installed state (S3b) — at which point the
+//! pin broke as designed and was replaced by the envelope contract below.
+//! The correctness half is permanent: recovery under a small budget must
+//! still recover *all* the data, however much memory it uses.
 #![cfg(all(feature = "localfs", target_os = "linux"))]
 
 use std::path::Path;
@@ -36,10 +36,6 @@ use strata_engine::{
 const KEYS: u32 = 2000;
 const VALUE_BYTES: usize = 32 * 1024;
 const RECOVERY_BUDGET: u64 = 16 * 1024 * 1024;
-
-/// Today recovery peaks at ~12× the budget; the pin trips at >4× so the
-/// assertion is nowhere near the noise floor in either direction.
-const PINNED_VIOLATION_FACTOR: u64 = 4;
 
 const DIR_ENV: &str = "STRATA_RECOVERY_BUDGET_DIR";
 
@@ -119,16 +115,27 @@ fn phase_recover_budgeted() {
     let db = open_budgeted(&root);
     let after_open = vm_kb("VmHWM");
 
-    let mut kv = db.kv(branch(), space()).expect("kv opens after recovery");
-    for index in [0, KEYS / 2, KEYS - 1] {
-        let row = kv.get(&kv_key(index)).expect("read recovers");
-        let value = row.unwrap_or_else(|| panic!("key {index} lost by budgeted recovery"));
-        assert_eq!(
-            value.as_bytes().len(),
-            VALUE_BYTES,
-            "key {index} damaged by budgeted recovery"
-        );
+    {
+        let mut kv = db.kv(branch(), space()).expect("kv opens after recovery");
+        for index in [0, KEYS / 2, KEYS - 1] {
+            let row = kv.get(&kv_key(index)).expect("read recovers");
+            let value = row.unwrap_or_else(|| panic!("key {index} lost by budgeted recovery"));
+            assert_eq!(
+                value.as_bytes().len(),
+                VALUE_BYTES,
+                "key {index} damaged by budgeted recovery"
+            );
+        }
+        // The recovered store must be fully OPERABLE: a write plus the clean
+        // close's flush drives a manifest publish over the tables the
+        // budgeted recovery flushed mid-replay — a catalog gap there
+        // (an unrecorded replay-flushed table) fails right here.
+        kv.put(kv_key(KEYS), KvValue::new(vec![b'w'; 64]))
+            .expect("post-recovery write");
     }
+    let mut db = db;
+    db.close()
+        .expect("post-recovery close flushes and publishes over replay-flushed tables");
     println!("PHASE-RECOVER-BUDGETED before_kb={before} after_open_kb={after_open}");
 }
 
@@ -199,9 +206,9 @@ fn wal_bytes(dir: &Path) -> u64 {
 /// Today `recover_wal` decodes the entire tail into one `Vec`, copies it,
 /// and carries it to bootstrap replay: the peak is ~3x the tail (~200 MB
 /// for a ~64 MB WAL). With streamed, windowed replay the peak is the
-/// installed state (the replayed rows' memtables, ~1x the tail — bounding
-/// THAT under the budget is the S3b replay-flush slice, tracked by
-/// `pin_2567_*`) plus a small window. The 1.5x ceiling sits between the
+/// installed state (the replayed rows' memtables, ~1x the tail — S3b's
+/// replay-time flush bounds that under the budget; the envelope test below
+/// asserts it) plus a small window. The 1.5x ceiling sits between the
 /// two regimes with margin on both sides.
 #[test]
 fn recovery_transient_stays_within_a_small_multiple_of_the_wal_tail() {
@@ -226,46 +233,49 @@ fn recovery_transient_stays_within_a_small_multiple_of_the_wal_tail() {
     );
 }
 
-/// #2567 pin (shrink-only): recovery memory ignores the configured budget.
+/// The S3b envelope allowance on top of the budget: the streamed read chunk,
+/// one in-flight flush artifact (itself budget-checked), disk-resident
+/// reader metadata, and allocator slack. Fixed and documented — not a knob
+/// to grow when the assertion gets tight.
+const ENVELOPE_ALLOWANCE_KB: u64 = 32 * 1024;
+
+/// The #2567/#3319 contract, complete (S3a + S3b): budgeted recovery peaks
+/// within the budget envelope — the transient is streamed (S3a) and the
+/// replayed state rotates and flushes to disk-resident tables under the
+/// budget-derived threshold (S3b) — while the read-back in
+/// `phase_recover_budgeted` keeps proving no data was traded away.
 ///
-/// Asserts today's violation exactly: the recovery-phase RSS peak exceeds
-/// the budget several times over, and an unbudgeted recovery peaks at the
-/// same height — the budget changes nothing. When the fix lands this pin
-/// breaks; delete it and assert the contract instead: the budgeted
-/// recovery peak stays within the budget envelope (budget + a fixed
-/// process-overhead allowance), while `phase_recover_budgeted`'s read-back
-/// (already permanent) keeps proving no data was traded away.
+/// Order matters: the UNBUDGETED control runs first because a budgeted
+/// recovery now MUTATES the store (its mid-replay flushes publish tables
+/// and manifests), and the control must see the original WAL-heavy shape.
+/// At this scale the unbudgeted run flushes nothing (its budget-derived
+/// rotation threshold exceeds the whole tail), so the store reaches the
+/// budgeted phase unchanged.
 #[test]
-fn pin_2567_recovery_rss_ignores_the_memory_budget() {
+fn budgeted_recovery_peak_stays_within_the_budget_envelope() {
     let dir = tempfile::tempdir().expect("tmp");
     run_phase("phase_seed", dir.path());
-
-    let budgeted = run_phase("phase_recover_budgeted", dir.path());
-    let budgeted_peak_kb = phase_kb(&budgeted, "PHASE-RECOVER-BUDGETED", "after_open_kb")
-        - phase_kb(&budgeted, "PHASE-RECOVER-BUDGETED", "before_kb");
 
     let unbudgeted = run_phase("phase_recover_unbudgeted", dir.path());
     let unbudgeted_peak_kb = phase_kb(&unbudgeted, "PHASE-RECOVER-UNBUDGETED", "after_open_kb")
         - phase_kb(&unbudgeted, "PHASE-RECOVER-UNBUDGETED", "before_kb");
 
+    let budgeted = run_phase("phase_recover_budgeted", dir.path());
+    let budgeted_peak_kb = phase_kb(&budgeted, "PHASE-RECOVER-BUDGETED", "after_open_kb")
+        - phase_kb(&budgeted, "PHASE-RECOVER-BUDGETED", "before_kb");
+
     let budget_kb = RECOVERY_BUDGET / 1024;
     assert!(
-        budgeted_peak_kb > budget_kb * PINNED_VIOLATION_FACTOR,
-        "#2567 pin: budgeted recovery peaked at {budgeted_peak_kb} kB, within \
-         {PINNED_VIOLATION_FACTOR}x of the {budget_kb} kB budget — the fix landed: \
-         delete this pin and assert the budget envelope instead"
+        budgeted_peak_kb <= budget_kb + ENVELOPE_ALLOWANCE_KB,
+        "budgeted recovery peaked at {budgeted_peak_kb} kB — outside the \
+         envelope ({budget_kb} kB budget + {ENVELOPE_ALLOWANCE_KB} kB allowance): \
+         the replayed state is not being flushed under the budget"
     );
-    // The stronger half: the budget is ignored, not merely exceeded — the
-    // budgeted peak matches the unbudgeted peak. (Both replay the same ~64 MB
-    // WAL; a budget-aware recovery would bound the budgeted run well below.)
-    let (low, high) = (
-        budgeted_peak_kb.min(unbudgeted_peak_kb),
-        budgeted_peak_kb.max(unbudgeted_peak_kb),
-    );
+    // The budget must INFLUENCE recovery: the same store recovered without a
+    // budget keeps the whole replayed state resident and peaks well above.
     assert!(
-        high - low < high / 4,
-        "#2567 pin: budgeted ({budgeted_peak_kb} kB) and unbudgeted \
-         ({unbudgeted_peak_kb} kB) recovery peaks diverged by more than 25% — the \
-         budget now influences recovery: re-triage this pin against the fix"
+        budgeted_peak_kb < unbudgeted_peak_kb - unbudgeted_peak_kb / 4,
+        "budgeted ({budgeted_peak_kb} kB) is not materially below unbudgeted \
+         ({unbudgeted_peak_kb} kB) — the budget is not shaping recovery"
     );
 }
