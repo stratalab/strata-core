@@ -625,3 +625,24 @@ fn wal_service_error_rendering_and_sources_survive() {
         "backend failures must retain their source for chain-walking consumers"
     );
 }
+
+#[test]
+fn active_segment_reclaim_eligibility_is_watermark_gated() {
+    // Truth table for the #3494 reclaim-rotation decision: an active segment
+    // may be rotated away only when it holds records AND its newest commit
+    // sits at or below the coverage watermark — everything else is either
+    // pointless churn (empty segment) or would seal away the only copy of
+    // un-covered commits (fresh tail).
+    use super::active_segment_is_reclaimable;
+    use strata_core::CommitVersion;
+    let version = CommitVersion::new;
+    assert!(active_segment_is_reclaimable(1, version(10), version(10)));
+    assert!(active_segment_is_reclaimable(5, version(9), version(10)));
+    assert!(!active_segment_is_reclaimable(1, version(11), version(10)));
+    assert!(!active_segment_is_reclaimable(0, version(0), version(10)));
+    assert!(!active_segment_is_reclaimable(
+        0,
+        CommitVersion::ZERO,
+        CommitVersion::ZERO
+    ));
+}

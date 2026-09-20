@@ -276,6 +276,15 @@ impl<'a> LifecycleDurableLocalServices<'a> {
         &mut self.wal
     }
 
+    /// Split borrow for the WAL-truncation path (#3494): the runner reads the
+    /// retention proof from the manifest while mutating the WAL (reclaim
+    /// rotation), which a pair of accessor calls cannot express.
+    pub(crate) fn manifest_and_wal_mut(
+        &mut self,
+    ) -> (&DatabaseManifestService<'a>, &mut WalService<'a>) {
+        (&self.manifest, &mut self.wal)
+    }
+
     pub(crate) const fn manifest(&self) -> &DatabaseManifestService<'a> {
         &self.manifest
     }

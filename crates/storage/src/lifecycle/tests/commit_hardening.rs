@@ -146,7 +146,11 @@ fn automatic_checkpoint_triggers_when_wal_bytes_exceed_threshold() {
         .iter()
         .any(|outcome| outcome.task_kind() == MaintenanceTaskKind::Checkpoint));
     assert!(!backend.snapshot_objects().is_empty());
-    assert_eq!(backend.delete_calls(), 0);
+    // Reclaim rotation (#3494): the checkpoint covered the whole single-segment
+    // WAL, so the truncation pass seals the active segment and releases it —
+    // before the fix this drain deleted nothing and the WAL was retained
+    // forever.
+    assert!(backend.delete_calls() > 0);
 }
 
 #[test]
@@ -1027,4 +1031,302 @@ fn automatic_checkpoint_truncates_wal_only_after_checkpoint_or_table_manifest_pr
     );
 
     assert!(backend.delete_calls() > 0);
+}
+
+fn durable_sized_batch(branch: BranchId, user_key: Vec<u8>, value: Vec<u8>) -> CommitBatch {
+    CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::put(
+            dynamic_physical_key(branch, user_key),
+            value,
+            CommitExpiry::None,
+            CommitRetentionHint::Append,
+        )],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::new(
+            CommitDurabilityMode::Standard,
+            CommitConflictValidationMode::Validate,
+            CommitDuplicateKeyPolicy::Reject,
+            CommitTimestampPolicy::RuntimeGenerated,
+            CommitOrigin::StorageRuntime,
+        ),
+    )
+}
+
+#[test]
+fn wal_truncation_reclaims_a_covered_active_segment() {
+    // #3494: a database whose WAL never crosses the segment-rotation threshold
+    // holds ONE active segment forever, and `delete_covered_segments` protects
+    // the active id — so however much of the WAL a checkpoint covered, not one
+    // byte was ever released. Reclaim must rotate a fully-covered active
+    // segment so truncation can free it.
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xa1);
+    let policy = LifecycleWalGrowthPolicy::new(1, usize::MAX, None);
+    let mut runtime = open_durable_runtime(branch, backend, policy);
+
+    for index in 0u8..4 {
+        runtime
+            .execute_durable_commit(
+                durable_sized_batch(
+                    branch,
+                    format!("reclaim-{index}").into_bytes(),
+                    vec![index; 8 * 1024],
+                ),
+                generation_guard(),
+            )
+            .expect("durable commit");
+    }
+    let before = runtime.current_wal_growth_facts().expect("facts before");
+    assert!(before.retained_bytes() > 0, "commits reached the WAL");
+
+    drain_wal_growth_maintenance(&mut runtime);
+
+    let after = runtime.current_wal_growth_facts().expect("facts after");
+    assert!(
+        after.active_segment_id() > before.active_segment_id(),
+        "reclaim rotates the covered active segment (id {} -> {})",
+        before.active_segment_id(),
+        after.active_segment_id()
+    );
+    assert!(
+        after.retained_bytes() < before.retained_bytes() / 4,
+        "covered WAL bytes are released ({} -> {})",
+        before.retained_bytes(),
+        after.retained_bytes()
+    );
+}
+
+/// Like [`drain_wal_growth_maintenance`], plus the compaction work a real
+/// flush cadence schedules — the bulk-import test below flushes repeatedly,
+/// which the strict four-kind helper (sized for one growth sequence) rejects.
+fn drain_bulk_import_maintenance(
+    runtime: &mut LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+) {
+    for _ in 0..32 {
+        if runtime.maintenance_status().pending_tasks() == 0 {
+            return;
+        }
+        if runtime
+            .run_next_flush_maintenance()
+            .expect("flush maintenance")
+            .is_some()
+            || runtime
+                .run_next_checkpoint_maintenance()
+                .expect("checkpoint maintenance")
+                .is_some()
+            || runtime
+                .run_next_flush_watermark_maintenance()
+                .expect("flush watermark maintenance")
+                .is_some()
+            || runtime
+                .run_next_wal_truncation_maintenance()
+                .expect("WAL truncation maintenance")
+                .is_some()
+            || runtime
+                .run_next_compaction_maintenance()
+                .expect("compaction maintenance")
+                .is_some()
+            || runtime
+                .run_next_table_rewrite_maintenance()
+                .expect("table rewrite maintenance")
+                .is_some()
+            || runtime
+                .run_next_retention_maintenance()
+                .expect("retention maintenance")
+                .is_some()
+            || runtime
+                .run_next_purge_maintenance()
+                .expect("purge maintenance")
+                .is_some()
+            || runtime
+                .run_next_materialization_maintenance()
+                .expect("materialization maintenance")
+                .is_some()
+            || runtime
+                .run_next_quarantine_maintenance()
+                .expect("quarantine maintenance")
+                .is_some()
+        {
+            continue;
+        }
+        panic!("pending bulk-import maintenance did not match a runner");
+    }
+    assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
+}
+
+#[test]
+fn covered_wal_is_reclaimed_as_flushes_advance_the_watermark() {
+    // #3494: once flushes advance the retention watermark — as a long-running
+    // process's background maintenance does during operation — the covered WAL
+    // must be RECLAIMED rather than accumulate. This drives that flush cadence
+    // explicitly and asserts the WAL converges instead of growing with the
+    // data. (The measured control: with the reclaim rotation disabled this WAL
+    // grows monotonically; the separate question of making the DEFAULT policy
+    // advance the watermark autonomously for a small database is deferred to
+    // the scale-aware-trigger slice — a checkpoint-cadence change with its own
+    // write-amp tradeoff, not needed to reclaim what a flush has already
+    // covered.)
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xa2);
+    let mut runtime = open_durable_runtime(branch, backend, LifecycleWalGrowthPolicy::default());
+
+    let mut peak_retained = 0u64;
+    for index in 0u16..24 {
+        let outcome = runtime
+            .execute_durable_commit(
+                durable_sized_batch(
+                    branch,
+                    format!("small-db-{index}").into_bytes(),
+                    vec![u8::try_from(index % 251).expect("byte"); 1024 * 1024],
+                ),
+                generation_guard(),
+            )
+            .expect("durable commit");
+        peak_retained = peak_retained.max(
+            runtime
+                .current_wal_growth_facts()
+                .expect("facts")
+                .retained_bytes(),
+        );
+        // Every fourth commit, flush and advance the coverage watermark — the
+        // work a long-running process's maintenance loop does during idle,
+        // sized down so the test does not depend on the host memory budget.
+        if index % 4 == 3 {
+            runtime
+                .enqueue_maintenance(MaintenanceTaskRequest::flush(branch))
+                .expect("enqueue flush");
+            runtime
+                .enqueue_maintenance(MaintenanceTaskRequest::table_manifest_flush_watermark(
+                    outcome
+                        .commit_version()
+                        .expect("mutating commit has a version"),
+                ))
+                .expect("enqueue flush watermark");
+            drain_bulk_import_maintenance(&mut runtime);
+        }
+    }
+
+    let after = runtime.current_wal_growth_facts().expect("facts after");
+    // The WAL accumulated real bytes between reclaims (several 1 MiB commits)…
+    assert!(
+        peak_retained > 3 * 1024 * 1024,
+        "test setup must accumulate WAL between reclaims (peak {peak_retained})"
+    );
+    // …and converged instead of growing with the data: retained WAL ends far
+    // below the 24 MiB written, which the pre-fix active-id protection left
+    // retained forever.
+    assert!(
+        after.retained_bytes() < 16 * 1024 * 1024 && after.retained_bytes() < peak_retained,
+        "covered WAL is reclaimed as the watermark advances \
+         (peak {peak_retained}, retained {})",
+        after.retained_bytes()
+    );
+    assert!(
+        after.active_segment_id() > 1,
+        "reclaim rotated the active segment"
+    );
+    assert!(backend.delete_calls() > 0, "covered segments were released");
+}
+
+#[test]
+fn wal_truncation_leaves_an_uncovered_active_tail_in_place() {
+    // Direction control for #3494's reclaim rotation: commits ABOVE the
+    // coverage watermark are the only copy of that data — the truncation pass
+    // must neither rotate nor release the active segment that holds them.
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xa3);
+    let policy = LifecycleWalGrowthPolicy::new(1, usize::MAX, None);
+    let mut runtime = open_durable_runtime(branch, backend, policy);
+
+    runtime
+        .execute_durable_commit(
+            durable_sized_batch(branch, b"covered".to_vec(), vec![0xc0; 8 * 1024]),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    drain_wal_growth_maintenance(&mut runtime);
+    let reclaimed = runtime.current_wal_growth_facts().expect("facts");
+
+    // A fresh commit lands in the new active segment, above the watermark.
+    runtime
+        .execute_durable_commit(
+            durable_sized_batch(branch, b"fresh-tail".to_vec(), vec![0xc1; 8 * 1024]),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    let deletes_before = backend.delete_calls();
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::wal_truncation())
+        .expect("enqueue WAL truncation");
+    runtime
+        .run_next_wal_truncation_maintenance()
+        .expect("WAL truncation runner")
+        .expect("WAL truncation outcome");
+
+    let after = runtime.current_wal_growth_facts().expect("facts after");
+    assert_eq!(
+        after.active_segment_id(),
+        reclaimed.active_segment_id(),
+        "an uncovered tail must keep its active segment"
+    );
+    assert!(after.retained_bytes() > 0, "the fresh tail is retained");
+    assert_eq!(
+        backend.delete_calls(),
+        deletes_before,
+        "nothing is released while the tail is uncovered"
+    );
+}
+#[test]
+fn background_wal_truncation_start_rotates_a_covered_active_segment() {
+    // The background truncation stages its deletes off-lock on a retention
+    // clone, so the #3494 reclaim rotation must happen at the ON-LOCK start —
+    // the sealed segment is immutable from that point, which is exactly what
+    // the off-lock delete pass is allowed to touch.
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xa4);
+    let policy = LifecycleWalGrowthPolicy::new(1, usize::MAX, None);
+    let mut runtime = open_durable_runtime(branch, backend, policy);
+
+    runtime
+        .execute_durable_commit(
+            durable_sized_batch(branch, b"bg-covered".to_vec(), vec![0xb6; 8 * 1024]),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    // Run the enqueued sequence up to — but not including — the truncation
+    // task, so coverage is proven while the truncation is still pending.
+    runtime
+        .run_next_flush_maintenance()
+        .expect("flush maintenance")
+        .expect("flush outcome");
+    runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint maintenance")
+        .expect("checkpoint outcome");
+    runtime
+        .run_next_flush_watermark_maintenance()
+        .expect("flush watermark maintenance")
+        .expect("flush watermark outcome");
+    let before = runtime.current_wal_growth_facts().expect("facts before");
+
+    let step = runtime
+        .start_next_background_wal_truncation_maintenance()
+        .expect("start background truncation")
+        .expect("truncation task is pending");
+    assert!(
+        matches!(step, DurableBackgroundMaintenanceStep::Build(_)),
+        "truncation stages its deletes off-lock"
+    );
+    let after = runtime.current_wal_growth_facts().expect("facts after");
+    assert!(
+        after.active_segment_id() > before.active_segment_id(),
+        "the covered active segment is sealed at the on-lock start ({} -> {})",
+        before.active_segment_id(),
+        after.active_segment_id()
+    );
 }
