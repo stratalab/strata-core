@@ -85,10 +85,16 @@ const TABLE_FILTER_BITS_PER_KEY: usize = 10;
 /// elsewhere (materialization, snapshot install — W2.2 follow-up) stay
 /// unfiltered; the reader treats a missing filter as `Unavailable` and probes
 /// normally, so mixed tables are fine.
+// Return type spelled out as `Result<T, E>`, not the `LifecycleResult` alias:
+// cargo-mutants resolves no aliases, so an alias return makes every whole-body
+// mutant unviable and the diff's decision (the compression codec) goes
+// gate-unjudged (#3337 / vacuity gate #3349). Spelled out, the `Ok(Default)`
+// mutant is viable and `zstd_flush_shrinks_on_disk_tables_versus_uncompressed`
+// kills it (`TableBuilderConfig::default()` is Uncompressed).
 pub(super) fn lifecycle_table_builder_config(
     data_block_bytes: Option<u32>,
     compression: crate::format::TableCompression,
-) -> LifecycleResult<TableBuilderConfig> {
+) -> Result<TableBuilderConfig, LifecycleError> {
     // B2: the per-database data-block byte target (configured at open,
     // carried by the lifecycle config) overrides the built-in default; the
     // open-time validation bounds it, so a failure here is an internal
