@@ -91,6 +91,11 @@ jobs:
           cargo test --locked -p strata-storage --test format_golden
           cargo test --locked -p strata-engine --test capability_conformance
           cargo test --locked -p strata-executor --features testkit --test error_contract
+          # #3290: ten engine test files are testkit-gated (five whole-file,
+          # five item-level) — 809 tests that no default-features run
+          # compiles. The #3437 clippy matrix LINTS this shape; this is the
+          # lane that RUNS it.
+          cargo test --locked -p strata-engine --features testkit
           # Standalone (no `hub` in the graph), so serde_json's `float_roundtrip`
           # is whatever the workspace declares rather than whatever `serde_jcs`
           # happens to unify in. The whole-workspace run above cannot fail if
