@@ -400,7 +400,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
       - name: Install libclang (rocksdb bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libclang-dev
       - name: KV differential soak vs RocksDB
         env:
           STRATA_KV_DIFF_SEEDS: "32"
