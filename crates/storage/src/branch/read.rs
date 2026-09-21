@@ -988,6 +988,11 @@ pub(crate) struct BranchReadView {
     /// `None` (constructors that never attach one, e.g. testkit) = always
     /// fall back to the timeline-space scan.
     retained_timeline: Option<(Arc<crate::timeline_index::RetainedCommitTimeline>, bool)>,
+    /// #3502 Slice A: the retained-history version floor published by MVCC
+    /// version pruning (`None` = unbounded). A read `as_of` below
+    /// `max(timeline.min_version, this)` raises `RetainedHistoryUnavailable`
+    /// rather than returning a below-floor survivor.
+    retained_history_floor: Option<CommitVersion>,
 }
 
 impl BranchReadView {
@@ -1026,6 +1031,7 @@ impl BranchReadView {
             facts,
             timestamp_coverage: BranchTimestampCoverage::unknown(),
             retained_timeline: None,
+            retained_history_floor: None,
         })
     }
 
@@ -1054,6 +1060,7 @@ impl BranchReadView {
             facts,
             timestamp_coverage: BranchTimestampCoverage::unknown(),
             retained_timeline: None,
+            retained_history_floor: None,
         })
     }
 
@@ -1098,6 +1105,18 @@ impl BranchReadView {
         self.retained_timeline
             .as_ref()
             .map(|(index, live)| (index, *live))
+    }
+
+    /// #3502 Slice A: attach the branch's retained-history version floor.
+    pub(crate) fn with_retained_history_floor(mut self, floor: Option<CommitVersion>) -> Self {
+        self.retained_history_floor = floor;
+        self
+    }
+
+    /// #3502 Slice A: the retained-history version floor for this view, if the
+    /// branch has pruned below one (`None` = unbounded).
+    pub(crate) const fn retained_history_floor(&self) -> Option<CommitVersion> {
+        self.retained_history_floor
     }
 
     pub(crate) fn active_row_count(&self) -> usize {

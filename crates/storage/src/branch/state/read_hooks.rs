@@ -250,6 +250,12 @@ impl BranchLocalState {
         self.timestamp_coverage = coverage;
     }
 
+    /// #3502 Slice A: set the retained-history version floor (shared into read
+    /// views; `None` = unbounded). The capture paths read the field directly.
+    pub(crate) fn set_retained_history_floor(&mut self, floor: Option<CommitVersion>) {
+        self.retained_history_floor = floor;
+    }
+
     pub(crate) const fn put_rows(&self) -> u64 {
         self.put_rows
     }
@@ -286,6 +292,7 @@ impl BranchLocalState {
         .map(|view| {
             view.with_timestamp_coverage(self.timestamp_coverage)
                 .with_retained_timeline(Arc::clone(self.retained_timeline()), false)
+                .with_retained_history_floor(self.retained_history_floor)
         })
     }
 
@@ -308,6 +315,7 @@ impl BranchLocalState {
         .map(|view| {
             view.with_timestamp_coverage(self.timestamp_coverage)
                 .with_retained_timeline(Arc::clone(self.retained_timeline()), true)
+                .with_retained_history_floor(self.retained_history_floor)
         })
     }
 

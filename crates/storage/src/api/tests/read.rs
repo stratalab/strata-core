@@ -290,6 +290,89 @@ fn read_at_version_rejects_unrecorded_future_version() {
     assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
 }
 
+/// #3502 Slice A: a read `as_of` a version below the branch's retained-history
+/// floor RAISES `HistoryUnavailable` rather than returning the below-floor
+/// survivor — the keystone that makes MVCC version pruning safe for
+/// time-travel. Versions at and above the floor still resolve exactly.
+#[test]
+fn read_at_version_below_retained_history_floor_is_rejected() {
+    let mut runtime = open_runtime();
+    let first = commit_put(&mut runtime, b"alpha", b"v1", 10);
+    let second = commit_put(&mut runtime, b"alpha", b"v2", 20);
+    let third = commit_put(&mut runtime, b"alpha", b"v3", 30);
+
+    // Control: with no floor the oldest version reads exactly (also the pre-fix
+    // behavior the floor must override).
+    let old = runtime
+        .read_point(&point_request(
+            b"alpha",
+            ReadBound::AtVersion(first.commit_version()),
+        ))
+        .expect("read old before floor");
+    assert_eq!(read_value(old.row().expect("row present")), b"v1");
+
+    // Publish a retained-history floor at the second version (what pruning does).
+    runtime
+        .set_retained_history_floor_for_test(branch(), second.commit_version())
+        .expect("set retained history floor");
+
+    // Below the floor now RAISES — the version was pruned; returning v1 is wrong.
+    let error = runtime
+        .read_point(&point_request(
+            b"alpha",
+            ReadBound::AtVersion(first.commit_version()),
+        ))
+        .expect_err("below-floor version is unavailable");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+
+    // At and above the floor still resolve exactly.
+    let at = runtime
+        .read_point(&point_request(
+            b"alpha",
+            ReadBound::AtVersion(second.commit_version()),
+        ))
+        .expect("read at floor");
+    assert_eq!(read_value(at.row().expect("row present")), b"v2");
+    let above = runtime
+        .read_point(&point_request(
+            b"alpha",
+            ReadBound::AtVersion(third.commit_version()),
+        ))
+        .expect("read above floor");
+    assert_eq!(read_value(above.row().expect("row present")), b"v3");
+}
+
+/// #3502 Slice A: a timestamp `as_of` that resolves to a version below the
+/// retained-history floor RAISES rather than returning the pruned value; a
+/// timestamp at/after the floor's version resolves exactly.
+#[test]
+fn read_at_timestamp_resolving_below_retained_history_floor_is_rejected() {
+    let mut runtime = open_runtime();
+    commit_put(&mut runtime, b"alpha", b"v1", 10);
+    let second = commit_put(&mut runtime, b"alpha", b"v2", 20);
+    commit_put(&mut runtime, b"alpha", b"v3", 30);
+
+    runtime
+        .set_retained_history_floor_for_test(branch(), second.commit_version())
+        .expect("set retained history floor");
+
+    let error = runtime
+        .read_point(&point_request(
+            b"alpha",
+            ReadBound::AtTimestamp(Timestamp::from_micros(15)),
+        ))
+        .expect_err("timestamp resolving below the floor is unavailable");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+
+    let at = runtime
+        .read_point(&point_request(
+            b"alpha",
+            ReadBound::AtTimestamp(Timestamp::from_micros(25)),
+        ))
+        .expect("read at/after floor");
+    assert_eq!(read_value(at.row().expect("row present")), b"v2");
+}
+
 #[test]
 fn read_at_timestamp_resolves_to_commit_version() {
     let mut runtime = open_runtime();
@@ -608,6 +691,24 @@ fn history_pruned_versions_return_retention_error() {
         )
         .expect_err("unretained history rejected");
     assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+}
+
+/// #3502 Slice A: a history read bounded at exactly the retained timeline
+/// minimum is in-window and must SUCCEED — the minimum version is retained, not
+/// pruned. Pins the `<` in `require_version_retained` against a `<=` that would
+/// spuriously reject the oldest retained version.
+#[test]
+fn history_before_version_at_timeline_minimum_is_in_window() {
+    let mut runtime = open_runtime();
+    let first = commit_put(&mut runtime, b"alpha", b"one", 10);
+    commit_put(&mut runtime, b"alpha", b"two", 20);
+
+    runtime
+        .read_history(
+            &HistoryReadRequest::new(branch(), engine_space(), api_key(b"alpha"))
+                .before_version(first.commit_version()),
+        )
+        .expect("history bounded at the timeline minimum is in-window");
 }
 
 #[test]
