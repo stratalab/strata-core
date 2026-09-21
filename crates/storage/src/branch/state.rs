@@ -85,6 +85,12 @@ pub(crate) struct BranchLocalState {
     /// shared into read views. Starts unseeded (lookups fall back to the
     /// timeline-space scan, which seeds it).
     retained_timeline: Arc<crate::timeline_index::RetainedCommitTimeline>,
+    /// #3502 Slice A: the retained-history version floor published by MVCC
+    /// version pruning. `None` = unbounded (nothing pruned yet). Shared into
+    /// read views so an `as_of` below `max(timeline.min_version, this)` raises
+    /// `RetainedHistoryUnavailable` rather than returning a below-floor
+    /// survivor.
+    retained_history_floor: Option<CommitVersion>,
 }
 
 impl BranchLocalState {
@@ -109,6 +115,7 @@ impl BranchLocalState {
             tombstone_rows: 0,
             shape: BranchShapeAggregates::empty(config.max_level_count()),
             retained_timeline: crate::timeline_index::RetainedCommitTimeline::new(),
+            retained_history_floor: None,
         })
     }
 

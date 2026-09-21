@@ -320,16 +320,29 @@ pub(super) fn map_immutable_sources(
     Ok(mapped)
 }
 
+/// #3502 Slice A: is `version` below the branch's published MVCC pruning floor?
+/// Below-floor versions were pruned — compaction keeps only one below-floor
+/// survivor per key (CMP-002) — so an `as_of` below the floor must RAISE rather
+/// than serve that survivor, honoring the locked no-clamp/raise temporal
+/// contract. The timeline minimum is a separate lower bound enforced by each
+/// caller; since `v < max(min, floor)` iff `v < min || v < floor`, this cheap
+/// floor-only check composes with it and adds no timeline materialization to
+/// the read path. `None` floor = unbounded (nothing pruned).
+fn version_below_retained_floor(view: &BranchReadView, version: CommitVersion) -> bool {
+    view.retained_history_floor()
+        .is_some_and(|floor| version < floor)
+}
+
 pub(super) fn require_version_retained(
     view: &BranchReadView,
     version: CommitVersion,
 ) -> StorageApiResult<()> {
     let timeline = timeline_view_or_index(view)?;
-    if timeline
+    let below_timeline_minimum = timeline
         .bounds()
         .min_version()
-        .is_some_and(|min_version| version < min_version)
-    {
+        .is_some_and(|min_version| version < min_version);
+    if below_timeline_minimum || version_below_retained_floor(view, version) {
         return Err(StorageApiError::RetainedHistoryUnavailable {
             branch_id: view.branch_id(),
             reason: "commit version is outside retained history",
@@ -348,6 +361,12 @@ pub(super) fn resolve_read_bound(
             selected_timestamp: None,
         }),
         ReadBound::AtVersion(version) => {
+            if version_below_retained_floor(view, version) {
+                return Err(StorageApiError::RetainedHistoryUnavailable {
+                    branch_id: view.branch_id(),
+                    reason: "commit version was pruned below the retained history floor",
+                });
+            }
             let selected_timestamp = timeline_timestamp_for_version(view, version)?.ok_or(
                 StorageApiError::RetainedHistoryUnavailable {
                     branch_id: view.branch_id(),
@@ -362,20 +381,32 @@ pub(super) fn resolve_read_bound(
         ReadBound::AtTimestamp(timestamp) => {
             let lookup = timeline_version_at_or_before(view, timestamp)?;
             match lookup.miss() {
-                CommitTimelineMiss::Matched => Ok(ResolvedReadBound {
-                    branch_bound: BranchReadBound::AtVersion(lookup.matched_version().ok_or(
+                CommitTimelineMiss::Matched => {
+                    let matched_version = lookup.matched_version().ok_or(
                         StorageApiError::TimestampHistoryUnavailable {
                             branch_id: view.branch_id(),
                             reason: "timestamp lookup did not return a retained version",
                         },
-                    )?),
-                    selected_timestamp: Some(lookup.matched_timestamp().ok_or(
-                        StorageApiError::TimestampHistoryUnavailable {
+                    )?;
+                    // #3502 Slice A: a timestamp that resolves to a version
+                    // below the pruning floor was pruned — raise rather than
+                    // return the below-floor survivor.
+                    if version_below_retained_floor(view, matched_version) {
+                        return Err(StorageApiError::TimestampHistoryUnavailable {
                             branch_id: view.branch_id(),
-                            reason: "timestamp lookup did not return a retained timestamp",
-                        },
-                    )?),
-                }),
+                            reason: "timestamp resolves to a version pruned below the retained history floor",
+                        });
+                    }
+                    Ok(ResolvedReadBound {
+                        branch_bound: BranchReadBound::AtVersion(matched_version),
+                        selected_timestamp: Some(lookup.matched_timestamp().ok_or(
+                            StorageApiError::TimestampHistoryUnavailable {
+                                branch_id: view.branch_id(),
+                                reason: "timestamp lookup did not return a retained timestamp",
+                            },
+                        )?),
+                    })
+                }
                 CommitTimelineMiss::BeforeRetainedHistory | CommitTimelineMiss::Empty => {
                     Err(StorageApiError::TimestampHistoryUnavailable {
                         branch_id: view.branch_id(),

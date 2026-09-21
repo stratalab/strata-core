@@ -3280,6 +3280,55 @@ impl<'a> StorageRuntime<'a> {
         }
     }
 
+    /// #3502 Slice A: seed the retained-history version floor for one branch,
+    /// simulating what MVCC version pruning will publish (Slice B+). The floor
+    /// is part of the read view, so this republishes the branch snapshot after
+    /// mutating it — mirroring `set_timestamp_coverage_for_test`.
+    #[cfg(test)]
+    pub(crate) fn set_retained_history_floor_for_test(
+        &mut self,
+        branch_id: BranchId,
+        floor: CommitVersion,
+    ) -> StorageApiResult<()> {
+        match &mut self.inner {
+            StorageRuntimeInner::Cache(slot) => {
+                let mut runtime = slot.lock();
+                let generation = runtime
+                    .branch_catalog()
+                    .registry()
+                    .lookup(branch_id)
+                    .map_err(commit_error)?
+                    .generation();
+                runtime
+                    .branch_catalog_mut_for_test()
+                    .branch_state_mut(branch_id, CommitBranchGenerationGuard::exact(generation))
+                    .map_err(map_lifecycle_error)?
+                    .set_retained_history_floor(Some(floor));
+                runtime.publish_branch_snapshot_for_test(branch_id);
+                Ok(())
+            }
+            StorageRuntimeInner::DurableOwned(slot) => {
+                let mut runtime = slot.lock();
+                let generation = runtime
+                    .branch_catalog()
+                    .registry()
+                    .lookup(branch_id)
+                    .map_err(commit_error)?
+                    .generation();
+                runtime
+                    .branch_catalog_mut_for_test()
+                    .branch_state_mut(branch_id, CommitBranchGenerationGuard::exact(generation))
+                    .map_err(map_lifecycle_error)?
+                    .set_retained_history_floor(Some(floor));
+                runtime.publish_branch_snapshot_for_test(branch_id);
+                Ok(())
+            }
+            StorageRuntimeInner::Closed => Err(StorageApiError::InvalidRuntimeState {
+                reason: "retained history floor update requires an open runtime",
+            }),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn fork_default_branch_for_test(
         &mut self,
