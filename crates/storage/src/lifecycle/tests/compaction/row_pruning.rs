@@ -168,6 +168,24 @@ fn manifest_records_retained_timestamp_floor() {
     );
 }
 
+/// #3502 Slice D0: a freshly-created durable database's initial branch is born
+/// in-process, so its timestamp history is provably COMPLETE (nothing pruned) —
+/// the attestation the version-pruning proof's timestamp-floor gate requires.
+/// Without this a fresh branch is `Unknown` and can never be pruned. Complete
+/// and Unknown are read-identical, so this is behavior-neutral for reads.
+#[test]
+fn fresh_durable_created_branch_has_complete_timestamp_coverage() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xd0);
+    let runtime = open_runtime(branch, backend);
+
+    assert_eq!(
+        runtime.branch_state().timestamp_coverage(),
+        BranchTimestampCoverage::complete()
+    );
+}
+
 #[test]
 fn durable_pruned_compaction_recovery_restores_retained_reads() {
     let backend: &'static CheckpointTestBackend =

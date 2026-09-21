@@ -411,11 +411,11 @@ impl<S> LifecycleCacheRuntime<S> {
         let budget = StorageBudgetLedger::new(request.plan.lifecycle_config().storage_budget())?;
         let branch_config =
             branch_config_with_storage_budget_for_cache(branch_config, budget.budget())?;
-        let branch = BranchLocalState::new(request.initial_branch_id(), branch_config)
+        let mut branch = BranchLocalState::new(request.initial_branch_id(), branch_config)
             .map_err(branch_error)?;
-        // W3.1b: cache mode never recovers — the initial branch is born
-        // in-process with complete (empty) timeline coverage.
-        branch.retained_timeline().mark_complete_from_birth();
+        // W3.1b / #3502 D0: cache mode never recovers — the initial branch is
+        // born in-process with complete (empty) timeline AND timestamp coverage.
+        branch.mark_complete_from_birth();
         let branch_catalog = LifecycleBranchCatalog::with_existing_branch(
             &branch,
             request.branch_generation(),

@@ -250,6 +250,20 @@ impl BranchLocalState {
         self.timestamp_coverage = coverage;
     }
 
+    /// #3502 Slice D0: a branch born in-process with no inherited history has
+    /// provably COMPLETE timestamp coverage — its whole timeline is present and
+    /// nothing was ever pruned. Marks both the retained-timeline index (W3.1b)
+    /// and the timestamp coverage complete-from-birth, in one place. Complete
+    /// and Unknown coverage are read-identical (`require_timestamp` only raises
+    /// on `CompleteSince`), so this changes no read — it is the attestation the
+    /// version-pruning proof's timestamp-floor gate requires (a fresh branch
+    /// would otherwise be `Unknown` and unprunable). Recovery-without-facts is
+    /// deliberately left `Unknown`; it never calls this.
+    pub(crate) fn mark_complete_from_birth(&mut self) {
+        self.retained_timeline.mark_complete_from_birth();
+        self.timestamp_coverage = BranchTimestampCoverage::complete();
+    }
+
     /// #3502 Slice A: set the retained-history version floor (shared into read
     /// views; `None` = unbounded). The capture paths read the field directly.
     pub(crate) fn set_retained_history_floor(&mut self, floor: Option<CommitVersion>) {

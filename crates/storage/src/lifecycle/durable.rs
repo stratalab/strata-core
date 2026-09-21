@@ -416,8 +416,19 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         let block_cache = table_block_cache_from_storage_budget(budget.budget())?;
         let branch_config =
             branch_config_with_storage_budget(request.branch_config(), budget.budget())?;
-        let branch = BranchLocalState::new(request.initial_branch_id(), branch_config)
+        let mut branch = BranchLocalState::new(request.initial_branch_id(), branch_config)
             .map_err(branch_error)?;
+        // #3502 D0: a freshly-created durable database's initial branch is born
+        // in-process — its history is provably complete, nothing was ever
+        // pruned — so its timestamp coverage is Complete (the attestation the
+        // version-pruning proof's timestamp-floor gate needs). An
+        // OpenedExisting branch instead takes its coverage from the recovered
+        // manifest facts (or stays Unknown without facts — conservative, since
+        // a missing extension could mean a prior prune whose facts were lost).
+        // Complete and Unknown are read-identical, so this changes no read.
+        if disposition == StorageOpenDisposition::Created {
+            branch.set_timestamp_coverage(crate::branch::read::BranchTimestampCoverage::complete());
+        }
         let mut registry = CommitBranchRegistry::new();
         registry
             .register_active(request.initial_branch_id(), request.branch_generation())
