@@ -69,6 +69,10 @@ path = "benches/wire_commands.rs"
 harness = false
 
 [[bin]]
+name = "storage-amplification"
+path = "src/bin/storage_amplification.rs"
+
+[[bin]]
 name = "bench-compare"
 path = "src/bin/compare.rs"
 

@@ -269,3 +269,26 @@ fn open_options_cache_preheat_policy_round_trips() {
         .validate()
         .expect("preheat policy needs no validation");
 }
+
+/// #3499 intent pin: durable-local opens select Zstd table compression by
+/// default — the disk-amplification win (#3492) — and the choice round-trips
+/// through the builder so an edge/measurement caller can opt back to
+/// Uncompressed. Nothing else pins that the *production* default is Zstd; a
+/// silent flip back to Uncompressed would re-inflate on-disk size undetected.
+#[test]
+fn open_options_default_durable_table_compression_is_zstd() {
+    use crate::format::TableCompression;
+
+    let default_options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard);
+    assert_eq!(default_options.table_compression(), TableCompression::Zstd);
+
+    let uncompressed =
+        default_options.with_table_compression_for_test(TableCompression::Uncompressed);
+    assert_eq!(
+        uncompressed.table_compression(),
+        TableCompression::Uncompressed
+    );
+    uncompressed
+        .validate()
+        .expect("compression choice needs no validation");
+}

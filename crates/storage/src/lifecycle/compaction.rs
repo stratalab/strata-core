@@ -85,25 +85,32 @@ const TABLE_FILTER_BITS_PER_KEY: usize = 10;
 /// elsewhere (materialization, snapshot install — W2.2 follow-up) stay
 /// unfiltered; the reader treats a missing filter as `Unavailable` and probes
 /// normally, so mixed tables are fine.
+// Return type spelled out as `Result<T, E>`, not the `LifecycleResult` alias:
+// cargo-mutants resolves no aliases, so an alias return makes every whole-body
+// mutant unviable and the diff's decision (the compression codec) goes
+// gate-unjudged (#3337 / vacuity gate #3349). Spelled out, the `Ok(Default)`
+// mutant is viable and `zstd_flush_shrinks_on_disk_tables_versus_uncompressed`
+// kills it (`TableBuilderConfig::default()` is Uncompressed).
 pub(super) fn lifecycle_table_builder_config(
     data_block_bytes: Option<u32>,
-) -> LifecycleResult<TableBuilderConfig> {
+    compression: crate::format::TableCompression,
+) -> Result<TableBuilderConfig, LifecycleError> {
     // B2: the per-database data-block byte target (configured at open,
     // carried by the lifecycle config) overrides the built-in default; the
     // open-time validation bounds it, so a failure here is an internal
-    // invariant break.
-    let base = match data_block_bytes {
-        Some(bytes) => TableBuilderConfig::new(
-            bytes,
-            TableBuilderConfig::default().rows_per_block(),
-            crate::format::TableCompression::Uncompressed,
-        )
-        .map_err(|_| LifecycleError::InvalidConfig {
-            field: "data_block_bytes",
-            reason: "table builder rejected the configured block byte target",
-        })?,
-        None => TableBuilderConfig::default(),
-    };
+    // invariant break. #3499: the compression codec is carried the same way
+    // (Zstd by default), applied uniformly to flush and compaction outputs.
+    let bytes =
+        data_block_bytes.unwrap_or_else(|| TableBuilderConfig::default().target_data_block_size());
+    let base = TableBuilderConfig::new(
+        bytes,
+        TableBuilderConfig::default().rows_per_block(),
+        compression,
+    )
+    .map_err(|_| LifecycleError::InvalidConfig {
+        field: "data_block_bytes",
+        reason: "table builder rejected the configured block byte target",
+    })?;
     Ok(base.with_filter_bits_per_key(Some(TABLE_FILTER_BITS_PER_KEY)))
 }
 
@@ -153,6 +160,9 @@ pub(crate) struct LifecycleCompactionRequest {
     /// constructor seeds the default.
     l0_pass_max_input_bytes: u64,
     data_block_bytes: Option<u32>,
+    /// #3499: compression codec for the rewritten tables, stamped from
+    /// `LifecycleConfig::table_compression` at dispatch (Zstd by default).
+    table_compression: crate::format::TableCompression,
     /// W1.3a: per-output grandparent-overlap bound applied to every
     /// table-rewrite request (see `OUTPUT_GRANDPARENT_OVERLAP_MAX_BYTES`);
     /// same field-over-constant rationale as the L0 pass bound.
@@ -362,6 +372,10 @@ impl LifecycleCompactionRequest {
             l0_pass_max_input_bytes: L0_PASS_MAX_INPUT_BYTES,
             output_grandparent_overlap_max_bytes: OUTPUT_GRANDPARENT_OVERLAP_MAX_BYTES,
             data_block_bytes: None,
+            // Uncompressed default keeps request-construction byte-stable; the
+            // production codec (Zstd) is stamped from the lifecycle config at
+            // dispatch via `with_table_compression` (#3499).
+            table_compression: crate::format::TableCompression::Uncompressed,
         };
         request.branch_request()?;
         Ok(request)
@@ -372,6 +386,16 @@ impl LifecycleCompactionRequest {
     /// `LifecycleConfig::data_block_bytes`.
     pub(crate) const fn with_data_block_bytes(mut self, data_block_bytes: Option<u32>) -> Self {
         self.data_block_bytes = data_block_bytes;
+        self
+    }
+
+    /// #3499: stamp the compression codec onto the request, from
+    /// `LifecycleConfig::table_compression` at dispatch (Zstd by default).
+    pub(crate) const fn with_table_compression(
+        mut self,
+        compression: crate::format::TableCompression,
+    ) -> Self {
+        self.table_compression = compression;
         self
     }
 
@@ -483,8 +507,10 @@ impl LifecycleCompactionRequest {
             request = request.with_max_pass_input_bytes(self.l0_pass_max_input_bytes);
         }
         // W2.2: every lifecycle-built table persists a bloom filter.
-        request = request
-            .with_table_builder_config(lifecycle_table_builder_config(self.data_block_bytes)?);
+        request = request.with_table_builder_config(lifecycle_table_builder_config(
+            self.data_block_bytes,
+            self.table_compression,
+        )?);
         // W1.3a: every pass cuts its outputs by grandparent overlap. Kinds
         // whose output level is bottommost get no hints downstream (the
         // grandparent level is empty), so applying the bound universally is

@@ -530,6 +530,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             table_catalog: &mut self.table_catalog,
             budget: &self.budget,
             data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
+            table_compression: self.open_plan.lifecycle_config().table_compression(),
         };
         let report = replay_wal_into_catalog(
             self.services.wal(),
@@ -594,6 +595,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             table_catalog: &mut self.table_catalog,
             budget: &self.budget,
             data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
+            table_compression: self.open_plan.lifecycle_config().table_compression(),
         };
         replay_wal_into_catalog(
             self.services.wal(),
@@ -1355,6 +1357,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             let services = &self.services;
             let budget = &self.budget;
             let data_block_bytes = self.open_plan.lifecycle_config().data_block_bytes();
+            let compression = self.open_plan.lifecycle_config().table_compression();
             let published_slice = &mut published_slice;
             let mut builder = |child: BranchId,
                                fork_version: CommitVersion,
@@ -1363,6 +1366,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
                     services,
                     budget,
                     data_block_bytes,
+                    compression,
                     child,
                     fork_version,
                     &rows,
@@ -1410,6 +1414,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             let services = &self.services;
             let budget = &self.budget;
             let data_block_bytes = self.open_plan.lifecycle_config().data_block_bytes();
+            let compression = self.open_plan.lifecycle_config().table_compression();
             let published_slice = &mut published_slice;
             let mut builder = |child: BranchId,
                                fork_version: CommitVersion,
@@ -1418,6 +1423,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
                     services,
                     budget,
                     data_block_bytes,
+                    compression,
                     child,
                     fork_version,
                     &rows,
@@ -3303,6 +3309,7 @@ fn build_and_publish_fork_unsealed_table(
     services: &crate::lifecycle::LifecycleDurableLocalServices<'_>,
     budget: &crate::lifecycle::StorageBudgetLedger,
     data_block_bytes: Option<u32>,
+    compression: crate::format::TableCompression,
     child: BranchId,
     fork_version: CommitVersion,
     rows: &[crate::row::StorageRow],
@@ -3325,7 +3332,10 @@ fn build_and_publish_fork_unsealed_table(
     ))
     .map_err(crate::lifecycle::flush::table_error)?;
     let artifact = crate::table::ImmutableTableBuilder::new(
-        crate::lifecycle::compaction::lifecycle_table_builder_config(data_block_bytes)?,
+        crate::lifecycle::compaction::lifecycle_table_builder_config(
+            data_block_bytes,
+            compression,
+        )?,
     )
     .map_err(crate::lifecycle::flush::table_error)?
     .build_from_storage_rows(identity.clone(), rows)
@@ -3530,6 +3540,7 @@ struct ReplayFlushContext<'a> {
     table_catalog: &'a mut LifecycleDurableTableCatalog,
     budget: &'a StorageBudgetLedger,
     data_block_bytes: Option<u32>,
+    table_compression: crate::format::TableCompression,
 }
 
 /// #3319 S3b: replay cannot refuse (recovery has no backpressure), so the
@@ -3574,6 +3585,7 @@ fn flush_replayed_state_if_over_threshold(
             request,
             Some(context.budget),
             context.data_block_bytes,
+            context.table_compression,
         )?;
         // Record each flushed table in the durable catalog, but leave the
         // MANIFEST publish to the post-open machinery: a mid-recovery

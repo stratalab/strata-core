@@ -154,6 +154,10 @@ pub(super) fn lifecycle_plan(
             .with_data_block_bytes(Some(bytes))
             .map_err(map_lifecycle_error)?;
     }
+    // #3499: carry the durable table compression codec (Zstd by default) from
+    // the open options into the lifecycle config, whence flush and compaction
+    // inherit it.
+    config = config.with_table_compression(options.table_compression());
     config = config
         .with_maintenance_scheduling_policy(map_maintenance_scheduling_policy(
             options.maintenance_scheduling_policy(),

@@ -762,7 +762,13 @@ pub(crate) fn flush_cache_branch_with_budget(
     let Some(frozen_index) = select_frozen_index(branch, request)? else {
         return Ok(FlushFrozenOutcome::deferred(request));
     };
-    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes)?;
+    let artifact = build_frozen_artifact(
+        branch,
+        request,
+        frozen_index,
+        data_block_bytes,
+        crate::format::TableCompression::Uncompressed,
+    )?;
     require_optional_generated_artifact_budget(
         budget,
         artifact.byte_count(),
@@ -815,7 +821,13 @@ pub(crate) fn prepare_cache_flush_with_budget(
     let Some(frozen_index) = select_frozen_index(branch, request)? else {
         return Ok(None);
     };
-    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes)?;
+    let artifact = build_frozen_artifact(
+        branch,
+        request,
+        frozen_index,
+        data_block_bytes,
+        crate::format::TableCompression::Uncompressed,
+    )?;
     require_optional_generated_artifact_budget(
         budget,
         artifact.byte_count(),
@@ -879,7 +891,15 @@ pub(crate) fn flush_durable_branch(
     reader_service: &TableObjectReaderService<'static>,
     request: &FlushFrozenRequest,
 ) -> LifecycleResult<FlushFrozenOutcome> {
-    flush_durable_branch_with_budget(branch, table_service, reader_service, request, None, None)
+    flush_durable_branch_with_budget(
+        branch,
+        table_service,
+        reader_service,
+        request,
+        None,
+        None,
+        crate::format::TableCompression::Uncompressed,
+    )
 }
 
 pub(crate) fn flush_durable_branch_with_budget(
@@ -889,6 +909,7 @@ pub(crate) fn flush_durable_branch_with_budget(
     request: &FlushFrozenRequest,
     budget: Option<&StorageBudgetLedger>,
     data_block_bytes: Option<u32>,
+    compression: crate::format::TableCompression,
 ) -> LifecycleResult<FlushFrozenOutcome> {
     let Some(prepared) = prepare_durable_flush_with_budget(
         branch,
@@ -897,6 +918,7 @@ pub(crate) fn flush_durable_branch_with_budget(
         request,
         budget,
         data_block_bytes,
+        compression,
         // Foreground path: publish and install share one runtime-lock hold,
         // so the mark can never interleave — no in-flight pin needed.
         None,
@@ -915,6 +937,7 @@ pub(crate) fn prepare_durable_flush_with_budget(
     request: &FlushFrozenRequest,
     budget: Option<&StorageBudgetLedger>,
     data_block_bytes: Option<u32>,
+    compression: crate::format::TableCompression,
     inflight: Option<&super::durable::InFlightOutputsGuard>,
 ) -> LifecycleResult<Option<PreparedDurableFlush>> {
     let Some(frozen_index) = select_frozen_index(branch, request)? else {
@@ -932,6 +955,7 @@ pub(crate) fn prepare_durable_flush_with_budget(
             request,
             budget,
             data_block_bytes,
+            compression,
             inflight,
             frozen_index,
             &cut_keys,
@@ -944,6 +968,7 @@ pub(crate) fn prepare_durable_flush_with_budget(
         request,
         budget,
         data_block_bytes,
+        compression,
         inflight,
         frozen_index,
     )
@@ -957,10 +982,12 @@ fn prepare_single_output_flush(
     request: &FlushFrozenRequest,
     budget: Option<&StorageBudgetLedger>,
     data_block_bytes: Option<u32>,
+    compression: crate::format::TableCompression,
     inflight: Option<&super::durable::InFlightOutputsGuard>,
     frozen_index: usize,
 ) -> LifecycleResult<Option<PreparedDurableFlush>> {
-    let artifact = build_frozen_artifact(branch, request, frozen_index, data_block_bytes)?;
+    let artifact =
+        build_frozen_artifact(branch, request, frozen_index, data_block_bytes, compression)?;
     require_optional_generated_artifact_budget(
         budget,
         artifact.byte_count(),
@@ -1121,6 +1148,7 @@ pub(crate) fn prepare_durable_flush_with_cuts_for_test(
     request: &FlushFrozenRequest,
     budget: Option<&StorageBudgetLedger>,
     data_block_bytes: Option<u32>,
+    compression: crate::format::TableCompression,
     inflight: Option<&super::durable::InFlightOutputsGuard>,
     cut_keys: &[Vec<u8>],
 ) -> LifecycleResult<Option<PreparedDurableFlush>> {
@@ -1134,6 +1162,7 @@ pub(crate) fn prepare_durable_flush_with_cuts_for_test(
         request,
         budget,
         data_block_bytes,
+        compression,
         inflight,
         frozen_index,
         cut_keys,
@@ -1158,6 +1187,7 @@ fn prepare_segmented_flush(
     request: &FlushFrozenRequest,
     budget: Option<&StorageBudgetLedger>,
     data_block_bytes: Option<u32>,
+    compression: crate::format::TableCompression,
     inflight: Option<&super::durable::InFlightOutputsGuard>,
     frozen_index: usize,
     cut_keys: &[Vec<u8>],
@@ -1195,7 +1225,7 @@ fn prepare_segmented_flush(
         }
         let identity = derived_segment_identity(request, segment)?;
         let artifact = ImmutableTableBuilder::new(
-            super::compaction::lifecycle_table_builder_config(data_block_bytes)?,
+            super::compaction::lifecycle_table_builder_config(data_block_bytes, compression)?,
         )
         .map_err(table_error)?
         .build_from_rows(identity.clone(), segment)
@@ -1374,6 +1404,7 @@ pub(crate) fn prepare_durable_flush_drain_with_budget(
     request: &FlushDrainRequest,
     budget: Option<&StorageBudgetLedger>,
     data_block_bytes: Option<u32>,
+    compression: crate::format::TableCompression,
     inflight: Option<&super::durable::InFlightTableOutputs>,
 ) -> LifecycleResult<PreparedDurableFlushDrain> {
     if branch.branch_id() != request.branch_id() {
@@ -1399,6 +1430,7 @@ pub(crate) fn prepare_durable_flush_drain_with_budget(
             &flush_request,
             budget,
             data_block_bytes,
+            compression,
             inflight_guard.as_deref(),
         )?
         else {
@@ -1742,6 +1774,7 @@ fn build_frozen_artifact(
     request: &FlushFrozenRequest,
     frozen_index: usize,
     data_block_bytes: Option<u32>,
+    compression: crate::format::TableCompression,
 ) -> LifecycleResult<crate::table::BuiltTableArtifact> {
     let frozen =
         branch
@@ -1753,6 +1786,7 @@ fn build_frozen_artifact(
     let identity = derived_table_identity(request, frozen)?;
     ImmutableTableBuilder::new(super::compaction::lifecycle_table_builder_config(
         data_block_bytes,
+        compression,
     )?)
     .map_err(table_error)?
     .build_from_frozen(identity, frozen)

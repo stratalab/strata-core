@@ -146,6 +146,7 @@ fn build_flush_drain(
     request: &crate::lifecycle::flush::FlushDrainRequest,
     budget: &crate::lifecycle::StorageBudgetLedger,
     data_block_bytes: Option<u32>,
+    table_compression: crate::format::TableCompression,
     inflight: &super::inflight::InFlightTableOutputs,
 ) -> LifecycleResult<crate::lifecycle::flush::PreparedDurableFlushDrain> {
     prepare_durable_flush_drain_with_budget(
@@ -155,6 +156,7 @@ fn build_flush_drain(
         request,
         Some(budget),
         data_block_bytes,
+        table_compression,
         Some(inflight),
     )
 }
@@ -169,6 +171,7 @@ pub(crate) enum DurableBackgroundMaintenanceBuild<'a> {
         table_reader: TableObjectReaderService<'static>,
         budget: crate::lifecycle::StorageBudgetLedger,
         data_block_bytes: Option<u32>,
+        table_compression: crate::format::TableCompression,
         started_at: std::time::Instant,
         inflight: super::inflight::InFlightTableOutputs,
     },
@@ -272,6 +275,7 @@ impl DurableBackgroundMaintenanceBuild<'_> {
                 table_reader,
                 budget,
                 data_block_bytes,
+                table_compression,
                 started_at,
                 inflight,
             } => Ok(DurableBackgroundMaintenanceBuilt::Flush {
@@ -284,6 +288,7 @@ impl DurableBackgroundMaintenanceBuild<'_> {
                     &request,
                     &budget,
                     data_block_bytes,
+                    table_compression,
                     &inflight,
                 )?,
                 elapsed: started_at.elapsed(),
@@ -572,6 +577,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 request,
                 Some(&self.budget),
                 self.open_plan.lifecycle_config().data_block_bytes(),
+                self.open_plan.lifecycle_config().table_compression(),
             )?
         };
         if publish_table_manifest_after_flush(
@@ -1697,6 +1703,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 table_catalog,
                 budget: &self.budget,
                 data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
+                table_compression: self.open_plan.lifecycle_config().table_compression(),
             };
             maintenance.run_next_matching(state, &mut runner, |task| task.id() == task_id)
         };
@@ -1824,6 +1831,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 table_reader: self.services.table_reader().clone(),
                 budget: self.budget.clone(),
                 data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
+                table_compression: self.open_plan.lifecycle_config().table_compression(),
                 started_at: std::time::Instant::now(),
                 inflight: self.inflight_outputs.clone(),
             },
@@ -3284,6 +3292,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 budget,
                 sweep_staged: &self.sweep_staged_names,
                 data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
+                table_compression: self.open_plan.lifecycle_config().table_compression(),
                 compaction_io_policy: self.open_plan.lifecycle_config().compaction_io_policy(),
             };
             maintenance.run_next_matching(state, &mut runner, |task| task.id() == task_id)
@@ -3366,9 +3375,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             Some(budget),
         ) {
             // B2: stamp the per-database data-block byte target at dispatch.
-            Ok(Some(request)) => {
-                request.with_data_block_bytes(self.open_plan.lifecycle_config().data_block_bytes())
-            }
+            Ok(Some(request)) => request
+                .with_data_block_bytes(self.open_plan.lifecycle_config().data_block_bytes())
+                .with_table_compression(self.open_plan.lifecycle_config().table_compression()),
             Ok(None) => {
                 crate::observability::perf_trace::record_lifecycle_background_candidate_stale_deferred(
                 );
@@ -4354,6 +4363,7 @@ struct DurableFlushMaintenanceRunner<'a, 'b> {
     table_catalog: &'a mut crate::lifecycle::LifecycleDurableTableCatalog,
     budget: &'a crate::lifecycle::StorageBudgetLedger,
     data_block_bytes: Option<u32>,
+    table_compression: crate::format::TableCompression,
 }
 
 impl MaintenanceTaskRunner for DurableFlushMaintenanceRunner<'_, '_> {
@@ -4397,6 +4407,7 @@ impl MaintenanceTaskRunner for DurableFlushMaintenanceRunner<'_, '_> {
                         request,
                         Some(self.budget),
                         self.data_block_bytes,
+                        self.table_compression,
                     )?;
                     let maintenance_outcome = outcome.maintenance_outcome();
                     if let Some(error) = publish_table_manifest_after_flush(
@@ -4662,6 +4673,7 @@ struct DurableCompactionMaintenanceRunner<'a, 'b> {
     budget: &'a crate::lifecycle::StorageBudgetLedger,
     compaction_io_policy: LifecycleCompactionIoPolicy,
     data_block_bytes: Option<u32>,
+    table_compression: crate::format::TableCompression,
     sweep_staged: &'a super::inflight::InFlightTableOutputs,
 }
 
@@ -4676,7 +4688,9 @@ impl MaintenanceTaskRunner for DurableCompactionMaintenanceRunner<'_, '_> {
             return Ok(stale_compaction_maintenance_outcome());
         };
         // B2: stamp the per-database data-block byte target at dispatch.
-        let request = request.with_data_block_bytes(self.data_block_bytes);
+        let request = request
+            .with_data_block_bytes(self.data_block_bytes)
+            .with_table_compression(self.table_compression);
         if let Some(outcome) =
             defer_compaction_for_resource_policy(self.branch, &request, self.compaction_io_policy)?
         {
