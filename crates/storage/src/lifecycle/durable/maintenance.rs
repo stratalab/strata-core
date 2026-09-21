@@ -3228,6 +3228,75 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         compaction_score_key_for_task(branch, task)
     }
 
+    /// #3502 Slice D: build the version-pruning policy + safety proof for a
+    /// compaction of `branch_id` from live state, when the database has opted
+    /// into a keep-newer-than retention window. Returns `None` (`KeepAll` —
+    /// compaction retains every version) whenever any safety precondition is
+    /// unmet, so a cycle that cannot prove pruning safe simply does not prune.
+    /// Called BEFORE the `&mut branch` borrow so it can read sibling branch
+    /// state for the shared-table gate.
+    fn build_version_pruning_for_compaction(
+        &self,
+        branch_id: BranchId,
+    ) -> Option<(
+        crate::branch::state::compaction::BranchCompactionRetentionPolicy,
+        crate::branch::pruning::BranchCompactionPruningProof,
+    )> {
+        let crate::lifecycle::StorageVersionRetentionPolicy::KeepRecentVersions { window } =
+            self.open_plan.lifecycle_config().version_retention()
+        else {
+            return None;
+        };
+        // Recovery must be healthy to attest the proof (DUR-017 / ARCH-005).
+        if !self.current_recovery_health.is_healthy() {
+            return None;
+        }
+        // Conservative shared-table safety: prune only when this is the SOLE
+        // active branch, so no COW fork can share a table the prune rewrites.
+        // Multi-branch per-table pruning (via the shared-table registry) is a
+        // follow-up refinement (D2).
+        if self.branch_catalog.registry().active_branch_ids().len() != 1 {
+            return None;
+        }
+        let branch = self.branch_catalog.branch_state(branch_id).ok()?;
+        // No readable inherited layers over the candidates (a COW child).
+        if !branch.inherited_layers().is_empty() {
+            return None;
+        }
+        let visible = branch.max_commit_version()?;
+        // keep-newer-than: retain versions at or above `visible - window`.
+        let floor = strata_core::CommitVersion::new(visible.as_u64().saturating_sub(window));
+        if floor == strata_core::CommitVersion::ZERO {
+            return None;
+        }
+        // The timestamp floor is the floor version's commit timestamp — the
+        // boundary the post-prune `CompleteSince` coverage records. Requires a
+        // complete-from-birth timeline (D0); an unproven lookup skips pruning.
+        let crate::timeline_index::RetainedVersionLookup::Found(timestamp_floor) = branch
+            .retained_timeline()
+            .timestamp_for_version(floor, None)
+        else {
+            return None;
+        };
+        let proof =
+            crate::branch::pruning::BranchCompactionPruningProof::from_branch_state(branch, floor)
+                .ok()?
+                .with_retained_timestamp_floor(timestamp_floor)
+                .ok()?
+                .with_no_readable_inherited_layers()
+                .ok()?
+                .with_candidate_tables_not_shared()
+                .ok()?
+                .with_recovery_health(
+                    crate::branch::pruning::BranchRecoveryHealthAttestation::Healthy,
+                )
+                .ok()?;
+        Some((
+            crate::branch::state::compaction::BranchCompactionRetentionPolicy::DropOlderVersions,
+            proof,
+        ))
+    }
+
     pub(crate) fn run_compaction_maintenance_task(
         &mut self,
         task_id: MaintenanceTaskId,
@@ -3273,6 +3342,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             .lookup(branch_id)
             .map_err(commit_error)?
             .generation();
+        // #3502 Slice D: build the version-pruning proof from live state BEFORE
+        // taking the branch `&mut` borrow (it reads sibling branch state).
+        let version_pruning = self.build_version_pruning_for_compaction(branch_id);
         let outcome = {
             let maintenance = &mut self.maintenance;
             let branch = self
@@ -3290,6 +3362,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 table_manifest,
                 table_catalog,
                 budget,
+                version_pruning,
                 sweep_staged: &self.sweep_staged_names,
                 data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
                 table_compression: self.open_plan.lifecycle_config().table_compression(),
@@ -4674,6 +4747,13 @@ struct DurableCompactionMaintenanceRunner<'a, 'b> {
     compaction_io_policy: LifecycleCompactionIoPolicy,
     data_block_bytes: Option<u32>,
     table_compression: crate::format::TableCompression,
+    /// #3502 Slice D: the opt-in version-pruning policy + proof to drive this
+    /// compaction, pre-built from live state before the branch `&mut` borrow.
+    /// `None` = `KeepAll` (retain every version).
+    version_pruning: Option<(
+        crate::branch::state::compaction::BranchCompactionRetentionPolicy,
+        crate::branch::pruning::BranchCompactionPruningProof,
+    )>,
     sweep_staged: &'a super::inflight::InFlightTableOutputs,
 }
 
@@ -4688,9 +4768,15 @@ impl MaintenanceTaskRunner for DurableCompactionMaintenanceRunner<'_, '_> {
             return Ok(stale_compaction_maintenance_outcome());
         };
         // B2: stamp the per-database data-block byte target at dispatch.
-        let request = request
+        let mut request = request
             .with_data_block_bytes(self.data_block_bytes)
             .with_table_compression(self.table_compression);
+        // #3502 Slice D: drive opt-in version pruning under the pre-built proof.
+        if let Some((policy, proof)) = self.version_pruning.take() {
+            request = request
+                .with_retention_policy(policy)
+                .with_pruning_proof(proof);
+        }
         if let Some(outcome) =
             defer_compaction_for_resource_policy(self.branch, &request, self.compaction_io_policy)?
         {

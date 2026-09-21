@@ -34,6 +34,27 @@ const DEFAULT_WRITE_THROTTLE_MIN_RATE_BYTES_PER_SEC: u64 = 16 * 1024;
 /// in-band pacing (single-digit ms), so it clips only the pathological tail. Graded path only.
 const DEFAULT_WRITE_THROTTLE_MAX_GRADED_DELAY_MILLIS: u64 = 250;
 
+/// #3502 Slice D: per-database MVCC version-retention policy. `KeepAll`
+/// (the default) retains every version — unbounded time-travel history.
+/// `KeepRecentVersions` opts into pruning: a compaction drops versions older
+/// than `visible_version - window` per key (keep-newer-than-watermark), under
+/// the full safety proof (healthy recovery, no shared tables, no readable
+/// inherited layers), publishing the retained-history floor in lockstep.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StorageVersionRetentionPolicy {
+    KeepAll,
+    #[allow(
+        dead_code,
+        reason = "#3502 Slice D: this variant's production constructor is the \
+                  opt-in surface added in Slice D2; today only the storage test \
+                  seam builds it, so it is unconstructed in non-test builds \
+                  while the dispatch already consumes it"
+    )]
+    KeepRecentVersions {
+        window: u64,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LifecycleConfig {
     max_maintenance_queue_depth: usize,
@@ -56,6 +77,9 @@ pub(crate) struct LifecycleConfig {
     // Uncompressed. Applies to flush and compaction; backpressure, the WAL, and
     // recovery are unaffected.
     table_compression: TableCompression,
+    // #3502 Slice D: MVCC version-retention policy. `KeepAll` by default
+    // (unbounded history); `KeepRecentVersions` opts a database into pruning.
+    version_retention: StorageVersionRetentionPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,9 +265,25 @@ impl LifecycleConfig {
             // applied at the options layer via `with_table_compression`, and
             // #3499's compaction-request default is Zstd there.
             table_compression: TableCompression::Uncompressed,
+            // #3502 Slice D: pruning is opt-in; retain all versions by default.
+            version_retention: StorageVersionRetentionPolicy::KeepAll,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// #3502 Slice D: the MVCC version-retention policy for this database.
+    pub(crate) const fn version_retention(&self) -> StorageVersionRetentionPolicy {
+        self.version_retention
+    }
+
+    /// #3502 Slice D: opt into version pruning (`KeepAll` by default).
+    pub(crate) const fn with_version_retention(
+        mut self,
+        version_retention: StorageVersionRetentionPolicy,
+    ) -> Self {
+        self.version_retention = version_retention;
+        self
     }
 
     /// #3499: the compression codec for lifecycle-built tables.

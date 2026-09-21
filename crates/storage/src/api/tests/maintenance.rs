@@ -478,6 +478,121 @@ fn api_rewrite_cache_mode_does_not_call_durable_services() {
     assert_eq!(runtime.state(), StorageRuntimeState::Open);
 }
 
+/// #3502 Slice D: with an opt-in keep-newer-than retention window, a durable
+/// compaction builds the pruning proof and drops versions older than
+/// `visible - window` — observable through Slice A: an `as_of` read of the
+/// oldest (now pruned) version RAISES, while the latest value still reads.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_opt_in_version_retention_prunes_old_versions() {
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_version_retention_for_test(
+            crate::lifecycle::StorageVersionRetentionPolicy::KeepRecentVersions { window: 1 },
+        );
+    let mut runtime = open_durable_runtime_with_options("prune-optin", options);
+
+    // Two batches of three versions, each flushed into its own L0 table — two
+    // tables, below the flush-followup pressure threshold, so no compaction
+    // races. Then FORCE one compaction (deterministically, at visible =
+    // versions[5]) which, under the opt-in keep-newer-than-1 window, prunes
+    // versions below `visible - 1`, keeping one below-floor survivor. The
+    // oldest version is dropped.
+    let flush = MaintenanceRequest::new(MaintenanceTask::Flush, MaintenanceScope::Branch(branch()));
+    let mut versions = Vec::new();
+    for index in 0..3u8 {
+        let summary = runtime
+            .commit(&put_batch(b"k", &[b'v', index]))
+            .expect("commit version");
+        versions.push(summary.commit_version());
+    }
+    runtime.maintenance(&flush).expect("flush first table");
+    for index in 3..6u8 {
+        let summary = runtime
+            .commit(&put_batch(b"k", &[b'v', index]))
+            .expect("commit version");
+        versions.push(summary.commit_version());
+    }
+    runtime.maintenance(&flush).expect("flush second table");
+    runtime
+        .force_branch_compaction_for_test(branch())
+        .expect("force pruning compaction");
+
+    let error = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect_err("oldest version was pruned");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+
+    let latest = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::Latest,
+        ))
+        .expect("latest read");
+    assert_eq!(
+        latest
+            .row()
+            .expect("row")
+            .value()
+            .expect("value")
+            .as_bytes(),
+        &[b'v', 5]
+    );
+}
+
+/// #3502 Slice D control: the default `KeepAll` policy never prunes — the
+/// oldest version still reads exactly after a compaction.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_default_keep_all_retention_keeps_old_versions() {
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard);
+    let mut runtime = open_durable_runtime_with_options("prune-keepall", options);
+
+    let mut versions = Vec::new();
+    for index in 0..6u8 {
+        let summary = runtime
+            .commit(&put_batch(b"k", &[b'v', index]))
+            .expect("commit version");
+        versions.push(summary.commit_version());
+        runtime
+            .maintenance(&MaintenanceRequest::new(
+                MaintenanceTask::Flush,
+                MaintenanceScope::Branch(branch()),
+            ))
+            .expect("flush");
+    }
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Compact,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("compact keeps all");
+
+    let outcome = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect("oldest version retained under KeepAll");
+    assert_eq!(
+        outcome
+            .row()
+            .expect("row")
+            .value()
+            .expect("value")
+            .as_bytes(),
+        &[b'v', 0]
+    );
+}
+
 #[test]
 fn api_explicit_compact_after_flush_drains_branch_sources() {
     let mut runtime = open_runtime();

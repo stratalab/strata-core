@@ -1707,6 +1707,46 @@ impl<'a> StorageRuntime<'a> {
         ))
     }
 
+    /// #3502 Slice D: deterministically drive one foreground compaction of a
+    /// branch through `run_compaction_maintenance_task` (the pruning dispatch),
+    /// bypassing the pressure gate on the autonomous flush-followup. Lets the
+    /// pruning end-to-end test force a compaction at a known watermark instead
+    /// of racing storage pressure.
+    #[cfg(test)]
+    #[cfg(feature = "localfs")]
+    pub(crate) fn force_branch_compaction_for_test(
+        &mut self,
+        branch_id: BranchId,
+    ) -> StorageApiResult<()> {
+        let task = LifecycleMaintenanceTaskRequest::compaction(branch_id, 0);
+        match &mut self.inner {
+            StorageRuntimeInner::Cache(slot) => {
+                let mut runtime = slot.lock();
+                let enqueue = runtime
+                    .enqueue_maintenance(task)
+                    .map_err(map_lifecycle_error)?;
+                runtime
+                    .run_compaction_maintenance_task(enqueue.task_id())
+                    .map_err(map_lifecycle_error)?;
+            }
+            StorageRuntimeInner::DurableOwned(slot) => {
+                let mut runtime = slot.lock();
+                let enqueue = runtime
+                    .enqueue_maintenance(task)
+                    .map_err(map_lifecycle_error)?;
+                runtime
+                    .run_compaction_maintenance_task(enqueue.task_id())
+                    .map_err(map_lifecycle_error)?;
+            }
+            StorageRuntimeInner::Closed => {
+                return Err(StorageApiError::InvalidRuntimeState {
+                    reason: "forced compaction requires an open runtime",
+                });
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn branch_source_layout_for_test(
         &self,
