@@ -348,12 +348,13 @@ impl LifecycleBranchCatalog {
             }
             Some(_) => Err(LifecycleError::BranchAlreadyExists { branch_id }),
             None => {
-                let state =
+                let mut state =
                     BranchLocalState::new(branch_id, self.branch_config).map_err(branch_error)?;
-                // W3.1b: a branch born in-process has provably complete
-                // (empty) timeline coverage — checkpoints can persist its
-                // retained index without a seeding scan ever running.
-                state.retained_timeline().mark_complete_from_birth();
+                // W3.1b / #3502 D0: a branch born in-process has provably
+                // complete (empty) timeline AND timestamp coverage —
+                // checkpoints persist its retained index without a seeding
+                // scan, and version pruning may attest its complete history.
+                state.mark_complete_from_birth();
                 let descriptor =
                     LifecycleBranchDescriptor::active(branch_id, generation, created_at);
                 self.registry
@@ -434,9 +435,11 @@ impl LifecycleBranchCatalog {
             });
         }
 
-        let state = BranchLocalState::new(branch_id, self.branch_config).map_err(branch_error)?;
-        // W3.1b: rebirth is an empty in-process state — complete from birth.
-        state.retained_timeline().mark_complete_from_birth();
+        let mut state =
+            BranchLocalState::new(branch_id, self.branch_config).map_err(branch_error)?;
+        // W3.1b / #3502 D0: rebirth is an empty in-process state — complete
+        // timeline AND timestamp coverage from birth.
+        state.mark_complete_from_birth();
         let descriptor = LifecycleBranchDescriptor::active(branch_id, generation, created_at)
             .with_next_revision();
         self.registry
@@ -758,10 +761,11 @@ impl LifecycleBranchCatalog {
             .expect("active entry has state")
             .reachability_snapshot()
             .map_err(branch_error)?;
-        let empty_state =
+        let mut empty_state =
             BranchLocalState::new(branch_id, self.branch_config).map_err(branch_error)?;
-        // W3.1b: a cleared branch restarts with empty, complete coverage.
-        empty_state.retained_timeline().mark_complete_from_birth();
+        // W3.1b / #3502 D0: a cleared branch restarts with empty, complete
+        // timeline AND timestamp coverage.
+        empty_state.mark_complete_from_birth();
         let release_plan = self.release_plan_after_removing(branch_id, &old_snapshot)?;
 
         let active = descriptor.with_next_revision();
@@ -1021,6 +1025,9 @@ impl LifecycleBranchCatalog {
             None if fork_version == CommitVersion::ZERO => {
                 let child = BranchLocalState::new(destination_branch_id, self.branch_config)
                     .map_err(branch_error)?;
+                // #3502 D0: an empty fork's timestamp coverage stays the fresh
+                // default (Unknown, conservative) — an empty branch has no
+                // versions to prune, so pruning-completeness is moot here.
                 child.retained_timeline().mark_complete_from_birth();
                 let parent = LifecycleBranchParent::new(source_branch_id, CommitVersion::ZERO);
                 // #2826: even an empty fork stamps visible-at-fork — a
