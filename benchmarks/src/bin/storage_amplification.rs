@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use strata_engine::{
     BranchName, Database, DurableLocalOpenOptions, GraphEdgeData, GraphEdgeType, GraphName,
-    GraphNodeData, GraphNodeId, GraphProperties, KvKey, KvValue, ProductSpace,
+    GraphNodeData, GraphNodeId, GraphProperties, KvKey, KvValue, ProductSpace, VersionRetention,
 };
 
 #[allow(dead_code)]
@@ -104,7 +104,7 @@ fn fill_bytes(fill: Fill, seed: u64, len: usize) -> Vec<u8> {
     }
 }
 
-fn report(primitive: &str, fill: Fill, logical: u64, c: &Components) {
+fn report(primitive: &str, fill: Fill, logical: u64, c: &Components, note: &str) {
     let amp = |phys: u64| {
         if logical == 0 {
             0.0
@@ -115,7 +115,7 @@ fn report(primitive: &str, fill: Fill, logical: u64, c: &Components) {
     let fill_label = if fill == Fill::Real { "real" } else { "random" };
     println!(
         "{primitive:<8} fill={fill_label:<6} logical={:>10} total={:>10} ({:.2}x)  \
-         tables={:>10} ({:.2}x)  wal={:>10}  snap={:>8}",
+         tables={:>10} ({:.2}x)  wal={:>10}  snap={:>8}  {note}",
         logical,
         c.total,
         amp(c.total),
@@ -126,48 +126,109 @@ fn report(primitive: &str, fill: Fill, logical: u64, c: &Components) {
     );
 }
 
-fn open_db(root: &Path) -> Database {
-    Database::open_local(root, DurableLocalOpenOptions::new())
+/// Percentage reduction from `before` to `after` (positive = shrank).
+fn pct_drop(before: u64, after: u64) -> f64 {
+    if before == 0 {
+        0.0
+    } else {
+        (before as f64 - after as f64) / before as f64 * 100.0
+    }
+}
+
+/// Runs `f` against a fresh throwaway database directory, returning its result.
+fn with_dir<T>(f: impl FnOnce(&Path) -> T) -> T {
+    let dir = tempfile::tempdir().expect("tempdir");
+    f(dir.path())
+}
+
+/// Opens a durable database, optionally opting into MVCC version pruning
+/// (#3502): `None` keeps every version (`KeepAll`, the control arm), `Some(w)`
+/// retains versions newer than `visible - w` per key and prunes the rest during
+/// compaction (the treatment arm that demonstrates the layer-2 disk win).
+fn open_db(root: &Path, retention: Option<u64>) -> Database {
+    let mut options = DurableLocalOpenOptions::new();
+    if let Some(window) = retention {
+        options = options.with_version_retention(VersionRetention::KeepRecentVersions { window });
+    }
+    Database::open_local(root, options)
         .expect("open localfs database")
         .into_database()
 }
 
 // --- KV: one physical row per key (control, lowest multiplier). ---
-fn bench_kv(root: &Path, fill: Fill, keys: usize, value_bytes: usize, settle_secs: u64) {
-    let mut database = open_db(root);
+//
+// `rewrites` is the layer-2 (MVCC version-retention) knob: after the initial
+// load, every key is overwritten `rewrites` more times, so each key accrues
+// `rewrites + 1` committed versions. `logical` stays the LIVE dataset size (one
+// value per key) — the extra versions are pure amplification. Under `KeepAll`
+// (`retention = None`) every version is retained; under `KeepRecentVersions`
+// (`retention = Some(w)`) compaction prunes versions older than the window, so
+// the physical size collapses toward the live set. Each key is flushed and
+// compacted so the table path (not just the WAL) carries the versions.
+fn bench_kv(
+    root: &Path,
+    fill: Fill,
+    keys: usize,
+    value_bytes: usize,
+    rewrites: usize,
+    retention: Option<u64>,
+    settle_secs: u64,
+) -> (u64, Components) {
+    let mut database = open_db(root, retention);
     let branch: BranchName = database.default_branch().clone();
     let space = ProductSpace::new("amp").expect("space");
 
     let mut logical = 0u64;
-    {
-        let mut kv = database.kv(branch.clone(), space).expect("kv service");
+    // One write-and-flush pass over the whole key set. `pass` seeds distinct
+    // values so every overwrite is a genuinely new version, and the flush after
+    // each pass lands that generation in its own L0 table.
+    let mut write_pass = |database: &mut Database, pass: usize, count_logical: bool| {
+        let mut kv = database
+            .kv(branch.clone(), space.clone())
+            .expect("kv service");
         let mut batch: Vec<(KvKey, KvValue)> = Vec::with_capacity(256);
         for i in 0..keys {
             let key = format!("key:{i:012}").into_bytes();
-            let value = fill_bytes(fill, i as u64, value_bytes);
-            logical += (key.len() + value.len()) as u64;
+            let value = fill_bytes(fill, (i + pass * keys) as u64, value_bytes);
+            if count_logical {
+                logical += (key.len() + value.len()) as u64;
+            }
             batch.push((KvKey::new(key).expect("key"), KvValue::new(value)));
             if batch.len() == 256 {
-                kv.put_batch(std::mem::take(&mut batch)).expect("kv put_batch");
+                kv.put_batch(std::mem::take(&mut batch))
+                    .expect("kv put_batch");
             }
         }
         if !batch.is_empty() {
             kv.put_batch(batch).expect("kv put_batch");
         }
+    };
+
+    // Pass 0 is the live dataset (counts toward logical); passes 1..=rewrites
+    // are overwrites that only add versions.
+    for pass in 0..=rewrites {
+        write_pass(&mut database, pass, pass == 0);
+        force_flush(&mut database, &branch);
     }
-    force_flush(&mut database, &branch);
+    // Deterministically drive the pruning dispatch so the treatment arm's win
+    // is measured, not raced against background pressure.
+    force_compact(&mut database, &branch);
     let c = settle(root, settle_secs);
-    report("kv", fill, logical, &c);
+    (logical, c)
 }
 
 // --- Graph: authored node/edge rows + derived index rows (highest multiplier). ---
 fn bench_graph(root: &Path, fill: Fill, node_count: usize, edge_count: usize, settle_secs: u64) {
-    let mut database = open_db(root);
+    let mut database = open_db(root, None);
     let branch: BranchName = database.default_branch().clone();
     let space = ProductSpace::new("amp").expect("space");
-    let mut graph = database.graph(branch.clone(), space).expect("graph service");
+    let mut graph = database
+        .graph(branch.clone(), space)
+        .expect("graph service");
     let graph_name = GraphName::new("city").expect("graph name");
-    graph.create_graph(graph_name.clone()).expect("create graph");
+    graph
+        .create_graph(graph_name.clone())
+        .expect("create graph");
 
     // Island-like shape: node id "n:<i>" with {x,y}; edge src->dst type "street"
     // weight + {name}. `logical` is the compact-JSON size of the dataset, the
@@ -185,14 +246,16 @@ fn bench_graph(root: &Path, fill: Fill, node_count: usize, edge_count: usize, se
                 .push(serde_json::json!({ "id": id, "x": x, "y": y }));
             (
                 GraphNodeId::new(id).expect("node id"),
-                GraphNodeData::new(
-                    Some(GraphProperties::new(props).expect("node props")),
-                    None,
-                ),
+                GraphNodeData::new(Some(GraphProperties::new(props).expect("node props")), None),
             )
         })
         .collect();
-    let name_pool = ["West 106th Street", "Broadway", "Amsterdam Ave", "Columbus Ave"];
+    let name_pool = [
+        "West 106th Street",
+        "Broadway",
+        "Amsterdam Ave",
+        "Columbus Ave",
+    ];
     let edges: Vec<(GraphNodeId, GraphEdgeType, GraphNodeId, GraphEdgeData)> = (0..edge_count)
         .map(|i| {
             let src = format!("n:{}", i % node_count.max(1));
@@ -211,12 +274,17 @@ fn bench_graph(root: &Path, fill: Fill, node_count: usize, edge_count: usize, se
                 GraphNodeId::new(src).expect("src"),
                 GraphEdgeType::new("street").expect("edge type"),
                 GraphNodeId::new(dst).expect("dst"),
-                GraphEdgeData::new(weight, Some(GraphProperties::new(props).expect("edge props")))
-                    .expect("edge data"),
+                GraphEdgeData::new(
+                    weight,
+                    Some(GraphProperties::new(props).expect("edge props")),
+                )
+                .expect("edge data"),
             )
         })
         .collect();
-    let logical = serde_json::to_vec(&logical_json).expect("logical json").len() as u64;
+    let logical = serde_json::to_vec(&logical_json)
+        .expect("logical json")
+        .len() as u64;
 
     graph
         .bulk_insert(&graph_name, &nodes, &edges, Some(1024))
@@ -224,7 +292,7 @@ fn bench_graph(root: &Path, fill: Fill, node_count: usize, edge_count: usize, se
     drop(graph);
     force_flush(&mut database, &branch);
     let c = settle(root, settle_secs);
-    report("graph", fill, logical, &c);
+    report("graph", fill, logical, &c, "");
 }
 
 /// Force the imported data out of the WAL into L0 tables so the table path is
@@ -240,6 +308,15 @@ fn force_flush(database: &mut Database, branch: &BranchName) {
                 break;
             }
         }
+    }
+}
+
+/// Deterministically drive the pruning compaction dispatch (#3502) so the
+/// treatment arm prunes at a known point instead of racing background pressure.
+/// A no-op for the `KeepAll` control (compaction runs, drops nothing).
+fn force_compact(database: &mut Database, branch: &BranchName) {
+    if let Err(e) = database.force_storage_branch_compaction_for_test(branch) {
+        eprintln!("[warn] forced compaction failed: {e:?}");
     }
 }
 
@@ -272,26 +349,71 @@ fn main() {
     let edges = arg_value(&args, "--edges")
         .and_then(|s| s.parse().ok())
         .unwrap_or(28_802);
+    // #3502 Slice E layer-2 knobs: `--rewrites R` overwrites every key R more
+    // times to build MVCC version churn; `--retention-window W` runs a second
+    // (treatment) KV arm with pruning opted in, so the A/B shows the disk win.
+    let rewrites = arg_value(&args, "--rewrites")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let retention_window: Option<u64> =
+        arg_value(&args, "--retention-window").and_then(|s| s.parse().ok());
 
     println!(
-        "# storage-amplification  fill={}  settle_secs={}",
+        "# storage-amplification  fill={}  settle_secs={}  rewrites={}  retention_window={}",
         if fill == Fill::Real { "real" } else { "random" },
-        settle_secs
+        settle_secs,
+        rewrites,
+        retention_window.map_or_else(|| "none".to_string(), |w| w.to_string()),
     );
     println!(
         "{:<8} {:<11} {:>18} {:>18} {:>18} {:>13} {:>13}",
         "primitive", "fill", "logical", "total(amp)", "tables(amp)", "wal", "snapshots"
     );
 
-    let run = |name: &str, f: &dyn Fn(&Path)| {
-        let dir = tempfile::tempdir().expect("tempdir");
-        f(dir.path());
-        let _ = name;
-    };
     if primitive == "kv" || primitive == "all" {
-        run("kv", &|p| bench_kv(p, fill, keys, value_bytes, settle_secs));
+        match retention_window {
+            // Layer-2 A/B: identical re-write-heavy workload under KeepAll
+            // (control) vs KeepRecentVersions{window} (treatment).
+            Some(window) if rewrites > 0 => {
+                let (_, ctl) = with_dir(|p| {
+                    let (logical, c) =
+                        bench_kv(p, fill, keys, value_bytes, rewrites, None, settle_secs);
+                    report("kv", fill, logical, &c, "[KeepAll]");
+                    (logical, c)
+                });
+                let (_, trt) = with_dir(|p| {
+                    let (logical, c) = bench_kv(
+                        p,
+                        fill,
+                        keys,
+                        value_bytes,
+                        rewrites,
+                        Some(window),
+                        settle_secs,
+                    );
+                    report("kv", fill, logical, &c, &format!("[Keep w={window}]"));
+                    (logical, c)
+                });
+                println!(
+                    "# layer-2 pruning win (rewrites={rewrites}, w={window}): \
+                     tables {} -> {} ({:.1}% smaller)  total {} -> {} ({:.1}% smaller)",
+                    ctl.tables,
+                    trt.tables,
+                    pct_drop(ctl.tables, trt.tables),
+                    ctl.total,
+                    trt.total,
+                    pct_drop(ctl.total, trt.total),
+                );
+            }
+            // Single run (optionally with a window but no churn, or plain).
+            other => with_dir(|p| {
+                let (logical, c) =
+                    bench_kv(p, fill, keys, value_bytes, rewrites, other, settle_secs);
+                report("kv", fill, logical, &c, "");
+            }),
+        }
     }
     if primitive == "graph" || primitive == "all" {
-        run("graph", &|p| bench_graph(p, fill, nodes, edges, settle_secs));
+        with_dir(|p| bench_graph(p, fill, nodes, edges, settle_secs));
     }
 }
