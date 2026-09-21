@@ -256,6 +256,12 @@ impl BranchLocalState {
         self.retained_history_floor = floor;
     }
 
+    /// #3502 Slice B: the retained-history version floor published by pruning
+    /// (`None` = unbounded / nothing pruned).
+    pub(crate) const fn retained_history_floor(&self) -> Option<CommitVersion> {
+        self.retained_history_floor
+    }
+
     pub(crate) const fn put_rows(&self) -> u64 {
         self.put_rows
     }
