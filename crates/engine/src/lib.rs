@@ -77,7 +77,7 @@ pub use api::{
     VectorHistory, VectorHistoryRow, VectorIndexDiagnostics, VectorKey, VectorKeyPage,
     VectorMetadata, VectorMetadataPatch, VectorMetadataUpdateOutcome, VectorScalar,
     VectorSearchMatch, VectorSearchResult, VectorService, VectorUpsertEntry, VectorVersionedEntry,
-    VectorWriteOutcome,
+    VectorWriteOutcome, VersionRetention,
 };
 
 #[cfg(test)]

@@ -910,6 +910,7 @@ impl<'a> StorageRuntime<'a> {
                 require_valid_branch_identifier(request.branch_id(), "branch_id")?;
                 require_valid_branch_identifier(source, "source_branch_id")?;
                 self.require_retained_version_watermark(source, version)?;
+                self.require_fork_version_within_retained_floor(source, version)?;
                 self.fork_branch_at_version(request, source, version, None)
             }
             BranchAction::ForkAtTimestamp { source, timestamp } => {
@@ -937,6 +938,7 @@ impl<'a> StorageRuntime<'a> {
                         });
                     }
                 };
+                self.require_fork_version_within_retained_floor(source, version)?;
                 self.fork_branch_at_version(request, source, version, Some(timestamp))
             }
             BranchAction::Clear => self.clear_branch_request(request),
@@ -1711,10 +1713,13 @@ impl<'a> StorageRuntime<'a> {
     /// branch through `run_compaction_maintenance_task` (the pruning dispatch),
     /// bypassing the pressure gate on the autonomous flush-followup. Lets the
     /// pruning end-to-end test force a compaction at a known watermark instead
-    /// of racing storage pressure.
-    #[cfg(test)]
+    /// of racing storage pressure. Exposed under `testkit` (Slice D2) so the
+    /// engine's opt-in retention test can drive the same dispatch across the
+    /// crate boundary; the only public compaction API routes to the fixed-point
+    /// drain, which does not prune.
+    #[cfg(any(test, feature = "testkit"))]
     #[cfg(feature = "localfs")]
-    pub(crate) fn force_branch_compaction_for_test(
+    pub fn force_branch_compaction_for_test(
         &mut self,
         branch_id: BranchId,
     ) -> StorageApiResult<()> {
@@ -2176,6 +2181,32 @@ impl<'a> StorageRuntime<'a> {
             return Err(StorageApiError::RetainedHistoryUnavailable {
                 branch_id,
                 reason: "commit version is outside retained branch history",
+            });
+        }
+        Ok(())
+    }
+
+    /// #3502 / #3509: refuse forking at a version below the source branch's
+    /// published MVCC retained-history floor. The rest of the fork path
+    /// validates only the never-pruned TIMELINE bounds, so without this a fork
+    /// below a pruned floor would silently inherit the pruned tables and read
+    /// ABSENT history for keys whose sub-floor versions were dropped. This
+    /// mirrors the read-path contract (a below-floor `as_of` raises
+    /// `RetainedHistoryUnavailable`); a version exactly AT the floor is
+    /// retained and allowed (CMP-002).
+    fn require_fork_version_within_retained_floor(
+        &self,
+        branch_id: BranchId,
+        version: CommitVersion,
+    ) -> StorageApiResult<()> {
+        if self
+            .read_view_for_branch(branch_id)?
+            .retained_history_floor()
+            .is_some_and(|floor| version < floor)
+        {
+            return Err(StorageApiError::RetainedHistoryUnavailable {
+                branch_id,
+                reason: "fork version is below the retained history floor",
             });
         }
         Ok(())

@@ -498,6 +498,29 @@ recovery prose because it is regressible independently of allocator monotonicity
 `list_branches(false)` (excluding deleted) at this site. MVCC-003's re-issue contract tests
 cover the lossy-domain interplay.
 
+### MVCC-009: Every history-access operation honors the published retained-history floor
+
+Once a branch publishes an MVCC `retained_history_floor` F (opt-in version pruning drops the
+sub-F versions, keeping at most one below-floor survivor per key — CMP-002), EVERY operation
+that accesses history at a caller-chosen version or timestamp MUST refuse a point below F with
+`RetainedHistoryUnavailable`, never silently return an absent, stale, or too-new value. This
+covers not only point/timestamp/history READS (`require_version_retained` /
+`version_below_retained_floor`, `api/runtime/data.rs`) but also FORK operations
+(`ForkAtVersion` / `ForkAtTimestamp`, `api/runtime/mod.rs`): a fork below F would inherit the
+pruned tables and its child, reading through the inherited layer bounded at the fork version,
+would see keys rewritten between the fork point and F as absent. The floor is the DATA-row
+`retained_history_floor`, DISTINCT from and NOT substitutable by the never-pruned TIMELINE
+minimum — validating only the timeline bounds (as the fork path once did) passes a below-F
+version straight through (#3509). A version exactly AT F is retained and allowed.
+
+**Audit**: Verify the read path consults `version_below_retained_floor`
+(`api/runtime/data.rs`) and the fork path consults
+`require_fork_version_within_retained_floor` in BOTH the `ForkAtVersion` and `ForkAtTimestamp`
+arms (`api/runtime/mod.rs::branch`) — a fork arm that validates only
+`require_retained_version_watermark` / the timeline is the regression. Tests:
+`read_at_version_below_retained_history_floor_is_rejected` (`api/tests/read.rs`),
+`api_fork_below_retained_history_floor_is_rejected` (`api/tests/maintenance.rs`).
+
 ---
 
 ## ACID — Atomicity, Consistency, Isolation, Durability Invariants

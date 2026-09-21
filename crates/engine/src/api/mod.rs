@@ -62,7 +62,9 @@ pub use kv::{
     KvListPage, KvSample, KvScanRow, KvService, KvValue, KvVersionedValue, KvWriteOutcome,
     ProductSpace,
 };
-pub use options::{CacheOpenOptions, CachePreheat, DurabilityMode, DurableLocalOpenOptions};
+pub use options::{
+    CacheOpenOptions, CachePreheat, DurabilityMode, DurableLocalOpenOptions, VersionRetention,
+};
 pub use space::{SpaceCreateOutcome, SpaceDeleteOutcome, SpaceService, SpaceUsageSummary};
 pub use vector::{
     EmbeddingModelId, VectorArtifactSourceDiagnostic, VectorBatchDeleteOutcome,

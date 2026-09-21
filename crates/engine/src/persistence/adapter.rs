@@ -394,13 +394,14 @@ impl StoragePersistence {
     pub(crate) fn open(
         target: PersistenceOpenTarget,
     ) -> Result<(Self, PersistenceOpenSummary), EngineError> {
-        Self::open_with_budget(target, None, None, crate::api::CachePreheat::WhenIdle)
+        Self::open_with_budget(target, None, None, None, crate::api::CachePreheat::WhenIdle)
     }
 
     pub(crate) fn open_with_budget(
         target: PersistenceOpenTarget,
         memory_budget_bytes: Option<u64>,
         data_block_bytes: Option<u32>,
+        version_retention_window: Option<u64>,
         cache_preheat: crate::api::CachePreheat,
     ) -> Result<(Self, PersistenceOpenSummary), EngineError> {
         let (runtime, summary, durable) = match target {
@@ -424,6 +425,11 @@ impl StoragePersistence {
                     // B2: durable-only data-block byte target (see options doc).
                     options = options.with_data_block_bytes(bytes);
                 }
+                // #3502: durable-only MVCC version pruning opt-in. `None` keeps
+                // every version (the default); `Some(window)` retains versions
+                // newer than the head-relative floor and prunes older ones in
+                // compaction, publishing a retained-history floor.
+                options = options.with_version_retention_window(version_retention_window);
                 // C2: durable-only idle cache preheat (cache mode has no
                 // disk-resident tables to warm from).
                 options = options.with_cache_preheat_policy(match cache_preheat {
@@ -985,6 +991,23 @@ impl StoragePersistence {
             .drain_maintenance()
             .map_err(map_storage_error)?;
         Ok(summary.drained_tasks().saturating_add(1))
+    }
+
+    /// #3502 Slice D2: deterministically drive one foreground compaction of a
+    /// branch through the storage pruning dispatch, so the engine's opt-in
+    /// retention test can prune at a known watermark without racing storage
+    /// pressure. Durable-only (pruning is a durable-branch behavior). Gated on
+    /// `testkit` (not `test`) because the storage seam it calls is exposed only
+    /// through `strata-storage/testkit`, which the engine's own `testkit`
+    /// feature pulls in.
+    #[cfg(all(feature = "testkit", feature = "localfs"))]
+    pub(crate) fn force_branch_compaction_for_test(
+        &mut self,
+        branch_id: BranchId,
+    ) -> Result<(), EngineError> {
+        self.runtime
+            .force_branch_compaction_for_test(branch_id)
+            .map_err(map_storage_error)
     }
 
     #[must_use]
