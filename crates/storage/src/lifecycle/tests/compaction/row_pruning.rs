@@ -86,6 +86,35 @@ fn manifest_records_retained_version_floor() {
     );
 }
 
+/// #3502 Slice B: a pruning compaction that actually drops below-floor versions
+/// publishes the proof's retained-version floor onto branch state, in lockstep
+/// with the deletion, so an api-layer `as_of` below it raises (Slice A) instead
+/// of serving the below-floor survivor CMP-002 keeps. Before any prune the floor
+/// is unpublished.
+#[test]
+fn pruning_compaction_publishes_the_version_floor_to_branch_state() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xea);
+    let mut runtime = pruning_runtime(branch, backend);
+
+    // Nothing pruned yet: the floor is unpublished.
+    assert_eq!(runtime.branch_state().retained_history_floor(), None);
+
+    let request =
+        pruning_request(runtime.branch_state(), branch, "publish-version-floor").expect("request");
+    runtime
+        .compact_branch_tables(&request)
+        .expect("durable pruning");
+
+    // The prune drops below-floor versions, so the read watermark rises to the
+    // proof floor (3) in lockstep with the deletion.
+    assert_eq!(
+        runtime.branch_state().retained_history_floor(),
+        Some(CommitVersion::new(3))
+    );
+}
+
 #[test]
 fn manifest_records_retained_timestamp_floor() {
     let backend: &'static CheckpointTestBackend =

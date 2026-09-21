@@ -740,11 +740,15 @@ impl BranchLocalState {
         self.advance_compact_pointer(compact_pointer);
         self.refresh_observed_row_facts();
         if report.dropped_rows() != 0 {
-            if let Some(floor) = request
-                .pruning_proof()
-                .and_then(BranchCompactionPruningProof::retained_timestamp_floor)
-            {
-                self.timestamp_coverage = BranchTimestampCoverage::complete_since(floor);
+            if let Some(proof) = request.pruning_proof() {
+                // #3502 Slice B: the version pruning floor rises in lockstep
+                // with the actual deletion, so a later api-layer `as_of` below
+                // it raises (Slice A) rather than serving the single below-floor
+                // survivor CMP-002 keeps.
+                self.set_retained_history_floor(Some(proof.retained_version_floor()));
+                if let Some(floor) = proof.retained_timestamp_floor() {
+                    self.timestamp_coverage = BranchTimestampCoverage::complete_since(floor);
+                }
             }
         }
 
