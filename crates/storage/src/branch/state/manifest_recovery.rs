@@ -16,6 +16,10 @@ pub(crate) struct BranchTableManifestRecoveryRequest {
     owned_levels: Vec<Vec<BranchOwnedTable>>,
     inherited_layers: Vec<BranchInheritedLayer>,
     timestamp_coverage: BranchTimestampCoverage,
+    /// #3502 Slice C: the retained-history version floor recovered from the
+    /// manifest, re-applied onto branch state so post-restart `as_of` reads
+    /// below a pruned floor keep raising (`None` = unbounded).
+    retained_history_floor: Option<CommitVersion>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,6 +43,7 @@ impl BranchTableManifestRecoveryRequest {
             owned_levels,
             inherited_layers,
             timestamp_coverage: BranchTimestampCoverage::unknown(),
+            retained_history_floor: None,
         };
         request.validate()?;
         Ok(request)
@@ -49,6 +54,12 @@ impl BranchTableManifestRecoveryRequest {
         timestamp_coverage: BranchTimestampCoverage,
     ) -> Self {
         self.timestamp_coverage = timestamp_coverage;
+        self
+    }
+
+    /// #3502 Slice C: carry the recovered retained-history version floor.
+    pub(crate) fn with_retained_history_floor(mut self, floor: Option<CommitVersion>) -> Self {
+        self.retained_history_floor = floor;
         self
     }
 
@@ -159,6 +170,7 @@ impl BranchLocalState {
             .resize_with(self.config.max_level_count(), || None);
         staged.inherited_layers = request.inherited_layers;
         staged.timestamp_coverage = request.timestamp_coverage;
+        staged.retained_history_floor = request.retained_history_floor;
         compaction::validate_compaction_levels(staged.owned_levels())?;
         validate_manifest_recovery_inherited_layers(staged.branch_id, &staged.inherited_layers)?;
         validate_manifest_recovery_table_identities(

@@ -323,9 +323,7 @@ impl LifecycleDurableTableCatalog {
         if let Some(facts) =
             super::retained_history_extension::RetainedHistoryFacts::from_timestamp_coverage(
                 branch.timestamp_coverage(),
-                branch
-                    .max_commit_version()
-                    .unwrap_or(strata_core::CommitVersion::ZERO),
+                manifest_retained_version_floor(branch),
             )
         {
             extensions.push(facts.to_extension_section().map_err(format_error)?);
@@ -739,7 +737,11 @@ fn recovery_request_from_manifest(
         )
         .map_err(format_error)?;
     Ok(match retained {
-        Some(facts) => request.with_timestamp_coverage(facts.to_timestamp_coverage()),
+        // #3502 Slice C: restore the version floor alongside the timestamp
+        // coverage so post-restart `as_of` reads below a pruned floor raise.
+        Some(facts) => request
+            .with_timestamp_coverage(facts.to_timestamp_coverage())
+            .with_retained_history_floor(Some(facts.retained_version_floor)),
         None => request,
     })
 }
@@ -896,6 +898,20 @@ fn branch_table_from_reader(
             BranchOwnedTable::new(branch_id, descriptor, reader, extras).map_err(branch_error)
         }
     }
+}
+
+/// #3502 Slice C: the retained-version floor to persist in the manifest — the
+/// pruning floor Slice B published (the lowest retained version), else the
+/// branch's max commit version as a defensive fallback for any narrowing not
+/// driven by a version prune, else zero. Persisting `max_commit_version` when a
+/// real floor exists would over-reject on restore (it would raise `as_of` reads
+/// of still-retained versions). Returned as a bare `CommitVersion` — not the
+/// `LifecycleResult` alias — so the mutation gate can judge the choice.
+fn manifest_retained_version_floor(branch: &BranchLocalState) -> strata_core::CommitVersion {
+    branch
+        .retained_history_floor()
+        .or_else(|| branch.max_commit_version())
+        .unwrap_or(strata_core::CommitVersion::ZERO)
 }
 
 fn manifest_levels_from_owned(
