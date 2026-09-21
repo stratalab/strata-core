@@ -49,9 +49,10 @@ fn durable_pruned_compaction_publishes_pruned_manifest_facts() {
 #[test]
 fn manifest_records_retained_version_floor() {
     // After a pruning compaction, the durable manifest must carry a
-    // retained-history extension recording the retained version
-    // floor used by the proof. Reopening the database recreates that
-    // floor from the manifest bytes.
+    // retained-history extension recording the retained version floor used by
+    // the PROOF (3) — the lowest retained version — not `max_commit_version`
+    // (4). #3502 Slice C: this floor is what recovery re-applies onto the read
+    // watermark, so persisting max_commit_version would over-reject on restore.
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let branch = branch_id(0xee);
@@ -79,7 +80,7 @@ fn manifest_records_retained_version_floor() {
         extension.payload(),
     )
     .expect("decode extension");
-    assert_eq!(facts.retained_version_floor, CommitVersion::new(4));
+    assert_eq!(facts.retained_version_floor, CommitVersion::new(3));
     assert_eq!(
         facts.retained_timestamp_floor,
         Some(Timestamp::from_micros(9_001))
@@ -111,6 +112,39 @@ fn pruning_compaction_publishes_the_version_floor_to_branch_state() {
     // proof floor (3) in lockstep with the deletion.
     assert_eq!(
         runtime.branch_state().retained_history_floor(),
+        Some(CommitVersion::new(3))
+    );
+}
+
+/// #3502 Slice C: the version pruning floor survives reopen. After a pruning
+/// compaction + checkpoint, reopening restores the retained-history floor onto
+/// branch state from the manifest's retained-history extension, so an api-layer
+/// `as_of` below it keeps raising across restarts — closing the window where a
+/// pruned-then-restarted store would again serve the below-floor survivor.
+#[test]
+fn durable_pruned_compaction_recovery_restores_version_floor() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xec);
+    {
+        let mut runtime = pruning_runtime(branch, backend);
+        let request = pruning_request(runtime.branch_state(), branch, "recover-version-floor")
+            .expect("request");
+        runtime
+            .compact_branch_tables(&request)
+            .expect("durable pruning");
+        // Slice B: published in-memory in lockstep with the prune.
+        assert_eq!(
+            runtime.branch_state().retained_history_floor(),
+            Some(CommitVersion::new(3))
+        );
+        checkpoint_pruned_runtime(&mut runtime, branch, 1);
+    }
+
+    // Slice C: restored from the manifest on reopen.
+    let reopened = open_runtime(branch, backend);
+    assert_eq!(
+        reopened.branch_state().retained_history_floor(),
         Some(CommitVersion::new(3))
     );
 }
