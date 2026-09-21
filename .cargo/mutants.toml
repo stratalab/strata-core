@@ -239,4 +239,21 @@ exclude_re = [
     # `doctor::tests::the_inference_report_carries_facts`, verified by hand.
     # That is the strength mechanism this entry rests on.
     "replace inference_report -> Value with Default::default\\(\\)",
+    # #3502 Slice D2: the two engine-side compaction seams the opt-in retention
+    # e2e test drives are `#[cfg(all(feature = "testkit", feature = "localfs"))]`
+    # — cfg'd out under this lane's DEFAULT features. cargo-mutants mutates
+    # source text without evaluating cfg, so it builds a binary that never
+    # contains the function and the mutant survives vacuously — the same class
+    # as `persistence/fault.rs` (excluded above) and the loom/DST modules.
+    #
+    # Their strength mechanism is the `-p strata-engine --features testkit` lane
+    # (`test` job, ci.yml): `version_retention.rs` drives both seams end to end
+    # — an opt-in database prunes and an `as_of` read of the pruned version
+    # raises — so planting `-> Ok(())` on either reds it (verified by hand).
+    # The storage-side `StorageRuntime::force_branch_compaction_for_test` that
+    # this lane CAN reach (`#[cfg(test)]` under `cargo test -p strata-storage`)
+    # is NOT excluded and stays killed by
+    # `api_opt_in_version_retention_prunes_old_versions`.
+    "Database::force_storage_branch_compaction_for_test",
+    "StoragePersistence::force_branch_compaction_for_test",
 ]

@@ -3235,6 +3235,41 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     /// unmet, so a cycle that cannot prove pruning safe simply does not prune.
     /// Called BEFORE the `&mut branch` borrow so it can read sibling branch
     /// state for the shared-table gate.
+    /// #3502 Slice D2: true when no OTHER active branch shares a table with
+    /// `branch_id` — the layering-clean shared-table safety predicate that
+    /// backs the pruning proof's `candidate_tables_not_shared`. Builds a fresh
+    /// `SharedTableRegistry` over every active branch's reachability snapshot,
+    /// then requires every table this branch references to be referenced by it
+    /// alone (reference count 1). A COW fork re-references the parent's table
+    /// identities, so a shared table lifts its count above 1 and the branch is
+    /// refused; independent roots hold disjoint identities and pass. Any lookup
+    /// or snapshot failure is treated conservatively as "cannot prove unshared"
+    /// and refuses the prune.
+    fn branch_tables_unshared_with_other_branches(&self, branch_id: BranchId) -> bool {
+        let active = self.branch_catalog.registry().active_branch_ids();
+        let mut snapshots = Vec::with_capacity(active.len());
+        for id in &active {
+            let Ok(state) = self.branch_catalog.branch_state(*id) else {
+                return false;
+            };
+            let Ok(snapshot) = state.reachability_snapshot() else {
+                return false;
+            };
+            snapshots.push(snapshot);
+        }
+        let Ok(registry) =
+            crate::branch::facts::SharedTableRegistry::rebuild_from_snapshots(&snapshots)
+        else {
+            return false;
+        };
+        let Some(mine) = snapshots.iter().find(|s| s.branch_id() == branch_id) else {
+            return false;
+        };
+        mine.table_refs()
+            .iter()
+            .all(|table_ref| registry.reference_count(table_ref.table_identity()) == 1)
+    }
+
     fn build_version_pruning_for_compaction(
         &self,
         branch_id: BranchId,
@@ -3251,11 +3286,16 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         if !self.current_recovery_health.is_healthy() {
             return None;
         }
-        // Conservative shared-table safety: prune only when this is the SOLE
-        // active branch, so no COW fork can share a table the prune rewrites.
-        // Multi-branch per-table pruning (via the shared-table registry) is a
-        // follow-up refinement (D2).
-        if self.branch_catalog.registry().active_branch_ids().len() != 1 {
+        // Shared-table safety: prune only when no OTHER active branch shares a
+        // table with this one, so a prune that rewrites/drops rows cannot
+        // affect a COW fork's reads. Derived per-table from a fresh
+        // `SharedTableRegistry` over every active branch's reachability
+        // snapshot — independent roots (the engine's `_system_` branch,
+        // sibling product roots) hold disjoint table identities and pass; a COW
+        // fork shares identities and is refused. This replaces the earlier
+        // single-branch count proxy, which baked the engine's "always one
+        // system branch" topology into the storage layer (D2).
+        if !self.branch_tables_unshared_with_other_branches(branch_id) {
             return None;
         }
         let branch = self.branch_catalog.branch_state(branch_id).ok()?;

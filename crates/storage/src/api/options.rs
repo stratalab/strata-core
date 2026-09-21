@@ -462,18 +462,19 @@ impl StorageOpenOptions {
         self.version_retention
     }
 
-    /// #3502 Slice D: opt into version pruning. Test-only for now — the
-    /// production opt-in belongs on the engine's `DurableLocalOpenOptions`
-    /// (Slice D2), so gating this to tests keeps the lib dead-code-free while
-    /// the storage suite drives the end-to-end pruning path.
-    #[cfg(test)]
-    #[cfg(feature = "localfs")]
+    /// #3502 Slice D2: opt into MVCC version pruning — retain versions newer
+    /// than `visible - window` per key (keep-newer-than-watermark); `None` keeps
+    /// every version (the default). Takes a plain window so the storage boundary
+    /// need not expose the internal policy enum; the engine's
+    /// `DurableLocalOpenOptions` is the user-facing opt-in surface.
     #[must_use]
-    pub(crate) const fn with_version_retention_for_test(
-        mut self,
-        version_retention: crate::lifecycle::StorageVersionRetentionPolicy,
-    ) -> Self {
-        self.version_retention = version_retention;
+    pub const fn with_version_retention_window(mut self, window: Option<u64>) -> Self {
+        self.version_retention = match window {
+            None => crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
+            Some(window) => {
+                crate::lifecycle::StorageVersionRetentionPolicy::KeepRecentVersions { window }
+            }
+        };
         self
     }
 

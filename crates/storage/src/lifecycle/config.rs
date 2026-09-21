@@ -43,16 +43,7 @@ const DEFAULT_WRITE_THROTTLE_MAX_GRADED_DELAY_MILLIS: u64 = 250;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StorageVersionRetentionPolicy {
     KeepAll,
-    #[allow(
-        dead_code,
-        reason = "#3502 Slice D: this variant's production constructor is the \
-                  opt-in surface added in Slice D2; today only the storage test \
-                  seam builds it, so it is unconstructed in non-test builds \
-                  while the dispatch already consumes it"
-    )]
-    KeepRecentVersions {
-        window: u64,
-    },
+    KeepRecentVersions { window: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

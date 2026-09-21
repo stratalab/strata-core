@@ -486,9 +486,7 @@ fn api_rewrite_cache_mode_does_not_call_durable_services() {
 #[test]
 fn api_opt_in_version_retention_prunes_old_versions() {
     let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
-        .with_version_retention_for_test(
-            crate::lifecycle::StorageVersionRetentionPolicy::KeepRecentVersions { window: 1 },
-        );
+        .with_version_retention_window(Some(1));
     let mut runtime = open_durable_runtime_with_options("prune-optin", options);
 
     // Two batches of three versions, each flushed into its own L0 table — two
@@ -591,6 +589,139 @@ fn api_default_keep_all_retention_keeps_old_versions() {
             .as_bytes(),
         &[b'v', 0]
     );
+}
+
+/// #3502 Slice D2: the shared-table safety gate. A COW fork re-references one
+/// of the branch's L0 tables, lifting its reference count to 2 while a later
+/// table stays branch-private (count 1) — a MIXED snapshot. The whole-branch
+/// gate requires EVERY referenced table to be unshared, so it refuses pruning
+/// wholesale, and the oldest version survives the compaction: a fork's
+/// inherited reads are never rewritten out from under it. The mixed snapshot
+/// (not two shared tables) is deliberate — it distinguishes the `all`-tables
+/// gate from an `any`-table one, which would wrongly prune on the private
+/// table alone. This is the multi-branch case the single-branch count proxy
+/// rejected wholesale; the derived check refuses only the genuinely shared
+/// branch.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_shared_tables_block_version_pruning() {
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_version_retention_window(Some(1));
+    let mut runtime = open_durable_runtime_with_options("prune-shared", options);
+
+    let flush = MaintenanceRequest::new(MaintenanceTask::Flush, MaintenanceScope::Branch(branch()));
+    let mut versions = Vec::new();
+    for index in 0..3u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit version")
+                .commit_version(),
+        );
+    }
+    runtime.maintenance(&flush).expect("flush first table");
+
+    // Fork BEFORE the second flush: the child inherits only the first table, so
+    // that table's reference count is 2 (shared) while the second stays 1
+    // (branch-private) — a mixed snapshot.
+    fork_branch(&mut runtime, branch_with(0xC5));
+
+    for index in 3..6u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit version")
+                .commit_version(),
+        );
+    }
+    runtime.maintenance(&flush).expect("flush second table");
+
+    runtime
+        .force_branch_compaction_for_test(branch())
+        .expect("force compaction (pruning refused while shared)");
+
+    // The oldest version is retained: had the gate mis-judged the shared
+    // tables as prunable, this read would raise `HistoryUnavailable`.
+    let outcome = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect("oldest version retained while tables are shared");
+    assert_eq!(
+        outcome
+            .row()
+            .expect("row")
+            .value()
+            .expect("value")
+            .as_bytes(),
+        &[b'v', 0]
+    );
+}
+
+/// #3502 / #3509: forking below a published retained-history floor RAISES,
+/// mirroring the read-path contract — a fork at an unavailable version must not
+/// silently inherit pruned tables and read absent history for keys whose
+/// sub-floor versions were dropped. A fork exactly AT the floor, and above it,
+/// still succeeds (the floor version is retained, CMP-002). The fork path
+/// otherwise validates only the never-pruned timeline bounds, so the timeline
+/// check passes for a below-floor version and this data-floor gate is what
+/// refuses it.
+#[test]
+fn api_fork_below_retained_history_floor_is_rejected() {
+    let mut runtime = open_runtime();
+    let mut versions = Vec::new();
+    for index in 0..3u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit version")
+                .commit_version(),
+        );
+    }
+    // Publish a retained-history floor at the middle version (what pruning does).
+    runtime
+        .set_retained_history_floor_for_test(branch(), versions[1])
+        .expect("set retained history floor");
+
+    // Below the floor: the fork is refused (its child would read absent history).
+    let error = runtime
+        .branch(&BranchRequest::new(
+            branch_with(0xC1),
+            BranchAction::ForkAtVersion {
+                source: branch(),
+                version: versions[0],
+            },
+            Some(BranchGeneration::new(1)),
+        ))
+        .expect_err("fork below the retained floor is rejected");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+
+    // Exactly AT the floor still forks — the floor version is retained.
+    runtime
+        .branch(&BranchRequest::new(
+            branch_with(0xC2),
+            BranchAction::ForkAtVersion {
+                source: branch(),
+                version: versions[1],
+            },
+            Some(BranchGeneration::new(1)),
+        ))
+        .expect("fork at the floor succeeds");
+
+    // Above the floor still forks.
+    runtime
+        .branch(&BranchRequest::new(
+            branch_with(0xC3),
+            BranchAction::ForkAtVersion {
+                source: branch(),
+                version: versions[2],
+            },
+            Some(BranchGeneration::new(1)),
+        ))
+        .expect("fork above the floor succeeds");
 }
 
 #[test]

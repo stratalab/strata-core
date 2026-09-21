@@ -166,6 +166,7 @@ impl Database {
             options.into_default_branch(),
             memory_budget_bytes,
             None,
+            None,
             CachePreheat::WhenIdle,
         )
     }
@@ -178,12 +179,16 @@ impl Database {
         let memory_budget_bytes = options.memory_budget_bytes();
         let data_block_bytes = options.data_block_bytes();
         let cache_preheat = options.cache_preheat();
+        // #3502 Slice D2: map the user-facing retention policy to the keep-newer-
+        // than window the storage boundary consumes (`None` = KeepAll).
+        let version_retention_window = options.version_retention().retained_window();
         Self::open(
             PersistenceOpenTarget::DurableLocal(path.into(), options.durability()),
             DatabaseOpenTarget::DurableLocal,
             options.into_default_branch(),
             memory_budget_bytes,
             data_block_bytes,
+            version_retention_window,
             cache_preheat,
         )
     }
@@ -496,6 +501,28 @@ impl Database {
             .flush_branch_for_test(record.storage_branch_id())
     }
 
+    /// #3502 Slice D2: forces one foreground compaction of a branch through the
+    /// persistence pruning dispatch, so a test can deterministically prune MVCC
+    /// versions on a database opened with `VersionRetention::KeepRecentVersions`.
+    /// Gated on `testkit` (not `test`) because the persistence seam it reaches
+    /// is compiled only under the `testkit` feature.
+    #[cfg(all(feature = "testkit", feature = "localfs"))]
+    pub fn force_storage_branch_compaction_for_test(
+        &mut self,
+        branch: &BranchName,
+    ) -> Result<(), EngineError> {
+        self.require_open()?;
+        self.control.require_healthy()?;
+        let record = self.control.lookup_branch(branch).cloned().ok_or_else(|| {
+            EngineError::not_found(
+                "not_found.engine.branch",
+                format!("branch `{branch}` does not exist"),
+            )
+        })?;
+        self.persistence
+            .force_branch_compaction_for_test(record.storage_branch_id())
+    }
+
     /// Arms a storage fault that fires on the next persistence commit.
     #[cfg(any(test, feature = "testkit"))]
     pub fn inject_commit_fault_for_test(&mut self, kind: StorageFaultKind) {
@@ -591,6 +618,7 @@ impl Database {
         default_branch: Option<BranchName>,
         memory_budget_bytes: Option<u64>,
         data_block_bytes: Option<u32>,
+        version_retention_window: Option<u64>,
         cache_preheat: CachePreheat,
     ) -> Result<DatabaseOpenOutcome, EngineError> {
         let vector_artifacts = vector_artifact_store_for_target(&target);
@@ -604,6 +632,7 @@ impl Database {
             target,
             memory_budget_bytes,
             data_block_bytes,
+            version_retention_window,
             cache_preheat,
         )?;
         let control = bootstrap_or_load(

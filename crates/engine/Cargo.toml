@@ -12,7 +12,11 @@ publish = false
 [features]
 default = ["localfs"]
 localfs = ["strata-storage/localfs"]
-testkit = []
+# #3502 Slice D2: the engine's opt-in retention test drives the storage pruning
+# compaction dispatch (`force_branch_compaction_for_test`), which storage exposes
+# only under its own `testkit`; the seams are additive test hooks that default to
+# no-op, so this is behavior-neutral for production callers.
+testkit = ["strata-storage/testkit"]
 # Derive JSON schemas on the public error vocabulary for IDL tooling only.
 wire-schemas = ["dep:schemars"]
 
