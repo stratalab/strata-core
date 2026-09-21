@@ -144,6 +144,9 @@ pub struct StorageOpenOptions {
     /// #3499: compression codec for durable lifecycle-built tables (Zstd by
     /// default). Cache mode ignores it (its in-memory tables stay uncompressed).
     table_compression: crate::format::TableCompression,
+    /// #3502 Slice D: MVCC version-retention policy (`KeepAll` by default;
+    /// pruning is opt-in).
+    version_retention: crate::lifecycle::StorageVersionRetentionPolicy,
     cache_preheat_policy: StorageCachePreheatPolicy,
     #[cfg(any(test, feature = "testkit"))]
     storage_budget_for_test: Option<StorageRuntimeBudget>,
@@ -259,6 +262,7 @@ impl StorageOpenOptions {
             wal_segment_size_for_test: None,
             data_block_bytes: None,
             table_compression: crate::format::TableCompression::Zstd,
+            version_retention: crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
             cache_preheat_policy: StorageCachePreheatPolicy::WhenIdle,
             #[cfg(any(test, feature = "testkit"))]
             storage_budget_for_test: None,
@@ -287,6 +291,7 @@ impl StorageOpenOptions {
             wal_segment_size_for_test: None,
             data_block_bytes: None,
             table_compression: crate::format::TableCompression::Zstd,
+            version_retention: crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
             cache_preheat_policy: StorageCachePreheatPolicy::WhenIdle,
             #[cfg(any(test, feature = "testkit"))]
             storage_budget_for_test: None,
@@ -306,6 +311,7 @@ impl StorageOpenOptions {
             wal_segment_size_for_test: None,
             data_block_bytes: None,
             table_compression: crate::format::TableCompression::Zstd,
+            version_retention: crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
             cache_preheat_policy: StorageCachePreheatPolicy::WhenIdle,
             #[cfg(any(test, feature = "testkit"))]
             storage_budget_for_test: None,
@@ -325,6 +331,7 @@ impl StorageOpenOptions {
             wal_segment_size_for_test: None,
             data_block_bytes: None,
             table_compression: crate::format::TableCompression::Zstd,
+            version_retention: crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
             cache_preheat_policy: StorageCachePreheatPolicy::WhenIdle,
             #[cfg(any(test, feature = "testkit"))]
             storage_budget_for_test: None,
@@ -444,6 +451,29 @@ impl StorageOpenOptions {
         compression: crate::format::TableCompression,
     ) -> Self {
         self.table_compression = compression;
+        self
+    }
+
+    /// #3502 Slice D: the MVCC version-retention policy (read by the open path
+    /// to seed the lifecycle config).
+    pub(crate) const fn version_retention(
+        &self,
+    ) -> crate::lifecycle::StorageVersionRetentionPolicy {
+        self.version_retention
+    }
+
+    /// #3502 Slice D: opt into version pruning. Test-only for now — the
+    /// production opt-in belongs on the engine's `DurableLocalOpenOptions`
+    /// (Slice D2), so gating this to tests keeps the lib dead-code-free while
+    /// the storage suite drives the end-to-end pruning path.
+    #[cfg(test)]
+    #[cfg(feature = "localfs")]
+    #[must_use]
+    pub(crate) const fn with_version_retention_for_test(
+        mut self,
+        version_retention: crate::lifecycle::StorageVersionRetentionPolicy,
+    ) -> Self {
+        self.version_retention = version_retention;
         self
     }
 

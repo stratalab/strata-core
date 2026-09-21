@@ -418,16 +418,17 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             branch_config_with_storage_budget(request.branch_config(), budget.budget())?;
         let mut branch = BranchLocalState::new(request.initial_branch_id(), branch_config)
             .map_err(branch_error)?;
-        // #3502 D0: a freshly-created durable database's initial branch is born
-        // in-process — its history is provably complete, nothing was ever
-        // pruned — so its timestamp coverage is Complete (the attestation the
-        // version-pruning proof's timestamp-floor gate needs). An
-        // OpenedExisting branch instead takes its coverage from the recovered
-        // manifest facts (or stays Unknown without facts — conservative, since
-        // a missing extension could mean a prior prune whose facts were lost).
-        // Complete and Unknown are read-identical, so this changes no read.
+        // #3502 D0/D: a freshly-created durable database's initial branch is
+        // born in-process — its history is provably complete, nothing was ever
+        // pruned — so both its retained-timeline index (needed to source the
+        // pruning proof's timestamp floor) AND its timestamp coverage are
+        // complete from birth. An OpenedExisting branch instead recovers its
+        // timeline/coverage from the manifest (or stays Unknown without facts —
+        // conservative, since a missing extension could mean a prior prune whose
+        // facts were lost). Complete and Unknown coverage are read-identical, so
+        // this changes no read.
         if disposition == StorageOpenDisposition::Created {
-            branch.set_timestamp_coverage(crate::branch::read::BranchTimestampCoverage::complete());
+            branch.mark_complete_from_birth();
         }
         let mut registry = CommitBranchRegistry::new();
         registry

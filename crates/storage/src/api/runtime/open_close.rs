@@ -158,6 +158,10 @@ pub(super) fn lifecycle_plan(
     // the open options into the lifecycle config, whence flush and compaction
     // inherit it.
     config = config.with_table_compression(options.table_compression());
+    // #3502 Slice D: carry the MVCC version-retention policy (KeepAll by
+    // default) into the lifecycle config, whence the compaction dispatch
+    // builds the pruning proof.
+    config = config.with_version_retention(options.version_retention());
     config = config
         .with_maintenance_scheduling_policy(map_maintenance_scheduling_policy(
             options.maintenance_scheduling_policy(),
