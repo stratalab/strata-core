@@ -9,7 +9,7 @@ use crate::branch::read::{
 use crate::commit::{
     CommitBranchGeneration, CommitBranchGenerationGuard, CommitDurabilityClass,
     CommitRuntimeConfig, CommitTimelineEntry, CommitTimelineLookup, CommitTimelineMiss,
-    CommitTimelineView, CommitTimestampSource, COMMIT_TIMELINE_SPACE,
+    CommitTimelineView, CommitTimestampSource,
 };
 use crate::lifecycle::{
     collect_storage_pressure_with_budget, estimate_commit_batch_active_bytes,

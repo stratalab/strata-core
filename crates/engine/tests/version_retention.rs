@@ -163,3 +163,42 @@ fn default_options_never_prune_history() {
         );
     }
 }
+
+/// #3519 end-to-end: under the default `KeepAll` posture, a flushed commit's
+/// history survives a clean close+reopen. In the real product the `_system_`
+/// branch always exists, so close DEFERS its checkpoint — and after W3.1c
+/// elided the `COMMIT_TIMELINE` rows the flushed commits' version→timestamp
+/// facts live only on their data rows. A retained `as_of` read of the oldest
+/// version must still return its exact value after reopen (the read-time
+/// fallback rebuilds the timeline from those rows), rather than raising
+/// `history_unavailable` as it did before the fix.
+#[test]
+fn keep_all_history_survives_close_and_reopen_end_to_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut versions = Vec::new();
+    {
+        let mut db = open(dir.path(), VersionRetention::KeepAll);
+        for index in 0..4u8 {
+            versions.push(commit(&mut db, b"k", &[b'v', index]));
+        }
+        db.flush_storage_branch_for_test(&branch("default"))
+            .expect("flush");
+        let before = db
+            .kv(branch("default"), space("default"))
+            .expect("default KV opens")
+            .get_at_version(&key(b"k"), versions[0])
+            .expect("oldest version reads before reopen")
+            .expect("value exists before reopen");
+        assert_eq!(before.as_bytes(), &[b'v', 0]);
+        db.close().expect("clean close");
+    }
+
+    let db = common::open_durable_database(dir.path()).expect("durable reopen");
+    let oldest = db
+        .kv(branch("default"), space("default"))
+        .expect("default KV opens")
+        .get_at_version(&key(b"k"), versions[0])
+        .expect("oldest version retained across reopen under KeepAll")
+        .expect("oldest value exists after reopen");
+    assert_eq!(oldest.as_bytes(), &[b'v', 0]);
+}

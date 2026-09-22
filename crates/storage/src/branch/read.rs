@@ -829,6 +829,29 @@ fn compute_straddle_read_view_summary(
     }))
 }
 
+/// #3519: fold one data row's commit stamp into the version→timestamp map,
+/// keeping the first timestamp seen for a version (all rows of one commit carry
+/// the same stamp; `CommitVersion::ZERO` is reserved and never a real commit).
+/// Rows carrying a foreign `branch_id` are skipped — the reconstruction is the
+/// branch's OWN timeline, and a materialized owned table holds only this
+/// branch's rows, but the guard mirrors the elided `from_rows` scan it replaces
+/// and keeps a stray COW row from forging a spurious version.
+fn record_own_commit_stamp(
+    stamps: &mut BTreeMap<CommitVersion, Timestamp>,
+    branch_id: BranchId,
+    row: &TableRow,
+) {
+    if row.row().physical_key().branch_id() != branch_id {
+        return;
+    }
+    let version = row.commit_version();
+    if version != CommitVersion::ZERO {
+        stamps
+            .entry(version)
+            .or_insert_with(|| row.commit_timestamp());
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BranchInheritedLayer {
     descriptor: InheritedLayerDescriptor,
@@ -1181,6 +1204,42 @@ impl BranchReadView {
     /// reference — the pin never clones them.
     fn pinned_active(&self) -> MutableTable {
         self.active.clone_for_read_view()
+    }
+
+    /// #3519: the version→timestamp map derivable from this branch's OWN rows
+    /// (active + frozen + owned tables). W3.1c elided the `COMMIT_TIMELINE`
+    /// rows, so a commit's `(version, timestamp)` fact now survives durably
+    /// only on the data rows it wrote and in a checkpoint's timeline group. A
+    /// branch that was flushed but never checkpointed loses the group (close
+    /// always defers the checkpoint while a non-seeded branch exists), and the
+    /// old timeline-space scan then finds nothing — so this reconstructs the
+    /// facts from the data rows, which is exact for the branch's own retained
+    /// history: every commit writes at least one row carrying its stamp, and
+    /// the `BTreeMap` collapses the per-commit row fan-out by version. Inherited
+    /// (pre-fork parent) rows are deliberately excluded: recovery seeds a fork's
+    /// pre-fork coverage from the parent chain, and a straddle layer would
+    /// otherwise fold in parent commits above the fork version.
+    pub(crate) fn own_commit_timestamps(
+        &self,
+    ) -> BranchRuntimeResult<BTreeMap<CommitVersion, Timestamp>> {
+        let mut stamps: BTreeMap<CommitVersion, Timestamp> = BTreeMap::new();
+        let branch_id = self.branch_id;
+        let active = self.pinned_active();
+        for row in active.iter() {
+            record_own_commit_stamp(&mut stamps, branch_id, &row);
+        }
+        for table in &self.frozen {
+            for row in table.iter() {
+                record_own_commit_stamp(&mut stamps, branch_id, &row);
+            }
+        }
+        for table in self.owned_levels.iter().flatten() {
+            try_for_each_reader_row(table.reader(), |row| {
+                record_own_commit_stamp(&mut stamps, branch_id, row);
+                Ok(())
+            })?;
+        }
+        Ok(stamps)
     }
 
     pub(crate) fn read_point(

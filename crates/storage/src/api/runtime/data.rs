@@ -1,15 +1,15 @@
 use super::error::{branch_error, commit_error, map_lifecycle_error};
 use super::{
-    BranchHistoryOptions, BranchId, BranchReadBound, BranchReadView, BranchScanBounds,
-    CommitAdmissionPressureReason, CommitAdmissionPressureSeverity, CommitAdmissionSummary,
-    CommitBatch, CommitDurabilityClass, CommitDurabilitySummary, CommitExpectedVersion,
-    CommitSummary, CommitTimelineEntry, CommitTimelineLookup, CommitTimelineMiss,
-    CommitTimelineView, CommitVersion, FlushFrozenRequest, FlushTableIdentitySeed,
-    FlushTableObjectId, LifecycleStoragePressureReason, LifecycleStoragePressureSeverity,
-    LifecycleWriteAdmissionOutcome, LifecycleWriteAdmissionStatus, PhysicalKey, ReadBound,
-    ReadLimit, ResolvedReadBound, RowStorageSpaceId, ScanReadOutcome, StorageApiError,
-    StorageApiLowerLayer, StorageApiResult, StorageKey, StorageReadRow, StorageRow, StorageSpaceId,
-    StorageValue, Timestamp, API_PHYSICAL_SPACE, COMMIT_TIMELINE_SPACE,
+    BranchHistoryOptions, BranchId, BranchReadBound, BranchReadView, CommitAdmissionPressureReason,
+    CommitAdmissionPressureSeverity, CommitAdmissionSummary, CommitBatch, CommitDurabilityClass,
+    CommitDurabilitySummary, CommitExpectedVersion, CommitSummary, CommitTimelineEntry,
+    CommitTimelineLookup, CommitTimelineMiss, CommitTimelineView, CommitVersion,
+    FlushFrozenRequest, FlushTableIdentitySeed, FlushTableObjectId, LifecycleStoragePressureReason,
+    LifecycleStoragePressureSeverity, LifecycleWriteAdmissionOutcome,
+    LifecycleWriteAdmissionStatus, PhysicalKey, ReadBound, ReadLimit, ResolvedReadBound,
+    RowStorageSpaceId, ScanReadOutcome, StorageApiError, StorageApiLowerLayer, StorageApiResult,
+    StorageKey, StorageReadRow, StorageRow, StorageSpaceId, StorageValue, Timestamp,
+    API_PHYSICAL_SPACE,
 };
 use crate::api::read::WallClockLookupOutcome;
 use crate::api::StorageImmutableSource;
@@ -633,25 +633,21 @@ fn seed_retained_timeline(
 pub(super) fn timeline_view_from_read_view(
     view: &BranchReadView,
 ) -> StorageApiResult<CommitTimelineView> {
-    // This intentionally rebuilds the timeline from branch rows today. The public
-    // boundary should grow a retained timeline index/cache before high-cardinality
-    // timestamp reads become a hot path.
-    let bounds = BranchScanBounds::unbounded(
-        view.branch_id(),
-        COMMIT_TIMELINE_SPACE,
-        RowStorageSpaceId::COMMIT_TIMELINE,
-    )
-    .map_err(branch_error)?;
-    let timeline_rows = view
-        .scan_range_including_tombstones(&bounds, BranchReadBound::Latest)
-        .map_err(branch_error)?;
-    CommitTimelineView::from_rows(
-        view.branch_id(),
-        timeline_rows
-            .iter()
-            .map(crate::branch::read::BranchHistoryRow::row),
-    )
-    .map_err(commit_error)
+    // #3519: W3.1c elided the COMMIT_TIMELINE rows, so the version→timestamp
+    // facts now live on the branch's data rows (and, when captured, a
+    // checkpoint timeline group). Rebuild the timeline from the branch's own
+    // rows — exact for its own retained history — rather than scanning the
+    // now-empty timeline space, which fabricated an empty view and made every
+    // as_of read of a flushed-but-uncheckpointed commit raise
+    // `RetainedHistoryUnavailable` even under KeepAll, where nothing was pruned.
+    let stamps = view.own_commit_timestamps().map_err(branch_error)?;
+    let mut entries = Vec::with_capacity(stamps.len());
+    for (version, timestamp) in stamps {
+        entries.push(
+            CommitTimelineEntry::new(view.branch_id(), version, timestamp).map_err(commit_error)?,
+        );
+    }
+    Ok(CommitTimelineView::from_entries(view.branch_id(), entries))
 }
 
 pub(super) fn map_api_commit_batch(
