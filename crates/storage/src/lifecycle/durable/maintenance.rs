@@ -654,6 +654,14 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         request: &LifecycleCompactionDrainRequest,
     ) -> LifecycleResult<LifecycleCompactionDrainOutcome> {
         require_admitted(self.state, LifecycleOperationKind::OrdinaryMaintenance)?;
+        // #3516: stamp the database's configured codec onto the drain so the
+        // fixed-point rewrites are compressed like flush/followup/background
+        // compaction (the explicit `maintenance(Compact)` path otherwise
+        // defaulted to Uncompressed, regressing #3499/#3492).
+        let stamped = request
+            .clone()
+            .with_table_compression(self.open_plan.lifecycle_config().table_compression());
+        let request = &stamped;
         let branch_id = request.branch_id();
         // Hold the per-branch publish slot across this foreground compaction drain so its manifest
         // fsync cannot run concurrently with a background off-lock fsync for the same branch.

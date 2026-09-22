@@ -189,6 +189,12 @@ pub(crate) struct LifecycleCompactionDrainRequest {
     branch_id: BranchId,
     output_identity_prefix: String,
     max_passes: usize,
+    /// #3516: compression codec for the tables the fixed-point drain rewrites,
+    /// stamped from `LifecycleConfig::table_compression` at dispatch. Defaults
+    /// to `Uncompressed` so a bare `new` (tests, the cache path) is unchanged;
+    /// the durable dispatch stamps the configured codec (Zstd by default) so
+    /// explicit compaction stops un-compressing #3499's output (#3492).
+    table_compression: crate::format::TableCompression,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -587,6 +593,7 @@ impl LifecycleCompactionDrainRequest {
             branch_id,
             output_identity_prefix: output_identity_prefix.into(),
             max_passes: DEFAULT_COMPACTION_DRAIN_PASS_LIMIT,
+            table_compression: crate::format::TableCompression::Uncompressed,
         };
         TableIdentity::new(request.output_identity_prefix.clone()).map_err(|source| {
             LifecycleError::lower_layer_with(
@@ -620,12 +627,27 @@ impl LifecycleCompactionDrainRequest {
         self
     }
 
+    /// #3516: stamp the compression codec the fixed-point drain applies to its
+    /// rewritten tables, from `LifecycleConfig::table_compression` at dispatch.
+    pub(crate) const fn with_table_compression(
+        mut self,
+        compression: crate::format::TableCompression,
+    ) -> Self {
+        self.table_compression = compression;
+        self
+    }
+
+    // Return type spelled out (`Result<_, LifecycleError>`, not the
+    // `LifecycleResult` alias) so the mutation gate sees a viable `Err(..)` body
+    // mutant — which any explicit-compaction test kills — rather than the alias
+    // blind spot (#3337); the #3516 codec threading below is otherwise all
+    // pass-through in alias-returning functions.
     fn compaction_request_for(
         &self,
         pass_index: usize,
         level_index: usize,
         operation_index: usize,
-    ) -> LifecycleResult<LifecycleCompactionRequest> {
+    ) -> Result<LifecycleCompactionRequest, LifecycleError> {
         let kind = if level_index == 0 {
             BranchCompactionKind::CompactL0ToLevelOne
         } else {
@@ -638,14 +660,18 @@ impl LifecycleCompactionDrainRequest {
                 table_index: 0,
             }
         };
-        LifecycleCompactionRequest::new(
+        // #3516: carry the drain's codec onto every per-level rewrite request so
+        // the fixed-point drain compresses its output like flush and the
+        // followup/background compaction paths already do.
+        Ok(LifecycleCompactionRequest::new(
             self.branch_id,
             kind,
             format!(
                 "{}-pass-{pass_index}-level-{level_index}-op-{operation_index}",
                 self.output_identity_prefix
             ),
-        )
+        )?
+        .with_table_compression(self.table_compression))
     }
 }
 
