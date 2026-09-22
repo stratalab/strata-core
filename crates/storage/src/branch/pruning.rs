@@ -498,18 +498,12 @@ fn validate_timestamp_floor(
     let Some(floor) = floor else {
         return Ok(());
     };
-    match coverage {
-        BranchTimestampCoverage::Complete => Ok(()),
-        BranchTimestampCoverage::CompleteSince { earliest_timestamp }
-            if earliest_timestamp <= floor =>
-        {
-            Ok(())
-        }
-        BranchTimestampCoverage::CompleteSince { .. } | BranchTimestampCoverage::Unknown => {
-            Err(BranchRuntimeError::InvalidCompaction {
-                reason: BranchCompactionInvalidity::TimestampFloorWithoutCoverage,
-            })
-        }
+    if coverage.covers_timestamp_floor(floor) {
+        Ok(())
+    } else {
+        Err(BranchRuntimeError::InvalidCompaction {
+            reason: BranchCompactionInvalidity::TimestampFloorWithoutCoverage,
+        })
     }
 }
 
@@ -794,5 +788,66 @@ fn hash_u64_raw(hash: &mut u64, value: u64) {
     for byte in value.to_le_bytes() {
         *hash ^= u64::from(byte);
         *hash = hash.wrapping_mul(FINGERPRINT_PRIME);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_timestamp_floor, BranchTimestampCoverage};
+    use crate::branch::error::BranchCompactionInvalidity;
+    use crate::branch::error::BranchRuntimeError;
+    use strata_core::Timestamp;
+
+    // #3520: coverage-vs-floor truth table (the single rule the pruning builder
+    // skips on and the apply-time validation rejects on).
+    #[test]
+    fn covers_timestamp_floor_truth_table() {
+        let floor = Timestamp::from_micros(10);
+        // Complete attests any floor.
+        assert!(BranchTimestampCoverage::complete().covers_timestamp_floor(floor));
+        // CompleteSince attests a floor at or after its earliest proven point.
+        assert!(
+            BranchTimestampCoverage::complete_since(Timestamp::from_micros(10))
+                .covers_timestamp_floor(floor)
+        );
+        assert!(
+            BranchTimestampCoverage::complete_since(Timestamp::from_micros(5))
+                .covers_timestamp_floor(floor)
+        );
+        // CompleteSince does NOT attest a floor before its earliest point.
+        assert!(
+            !BranchTimestampCoverage::complete_since(Timestamp::from_micros(11))
+                .covers_timestamp_floor(floor)
+        );
+        // Unknown attests nothing.
+        assert!(!BranchTimestampCoverage::unknown().covers_timestamp_floor(floor));
+    }
+
+    #[test]
+    fn validate_timestamp_floor_matches_coverage() {
+        let floor = Timestamp::from_micros(10);
+        // No floor: always OK, regardless of coverage.
+        assert!(validate_timestamp_floor(BranchTimestampCoverage::unknown(), None).is_ok());
+        // Attested floors pass.
+        assert!(validate_timestamp_floor(BranchTimestampCoverage::complete(), Some(floor)).is_ok());
+        assert!(validate_timestamp_floor(
+            BranchTimestampCoverage::complete_since(Timestamp::from_micros(5)),
+            Some(floor)
+        )
+        .is_ok());
+        // Unattested floors raise TimestampFloorWithoutCoverage.
+        for coverage in [
+            BranchTimestampCoverage::unknown(),
+            BranchTimestampCoverage::complete_since(Timestamp::from_micros(11)),
+        ] {
+            let error = validate_timestamp_floor(coverage, Some(floor))
+                .expect_err("unattested floor must be rejected");
+            assert!(matches!(
+                error,
+                BranchRuntimeError::InvalidCompaction {
+                    reason: BranchCompactionInvalidity::TimestampFloorWithoutCoverage
+                }
+            ));
+        }
     }
 }
