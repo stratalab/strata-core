@@ -3226,6 +3226,35 @@ fn durable_put_batch(
     durable_put_batch_with_mode(branch, user_key, value, CommitDurabilityMode::Standard)
 }
 
+/// #3526: a put at an EXPLICIT commit timestamp, so a test can give successive
+/// versions strictly increasing timestamps (the manual timestamp source is
+/// fixed, which would otherwise stamp every version identically and defeat the
+/// pruning proof's timestamp-floor gate).
+fn durable_put_batch_at(
+    branch: BranchId,
+    user_key: &'static [u8],
+    value: Vec<u8>,
+    micros: u64,
+) -> CommitBatch {
+    CommitBatch::mutating(
+        branch,
+        vec![CommitMutation::put(
+            physical_key(branch, user_key),
+            value,
+            CommitExpiry::None,
+            CommitRetentionHint::Append,
+        )],
+        CommitValidationFacts::empty(),
+        CommitBatchOptions::new(
+            CommitDurabilityMode::Standard,
+            CommitConflictValidationMode::Skip,
+            CommitDuplicateKeyPolicy::Reject,
+            CommitTimestampPolicy::Explicit(Timestamp::from_micros(micros)),
+            CommitOrigin::StorageRuntime,
+        ),
+    )
+}
+
 fn durable_put_batch_owned(
     branch: BranchId,
     user_key: &'static [u8],
@@ -4203,6 +4232,236 @@ fn publish_to_confirmation(
             result.expect("publish done");
         }
     }
+}
+
+/// #3526 scaffolding: rotate the active memtable and drive a background flush
+/// through to a CONFIRMED durable L0 table.
+fn flush_active_to_confirmed_l0(
+    runtime: &mut LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+    branch: BranchId,
+) {
+    runtime
+        .rotate_active_for_maintenance()
+        .expect("rotate active");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::flush(branch))
+        .expect("enqueue flush");
+    let step = runtime
+        .start_next_background_flush_maintenance()
+        .expect("start flush")
+        .expect("flush step");
+    let DurableBackgroundMaintenanceStep::Build(pending) = step else {
+        panic!("expected a flush build step");
+    };
+    let built = pending.build().expect("build flush");
+    publish_to_confirmation(runtime, built);
+}
+
+/// #3526 (root #3521): a BACKGROUND compaction on a branch that opted into
+/// `KeepRecentVersions` must PRUNE — build the proof at start, apply it in the
+/// off-lock build, re-validate at publish. Today the background path builds its
+/// request plain (`KeepAll`) and never attaches a proof, so it never prunes and
+/// never publishes a retained-history floor. RED until the background pruning
+/// dispatch lands.
+#[test]
+fn test_background_compaction_prunes_under_retention() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x7b);
+    let config = LifecycleConfig::default().with_version_retention(
+        crate::lifecycle::StorageVersionRetentionPolicy::KeepRecentVersions { window: 1 },
+    );
+    let mut runtime =
+        open_runtime_with_config(StorageMode::DurableLocalStandard, branch, backend, config);
+
+    // Two L0 tables, each carrying three versions of key `k` at strictly
+    // increasing timestamps, so a level-0 compaction under window=1 has several
+    // versions below BOTH the version floor and the derived timestamp floor to
+    // drop (keeping one below-floor survivor, CMP-002).
+    let mut micros = 10_000u64;
+    for round in 0..2u8 {
+        for step in 0..3u8 {
+            runtime
+                .execute_durable_commit(
+                    durable_put_batch_at(branch, b"k", vec![b'v', round * 3 + step], micros),
+                    generation_guard(),
+                )
+                .expect("commit version");
+            micros += 1_000;
+        }
+        flush_active_to_confirmed_l0(&mut runtime, branch);
+    }
+
+    // Drive a level-0 background compaction to completion (start → build → publish).
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::compaction(branch, 0))
+        .expect("enqueue compaction");
+    let step = runtime
+        .start_next_background_table_rewrite_maintenance()
+        .expect("start compaction")
+        .expect("compaction step");
+    let DurableBackgroundMaintenanceStep::Build(pending) = step else {
+        panic!("expected a compaction build step");
+    };
+    let built = pending.build().expect("build compaction");
+    publish_to_confirmation(&mut runtime, built);
+
+    // Under an opt-in retention window the background compaction must publish a
+    // retained-history floor — i.e. it must have pruned below-floor versions.
+    assert!(
+        runtime.branch_state().retained_history_floor().is_some(),
+        "background compaction under KeepRecentVersions must publish a retained-history floor (it must prune)",
+    );
+}
+
+/// #3526 Hazard A: a COW fork that appears DURING the off-lock build window
+/// re-references the branch's input tables. Publishing the pruned output would
+/// rewrite tables the fork still reads (COW-005/006). The publish re-validation
+/// must catch the now-shared tables against the LIVE branch and DEFER (the
+/// proof's frozen shared-table boolean would not — the fork changes neither this
+/// branch's fingerprint nor that boolean). RED until the publish re-validation
+/// lands (today the pruned output installs regardless).
+#[test]
+fn test_background_prune_defers_when_fork_shares_tables_mid_window() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x7c);
+    let config = LifecycleConfig::default().with_version_retention(
+        crate::lifecycle::StorageVersionRetentionPolicy::KeepRecentVersions { window: 1 },
+    );
+    let mut runtime =
+        open_runtime_with_config(StorageMode::DurableLocalStandard, branch, backend, config);
+
+    let mut micros = 10_000u64;
+    for round in 0..2u8 {
+        for step in 0..3u8 {
+            runtime
+                .execute_durable_commit(
+                    durable_put_batch_at(branch, b"k", vec![b'v', round * 3 + step], micros),
+                    generation_guard(),
+                )
+                .expect("commit version");
+            micros += 1_000;
+        }
+        flush_active_to_confirmed_l0(&mut runtime, branch);
+    }
+
+    // Start + build the compaction OFF-LOCK — this prunes the snapshot.
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::compaction(branch, 0))
+        .expect("enqueue compaction");
+    let step = runtime
+        .start_next_background_table_rewrite_maintenance()
+        .expect("start compaction")
+        .expect("compaction step");
+    let DurableBackgroundMaintenanceStep::Build(pending) = step else {
+        panic!("expected a compaction build step");
+    };
+    let built = pending.build().expect("build compaction");
+
+    // MID-WINDOW: a COW fork appears, sharing this branch's (sealed) input tables.
+    runtime
+        .fork_current(
+            branch,
+            branch_id(0xc7),
+            CommitBranchGeneration::new(1).expect("generation"),
+            None,
+        )
+        .expect("fork current mid-window");
+
+    // Publishing must DEFER: pruning below a now-shared table would strand the
+    // fork's reads.
+    let outcome = match runtime.begin_publish_phase(built).expect("publish") {
+        PreparedPublishStep::Done(result) => result.expect("publish resolves"),
+        PreparedPublishStep::OffLock(prepared) => {
+            let (prepared, write_result) = prepared.persist_off_lock();
+            runtime
+                .finish_publish_phase(prepared, write_result)
+                .expect("finish publish")
+        }
+    };
+    assert_eq!(
+        outcome.status(),
+        MaintenanceOutcomeStatus::Deferred,
+        "prune must defer when a fork shares the input tables mid-window",
+    );
+    assert!(
+        runtime.branch_state().retained_history_floor().is_none(),
+        "no retained-history floor may be published when the prune deferred",
+    );
+}
+
+/// #3526 Hazard B: a benign above-floor commit landing in the active memtable
+/// DURING the off-lock window must NOT defer the prune — dropping below-floor
+/// versions is invariant to concurrent above-floor commits. The publish
+/// re-validation deliberately skips the content fingerprint (which the commit
+/// trips) and re-checks only the safety gates, so the pruned output still
+/// installs. Guards against a fix that "defended" Hazard A by deferring on any
+/// change.
+#[test]
+fn test_background_prune_publishes_despite_concurrent_above_floor_commit() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x7d);
+    let config = LifecycleConfig::default().with_version_retention(
+        crate::lifecycle::StorageVersionRetentionPolicy::KeepRecentVersions { window: 1 },
+    );
+    let mut runtime =
+        open_runtime_with_config(StorageMode::DurableLocalStandard, branch, backend, config);
+
+    let mut micros = 10_000u64;
+    for round in 0..2u8 {
+        for step in 0..3u8 {
+            runtime
+                .execute_durable_commit(
+                    durable_put_batch_at(branch, b"k", vec![b'v', round * 3 + step], micros),
+                    generation_guard(),
+                )
+                .expect("commit version");
+            micros += 1_000;
+        }
+        flush_active_to_confirmed_l0(&mut runtime, branch);
+    }
+
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::compaction(branch, 0))
+        .expect("enqueue compaction");
+    let step = runtime
+        .start_next_background_table_rewrite_maintenance()
+        .expect("start compaction")
+        .expect("compaction step");
+    let DurableBackgroundMaintenanceStep::Build(pending) = step else {
+        panic!("expected a compaction build step");
+    };
+    let built = pending.build().expect("build compaction");
+
+    // MID-WINDOW: a benign above-floor commit lands in the active memtable — it
+    // touches neither the below-floor rows nor the input tables' sharing.
+    runtime
+        .execute_durable_commit(
+            durable_put_batch_at(branch, b"k", vec![b'v', 99], micros),
+            generation_guard(),
+        )
+        .expect("above-floor commit mid-window");
+
+    let outcome = match runtime.begin_publish_phase(built).expect("publish") {
+        PreparedPublishStep::Done(result) => result.expect("publish resolves"),
+        PreparedPublishStep::OffLock(prepared) => {
+            let (prepared, write_result) = prepared.persist_off_lock();
+            runtime
+                .finish_publish_phase(prepared, write_result)
+                .expect("finish publish")
+        }
+    };
+    assert_eq!(
+        outcome.status(),
+        MaintenanceOutcomeStatus::Completed,
+        "an above-floor commit must not defer a below-floor prune",
+    );
+    assert!(
+        runtime.branch_state().retained_history_floor().is_some(),
+        "the prune must still publish a retained-history floor",
+    );
 }
 
 /// #2553: an object consumed OUT of branch state while the manifest that still

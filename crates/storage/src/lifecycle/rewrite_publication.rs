@@ -45,6 +45,16 @@ pub(crate) struct PreparedDurableCompaction {
     inflight_guard: Option<std::sync::Arc<super::durable::InFlightOutputsGuard>>,
 }
 
+impl PreparedDurableCompaction {
+    /// #3526: the branch compaction request this off-lock build carried. The
+    /// publish path reads it back to re-check safety against the LIVE branch
+    /// before installing — this module stays agnostic of the request's
+    /// retention semantics (source guard).
+    pub(crate) fn branch_request(&self) -> &BranchCompactionRequest {
+        &self.branch_request
+    }
+}
+
 enum PreparedDurableCompactionOutput {
     MetadataOnly,
     Published {
