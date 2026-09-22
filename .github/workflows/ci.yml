@@ -308,6 +308,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-mutants
+      - name: Build the cfg-aware survivor filter (#3254)
+        # Lane C compiles strata-inference WITHOUT `local`, so cargo-mutants —
+        # which mutates source text without evaluating cfg — reports every
+        # `#[cfg(feature = "local")]` mutant as MISSED, vacuously. This tool
+        # drops such survivors by parsing the cfg spans; see its use in the
+        # lane below. It is workspace-excluded (its own Cargo.lock, deps `syn`),
+        # so it touches no other job; built once per shard here.
+        run: cargo build --release --locked --manifest-path tools/mutants-cfg-filter/Cargo.toml
+      - name: Self-test the cfg-aware survivor filter (#3254)
+        # Its correctness (Kleene cfg evaluation, span mapping, denylist safety)
+        # is what lets the gate trust a drop, so its own tests gate the PR.
+        # Once is enough — it is identical across shards.
+        if: matrix.shard == 0
+        run: cargo test --locked --manifest-path tools/mutants-cfg-filter/Cargo.toml
       - name: Mutants on the PR diff
         # Partitioned into three lanes (#2659): feature names are
         # package-local, so one global --features list cannot serve the
@@ -353,6 +367,14 @@ jobs:
         run: |
           set +e
           git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
+          # `--in-diff` off-by-one (#3254): cargo-mutants selects a mutant on the
+          # line directly ABOVE a changed line as well as on changed lines
+          # (verified with single-line diffs against runtime.rs: touching 820
+          # pulls in the `|=` on 819; touching 813 pulls in nothing on 812/814).
+          # So a survivor can land on a line this PR did not itself change — that
+          # is expected cargo-mutants behaviour, not a bug here: kill it or split
+          # the diff. It is also why an exclusion for an operator sometimes had
+          # to cover the untouched line above it.
           common=(--in-diff pr.diff --timeout-multiplier 2.5 --minimum-test-timeout 60
                   --shard ${{ matrix.shard }}/8 --sharding round-robin)
           check() {
@@ -387,7 +409,16 @@ jobs:
             --config .cargo/mutants-inference.toml \
             --package strata-inference \
             --features download,testkit > mutants-c.log 2>&1
-          check c $?
+          c_rc=$?
+          # #3254: drop survivors inside `#[cfg(feature = "local")]` spans this
+          # lane never compiles (they are vacuous — no test can reach them),
+          # rewriting missed.txt in place before the verdict reads it. Only
+          # provably-inactive spans are dropped, so a real survivor is never
+          # hidden; every drop is logged into the lane log. `|| true` because
+          # the filter is a transformer, not a verdict.
+          tools/mutants-cfg-filter/target/release/mutants-cfg-filter \
+            --inactive-feature local --in-place mutants.out/missed.txt >> mutants-c.log 2>&1 || true
+          check c $c_rc
       - name: Upload mutants report
         if: failure()
         uses: actions/upload-artifact@v4

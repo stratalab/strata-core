@@ -28,25 +28,33 @@ exclude_globs = [
     "crates/inference/src/provider/local.rs",
 ]
 
-# Reasoned exclusions (regexes over mutant names). `runtime.rs` is a MIXED
-# file: most of it compiles here, but its `#[cfg(feature = "local")]` items are
-# in exactly the position of the files above — never compiled in this lane, so
-# their mutants survive vacuously. cargo-mutants mutates source text without
-# evaluating cfg, and a glob cannot exclude part of a file, so those items are
-# named here as they surface. Vacuity is proven, not assumed: a
-# `compile_error!` planted in each item builds clean under this lane's
-# features and fails the build when moved to a compiled neighbour (#3253).
-# These entries are the incident log for #3254, which is where the class gets
-# fixed (compile the lane with `local`, or move the gated code into files the
-# globs above already cover); retire them there.
+# Reasoned exclusions (regexes over mutant names).
+#
+# `runtime.rs` is a MIXED file: most of it compiles here, but its
+# `#[cfg(feature = "local")]` items are in the position of the globbed files
+# above — never compiled in this lane, so their mutants survive vacuously
+# (cargo-mutants mutates source text without evaluating cfg: `--list` under
+# `download,testkit` and under `download,testkit,local` is byte-identical).
+#
+# Those local-gated items are NO LONGER named here. #3254 replaced the
+# hand-maintained list with `tools/mutants-cfg-filter`, which the CI lane runs
+# as `--inactive-feature local`: it parses each survivor's source, evaluates
+# every `#[cfg(..)]` predicate, and drops survivors inside a span that resolves
+# to false for this lane. That covers every `local` item — including ones a
+# diff has never touched (`with_ranking_engine`, `local_generation_engine`) —
+# without a regex per function, and it can only ever drop a provably-inactive
+# span, so it cannot mask a real survivor.
+#
+# What remains below is deliberately NOT what the filter handles: these are
+# unviable or equivalent-program mutants in code this lane DOES compile, which
+# a cfg-span filter cannot and must not touch.
 exclude_re = [
     # #3436: three `-> Default::default()` replacements that can never compile,
     # in any build, because neither return type implements `Default` — proven
     # with a `needs_default::<T>()` probe, which fails to compile for both
-    # `InferenceStatus` and `ConfigFileStatus`. Unlike the entries below they
-    # are not uncompiled or equivalent: cargo-mutants simply has no viable
-    # replacement to write, the same shape as the `MutexGuard` returns already
-    # excluded here.
+    # `InferenceStatus` and `ConfigFileStatus`. These are not uncompiled or
+    # equivalent: cargo-mutants simply has no viable replacement to write (the
+    # same shape as a `MutexGuard` return, for which it likewise has none).
     #
     # Left in, they are a landmine rather than a gate: every one of these
     # functions is on a path a future diff will touch, and a diff whose lane-C
@@ -84,35 +92,14 @@ exclude_re = [
     # in 120ms instead of ten minutes. Anchored to the function so it cannot
     # over-match a future comparison elsewhere.
     "replace < with <= in wait_out_lock_within",
-    # The `local`-only model-cache guards (#3249). Beyond being uncompiled
-    # here, every replacement cargo-mutants can write for a `MutexGuard`
-    # return is unviable — this lane judged all ten of the compiled twin
-    # `lock_generation`'s that way — so nothing is lost by not judging these.
-    # Their strength mechanism is the real-model integration suite, like the
-    # files above.
-    "replace InferenceRuntime::lock_embeddings -> MutexGuard",
-    "replace InferenceRuntime::lock_rankers -> MutexGuard",
     # `unload` folds "dropped anything?" across three caches with `|=`; two of
-    # the three folds sit in its `local`-only block. A mutant's name carries no
-    # cfg context, so this entry also covers the compiled generation fold —
-    # which is pinned directly instead: planting `&=` there reds
-    # `unload_reports_whether_it_dropped_a_cached_model`, verified by hand.
+    # the three folds sit in its `local`-only block. This entry is name-scoped,
+    # so it also covers the COMPILED `any(anthropic, openai, google)` fold —
+    # which is pinned directly: planting `&=` there reds
+    # `unload_reports_whether_it_dropped_a_cached_model`. It is kept until that
+    # compiled fold is judged by the gate directly; the cfg filter would drop
+    # the other two (local) folds on its own were this entry removed.
     "replace \\|= with &= in InferenceRuntime::unload",
-    # The `local`-only load path (#3269, S1 of #3261): the two engine caches
-    # and the loader they share are `#[cfg(feature = "local")]` items in
-    # `runtime.rs`, and `downloaded_catalog_path` is a
-    # `#[cfg(all(test, feature = "local"))]` helper for the ignored real-model
-    # smoke tests. Proven vacuous the same way: four `compile_error!` plants
-    # built clean under `--features download,testkit --all-targets` while a
-    # fifth, in the compiled neighbour `cached_generation_engine`, failed the
-    # same build. Their strength mechanism is the `local,download` lane of
-    # `crates/inference/tests/resolution_matrix.rs`, whose junk-file cells
-    # observe `model_load_failed` from exactly these paths (#3267 is the lane
-    # that would run it in CI).
-    "\\bInferenceRuntime::cached_embedding_engine\\b",
-    "\\bInferenceRuntime::cached_ranking_engine\\b",
-    "\\bload_local\\b",
-    "\\bModelRegistry::downloaded_catalog_path\\b",
     # `cached_generation_engine` IS compiled here (the cloud providers need
     # the generation cache) but is dead by control flow: its only caller sits
     # behind `!is_cloud()` on a *ready* model, and `resolve_local`'s
