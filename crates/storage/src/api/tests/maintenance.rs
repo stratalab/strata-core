@@ -591,22 +591,22 @@ fn api_default_keep_all_retention_keeps_old_versions() {
     );
 }
 
-/// #3520: opting into `KeepRecentVersions` on a REOPENED `KeepAll` database
-/// must not hard-fail maintenance. A reopened created-never-pruned branch
-/// recovers `Unknown` timestamp coverage (no D0 completeness marker on reopen).
-/// The pruning-proof builder found a timeline timestamp for the floor (the
-/// post-reopen writes observe into the index) but the branch's coverage cannot
-/// attest it, so the apply-time proof validation raised
-/// `TimestampFloorWithoutCoverage` and failed the whole compaction. The builder
-/// now validates coverage FIRST and SKIPS (no-prune → `KeepAll` for this
-/// compaction) instead of building a proof that cannot apply.
+/// #3524 (was #3520): opting into `KeepRecentVersions` on a REOPENED `KeepAll`
+/// database must PRUNE. A reopened branch used to recover `Unknown` timestamp
+/// coverage (only a born-in-process branch got `mark_complete_from_birth`; the
+/// manifest persists the version floor but not coverage), so the pruning proof
+/// could never be attested and retention silently no-op'd for the whole session
+/// (#3520 turned the hard failure into a graceful skip; this makes it actually
+/// prune). Recovery now re-establishes coverage from the durable state — a
+/// never-pruned branch recovers `Complete` — so a post-reopen compaction prunes
+/// below the floor and an `as_of` read of the oldest version RAISES.
 #[cfg(feature = "localfs")]
 #[test]
-fn test_retention_optin_on_reopened_keepall_db_skips_rather_than_failing() {
+fn test_retention_optin_on_reopened_db_prunes_after_coverage_reestablished() {
     let flush = MaintenanceRequest::new(MaintenanceTask::Flush, MaintenanceScope::Branch(branch()));
     // A KeepAll durable database with some flushed history, cleanly closed.
     let (backend, mut runtime) = open_durable_runtime_with_backend(
-        "retention-reopen-skip",
+        "retention-reopen-prunes",
         StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
     );
     let mut versions = Vec::new();
@@ -623,9 +623,8 @@ fn test_retention_optin_on_reopened_keepall_db_skips_rather_than_failing() {
     drop(runtime);
 
     // Reopen the same store WITH an opt-in retention window, then write, flush
-    // and force a compaction. The reopened branch's coverage is `Unknown`, so
-    // the pruning proof cannot be attested — this must gracefully skip pruning,
-    // not fail with `TimestampFloorWithoutCoverage`.
+    // and force a compaction. Recovery re-established `Complete` coverage (the
+    // branch was never pruned), so the compaction prunes below the floor.
     let mut runtime = StorageRuntime::open_with_backend(
         StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
             .with_version_retention_window(Some(1)),
@@ -633,6 +632,27 @@ fn test_retention_optin_on_reopened_keepall_db_skips_rather_than_failing() {
     )
     .expect("reopen with retention window")
     .into_runtime();
+    // Confirm the oldest version is RETAINED right after reopen (nothing pruned
+    // yet). This also seeds the retained-timeline index from data rows (#3519),
+    // so the post-compaction read below raises only if pruning actually dropped
+    // the version — not because the timeline index could not resolve it.
+    let before = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect("oldest version retained right after reopen");
+    assert_eq!(
+        before
+            .row()
+            .expect("row")
+            .value()
+            .expect("value")
+            .as_bytes(),
+        &[b'v', 0]
+    );
     for index in 3..6u8 {
         versions.push(
             runtime
@@ -644,27 +664,46 @@ fn test_retention_optin_on_reopened_keepall_db_skips_rather_than_failing() {
     runtime.maintenance(&flush).expect("flush after reopen");
     runtime
         .force_branch_compaction_for_test(branch())
-        .expect("compaction must skip pruning under Unknown coverage, not hard-fail");
+        .expect("compaction");
+    // Coverage was re-established on reopen, so the compaction pruned and
+    // published a retained-history floor (the canonical "pruning fired" signal).
+    assert!(
+        runtime
+            .retained_history_floor_for_test(branch())
+            .expect("floor query")
+            .is_some(),
+        "reopened retention must re-establish coverage and publish a pruning floor",
+    );
 
-    // Pruning was skipped (coverage unproven → KeepAll fallback), so a
-    // post-reopen version below the would-be floor still reads. `versions[3]`
-    // was observed after reopen, so its read is unaffected by timeline recovery.
-    let retained = runtime
+    // The oldest version was pruned below the published floor — an `as_of` read
+    // of it RAISES. (Before the coverage fix, pruning was skipped and it read.)
+    let error = runtime
         .read_point(&PointReadRequest::new(
             branch(),
             engine_space(),
             api_key(b"k"),
-            ReadBound::AtVersion(versions[3]),
+            ReadBound::AtVersion(versions[0]),
         ))
-        .expect("post-reopen version retained because pruning was skipped");
+        .expect_err("oldest version was pruned after reopen");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+
+    // The latest value still reads.
+    let latest = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::Latest,
+        ))
+        .expect("latest read");
     assert_eq!(
-        retained
+        latest
             .row()
             .expect("row")
             .value()
             .expect("value")
             .as_bytes(),
-        &[b'v', 3]
+        &[b'v', 5]
     );
 }
 

@@ -702,11 +702,22 @@ pre-V1 global `gc_safe_point`; COW children remain safe because shared tables ar
 by the not-shared gate and retained by COW-001's reachability. The proof BUILDER is a
 partner to this gate, not a bypass: when it cannot satisfy a gate it returns NO proof, so
 the compaction degrades to KeepAll rather than building a proof that will be rejected at
-apply. In particular a floor whose timestamp coverage is `Unknown` (a created-never-pruned
-branch reopened before a D0 completeness marker exists) skips pruning up front instead of
-hard-failing the maintenance task (#3520) — the coverage-vs-floor rule
+apply. In particular a floor whose timestamp coverage is `Unknown` skips pruning up front
+instead of hard-failing the maintenance task (#3520) — the coverage-vs-floor rule
 (`BranchTimestampCoverage::covers_timestamp_floor`) is one predicate shared by the builder's
 skip and the apply-time `validate_timestamp_floor` rejection.
+
+REOPEN COVERAGE (#3524): a recovered branch defaults to `Unknown` coverage (only a
+born-in-process branch is marked complete; the manifest's retained-history extension
+restores a PRUNED branch's `CompleteSince` boundary, but a never-pruned branch has no
+extension). Left as-is, opt-in retention would silently never prune after any restart. So a
+HEALTHY recovery fills in coverage for a never-pruned branch (no floor, currently `Unknown`)
+as `Complete` — its full durable history is provably present — while never overwriting a
+pruned branch's restored `CompleteSince`, and a degraded/failed recovery stays the
+conservative `Unknown` (shed history must not be attested). `Complete` and `Unknown` are
+read-identical, so this enables pruning without changing any read
+(`reestablish_recovered_timestamp_coverage` / the pure `recovered_timestamp_coverage`,
+`lifecycle/durable/bootstrap.rs`, run once at recovery after floors + timelines are restored).
 
 OFF-LOCK PRUNING (#3526): background compaction builds the proof under the lock at START but
 prunes on a start-time SNAPSHOT off-lock and installs under the lock at PUBLISH — so the
@@ -730,10 +741,11 @@ authoritative gate at publish rather than build.
 fingerprint freshness check is load-bearing. Off-lock re-validation:
 `revalidate_pruning_for_publish` + the pure `pruning_publish_gates_hold`
 (`lifecycle/durable/maintenance.rs`), called in `begin_compaction_publish` before the
-install. Builder-skip pin:
-`test_retention_optin_on_reopened_keepall_db_skips_rather_than_failing`
-(`api/tests/maintenance.rs`) + the `covers_timestamp_floor` / `validate_timestamp_floor`
-truth tables (`branch/pruning.rs`); the prune-when-covered direction stays pinned by
+install. Reopen-coverage pins: `test_retention_optin_on_reopened_db_prunes_after_coverage_reestablished`
+(`api/tests/maintenance.rs`, a reopened never-pruned branch prunes) + the
+`recovered_timestamp_coverage` truth table (`lifecycle/durable/bootstrap.rs`); the
+`covers_timestamp_floor` / `validate_timestamp_floor` truth tables (`branch/pruning.rs`)
+pin the coverage-vs-floor rule; the prune-when-covered direction stays pinned by
 `api_opt_in_version_retention_prunes_old_versions`. Off-lock pins
 (`lifecycle/tests/durable.rs`): `test_background_compaction_prunes_under_retention` (prunes),
 `test_background_prune_defers_when_fork_shares_tables_mid_window` (Hazard A → defer),
