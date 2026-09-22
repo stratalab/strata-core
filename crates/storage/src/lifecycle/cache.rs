@@ -220,7 +220,12 @@ impl Drop for CacheBackgroundBuildPauseGuard {
     }
 }
 
-#[cfg(all(test, feature = "perf-trace"))]
+#[cfg(test)]
+#[cfg(feature = "perf-trace")]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "co-located mid-file test module; stacking #[cfg(test)] for the mutation gate (#3292) makes clippy see it, and relocating it away from the code it exercises is the worse trade"
+)]
 mod background_build_pause {
     use super::CacheBackgroundBuildKind;
     use std::sync::{mpsc, Mutex, OnceLock};

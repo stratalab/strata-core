@@ -1157,7 +1157,8 @@ mod log_routing_tests {
 /// installing the callback after it, or on a path some other caller reaches
 /// first, would leave the default logger in place for exactly the load that
 /// prints the 900 lines.
-#[cfg(all(test, feature = "local"))]
+#[cfg(test)]
+#[cfg(feature = "local")]
 mod log_installation_tests {
     use super::{forward_log_to_tracing, ggml_log_get, GgmlLogCallback, LlamaCppApi};
     use std::os::raw::c_void;

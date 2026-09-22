@@ -1060,7 +1060,8 @@ fn fmt_bounded_bytes(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::R
 /// order, eviction victims, byte charge, and length as a naive reference LRU under every op sequence.
 /// Lives in-file because `LruSlab` and its links are private; deterministic (no sharding), so it is
 /// the home for eviction-victim exactness. `wasm32` is excluded like the other proptest suites.
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod lru_slab_property_tests {
     use super::{
         LruSlab, TableBlockAddress, TableBlockCacheKey, TableBlockCacheKind, TableCacheTableId,
