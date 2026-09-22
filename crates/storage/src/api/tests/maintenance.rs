@@ -724,6 +724,199 @@ fn api_fork_below_retained_history_floor_is_rejected() {
         .expect("fork above the floor succeeds");
 }
 
+/// #3515: a fork child INHERITS the source's retained-history floor. Forking at
+/// or above the floor is legal (D2), but the resulting child must still refuse
+/// an at-version read below the inherited floor — otherwise a legal fork
+/// launders history the source legally pruned. The child at/above the floor
+/// still reads, and a grandchild fork below the inherited floor is refused.
+#[cfg(feature = "localfs")]
+#[test]
+fn test_fork_child_inherits_retained_history_floor() {
+    let mut runtime = open_durable_runtime_with_options(
+        "fork-inherits-floor",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let mut versions = Vec::new();
+    for index in 0..4u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit version")
+                .commit_version(),
+        );
+    }
+    // Seal the versions into owned tables so the COW historical fork can
+    // reference them, then publish a floor at versions[2] (what pruning does).
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Flush,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("flush");
+    runtime
+        .set_retained_history_floor_for_test(branch(), versions[2])
+        .expect("set retained history floor");
+
+    // A LEGAL fork at the latest version (>= floor) succeeds.
+    let child = branch_with(0xD1);
+    runtime
+        .branch(&BranchRequest::new(
+            child,
+            BranchAction::ForkAtVersion {
+                source: branch(),
+                version: versions[3],
+            },
+            Some(BranchGeneration::new(1)),
+        ))
+        .expect("legal fork at/above the floor");
+
+    // The child inherited the floor: an at-version read below it RAISES rather
+    // than serving history the source legally pruned.
+    let error = runtime
+        .read_point(&PointReadRequest::new(
+            child,
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect_err("child must refuse below-inherited-floor history");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+
+    // Direction control: at/above the inherited floor the child still reads.
+    let ok = runtime
+        .read_point(&PointReadRequest::new(
+            child,
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[3]),
+        ))
+        .expect("child reads at/above the inherited floor");
+    assert_eq!(
+        ok.row().expect("row").value().expect("value").as_bytes(),
+        &[b'v', 3]
+    );
+
+    // And a grandchild fork below the inherited floor is refused (the child
+    // carries a real floor now, so D2's guard fires for its descendants too).
+    let grandchild_error = runtime
+        .branch(&BranchRequest::new(
+            branch_with(0xD2),
+            BranchAction::ForkAtVersion {
+                source: child,
+                version: versions[0],
+            },
+            Some(BranchGeneration::new(1)),
+        ))
+        .expect_err("grandchild fork below the inherited floor is refused");
+    assert_eq!(
+        grandchild_error.class(),
+        StorageApiErrorClass::HistoryUnavailable
+    );
+}
+
+/// #3515: fork-CURRENT (not just fork-at-version) inherits the floor too. The
+/// fix lives in both COW constructors; this covers `fork_into_empty_child`.
+#[cfg(feature = "localfs")]
+#[test]
+fn test_fork_current_child_inherits_retained_history_floor() {
+    let mut runtime = open_durable_runtime_with_options(
+        "fork-current-inherits-floor",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let mut versions = Vec::new();
+    for index in 0..4u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit version")
+                .commit_version(),
+        );
+    }
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Flush,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("flush");
+    runtime
+        .set_retained_history_floor_for_test(branch(), versions[2])
+        .expect("set retained history floor");
+
+    // Fork the source at its current head (fork_into_empty_child).
+    fork_branch(&mut runtime, branch_with(0xD5));
+
+    let error = runtime
+        .read_point(&PointReadRequest::new(
+            branch_with(0xD5),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect_err("fork-current child must refuse below-inherited-floor history");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+}
+
+/// #3515: the inherited floor PERSISTS across reopen — the child's floor is
+/// written into its manifest at fork (slice C's `manifest_retained_version_floor`
+/// derives from the branch's floor) and recovered on restart, so a below-floor
+/// read on the child still raises after a reopen.
+#[cfg(feature = "localfs")]
+#[test]
+fn test_fork_child_inherited_floor_persists_across_reopen() {
+    let (backend, mut runtime) = open_durable_runtime_with_backend(
+        "fork-floor-persist",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let mut versions = Vec::new();
+    for index in 0..4u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit version")
+                .commit_version(),
+        );
+    }
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Flush,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("flush");
+    runtime
+        .set_retained_history_floor_for_test(branch(), versions[2])
+        .expect("set retained history floor");
+    let child = branch_with(0xD3);
+    runtime
+        .branch(&BranchRequest::new(
+            child,
+            BranchAction::ForkAtVersion {
+                source: branch(),
+                version: versions[3],
+            },
+            Some(BranchGeneration::new(1)),
+        ))
+        .expect("legal fork at/above the floor");
+    // Close and reopen against the same backend.
+    drop(runtime);
+    let runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        backend,
+    )
+    .expect("reopen")
+    .into_runtime();
+
+    // The child's inherited floor survived recovery.
+    let error = runtime
+        .read_point(&PointReadRequest::new(
+            child,
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect_err("child refuses below-inherited-floor history after reopen");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+}
+
 #[test]
 fn api_explicit_compact_after_flush_drains_branch_sources() {
     let mut runtime = open_runtime();
