@@ -546,6 +546,9 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         )?;
         rebuild_fork_snapshot_rows(&mut branch_catalog)?;
         complete_forked_branch_timelines_after_replay(&branch_catalog)?;
+        // #3524: with timelines complete and floors restored, re-establish
+        // timestamp coverage so opt-in retention can prune after a reopen.
+        reestablish_recovered_timestamp_coverage(&mut branch_catalog, recovery.health())?;
         Ok((
             report,
             branch_catalog,
@@ -3032,6 +3035,66 @@ fn complete_forked_branch_timelines_after_replay(
     Ok(())
 }
 
+/// #3524: on a HEALTHY reopen, re-establish each active branch's timestamp
+/// coverage from its recovered state so opt-in version pruning can resume. A
+/// recovered branch defaults to `Unknown` coverage (only a born-in-process
+/// branch is marked complete, and the manifest persists the version floor but
+/// not coverage), which the pruning proof-gate correctly refuses — so retention
+/// silently no-op'd for the whole session after any restart. A healthy recovery
+/// provably retains its durable history: a never-pruned branch (no floor) is
+/// `Complete`; a pruned branch is complete from its floor version's timestamp
+/// onward. A `Degraded`/`Failed` recovery keeps `Unknown` (conservative — shed
+/// history must never be attested). Forks inherit their parent's floor (#3515),
+/// so the same rule derives their true retained lower bound. Runs after the
+/// timelines are complete and floors restored, so the floor's timestamp is
+/// resolvable.
+fn reestablish_recovered_timestamp_coverage(
+    branch_catalog: &mut LifecycleBranchCatalog,
+    recovery_health: &RecoveryHealth,
+) -> LifecycleResult<()> {
+    let recovery_healthy = matches!(recovery_health, RecoveryHealth::Healthy);
+    for descriptor in branch_catalog.list_branches(false) {
+        let branch = branch_catalog.branch_state_mut(
+            descriptor.branch_id(),
+            CommitBranchGenerationGuard::exact(descriptor.generation()),
+        )?;
+        if let Some(coverage) = recovered_timestamp_coverage(
+            recovery_healthy,
+            branch.retained_history_floor(),
+            branch.timestamp_coverage(),
+        ) {
+            branch.set_timestamp_coverage(coverage);
+        }
+    }
+    Ok(())
+}
+
+/// #3524: the coverage to FILL IN for a recovered branch, or `None` to leave it
+/// as recovered. Pure + truth-tabled. Only fill a branch that recovered with NO
+/// coverage facts AND no pruning floor — a never-pruned branch, whose full
+/// durable history a healthy recovery provably retains → `Complete`. A PRUNED
+/// branch already restored its `CompleteSince` boundary from the manifest's
+/// retained-history extension, so its coverage is not `Unknown` and is never
+/// overwritten. A degraded/failed recovery may have shed history, so it stays
+/// the conservative `Unknown`.
+fn recovered_timestamp_coverage(
+    recovery_healthy: bool,
+    floor: Option<CommitVersion>,
+    current_coverage: crate::branch::read::BranchTimestampCoverage,
+) -> Option<crate::branch::read::BranchTimestampCoverage> {
+    if recovery_healthy
+        && floor.is_none()
+        && matches!(
+            current_coverage,
+            crate::branch::read::BranchTimestampCoverage::Unknown
+        )
+    {
+        Some(crate::branch::read::BranchTimestampCoverage::complete())
+    } else {
+        None
+    }
+}
+
 /// #2522: a forked branch that reopens without its own checkpoint timeline
 /// group must NOT complete-empty from the post-elision scan — timeline rows
 /// no longer exist, and "empty is exact" only holds for branches created
@@ -3858,4 +3921,34 @@ fn replay_wal_into_catalog<S>(
     };
     report.finish(checkpoint_visible_publish, recovered_visible_version);
     Ok(report)
+}
+
+#[cfg(test)]
+mod coverage_reestablishment_tests {
+    use super::recovered_timestamp_coverage;
+    use crate::branch::read::BranchTimestampCoverage;
+    use strata_core::{CommitVersion, Timestamp};
+
+    // #3524: fill coverage ONLY for a healthy recovery of a never-pruned branch
+    // (no floor) that recovered without coverage facts (`Unknown`). Every other
+    // case leaves the recovered coverage untouched.
+    #[test]
+    fn recovered_timestamp_coverage_truth_table() {
+        let v = CommitVersion::new(5);
+        let since = BranchTimestampCoverage::complete_since(Timestamp::from_micros(9_001));
+        let unknown = BranchTimestampCoverage::unknown();
+        // The one filling case: healthy + never pruned + Unknown → Complete.
+        assert_eq!(
+            recovered_timestamp_coverage(true, None, unknown),
+            Some(BranchTimestampCoverage::complete())
+        );
+        // Degraded/failed recovery attests nothing.
+        assert_eq!(recovered_timestamp_coverage(false, None, unknown), None);
+        // A pruned branch (floor present) is never touched — its manifest
+        // CompleteSince stands.
+        assert_eq!(recovered_timestamp_coverage(true, Some(v), since), None);
+        assert_eq!(recovered_timestamp_coverage(true, Some(v), unknown), None);
+        // Coverage already established (not Unknown) is never overwritten.
+        assert_eq!(recovered_timestamp_coverage(true, None, since), None);
+    }
 }
