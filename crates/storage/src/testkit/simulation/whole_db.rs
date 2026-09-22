@@ -605,10 +605,24 @@ impl WholeDbSim {
         ));
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(_pruned) => {
-                // Below the retained floor (pruning is part of the workload).
+            Err(crate::api::StorageApiError::RetainedHistoryUnavailable { .. }) => {
+                // The watermark fell below the retained-history bound: the
+                // never-pruned timeline minimum after a lossy reopen, or the
+                // MVCC retained-history floor once pruning is part of the
+                // workload (#3502 Slice E). Both surface this exact variant —
+                // any OTHER error is a real divergence, never a silent pass.
                 self.facts.temporal_probes_unavailable += 1;
                 return Ok(());
+            }
+            Err(other) => {
+                return Err(self.error(
+                    step,
+                    format!(
+                        "temporal probe on {} at v{} raised an unexpected error: {other:?}",
+                        branch_label(branch),
+                        watermark.as_u64(),
+                    ),
+                ));
             }
         };
         let mut observed = RecoveredState::new();
@@ -1192,5 +1206,134 @@ mod tests {
         let a = run_whole_db_sim(dir_a.path(), 1, 2, 24).expect("run a");
         let b = run_whole_db_sim(dir_b.path(), 3, 2, 24).expect("run b");
         assert_ne!(a, b, "distinct seeds produced identical trajectories");
+    }
+
+    /// #3502 Slice E: a deterministic pruning trajectory through the harness's
+    /// own durable open path. A re-write-heavy history for one key is flushed
+    /// into two L0 tables and then compacted under an opt-in retention window,
+    /// proving the retained-history contract end to end: the floor advances
+    /// (pruning FIRED — non-vacuity, via `retained_history_floor_for_test`), an
+    /// at-version read below the floor RAISES `RetainedHistoryUnavailable`, the
+    /// latest value still reads exactly, and a fork below the floor is refused
+    /// (D2's guard, exercised through the simulation surface). This closes the
+    /// gap the temporal/fork oracles left vacuous under the default `KeepAll`
+    /// (the never-pruned sweep pins are untouched; exhaustive pruning fuzzing
+    /// across the fault matrix is the E1b follow-up).
+    #[test]
+    fn pruning_enforces_the_retained_floor_on_reads_and_forks() {
+        use crate::api::{
+            BranchAction, BranchGeneration, BranchRequest, CommitBatch, CommitMutation,
+            CommitOptions, MaintenanceRequest, MaintenanceScope, MaintenanceTask, PointReadRequest,
+            ReadBound, StorageApiError, StorageBackend, StorageDurabilityPolicy, StorageKey,
+            StorageRuntime, StorageSpaceId, StorageValue,
+        };
+        use strata_core::CommitVersion;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let backend = StorageBackend::local_fs(dir.path().to_path_buf());
+        let mut runtime = StorageRuntime::open_with_backend(
+            crate::testkit::simulation::faults::deterministic_options(
+                StorageDurabilityPolicy::Standard,
+            )
+            .with_version_retention_window(Some(1)),
+            &backend,
+        )
+        .expect("open")
+        .into_runtime();
+
+        let space = StorageSpaceId::new(vec![0x20]).expect("space");
+        let key = StorageKey::new(b"k".to_vec()).expect("key");
+        let put = |v: u8| {
+            CommitBatch::new(
+                super::default_branch(),
+                vec![CommitMutation::Put {
+                    storage_space: space.clone(),
+                    key: key.clone(),
+                    value: StorageValue::new(vec![b'v', v]),
+                    ttl: None,
+                }],
+                CommitOptions::default(),
+            )
+            .expect("batch")
+        };
+        let flush = MaintenanceRequest::new(
+            MaintenanceTask::Flush,
+            MaintenanceScope::Branch(super::default_branch()),
+        );
+
+        // Two flushed L0 tables of three versions each (below the flush-followup
+        // threshold, so nothing auto-races), then a forced pruning compaction.
+        let mut versions = Vec::new();
+        for v in 0..3u8 {
+            versions.push(runtime.commit(&put(v)).expect("commit").commit_version());
+        }
+        runtime.maintenance(&flush).expect("flush first table");
+        for v in 3..6u8 {
+            versions.push(runtime.commit(&put(v)).expect("commit").commit_version());
+        }
+        runtime.maintenance(&flush).expect("flush second table");
+        runtime
+            .force_branch_compaction_for_test(super::default_branch())
+            .expect("forced pruning compaction");
+
+        // Non-vacuity: pruning actually published a floor above the origin.
+        let floor = runtime
+            .retained_history_floor_for_test(super::default_branch())
+            .expect("floor query")
+            .expect("a retained-history floor is published after pruning");
+        assert!(
+            floor > CommitVersion::ZERO,
+            "floor did not advance: {floor:?}"
+        );
+
+        // Below the floor: the oldest version RAISES rather than serving a
+        // too-new survivor.
+        let err = runtime
+            .read_point(&PointReadRequest::new(
+                super::default_branch(),
+                space.clone(),
+                key.clone(),
+                ReadBound::AtVersion(versions[0]),
+            ))
+            .expect_err("below-floor at-version read is unavailable");
+        assert!(
+            matches!(err, StorageApiError::RetainedHistoryUnavailable { .. }),
+            "expected RetainedHistoryUnavailable, got {err:?}"
+        );
+
+        // The latest value still reads exactly.
+        let latest = runtime
+            .read_point(&PointReadRequest::new(
+                super::default_branch(),
+                space.clone(),
+                key.clone(),
+                ReadBound::Latest,
+            ))
+            .expect("latest read succeeds");
+        assert_eq!(
+            latest
+                .row()
+                .expect("row")
+                .value()
+                .expect("value")
+                .as_bytes(),
+            &[b'v', 5]
+        );
+
+        // A fork below the floor is refused (D2's fork guard, through the sim).
+        let fork_err = runtime
+            .branch(&BranchRequest::new(
+                super::pool_branch(0),
+                BranchAction::ForkAtVersion {
+                    source: super::default_branch(),
+                    version: versions[0],
+                },
+                Some(BranchGeneration::new(1)),
+            ))
+            .expect_err("below-floor fork is refused");
+        assert!(
+            matches!(fork_err, StorageApiError::RetainedHistoryUnavailable { .. }),
+            "expected RetainedHistoryUnavailable, got {fork_err:?}"
+        );
     }
 }

@@ -3400,6 +3400,27 @@ impl<'a> StorageRuntime<'a> {
         }
     }
 
+    /// #3502 Slice E: the published MVCC retained-history floor for a branch, or
+    /// `None` when unbounded (`KeepAll`, or a branch that has not pruned). The
+    /// pruning simulation reads this to prove pruning actually fired (the floor
+    /// advanced) rather than predicting the compaction schedule. Gated on
+    /// `all(test, localfs)` to match its sole caller — the simulation's
+    /// `#[cfg(test)]` trajectory test, which lives in a `localfs`-gated module —
+    /// so a no-`localfs` test build does not compile it unused. The return type
+    /// is spelled out (`Result<_, StorageApiError>`, not the `StorageApiResult`
+    /// alias) so the mutation gate sees viable `Ok(None)` / `Ok(Some(_))` body
+    /// mutants — which the trajectory test's floor-advanced assertion kills —
+    /// instead of the alias blind spot (#3337).
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn retained_history_floor_for_test(
+        &self,
+        branch_id: BranchId,
+    ) -> Result<Option<CommitVersion>, StorageApiError> {
+        Ok(self
+            .read_view_for_branch(branch_id)?
+            .retained_history_floor())
+    }
+
     #[cfg(test)]
     pub(crate) fn fork_default_branch_for_test(
         &mut self,
