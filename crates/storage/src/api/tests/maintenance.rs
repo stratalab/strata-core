@@ -995,6 +995,174 @@ fn test_explicit_compaction_applies_configured_codec() {
     );
 }
 
+/// #3519: under the default `KeepAll` policy nothing is pruned, so every
+/// committed version stays readable across a clean reopen. W3.1c elided the
+/// `COMMIT_TIMELINE` rows, leaving a commit's version→timestamp fact durable
+/// only on its data rows and in a checkpoint's timeline group; a flush without
+/// a subsequent checkpoint (close defers it while the non-seeded `_system_`
+/// branch exists) lost the group, and the reopen's timeline-space scan then
+/// fabricated an empty index that raised `HistoryUnavailable` on a retained
+/// `as_of` read. The read-time fallback now rebuilds the timeline from the
+/// branch's own data rows, so the flushed history reads back — by version AND
+/// by timestamp.
+#[cfg(feature = "localfs")]
+#[test]
+fn test_keepall_reopen_retains_historical_reads() {
+    let (backend, mut runtime) = open_durable_runtime_with_backend(
+        "keepall-reopen-repro",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let mut versions = Vec::new();
+    for index in 0..4u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit")
+                .commit_version(),
+        );
+    }
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Flush,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("flush");
+    // Before reopen: the oldest version reads exactly. Capture its commit
+    // timestamp so the reopened store can also be probed by wall-clock as_of.
+    let before = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect("v0 reads before reopen");
+    let oldest_timestamp = before.row().expect("row").commit_timestamp();
+    assert_eq!(
+        before
+            .row()
+            .expect("row")
+            .value()
+            .expect("value")
+            .as_bytes(),
+        &[b'v', 0]
+    );
+
+    runtime.close().expect("clean close (checkpoint)");
+    drop(runtime);
+    let runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        backend,
+    )
+    .expect("reopen")
+    .into_runtime();
+
+    // After a CLEAN reopen the same retained version must still read.
+    let after = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect("v0 must still read after a clean reopen");
+    assert_eq!(
+        after.row().expect("row").value().expect("value").as_bytes(),
+        &[b'v', 0]
+    );
+
+    // The timestamp path shares the same reconstruction fallback: an as_of read
+    // at the oldest commit's timestamp must resolve rather than raise.
+    let by_timestamp = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtTimestamp(oldest_timestamp),
+        ))
+        .expect("as_of-by-timestamp must resolve retained history after reopen");
+    assert!(
+        by_timestamp.row().is_some(),
+        "timestamp as_of at the oldest retained commit returned no row"
+    );
+}
+
+/// #3519 direction control: rebuilding the timeline from data rows must NOT
+/// resurrect genuinely pruned history. Under an opt-in retention window the
+/// oldest version is dropped below the published floor; after a clean reopen a
+/// sub-floor `as_of` read must still RAISE `HistoryUnavailable`, because the
+/// floor gate runs before the (now data-derived) timeline lookup.
+#[cfg(feature = "localfs")]
+#[test]
+fn test_pruned_history_stays_unavailable_after_reopen() {
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_version_retention_window(Some(1));
+    let (backend, mut runtime) = open_durable_runtime_with_backend("prune-reopen-control", options);
+
+    let flush = MaintenanceRequest::new(MaintenanceTask::Flush, MaintenanceScope::Branch(branch()));
+    let mut versions = Vec::new();
+    for index in 0..3u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit version")
+                .commit_version(),
+        );
+    }
+    runtime.maintenance(&flush).expect("flush first table");
+    for index in 3..6u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit version")
+                .commit_version(),
+        );
+    }
+    runtime.maintenance(&flush).expect("flush second table");
+    runtime
+        .force_branch_compaction_for_test(branch())
+        .expect("force pruning compaction");
+
+    runtime.close().expect("clean close");
+    drop(runtime);
+    let runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_version_retention_window(Some(1)),
+        backend,
+    )
+    .expect("reopen")
+    .into_runtime();
+
+    let error = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[0]),
+        ))
+        .expect_err("oldest version was pruned and must stay unavailable after reopen");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+
+    // The latest value still reads — the reconstruction did not lose live data.
+    let latest = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::Latest,
+        ))
+        .expect("latest read after reopen");
+    assert_eq!(
+        latest
+            .row()
+            .expect("row")
+            .value()
+            .expect("value")
+            .as_bytes(),
+        &[b'v', 5]
+    );
+}
+
 #[test]
 fn api_explicit_compact_after_flush_drains_branch_sources() {
     let mut runtime = open_runtime();

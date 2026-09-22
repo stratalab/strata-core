@@ -1210,8 +1210,13 @@ the provable prefix, it never vanishes. Three rules enforce it: (1) the index's
 bounded lookups CLAMP a view bound above the tip to the tip's prefix (a shed
 version's mapping is Unproven, never proven-Absent; queries past the tip's timestamp
 keep the after-latest refusal shape); (2) the scan-fallback surfaces re-consult the
-index after seeding it (the seed folds observed entries the empty post-elision scan
-cannot see); (3) recovery's checkpoint/manifest COMBINE re-seeds the snapshot's
+index after seeding it, and the fallback REBUILDS the timeline from the branch's own
+data rows — the durable carrier of the (version→timestamp) stamp (DUR-013) — not from
+the post-elision timeline space, which is empty (#3519: a commit flushed below the WAL
+replay floor and never captured in a checkpoint group has no observed entry and no
+timeline row, yet its stamp survives on every data row it wrote; the old empty-space
+scan seeded nothing and denied that provably-retained coverage even under KeepAll);
+(3) recovery's checkpoint/manifest COMBINE re-seeds the snapshot's
 timeline group onto the SURVIVING branch instance — the group is the only durable
 carrier of retired (version→timestamp) facts, and the combine's instance swap
 previously discarded it, force-completing the index EMPTY.
@@ -1226,11 +1231,19 @@ direction control. Availability leg: `bounded_prefix` clamp + the tip guard in
 `timestamp_for_version` (`timeline_index.rs`;
 `bound_above_tip_serves_the_clamped_prefix` is the truth table), the post-seed
 re-consults in `timeline_view_or_index` / `timeline_version_at_or_before` /
-`timeline_timestamp_for_version` (`api/runtime/data.rs`), and the COMBINE-arm
+`timeline_timestamp_for_version` (`api/runtime/data.rs`) over
+`timeline_view_from_read_view`, which rebuilds from `BranchReadView::own_commit_timestamps`
+(`branch/read.rs`, the branch's own active/frozen/owned rows — inherited layers excluded,
+they are the parent chain's to seed), and the COMBINE-arm
 `seed_branch_timeline_from_groups` re-seed (`lifecycle/recovery.rs`);
 `fork_at_version_inside_surviving_timeline_coverage_succeeds_after_lossy_crash`
 (api/tests/branch.rs) pins the end-to-end choreography with its shed-version refusal
-direction control. The whole-DB DST sweep (seeds 83 154 164 178) is the volume lane.
+direction control. `test_keepall_reopen_retains_historical_reads` /
+`test_pruned_history_stays_unavailable_after_reopen` (api/tests/maintenance.rs) and
+`keep_all_history_survives_close_and_reopen_end_to_end` (engine
+tests/version_retention.rs) pin the #3519 flush-without-checkpoint reopen with its
+pruned-history refusal control. The whole-DB DST sweep (seeds 83 154 164 178) is the
+volume lane.
 
 ### DUR-012: A checkpoint-attesting manifest requires its WAL chain on disk
 
