@@ -39,6 +39,18 @@ impl BranchForkOutcome {
 }
 
 impl BranchLocalState {
+    /// #3515: the retained-history floor a fork child inherits from its source.
+    /// A child references (COW) or copies (materialized) the source's `<= V`
+    /// tables, which the source may have pruned below its floor — so the child
+    /// inherits that floor verbatim (pre-floor history is unavailable to it
+    /// too). The one place this policy lives; a future rule (e.g. bounding by
+    /// the fork version) changes here.
+    pub(crate) const fn fork_child_retained_floor(
+        source_floor: Option<CommitVersion>,
+    ) -> Option<CommitVersion> {
+        source_floor
+    }
+
     pub(crate) fn attach_inherited_layers(
         &mut self,
         layers: Vec<BranchInheritedLayer>,
@@ -104,6 +116,14 @@ impl BranchLocalState {
         }
 
         let mut child = Self::new(destination_branch_id, self.config)?;
+        // #3515: the child inherits the source's tables, which the source may
+        // have pruned below its retained-history floor — so the child inherits
+        // that floor too. Without this a legal fork (at/above the floor) yields
+        // a child that serves discarded pre-floor history and can fork
+        // grandchildren below it (MVCC-009).
+        child.set_retained_history_floor(Self::fork_child_retained_floor(
+            self.retained_history_floor(),
+        ));
         let attach_outcome = child.attach_inherited_layers(layers)?;
         let outcome = BranchForkOutcome {
             source_branch_id: self.branch_id,
@@ -168,6 +188,12 @@ impl BranchLocalState {
             owned_levels,
         )?;
         let mut child = Self::new(destination_branch_id, self.config)?;
+        // #3515: inherit the source's retained-history floor (see the twin in
+        // `fork_into_empty_child`) — the COW layer references the source's
+        // pruned tables, so pre-floor history is unavailable to the child too.
+        child.set_retained_history_floor(Self::fork_child_retained_floor(
+            self.retained_history_floor(),
+        ));
         let attach_outcome = child.attach_inherited_layers(vec![layer])?;
         let outcome = BranchForkOutcome {
             source_branch_id: self.branch_id,
@@ -231,5 +257,26 @@ impl BranchLocalState {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BranchLocalState;
+    use strata_core::CommitVersion;
+
+    /// #3515: a fork child inherits the source's retained-history floor
+    /// verbatim (`None` stays unbounded; a floor carries through unchanged).
+    #[test]
+    fn fork_child_inherits_the_source_floor_verbatim() {
+        assert_eq!(BranchLocalState::fork_child_retained_floor(None), None);
+        assert_eq!(
+            BranchLocalState::fork_child_retained_floor(Some(CommitVersion::new(7))),
+            Some(CommitVersion::new(7))
+        );
+        assert_eq!(
+            BranchLocalState::fork_child_retained_floor(Some(CommitVersion::ZERO)),
+            Some(CommitVersion::ZERO)
+        );
     }
 }

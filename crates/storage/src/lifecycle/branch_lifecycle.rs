@@ -954,10 +954,17 @@ impl LifecycleBranchCatalog {
             .map_err(branch_error)?;
             install_snapshot_rows_into_branches(&mut states, &request).map_err(branch_error)?;
         }
-        Ok(states
+        let mut child = states
             .into_iter()
             .next()
-            .expect("destination state is always present"))
+            .expect("destination state is always present");
+        // #3515: a materialized fork copies only the source's `<= V` rows, which
+        // the source may have pruned below its retained-history floor — so the
+        // child inherits that floor (the COW twins do the same in `fork.rs`).
+        child.set_retained_history_floor(BranchLocalState::fork_child_retained_floor(
+            source.retained_history_floor(),
+        ));
+        Ok(child)
     }
 
     pub(crate) fn fork_at_retained_version(
