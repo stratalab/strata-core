@@ -2344,6 +2344,26 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         if self.branch_catalog.branch_is_deleted(branch_id) {
             return self.finish_locked_publish(task, deleted_scope_canceled_outcome(task.kind()));
         }
+        // #3526: re-validate an off-lock pruning proof against the LIVE branch
+        // before installing the pruned output. The proof was built at start from
+        // a snapshot; a fork sharing the pruned tables or a concurrent prune that
+        // moved the floor during the off-lock window makes it unsafe (its frozen
+        // shared-table gate would not catch the fork). If stale, DEFER — discard
+        // the pruned output; the next pass re-derives a fresh proof (or compacts
+        // as KeepAll while the tables stay shared).
+        if let Some(proof) = prepared.branch_request().pruning_proof() {
+            if !self.revalidate_pruning_for_publish(branch_id, &proof) {
+                crate::observability::perf_trace::record_lifecycle_background_candidate_stale_deferred();
+                let outcome =
+                    MaintenanceOutcome::new(task.kind(), MaintenanceOutcomeStatus::Deferred)
+                        .with_reason(
+                            "version-pruning proof became unsafe before publish \
+                         (input tables shared or retained-history floor moved)",
+                        )
+                        .with_stats(LifecycleStats::new(0, 0, 1, 1, 0));
+                return self.finish_locked_publish(task, outcome);
+            }
+        }
         let install: LifecycleResult<LifecycleCompactionOutcome> = (|| {
             let generation = self
                 .branch_catalog
@@ -3358,6 +3378,45 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         ))
     }
 
+    /// #3526: re-validate a version-pruning proof against the LIVE branch at
+    /// publish, for the OFF-LOCK background path. The proof was built at start
+    /// from a start-time snapshot; by publish a fork may share the tables it
+    /// prunes — the proof's frozen shared-table gate cannot see a fork that
+    /// changed neither this branch's fingerprint nor that gate (Hazard A) — or a
+    /// concurrent prune may have moved the floor. This re-checks only the SAFETY
+    /// gates a concurrent op can flip (live shared-table safety, floor movement,
+    /// inherited layers, recovery health, timestamp coverage), and deliberately
+    /// NOT the content fingerprint, which a benign above-floor commit trips
+    /// (Hazard B) and which is irrelevant to a below-floor drop. `false` → the
+    /// caller defers and discards the pruned output; the next pass re-derives a
+    /// fresh proof (or compacts as `KeepAll` while the tables stay shared).
+    fn revalidate_pruning_for_publish(
+        &self,
+        branch_id: BranchId,
+        proof: &crate::branch::pruning::BranchCompactionPruningProof,
+    ) -> bool {
+        let tables_unshared = self.branch_tables_unshared_with_other_branches(branch_id);
+        let recovery_healthy = self.current_recovery_health.is_healthy();
+        let Ok(branch) = self.branch_catalog.branch_state(branch_id) else {
+            return false;
+        };
+        let inherited_layers_empty = branch.inherited_layers().is_empty();
+        let floor_not_regressed = retained_floor_not_regressed(
+            branch.retained_history_floor(),
+            proof.retained_version_floor(),
+        );
+        let timestamp_coverage_ok = proof
+            .retained_timestamp_floor()
+            .is_none_or(|floor| branch.timestamp_coverage().covers_timestamp_floor(floor));
+        pruning_publish_gates_hold(
+            tables_unshared,
+            recovery_healthy,
+            inherited_layers_empty,
+            floor_not_regressed,
+            timestamp_coverage_ok,
+        )
+    }
+
     pub(crate) fn run_compaction_maintenance_task(
         &mut self,
         task_id: MaintenanceTaskId,
@@ -3488,6 +3547,14 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
             }
         };
+        // #3526: build the version-pruning proof from live state BEFORE the
+        // `&mut branch` borrow (it reads sibling branch state), mirroring the
+        // foreground path (`run_compaction_maintenance_task`). It is attached to
+        // the request so the OFF-LOCK build prunes the snapshot, then
+        // re-validated against the live branch under the lock at publish
+        // (`revalidate_pruning_for_publish`) — the proof is fingerprint-bound to
+        // this snapshot and cannot be trusted after the off-lock window.
+        let version_pruning = self.build_version_pruning_for_compaction(branch_id);
         let branch = match self
             .branch_catalog
             .branch_state_mut(branch_id, CommitBranchGenerationGuard::exact(generation))
@@ -3509,9 +3576,18 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             Some(budget),
         ) {
             // B2: stamp the per-database data-block byte target at dispatch.
-            Ok(Some(request)) => request
-                .with_data_block_bytes(self.open_plan.lifecycle_config().data_block_bytes())
-                .with_table_compression(self.open_plan.lifecycle_config().table_compression()),
+            Ok(Some(request)) => {
+                let request = request
+                    .with_data_block_bytes(self.open_plan.lifecycle_config().data_block_bytes())
+                    .with_table_compression(self.open_plan.lifecycle_config().table_compression());
+                // #3526: opt-in pruning — the build applies it on the snapshot.
+                match version_pruning {
+                    Some((policy, proof)) => request
+                        .with_retention_policy(policy)
+                        .with_pruning_proof(proof),
+                    None => request,
+                }
+            }
             Ok(None) => {
                 crate::observability::perf_trace::record_lifecycle_background_candidate_stale_deferred(
                 );
@@ -5765,6 +5841,40 @@ fn deleted_scope_canceled_outcome(kind: MaintenanceTaskKind) -> MaintenanceOutco
         .with_reason("maintenance target branch was deleted after enqueue")
 }
 
+/// #3526: the publish-time pruning re-validation decision — every safety gate a
+/// concurrent op can flip must still hold for the off-lock pruned output to be
+/// installed. Pure and truth-tabled; `revalidate_pruning_for_publish` gathers
+/// the live inputs.
+#[allow(
+    clippy::fn_params_excessive_bools,
+    reason = "five independent safety gates, each a distinct live-branch condition; a struct would obscure the truth table"
+)]
+const fn pruning_publish_gates_hold(
+    tables_unshared: bool,
+    recovery_healthy: bool,
+    inherited_layers_empty: bool,
+    floor_not_regressed: bool,
+    timestamp_coverage_ok: bool,
+) -> bool {
+    tables_unshared
+        && recovery_healthy
+        && inherited_layers_empty
+        && floor_not_regressed
+        && timestamp_coverage_ok
+}
+
+/// #3526: the live retained-history floor must not have advanced past the floor
+/// the off-lock output was pruned against — a concurrent prune that raised the
+/// floor kept LESS history, so installing this (lower-floor) output would
+/// resurrect versions it already dropped. `None` live floor = nothing pruned
+/// yet, so no regression. Equal floors are allowed.
+fn retained_floor_not_regressed(
+    live: Option<strata_core::CommitVersion>,
+    proof_floor: strata_core::CommitVersion,
+) -> bool {
+    live.is_none_or(|live| live <= proof_floor)
+}
+
 fn global_retention_maintenance_outcome(
     snapshot_outcome: &LifecycleSnapshotPruningOutcome,
     retention_outcome: &LifecycleRetentionOutcome,
@@ -6173,8 +6283,31 @@ fn table_object_service_error(error: crate::service::TableObjectServiceError) ->
 
 #[cfg(test)]
 mod tests {
-    use super::checkpoint_created_at;
-    use strata_core::Timestamp;
+    use super::{checkpoint_created_at, pruning_publish_gates_hold, retained_floor_not_regressed};
+    use strata_core::{CommitVersion, Timestamp};
+
+    // #3526: the off-lock pruning publish gate — every safety input must hold, or
+    // the caller defers. Each argument is independently load-bearing.
+    #[test]
+    fn pruning_publish_gates_hold_requires_every_safety_gate() {
+        assert!(pruning_publish_gates_hold(true, true, true, true, true));
+        assert!(!pruning_publish_gates_hold(false, true, true, true, true));
+        assert!(!pruning_publish_gates_hold(true, false, true, true, true));
+        assert!(!pruning_publish_gates_hold(true, true, false, true, true));
+        assert!(!pruning_publish_gates_hold(true, true, true, false, true));
+        assert!(!pruning_publish_gates_hold(true, true, true, true, false));
+    }
+
+    // #3526: the floor-movement gate — a live floor advanced past the proof's
+    // floor (a concurrent prune kept less) must defer; equal or lower is fine.
+    #[test]
+    fn retained_floor_not_regressed_rejects_an_advanced_live_floor() {
+        let v = CommitVersion::new;
+        assert!(retained_floor_not_regressed(None, v(5)));
+        assert!(retained_floor_not_regressed(Some(v(4)), v(5)));
+        assert!(retained_floor_not_regressed(Some(v(5)), v(5)));
+        assert!(!retained_floor_not_regressed(Some(v(6)), v(5)));
+    }
 
     #[test]
     fn checkpoint_timestamp_fallback_is_non_epoch_without_commits_or_manifest_timestamp() {

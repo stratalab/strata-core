@@ -708,14 +708,37 @@ hard-failing the maintenance task (#3520) — the coverage-vs-floor rule
 (`BranchTimestampCoverage::covers_timestamp_floor`) is one predicate shared by the builder's
 skip and the apply-time `validate_timestamp_floor` rejection.
 
+OFF-LOCK PRUNING (#3526): background compaction builds the proof under the lock at START but
+prunes on a start-time SNAPSHOT off-lock and installs under the lock at PUBLISH — so the
+proof cannot be trusted at install by its build-time fingerprint alone. The fingerprint is
+content-bound to the active memtable, so a benign above-floor commit would trip it, and the
+proof's `candidate_tables_not_shared` gate is a FROZEN boolean that a concurrent fork of this
+branch (changing neither this branch's fingerprint nor that boolean) does not flip. So the
+publish path RE-VALIDATES against the LIVE branch, checking only the safety gates a
+concurrent op can flip — live shared-table safety, retained-history-floor movement, inherited
+layers, recovery health, timestamp coverage — and DEFERS (discarding the pruned output) when
+any fails, mirroring the stale-candidate deferral. The content fingerprint is deliberately
+NOT re-checked there: dropping below-floor versions is invariant to concurrent above-floor
+commits (input-table freshness is covered by `require_candidate_current`, the floor rises
+monotonically). Below-floor deletion still happens only under gates validated at the moment
+of install, under the lock — so ARCH-005 holds for the off-lock path too, with the
+authoritative gate at publish rather than build.
+
 **Audit**: Find `BranchCompactionPruningProof::{validate_static, validate_for_branch}`
 (`branch/pruning.rs`) and the call site before policy execution
 (`branch/state/compaction.rs`). Verify a proof missing ANY gate is rejected and the
-fingerprint freshness check is load-bearing. Builder-skip pin:
+fingerprint freshness check is load-bearing. Off-lock re-validation:
+`revalidate_pruning_for_publish` + the pure `pruning_publish_gates_hold`
+(`lifecycle/durable/maintenance.rs`), called in `begin_compaction_publish` before the
+install. Builder-skip pin:
 `test_retention_optin_on_reopened_keepall_db_skips_rather_than_failing`
 (`api/tests/maintenance.rs`) + the `covers_timestamp_floor` / `validate_timestamp_floor`
 truth tables (`branch/pruning.rs`); the prune-when-covered direction stays pinned by
-`api_opt_in_version_retention_prunes_old_versions`.
+`api_opt_in_version_retention_prunes_old_versions`. Off-lock pins
+(`lifecycle/tests/durable.rs`): `test_background_compaction_prunes_under_retention` (prunes),
+`test_background_prune_defers_when_fork_shares_tables_mid_window` (Hazard A → defer),
+`test_background_prune_publishes_despite_concurrent_above_floor_commit` (Hazard B → still
+prunes), and the `pruning_publish_gates_hold` truth table.
 
 ### ARCH-006: RETIRED (2026-08-19) — transaction timeout
 
