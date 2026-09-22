@@ -217,6 +217,23 @@ fn bench_kv(
     (logical, c)
 }
 
+/// #3522: the (src, dst) node indices for edge submission `index`. The graph
+/// dedups edges by (src, type, dst), so colliding endpoints collapse to one
+/// live edge while the `logical` denominator counts every submission — which
+/// deflated the reported graph amplification. Each submission must map to a
+/// DISTINCT (src, dst) pair (no duplicate live edge), while keeping an
+/// island-like shape (each node links to a few nearby neighbours).
+fn graph_edge_endpoints(index: usize, node_count: usize) -> (usize, usize) {
+    let n = node_count.max(1);
+    let src = index % n;
+    // `index / n` grows the neighbour offset each time `src` wraps, so
+    // (src, dst) is unique for every submission below `n * (n - 1)` (the base-n
+    // decomposition of `index` is a bijection): distinct live edges, one per
+    // submission, still island-like (each node links to a few nearby nodes).
+    let dst = (src + 1 + index / n) % n;
+    (src, dst)
+}
+
 // --- Graph: authored node/edge rows + derived index rows (highest multiplier). ---
 fn bench_graph(root: &Path, fill: Fill, node_count: usize, edge_count: usize, settle_secs: u64) {
     let mut database = open_db(root, None);
@@ -258,8 +275,9 @@ fn bench_graph(root: &Path, fill: Fill, node_count: usize, edge_count: usize, se
     ];
     let edges: Vec<(GraphNodeId, GraphEdgeType, GraphNodeId, GraphEdgeData)> = (0..edge_count)
         .map(|i| {
-            let src = format!("n:{}", i % node_count.max(1));
-            let dst = format!("n:{}", (i * 7 + 1) % node_count.max(1));
+            let (src_index, dst_index) = graph_edge_endpoints(i, node_count);
+            let src = format!("n:{src_index}");
+            let dst = format!("n:{dst_index}");
             let name = if fill == Fill::Real {
                 name_pool[i % name_pool.len()].to_string()
             } else {
@@ -415,5 +433,38 @@ fn main() {
     }
     if primitive == "graph" || primitive == "all" {
         with_dir(|p| bench_graph(p, fill, nodes, edges, settle_secs));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::graph_edge_endpoints;
+    use std::collections::HashSet;
+
+    /// #3522: every edge submission must map to a DISTINCT (src, dst) pair, so
+    /// the number of live edges equals the number submitted and the `logical`
+    /// denominator is accurate. The default workload (nodes=12862, edges=28802)
+    /// previously collapsed to 12862 distinct live edges. No self-loops either
+    /// (a self-loop is not an island-like street).
+    #[test]
+    fn graph_edge_endpoints_are_distinct_without_self_loops() {
+        for &(node_count, edge_count) in &[(100usize, 250usize), (12_862, 28_802)] {
+            let mut seen = HashSet::with_capacity(edge_count);
+            for i in 0..edge_count {
+                let (src, dst) = graph_edge_endpoints(i, node_count);
+                assert!(src < node_count && dst < node_count, "endpoints in range");
+                assert_ne!(src, dst, "no self-loop at edge {i}");
+                assert!(
+                    seen.insert((src, dst)),
+                    "duplicate live edge ({src}, {dst}) at submission {i} \
+                     (nodes={node_count}, edges={edge_count})",
+                );
+            }
+            assert_eq!(
+                seen.len(),
+                edge_count,
+                "every submission must be a distinct live edge",
+            );
+        }
     }
 }
