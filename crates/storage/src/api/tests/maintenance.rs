@@ -917,6 +917,84 @@ fn test_fork_child_inherited_floor_persists_across_reopen() {
     assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
 }
 
+/// #3516: explicit compaction (`maintenance(Compact)` → the fixed-point drain)
+/// must apply the database's configured table codec, not silently rewrite
+/// uncompressed. Highly compressible data compacted under the default Zstd
+/// config produces far smaller table bytes than the same data compacted under
+/// an Uncompressed config — proving the drain honors the codec (regression for
+/// #3499/#3492, which shipped compression on flush + the flush-followup and
+/// background compaction paths but not the fixed-point drain).
+#[cfg(feature = "localfs")]
+#[test]
+fn test_explicit_compaction_applies_configured_codec() {
+    fn table_bytes(root: &std::path::Path) -> u64 {
+        let mut total = 0u64;
+        let mut stack = vec![root.join("tables")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    Ok(file_type) if file_type.is_dir() => stack.push(entry.path()),
+                    Ok(_) => {
+                        if let Ok(meta) = entry.metadata() {
+                            total = total.saturating_add(meta.len());
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        total
+    }
+    fn compacted_table_bytes(name: &str, compression: crate::format::TableCompression) -> u64 {
+        let root = temp_dir_for_api_test(name);
+        let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+                .with_table_compression_for_test(compression),
+            backend,
+        )
+        .expect("open")
+        .into_runtime();
+        let flush =
+            MaintenanceRequest::new(MaintenanceTask::Flush, MaintenanceScope::Branch(branch()));
+        // Highly compressible payloads across two flushed L0 tables, so the
+        // fixed-point drain has something to merge and rewrite.
+        let value = vec![b'z'; 2048];
+        for pass in 0..2u8 {
+            for index in 0..64u32 {
+                runtime
+                    .commit(&put_batch(format!("k{pass}-{index:04}").as_bytes(), &value))
+                    .expect("commit");
+            }
+            runtime.maintenance(&flush).expect("flush");
+        }
+        runtime
+            .maintenance(&MaintenanceRequest::new(
+                MaintenanceTask::Compact,
+                MaintenanceScope::Branch(branch()),
+            ))
+            .expect("compact");
+        table_bytes(&root)
+    }
+
+    let zstd = compacted_table_bytes(
+        "explicit-compact-zstd",
+        crate::format::TableCompression::Zstd,
+    );
+    let uncompressed = compacted_table_bytes(
+        "explicit-compact-uncompressed",
+        crate::format::TableCompression::Uncompressed,
+    );
+    assert!(
+        zstd.saturating_mul(2) < uncompressed,
+        "explicit compaction did not apply the configured Zstd codec: \
+         zstd={zstd} uncompressed={uncompressed}"
+    );
+}
+
 #[test]
 fn api_explicit_compact_after_flush_drains_branch_sources() {
     let mut runtime = open_runtime();
