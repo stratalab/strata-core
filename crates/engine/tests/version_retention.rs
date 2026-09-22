@@ -119,3 +119,47 @@ fn default_keep_all_retention_keeps_old_versions_end_to_end() {
         .expect("oldest value exists");
     assert_eq!(oldest.as_bytes(), &[b'v', 0]);
 }
+
+/// #3502 Slice E3 — default-posture proof. A database opened with the PLAIN
+/// defaults (no `with_version_retention` call at all) never prunes: after the
+/// same re-write-heavy churn and a forced compaction, an `as_of` read of the
+/// OLDEST version still returns its exact value. V1 ships pruning opt-in
+/// (`KeepAll` default), so unbounded time-travel history is the promise a user
+/// gets without opting into anything — this pins that no compaction erodes it.
+#[test]
+fn default_options_never_prune_history() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The default a real caller gets: no `with_version_retention` call.
+    let mut db = Database::open_local(dir.path(), DurableLocalOpenOptions::new())
+        .map(DatabaseOpenOutcome::into_database)
+        .expect("durable open");
+
+    let mut versions = Vec::new();
+    for index in 0..3u8 {
+        versions.push(commit(&mut db, b"k", &[b'v', index]));
+    }
+    db.flush_storage_branch_for_test(&branch("default"))
+        .expect("flush first table");
+    for index in 3..6u8 {
+        versions.push(commit(&mut db, b"k", &[b'v', index]));
+    }
+    db.flush_storage_branch_for_test(&branch("default"))
+        .expect("flush second table");
+    db.force_storage_branch_compaction_for_test(&branch("default"))
+        .expect("force compaction");
+
+    // Every version — including the oldest — still reads exactly: the default
+    // published no retained-history floor, so nothing was pruned.
+    for (index, version) in versions.iter().enumerate() {
+        let value = db
+            .kv(branch("default"), space("default"))
+            .expect("default KV opens")
+            .get_at_version(&key(b"k"), *version)
+            .expect("default retains every version")
+            .expect("value exists at every retained version");
+        assert_eq!(
+            value.as_bytes(),
+            &[b'v', u8::try_from(index).expect("small index")]
+        );
+    }
+}
