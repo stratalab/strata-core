@@ -177,6 +177,21 @@ impl BranchTimestampCoverage {
         Self::CompleteSince { earliest_timestamp }
     }
 
+    /// #3520: whether this coverage can attest a pruning timestamp floor — i.e.
+    /// whether every commit at or after `floor` is provably retained. `Complete`
+    /// attests any floor; `CompleteSince` attests a floor at or after its
+    /// earliest proven timestamp; `Unknown` (e.g. a created-never-pruned branch
+    /// reopened without a completeness marker) attests nothing. The pruning
+    /// proof builder skips pruning when this is false, and `validate_timestamp_floor`
+    /// rejects a proof that violates it (defense in depth) — one rule, both sites.
+    pub(crate) fn covers_timestamp_floor(self, floor: Timestamp) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::CompleteSince { earliest_timestamp } => earliest_timestamp <= floor,
+            Self::Unknown => false,
+        }
+    }
+
     fn require_timestamp(
         self,
         branch_id: BranchId,

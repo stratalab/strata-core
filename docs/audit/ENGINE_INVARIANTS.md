@@ -699,12 +699,23 @@ the candidates, candidate tables not shared with any other branch, table-manifes
 ≥ the floor, healthy recovery state — and a branch-state fingerprint binding the proof to
 the actual current contents (a stale proof is refused). This proof-gate model replaces the
 pre-V1 global `gc_safe_point`; COW children remain safe because shared tables are excluded
-by the not-shared gate and retained by COW-001's reachability.
+by the not-shared gate and retained by COW-001's reachability. The proof BUILDER is a
+partner to this gate, not a bypass: when it cannot satisfy a gate it returns NO proof, so
+the compaction degrades to KeepAll rather than building a proof that will be rejected at
+apply. In particular a floor whose timestamp coverage is `Unknown` (a created-never-pruned
+branch reopened before a D0 completeness marker exists) skips pruning up front instead of
+hard-failing the maintenance task (#3520) — the coverage-vs-floor rule
+(`BranchTimestampCoverage::covers_timestamp_floor`) is one predicate shared by the builder's
+skip and the apply-time `validate_timestamp_floor` rejection.
 
 **Audit**: Find `BranchCompactionPruningProof::{validate_static, validate_for_branch}`
 (`branch/pruning.rs`) and the call site before policy execution
 (`branch/state/compaction.rs`). Verify a proof missing ANY gate is rejected and the
-fingerprint freshness check is load-bearing.
+fingerprint freshness check is load-bearing. Builder-skip pin:
+`test_retention_optin_on_reopened_keepall_db_skips_rather_than_failing`
+(`api/tests/maintenance.rs`) + the `covers_timestamp_floor` / `validate_timestamp_floor`
+truth tables (`branch/pruning.rs`); the prune-when-covered direction stays pinned by
+`api_opt_in_version_retention_prunes_old_versions`.
 
 ### ARCH-006: RETIRED (2026-08-19) — transaction timeout
 

@@ -3326,6 +3326,19 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         else {
             return None;
         };
+        // #3520: the proof's apply-time validation requires timestamp coverage
+        // that attests this floor. A branch that recovered `Unknown` coverage (a
+        // created-never-pruned branch reopened with retention now opted in — no
+        // D0 completeness marker on reopen) cannot attest it, so building the
+        // proof here would hard-fail the compaction at apply
+        // (`TimestampFloorWithoutCoverage`). Validate coverage up front and SKIP
+        // (no-prune → KeepAll for this compaction) instead.
+        if !branch
+            .timestamp_coverage()
+            .covers_timestamp_floor(timestamp_floor)
+        {
+            return None;
+        }
         let proof =
             crate::branch::pruning::BranchCompactionPruningProof::from_branch_state(branch, floor)
                 .ok()?

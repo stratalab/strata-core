@@ -591,6 +591,83 @@ fn api_default_keep_all_retention_keeps_old_versions() {
     );
 }
 
+/// #3520: opting into `KeepRecentVersions` on a REOPENED `KeepAll` database
+/// must not hard-fail maintenance. A reopened created-never-pruned branch
+/// recovers `Unknown` timestamp coverage (no D0 completeness marker on reopen).
+/// The pruning-proof builder found a timeline timestamp for the floor (the
+/// post-reopen writes observe into the index) but the branch's coverage cannot
+/// attest it, so the apply-time proof validation raised
+/// `TimestampFloorWithoutCoverage` and failed the whole compaction. The builder
+/// now validates coverage FIRST and SKIPS (no-prune → `KeepAll` for this
+/// compaction) instead of building a proof that cannot apply.
+#[cfg(feature = "localfs")]
+#[test]
+fn test_retention_optin_on_reopened_keepall_db_skips_rather_than_failing() {
+    let flush = MaintenanceRequest::new(MaintenanceTask::Flush, MaintenanceScope::Branch(branch()));
+    // A KeepAll durable database with some flushed history, cleanly closed.
+    let (backend, mut runtime) = open_durable_runtime_with_backend(
+        "retention-reopen-skip",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let mut versions = Vec::new();
+    for index in 0..3u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit")
+                .commit_version(),
+        );
+    }
+    runtime.maintenance(&flush).expect("flush before close");
+    runtime.close().expect("clean close");
+    drop(runtime);
+
+    // Reopen the same store WITH an opt-in retention window, then write, flush
+    // and force a compaction. The reopened branch's coverage is `Unknown`, so
+    // the pruning proof cannot be attested — this must gracefully skip pruning,
+    // not fail with `TimestampFloorWithoutCoverage`.
+    let mut runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_version_retention_window(Some(1)),
+        backend,
+    )
+    .expect("reopen with retention window")
+    .into_runtime();
+    for index in 3..6u8 {
+        versions.push(
+            runtime
+                .commit(&put_batch(b"k", &[b'v', index]))
+                .expect("commit after reopen")
+                .commit_version(),
+        );
+    }
+    runtime.maintenance(&flush).expect("flush after reopen");
+    runtime
+        .force_branch_compaction_for_test(branch())
+        .expect("compaction must skip pruning under Unknown coverage, not hard-fail");
+
+    // Pruning was skipped (coverage unproven → KeepAll fallback), so a
+    // post-reopen version below the would-be floor still reads. `versions[3]`
+    // was observed after reopen, so its read is unaffected by timeline recovery.
+    let retained = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"k"),
+            ReadBound::AtVersion(versions[3]),
+        ))
+        .expect("post-reopen version retained because pruning was skipped");
+    assert_eq!(
+        retained
+            .row()
+            .expect("row")
+            .value()
+            .expect("value")
+            .as_bytes(),
+        &[b'v', 3]
+    );
+}
+
 /// #3502 Slice D2: the shared-table safety gate. A COW fork re-references one
 /// of the branch's L0 tables, lifting its reference count to 2 while a later
 /// table stays branch-private (count 1) — a MIXED snapshot. The whole-branch
