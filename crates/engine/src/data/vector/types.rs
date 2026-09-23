@@ -201,6 +201,13 @@ pub struct VectorMetadata(Value);
 
 impl VectorMetadata {
     /// Creates validated vector metadata.
+    ///
+    /// A non-finite float never reaches this constructor: `serde_json` coerces
+    /// `NaN`/`±Inf` to `Value::Null` in the caller's crate (`Number::from_f64`
+    /// returns `None`), so it arrives as an indistinguishable `null` rather than
+    /// an error, and the engine cannot tell it from a `null` the caller meant to
+    /// write. Check finiteness before building the `Value`. See the engine
+    /// error-and-diagnostics contract, "Non-Finite Floats In JSON Values".
     pub fn new(value: Value) -> Result<Self, EngineError> {
         if !value.is_object() {
             return Err(EngineError::invalid_input(
@@ -660,6 +667,13 @@ pub struct VectorMetadataPatch(Map<String, Value>);
 
 impl VectorMetadataPatch {
     /// Creates a validated metadata patch from a JSON object.
+    ///
+    /// A non-finite float never reaches this constructor: `serde_json` coerces
+    /// `NaN`/`±Inf` to `Value::Null` in the caller's crate (`Number::from_f64`
+    /// returns `None`), so it arrives as an indistinguishable `null` rather than
+    /// an error, and the engine cannot tell it from a `null` the caller meant to
+    /// write. Check finiteness before building the `Value`. See the engine
+    /// error-and-diagnostics contract, "Non-Finite Floats In JSON Values".
     pub fn new(value: Value) -> Result<Self, EngineError> {
         let Value::Object(map) = value else {
             return Err(EngineError::invalid_input(
@@ -844,9 +858,27 @@ mod tests {
 
     use super::{
         VectorCollectionName, VectorConfig, VectorDistanceMetric, VectorEmbedding, VectorFilter,
-        VectorFilterCondition, VectorFilterOp, VectorKey, VectorMetadataPatch, VectorScalar,
+        VectorFilterCondition, VectorFilterOp, VectorKey, VectorMetadata, VectorMetadataPatch,
+        VectorScalar,
     };
     use crate::diagnostics::EngineErrorClass;
+
+    /// #3434: a non-finite float is coerced to `null` in the caller's crate and
+    /// accepted, not refused — the same property EventPayload/JsonValue carry.
+    /// Engine cannot distinguish it from a `null` the caller meant to write.
+    #[test]
+    fn vector_metadata_accepts_a_non_finite_float_as_null() {
+        let metadata = VectorMetadata::new(json!({"vx": f64::NAN, "vy": f64::INFINITY}))
+            .expect("a coerced metadata object is accepted, not refused");
+        assert_eq!(metadata.as_inner(), &json!({"vx": null, "vy": null}));
+    }
+
+    #[test]
+    fn vector_metadata_patch_accepts_a_non_finite_float_as_null() {
+        let patch = VectorMetadataPatch::new(json!({"vx": f64::NAN}))
+            .expect("a coerced patch object is accepted, not refused");
+        assert_eq!(patch.fields().get("vx"), Some(&json!(null)));
+    }
 
     #[test]
     fn from_wire_rejects_non_representable_values_and_keeps_genuine_zero() {

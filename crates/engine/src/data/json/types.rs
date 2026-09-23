@@ -113,6 +113,13 @@ pub struct JsonValue(Value);
 
 impl JsonValue {
     /// Creates a JSON value after applying document limits.
+    ///
+    /// A non-finite float never reaches this constructor: `serde_json` coerces
+    /// `NaN`/`±Inf` to `Value::Null` in the caller's crate (`Number::from_f64`
+    /// returns `None`), so it arrives as an indistinguishable `null` rather than
+    /// an error, and the engine cannot tell it from a `null` the caller meant to
+    /// write. Check finiteness before building the `Value`. See the engine
+    /// error-and-diagnostics contract, "Non-Finite Floats In JSON Values".
     pub fn new(value: Value) -> Result<Self, EngineError> {
         let wrapped = Self(value);
         wrapped.validate()?;
@@ -838,6 +845,16 @@ mod tests {
         MAX_PATH_SEGMENTS,
     };
     use crate::diagnostics::EngineErrorClass;
+
+    /// #3434: the behaviour the rustdoc warns about — a non-finite float is
+    /// coerced to `null` in the caller's crate and accepted here, not refused,
+    /// because it is already `null` by the time `new` sees the `Value`.
+    #[test]
+    fn a_non_finite_float_is_accepted_as_null_not_refused() {
+        let value = JsonValue::new(json!({"vx": f64::NAN, "vy": f64::INFINITY}))
+            .expect("a coerced value is accepted, not refused");
+        assert_eq!(value.as_inner(), &json!({"vx": null, "vy": null}));
+    }
 
     #[test]
     fn document_ids_and_index_names_validate_boundaries() {

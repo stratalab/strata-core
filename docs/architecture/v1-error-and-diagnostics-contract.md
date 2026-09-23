@@ -672,6 +672,37 @@ Avoid creating:
 Layer-local helper errors are fine when they protect a real boundary. They
 should collapse into the layer parent before crossing outward.
 
+## Non-Finite Floats In JSON Values
+
+`serde_json::Value` has no representation for a non-finite number.
+`serde_json::Number::from_f64(NaN | ±Inf)` returns `None`, and both the `json!`
+macro and `serde_json::to_value` fall back to `Value::Null` for such a float —
+silently, in the caller's own crate, before any Strata code runs.
+
+Every engine constructor that accepts an already-built `Value` therefore
+receives a payload whose non-finite floats are already `null`, and **cannot**
+distinguish a coerced `NaN`/`±Inf` from a `null` the caller intended to write:
+
+- `EventPayload::new(Value)`
+- `JsonValue::new(Value)`
+- `VectorMetadata::new(Value)`
+- `VectorMetadataPatch::new(Value)` / `VectorMetadataPatch::from_map(Map<String, Value>)`
+
+This is a property of `serde_json`, not a Strata validation gap: the information
+is destroyed above the engine. A caller assembling a payload from float data
+must check finiteness (`f64::is_finite`) **before** building the `Value`.
+
+Strata refuses a non-finite float only at the boundaries where it still sees a
+raw float rather than a `Value`:
+
+- Arrow import — `invalid_argument.executor.arrow_non_finite_float`.
+- `VectorEmbedding::from_wire(Vec<f64>)` — `invalid_argument.engine.vector_embedding`.
+- Graph edge weight (`f64`).
+
+Text surfaces are loud too: the CLI and any JSON-text path reject `NaN` and
+`1e400` as parse errors. See "Resolved Decisions" for why V1 does not add a
+checked `Value`-building constructor to close this at the type level.
+
 ## Testing Plan Inputs
 
 The testing and conformance plan must include these error tests.
@@ -832,3 +863,14 @@ These questions should be resolved before V1 implementation freezes:
    Fields)". This keeps error values pure and deterministic and ties the
    user-visible id to internal logs. A deterministic id source must exist so
    deterministic-simulation testing replays identically.
+2. **Non-finite floats in `Value`-taking constructors** (#3434). Resolved: not
+   closed with a checked constructor. `serde_json` coerces `NaN`/`±Inf` to
+   `Value::Null` in the caller's crate before the value reaches the engine, so a
+   `Value`-taking helper could not detect it either; a helper that took
+   float-bearing input before `Value` construction would be a second canonical
+   way to build a payload (Rule 8) and a new D4 surface for no gain the raw-float
+   entry points do not already provide. The coercion is documented on each
+   affected constructor and in "Non-Finite Floats In JSON Values"; the
+   actionable rule is that callers check finiteness before building the `Value`.
+   Strata's raw-float entry points (Arrow, `VectorEmbedding::from_wire`, graph
+   edge weight) refuse at the boundary where the float is not yet a `Value`.
