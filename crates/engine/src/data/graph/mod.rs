@@ -26,7 +26,7 @@ pub use ontology::{
 };
 pub use outcome::{
     GraphBatchOpOutcome, GraphBatchWriteOutcome, GraphBinding, GraphBindingPage,
-    GraphBulkInsertOutcome, GraphDeleteOutcome, GraphDeletePolicyOutcome, GraphEdge,
+    GraphBulkInsertOutcome, GraphDeleteOutcome, GraphDeletePolicyOutcome, GraphEdge, GraphEdgePage,
     GraphEdgeWriteOutcome, GraphInfo, GraphNamePage, GraphNeighbor, GraphNeighborPage, GraphNode,
     GraphNodePage, GraphTargetStatus, GraphWriteOutcome,
 };

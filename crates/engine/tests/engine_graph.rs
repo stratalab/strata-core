@@ -66,6 +66,11 @@ fn graph_reads_take_shared_ref_so_one_handle_serves_concurrent_readers() {
 }
 
 #[test]
+fn graph_list_edges_streams_full_edge_data_with_a_cursor() {
+    run_database_modes(exercise_graph_list_edges);
+}
+
+#[test]
 fn graph_branch_and_space_isolation_match_other_primitives() {
     let mut database = open_cache_database().expect("cache open succeeds");
     let parent_binding = binding(GraphBindingPrimitive::Json, "docs", "parent-bound");
@@ -2089,6 +2094,133 @@ fn reads_through_shared_ref(service: &GraphService<'_>, name: &GraphName) -> usi
         .expect("neighbors reads via &self")
         .neighbors()
         .len()
+}
+
+/// #3457: `list_edges` pages a graph's edges WITH their full data (weight plus
+/// properties like street names/lengths), ordered by `(src, type, dst)`, so a
+/// caller that imported labeled edges reads them back without per-node
+/// `neighbors` round-trips or re-joining labels from an external fixture.
+fn exercise_graph_list_edges(mut database: Database) {
+    let (version, timestamp) = {
+        let mut graph = graph_service(&mut database, "default", "default");
+        graph
+            .create_graph(graph_name("streets"))
+            .expect("graph create succeeds");
+        for id in ["a", "b", "c"] {
+            graph
+                .upsert_node(
+                    &graph_name("streets"),
+                    node(id),
+                    node_data(json!({"x": 1}), None),
+                )
+                .expect("node upsert succeeds");
+        }
+        graph
+            .upsert_edge(
+                &graph_name("streets"),
+                node("a"),
+                edge_type("road"),
+                node("b"),
+                edge_data(120.0, json!({"name": "Main St"})),
+            )
+            .expect("edge a->b upsert succeeds");
+        graph
+            .upsert_edge(
+                &graph_name("streets"),
+                node("a"),
+                edge_type("road"),
+                node("c"),
+                edge_data(80.0, json!({"name": "Oak Ave"})),
+            )
+            .expect("edge a->c upsert succeeds");
+        let last = graph
+            .upsert_edge(
+                &graph_name("streets"),
+                node("b"),
+                edge_type("road"),
+                node("c"),
+                edge_data(50.0, json!({"name": "2nd St"})),
+            )
+            .expect("edge b->c upsert succeeds");
+        (last.commit().version(), last.commit().timestamp())
+    };
+
+    let service = graph_service(&mut database, "default", "default");
+
+    // Full page: every edge, ordered by (src, type, dst), with data attached.
+    let all = service
+        .list_edges(&graph_name("streets"), None, 10)
+        .expect("list_edges succeeds");
+    assert_eq!(all.edges().len(), 3);
+    assert!(!all.has_more());
+    assert!(all.cursor().is_none());
+    let identity: Vec<(&str, &str)> = all
+        .edges()
+        .iter()
+        .map(|edge| (edge.src().as_str(), edge.dst().as_str()))
+        .collect();
+    assert_eq!(identity, vec![("a", "b"), ("a", "c"), ("b", "c")]);
+    // #3457's point: the imported property survives on the listed edge.
+    let first = &all.edges()[0];
+    assert!((first.data().weight() - 120.0).abs() < f64::EPSILON);
+    assert_eq!(
+        first
+            .data()
+            .properties()
+            .expect("edge properties")
+            .as_inner(),
+        &json!({"name": "Main St"})
+    );
+
+    // A page holding exactly `limit` edges is the LAST page, not a spuriously
+    // "more" one (guards the has_more boundary).
+    let exact = service
+        .list_edges(&graph_name("streets"), None, 3)
+        .expect("exact-limit page");
+    assert_eq!(exact.edges().len(), 3);
+    assert!(!exact.has_more());
+    assert!(exact.cursor().is_none());
+
+    // Cursor pagination: a page of two, then resume with no overlap.
+    let page1 = service
+        .list_edges(&graph_name("streets"), None, 2)
+        .expect("first page");
+    assert_eq!(page1.edges().len(), 2);
+    assert!(page1.has_more());
+    assert_eq!(page1.edges().last().expect("edge").src().as_str(), "a");
+    let cursor = page1.cursor().expect("cursor").to_owned();
+    let page2 = service
+        .list_edges(&graph_name("streets"), Some(&cursor), 2)
+        .expect("second page");
+    assert_eq!(page2.edges().len(), 1);
+    assert!(!page2.has_more());
+    assert_eq!(page2.edges()[0].src().as_str(), "b");
+    assert_eq!(page2.edges()[0].dst().as_str(), "c");
+
+    // limit 0 -> an empty page, no cursor.
+    let empty = service
+        .list_edges(&graph_name("streets"), None, 0)
+        .expect("limit-0 page");
+    assert!(empty.edges().is_empty());
+    assert!(!empty.has_more());
+    assert!(empty.cursor().is_none());
+
+    // Time-travel variants read the edges visible at the commit that wrote them.
+    let at_version = service
+        .list_edges_at_version(&graph_name("streets"), None, 10, version)
+        .expect("list_edges_at_version succeeds");
+    assert_eq!(at_version.edges().len(), 3);
+    let at_time = service
+        .list_edges_at(&graph_name("streets"), None, 10, timestamp)
+        .expect("list_edges_at succeeds");
+    assert_eq!(at_time.edges().len(), 3);
+
+    // A missing graph is a not-found error, not a silent empty page.
+    let missing = service
+        .list_edges(&graph_name("absent"), None, 10)
+        .expect_err("missing graph is rejected");
+    assert_eq!(missing.class(), EngineErrorClass::NotFound);
+    assert_eq!(missing.code(), "not_found.engine.graph");
 }
 
 fn run_database_modes(exercise: fn(Database)) {
