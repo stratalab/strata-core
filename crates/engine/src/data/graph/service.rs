@@ -1369,6 +1369,32 @@ impl<'a> GraphService<'a> {
                 } => {
                     let (Some(src_record), Some(dst_record)) = (nodes.get(src), nodes.get(dst))
                     else {
+                        // #3192: when a missing endpoint is upserted LATER in this
+                        // batch, name the ordering rule — operations apply in
+                        // order, so nodes must precede their edges — rather than
+                        // report a bare missing endpoint.
+                        let upserted_later = |id: &GraphNodeId| {
+                            // Operations strictly after this edge: `.skip(index)`
+                            // drops the ops already applied to `nodes`, and the
+                            // extra `.skip(1)` drops this edge itself.
+                            batch.operations().iter().skip(index).skip(1).any(|later| {
+                                matches!(
+                                    later,
+                                    GraphBatchOperation::UpsertNode { node_id, .. }
+                                        if node_id == id
+                                )
+                            })
+                        };
+                        if (!nodes.contains_key(src) && upserted_later(src))
+                            || (!nodes.contains_key(dst) && upserted_later(dst))
+                        {
+                            return Err(EngineError::invalid_input(
+                                "invalid_argument.engine.graph_edge_endpoint",
+                                "graph edge endpoints must be upserted before the edge within \
+                                 the same batch; a node upserted later in the batch is not yet \
+                                 visible — sort nodes before edges",
+                            ));
+                        }
                         return Err(missing_edge_endpoint());
                     };
                     if let Some(ontology) = frozen.as_ref() {
