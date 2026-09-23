@@ -9,7 +9,7 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use stratahub_protocol::{BranchName, DatasetName, Hash, Manifest};
 use time::OffsetDateTime;
@@ -83,6 +83,14 @@ pub enum RemoteRefError {
         /// Human-readable defect description.
         detail: String,
     },
+    /// The path is not an existing database. A tracking-ref read or write
+    /// attaches to a database the caller says already exists; it must not create
+    /// one. Reported by hub rather than borrowing an engine code — the engine
+    /// never emits a "database not found" for a create-capable open (#2630).
+    DatabaseMissing {
+        /// The path that was expected to hold a database.
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for RemoteRefError {
@@ -91,6 +99,9 @@ impl fmt::Display for RemoteRefError {
             Self::Engine { code } => write!(formatter, "database operation failed: {code}"),
             Self::Malformed { detail } => {
                 write!(formatter, "remote tracking ref is malformed: {detail}")
+            }
+            Self::DatabaseMissing { path } => {
+                write!(formatter, "no database at {}", path.display())
             }
         }
     }
@@ -173,14 +184,28 @@ pub fn read_remote_tracking_ref(path: &Path) -> Result<Option<RemoteTrackingRef>
 }
 
 fn open_database(path: &Path) -> Result<Database, RemoteRefError> {
+    // #2630: a tracking-ref read/write ATTACHES to an existing database; it must
+    // not create one. `open_local` is open-or-create, so opening a path that
+    // does not exist would materialize wal/, manifest/, snapshots/ and locks/ on
+    // disk and this function would then report "not found", leaving that debris
+    // behind. Probe first and refuse a missing path without touching the
+    // filesystem, and report it with a typed hub error rather than fabricating
+    // `not_found.engine.database` — a code the engine never emits.
+    if !path.exists() {
+        return Err(RemoteRefError::DatabaseMissing {
+            path: path.to_owned(),
+        });
+    }
     let outcome = Database::open_local(path, DurableLocalOpenOptions::new()).map_err(|error| {
         RemoteRefError::Engine {
             code: error.code().to_owned(),
         }
     })?;
+    // The path existed but was not a database, so the open created one. Still not
+    // an attach target: report it missing (typed), not as an engine "not found".
     if outcome.summary().created() {
-        return Err(RemoteRefError::Engine {
-            code: "not_found.engine.database".to_owned(),
+        return Err(RemoteRefError::DatabaseMissing {
+            path: path.to_owned(),
         });
     }
     Ok(outcome.into_database())
