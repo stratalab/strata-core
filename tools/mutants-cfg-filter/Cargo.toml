@@ -1,0 +1,31 @@
+# mutants-cfg-filter — a mutation-gate post-filter that drops surviving mutants
+# landing in `#[cfg(...)]` spans a lane does not compile (#3254).
+#
+# This crate is DELIBERATELY EXCLUDED from the root workspace (see the root
+# `Cargo.toml` `[workspace] exclude`). It depends on `syn`, which nothing else
+# in the workspace does, and it is only ever built inside the `mutation-on-diff`
+# CI job. Keeping it out of the workspace means it adds nothing to the
+# `--workspace` build/clippy/check/hack/MSRV jobs, the dependency-direction
+# guard never sees it, and `syn` never enters the product lockfile — which is
+# the whole point of choosing this over compiling lane C with `local`.
+[package]
+name = "mutants-cfg-filter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "mutants-cfg-filter"
+path = "src/main.rs"
+
+[lib]
+name = "mutants_cfg_filter"
+path = "src/lib.rs"
+
+[dependencies]
+# `full` for statements/expressions (inline `#[cfg] { .. }` blocks), `visit` to
+# walk every attributed node, `extra-traits` is not needed. `proc-macro2` with
+# `span-locations` is what makes `Span::start()/end()` return real line numbers
+# for parsed (non-proc-macro) input on stable.
+syn = { version = "2", features = ["full", "visit", "parsing"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

@@ -10,7 +10,7 @@ default-members = [
     "crates/stratadb",
     "crates/hub",
 ]
-exclude = ["benchmarks"]
+exclude = ["benchmarks", "tools/mutants-cfg-filter"]
 members = [
     "crates/core",
     "crates/storage",
