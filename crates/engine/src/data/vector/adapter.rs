@@ -194,6 +194,7 @@ pub(crate) fn plan_collection_promotion(
     source: &BranchCatalogRecord,
     target: &BranchCatalogRecord,
     spaces: &[ProductSpace],
+    deregistered_spaces: &[ProductSpace],
     strategy_result: ConflictStrategyResult,
 ) -> Result<(Vec<RowMutation>, Vec<PreviewConflict>), EngineError> {
     let (base_branch, base_selector) = base_point_for(source, target)?;
@@ -211,10 +212,31 @@ pub(crate) fn plan_collection_promotion(
     let mut conflicts = Vec::new();
     for space in &all_spaces {
         let prefix = encode_vector_collection_prefix(space);
+        let target_configs = collection_config_rows(persistence, target, &prefix)?;
+
+        // #2972: a space the promotion DEREGISTERS (source-deleted, with no
+        // retained rows) is being removed from the target's catalog. Every
+        // target collection config in it — whether inherited from the base or
+        // added only by the target — would otherwise linger as stale metadata
+        // and resurface if the space were recreated. Tombstone them all. This
+        // subsumes the base-present-config cleanup (#2968) for such a space, and
+        // a deregistered space holds no retained vectors (it would be retained
+        // otherwise), so there is no reshape conflict to weigh.
+        if deregistered_spaces.contains(space) {
+            for key in target_configs.keys() {
+                let address = RowAddress::new(
+                    target.storage_branch_id(),
+                    RowClass::VectorCollection,
+                    key.clone(),
+                );
+                mutations.push(RowMutation::delete(address));
+            }
+            continue;
+        }
+
         let base_configs =
             collection_config_rows_at(persistence, base_branch, &prefix, base_selector)?;
         let source_configs = collection_config_rows(persistence, source, &prefix)?;
-        let target_configs = collection_config_rows(persistence, target, &prefix)?;
 
         // Base -> source -> target three-way over every collection key, exactly
         // like the data-row three-way: only source-side changes propagate, a
