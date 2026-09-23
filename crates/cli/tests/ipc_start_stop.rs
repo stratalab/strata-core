@@ -121,6 +121,45 @@ fn start_hosts_a_database_and_stop_stops_it_and_it_exits() {
 }
 
 #[test]
+fn brokered_durability_flag_is_refused_not_silently_ignored() {
+    // #3395: durability is fixed when the owner opens the database, so a brokered
+    // client cannot change it. Asking for one and being silently given the
+    // owner's mode is the failure this refuses — a caller who wanted a synced
+    // commit must not be told it happened when it did not.
+    let dir = tempfile::tempdir().expect("tmp");
+    let db = db_arg(dir.path());
+    assert!(strata(&["--db", &db, "kv", "put", "seed", "1"])
+        .status
+        .success());
+    // The start host owns the store at its default (standard) durability.
+    let (mut host, _report) = spawn_start_host(&db);
+
+    let refused = strata(&["--db", &db, "--durability", "always", "kv", "put", "k", "v"]);
+    assert!(
+        !refused.status.success(),
+        "a brokered --durability must be refused, not silently ignored: stdout={}",
+        stdout(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("running owner") && stderr(&refused).contains("--durability"),
+        "the refusal names the flag and the owner-governs reason: {}",
+        stderr(&refused)
+    );
+
+    // The same client brokers fine without the flag.
+    let ok = strata(&["--db", &db, "kv", "put", "k", "v"]);
+    assert!(
+        ok.status.success(),
+        "a brokered write without --durability succeeds: {}",
+        stderr(&ok)
+    );
+
+    let stop = strata(&["--db", &db, "--json", "stop"]);
+    assert!(stop.status.success(), "stop: {}", stderr(&stop));
+    wait_with_timeout(&mut host).expect("host exits after stop");
+}
+
+#[test]
 fn stop_on_a_missing_database_reports_not_stopped_and_creates_nothing() {
     let dir = tempfile::tempdir().expect("tmp");
     let missing = dir.path().join("no-such-db");
