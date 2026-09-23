@@ -98,8 +98,23 @@ pub(crate) fn open_connection(
         if let Some(mode) = durability {
             options = options.with_durability(mode);
         }
+        let connection = Connection::open_durable_local_brokered(path, options, ipc, access)?;
+        // #3395: durability is fixed when the OWNER opens the database (it sets
+        // the WAL sync policy), so a connection that brokered to a running owner
+        // cannot change it. Accepting `--durability` here and silently doing the
+        // owner's mode would tell a caller who asked for a synced commit that it
+        // happened when it did not — the surprise then arrives during an
+        // incident. Refuse loudly instead. `server_hello()` is `Some` exactly
+        // when this connection brokered to a remote owner.
+        if durability.is_some() && connection.server_hello().is_some() {
+            return Err(CliError::usage(
+                "`--durability` cannot be set on a connection to a running owner: the \
+                 owner's durability governs this database. Connect without `--durability`, \
+                 or restart the owner with the durability mode you want.",
+            ));
+        }
         return Ok(OpenedConnection {
-            connection: Connection::open_durable_local_brokered(path, options, ipc, access)?,
+            connection,
             implicit_cache: false,
             implicit_cwd,
         });
