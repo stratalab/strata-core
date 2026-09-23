@@ -299,6 +299,42 @@ impl GraphEdge {
     }
 }
 
+/// Paginated graph edges with their full edge data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphEdgePage {
+    edges: Vec<GraphEdge>,
+    has_more: bool,
+    cursor: Option<String>,
+}
+
+impl GraphEdgePage {
+    pub(crate) const fn new(edges: Vec<GraphEdge>, has_more: bool, cursor: Option<String>) -> Self {
+        Self {
+            edges,
+            has_more,
+            cursor,
+        }
+    }
+
+    #[must_use]
+    /// Returns edges in this page, each with its full `GraphEdgeData`.
+    pub fn edges(&self) -> &[GraphEdge] {
+        &self.edges
+    }
+
+    #[must_use]
+    /// Returns true when another page is available.
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+
+    #[must_use]
+    /// Returns the cursor for the next page.
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+}
+
 /// One neighbor hit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphNeighbor {

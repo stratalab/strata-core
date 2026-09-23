@@ -35,12 +35,12 @@ use super::{
     GraphBatchOperation, GraphBatchWrite, GraphBatchWriteOutcome, GraphBinding, GraphBindingPage,
     GraphBindingPrimitive, GraphBindingRecord, GraphBindingTarget, GraphBulkInsertOutcome,
     GraphDeleteOutcome, GraphDeletePolicy, GraphDeletePolicyOutcome, GraphDirection, GraphEdge,
-    GraphEdgeRecord, GraphEdgeType, GraphEdgeWriteOutcome, GraphInfo, GraphLinkTypeDef,
-    GraphLinkTypeSummary, GraphName, GraphNamePage, GraphNeighbor, GraphNeighborPage, GraphNode,
-    GraphNodeId, GraphNodePage, GraphNodeRecord, GraphObjectTypeDef, GraphObjectTypeSummary,
-    GraphOntology, GraphOntologyFreezeOutcome, GraphOntologyRecord, GraphOntologySummary,
-    GraphOntologyWriteOutcome, GraphTargetStatus, GraphTypeIndexRecord, GraphTypeName,
-    GraphWriteOutcome,
+    GraphEdgePage, GraphEdgeRecord, GraphEdgeType, GraphEdgeWriteOutcome, GraphInfo,
+    GraphLinkTypeDef, GraphLinkTypeSummary, GraphName, GraphNamePage, GraphNeighbor,
+    GraphNeighborPage, GraphNode, GraphNodeId, GraphNodePage, GraphNodeRecord, GraphObjectTypeDef,
+    GraphObjectTypeSummary, GraphOntology, GraphOntologyFreezeOutcome, GraphOntologyRecord,
+    GraphOntologySummary, GraphOntologyWriteOutcome, GraphTargetStatus, GraphTypeIndexRecord,
+    GraphTypeName, GraphWriteOutcome,
 };
 
 type EdgeIdentity = (GraphNodeId, GraphEdgeType, GraphNodeId);
@@ -1168,6 +1168,74 @@ impl<'a> GraphService<'a> {
         }
         let cursor = has_more.then(|| neighbor_cursor(hits.last().expect("non-empty page")));
         Ok(GraphNeighborPage::new(hits, has_more, cursor))
+    }
+
+    /// Lists a graph's edges with their full data, page by page.
+    ///
+    /// #3457: a process that imported edges carrying properties (street names,
+    /// integer lengths) can page them all back with `GraphEdgeData` attached,
+    /// instead of round-tripping `neighbors` per node or re-joining labels from
+    /// an external fixture. Edges order by `(src, type, dst)`; `cursor` resumes
+    /// after the last edge of the previous page.
+    pub fn list_edges(
+        &self,
+        graph: &GraphName,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<GraphEdgePage, EngineError> {
+        self.list_edges_with_selector(graph, cursor, limit, ReadSelector::Latest)
+    }
+
+    /// Lists a graph's edges visible at a commit version.
+    pub fn list_edges_at_version(
+        &self,
+        graph: &GraphName,
+        cursor: Option<&str>,
+        limit: usize,
+        version: CommitVersion,
+    ) -> Result<GraphEdgePage, EngineError> {
+        self.list_edges_with_selector(graph, cursor, limit, ReadSelector::AtVersion(version))
+    }
+
+    /// Lists a graph's edges visible at a timestamp.
+    pub fn list_edges_at(
+        &self,
+        graph: &GraphName,
+        cursor: Option<&str>,
+        limit: usize,
+        timestamp: Timestamp,
+    ) -> Result<GraphEdgePage, EngineError> {
+        self.list_edges_with_selector(graph, cursor, limit, ReadSelector::AtTimestamp(timestamp))
+    }
+
+    fn list_edges_with_selector(
+        &self,
+        graph: &GraphName,
+        cursor: Option<&str>,
+        limit: usize,
+        selector: ReadSelector,
+    ) -> Result<GraphEdgePage, EngineError> {
+        let record = self.branch_record()?;
+        self.require_graph_with_selector(&record, graph, selector)?;
+        if limit == 0 {
+            return Ok(GraphEdgePage::new(Vec::new(), false, None));
+        }
+        let mut edges = self
+            .edge_rows(&record, graph, selector)?
+            .into_iter()
+            .filter(|row| !row.is_tombstone())
+            .map(|row| self.edge_from_forward_row(&row))
+            .collect::<EngineResult<Vec<_>>>()?;
+        edges.sort_by_key(edge_cursor);
+        if let Some(cursor) = cursor {
+            edges.retain(|edge| edge_cursor(edge).as_str() > cursor);
+        }
+        let has_more = edges.len() > limit;
+        if has_more {
+            edges.truncate(limit);
+        }
+        let cursor = has_more.then(|| edge_cursor(edges.last().expect("non-empty page")));
+        Ok(GraphEdgePage::new(edges, has_more, cursor))
     }
 
     /// Looks up graph nodes bound to an entity target.
@@ -2648,6 +2716,17 @@ fn neighbor_cursor(hit: &GraphNeighbor) -> String {
         hit.edge().edge_type().as_str(),
         hit.node().node_id().as_str(),
         hit.edge().dst().as_str()
+    )
+}
+
+/// #3457: orders a graph's edges by `(src, type, dst)` for `list_edges`
+/// pagination, with a unit separator so component boundaries can't collide.
+fn edge_cursor(edge: &GraphEdge) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        edge.src().as_str(),
+        edge.edge_type().as_str(),
+        edge.dst().as_str()
     )
 }
 
