@@ -307,6 +307,11 @@ impl StrataCoreEngine {
         max_micros: Option<u64>,
         used_models: &std::collections::BTreeSet<&'static str>,
     ) -> Result<Manifest, BundleExportError> {
+        // #3198: capabilities are derived from the data models present (and
+        // `branches` for a multi-branch bundle). A dataset clone is
+        // point-in-time — it carries current values, not version history — so
+        // `time_travel` is deliberately never among them. A history-carrying
+        // export would add it here; see the dataset-clone-artifact contract.
         let mut required_capabilities: Vec<String> = used_models
             .iter()
             .map(|model| capability_for(model))
