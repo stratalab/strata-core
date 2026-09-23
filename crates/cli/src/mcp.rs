@@ -26,6 +26,13 @@ use crate::{agents, CliError};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// The MCP protocol revisions this server actually implements. `initialize`
+/// answers with the client's requested version only when it is one of these,
+/// and otherwise with [`PROTOCOL_VERSION`] (the latest) — never with an
+/// unsupported version the client merely offered, which would tell the client
+/// this server speaks a protocol it does not (#2572).
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
+
 /// Runs the stdio server loop until stdin closes. Returns the exit code.
 pub(crate) fn serve(connection: &Connection) -> Result<i32, CliError> {
     let stdin = std::io::stdin();
@@ -74,15 +81,32 @@ fn handle_message(connection: &Connection, line: &str) -> Option<Value> {
     })
 }
 
+/// Negotiate an MCP protocol version (#2572): the requested version when it is
+/// supported, otherwise `latest`. Pulled out of `initialize_result` so the
+/// echo-vs-fallback decision is observable with more than one supported version
+/// — the shipped list has exactly one (equal to the fallback), so a call-site
+/// test alone cannot tell the guard from a constant.
+fn negotiate_protocol_version<'a>(
+    requested: Option<&'a str>,
+    supported: &[&'a str],
+    latest: &'a str,
+) -> &'a str {
+    match requested {
+        Some(version) if supported.contains(&version) => version,
+        _ => latest,
+    }
+}
+
 fn initialize_result(params: &Value) -> Value {
-    // Echo a protocol version the client offered when present; the message
-    // set used here is stable across published revisions.
-    let version = params
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .unwrap_or(PROTOCOL_VERSION);
+    // Negotiate per the MCP spec (#2572): respond with the client's requested
+    // version when this server actually supports it, otherwise with our latest.
+    let negotiated = negotiate_protocol_version(
+        params.get("protocolVersion").and_then(Value::as_str),
+        SUPPORTED_PROTOCOL_VERSIONS,
+        PROTOCOL_VERSION,
+    );
     json!({
-        "protocolVersion": version,
+        "protocolVersion": negotiated,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "strata", "version": env!("CARGO_PKG_VERSION") },
         "instructions": "Strata is an embedded multi-model database (KV, JSON, vectors, \
@@ -638,8 +662,18 @@ mod tests {
     /// command escape hatch, and the skills.
     #[test]
     fn initialize_result_names_the_server_and_teaches_the_entry_points() {
-        let echoed = initialize_result(&json!({ "protocolVersion": "2024-11-05" }));
-        assert_eq!(echoed["protocolVersion"], json!("2024-11-05"));
+        // #2572: negotiate, don't echo. A supported version comes back as-is; an
+        // unsupported or bogus one gets our latest, never the client's fiction.
+        let supported = initialize_result(&json!({ "protocolVersion": PROTOCOL_VERSION }));
+        assert_eq!(supported["protocolVersion"], json!(PROTOCOL_VERSION));
+        for unsupported in ["2024-11-05", "1999-01-01", ""] {
+            let negotiated = initialize_result(&json!({ "protocolVersion": unsupported }));
+            assert_eq!(
+                negotiated["protocolVersion"],
+                json!(PROTOCOL_VERSION),
+                "an unsupported protocolVersion must not be echoed ({unsupported:?})"
+            );
+        }
 
         let defaulted = initialize_result(&json!({}));
         assert_eq!(defaulted["protocolVersion"], json!(PROTOCOL_VERSION));
@@ -648,6 +682,35 @@ mod tests {
         assert!(instructions.contains("strata_guide"));
         assert!(instructions.contains("strata_command"));
         assert!(instructions.contains("npx skills add"));
+    }
+
+    /// #2572: the negotiation function itself, exercised with a multi-element
+    /// supported list so echoing a supported *non-latest* version is observably
+    /// different from falling back to the latest. The shipped list has one entry
+    /// equal to the fallback, so a call-site test alone cannot tell the guard
+    /// from a constant.
+    #[test]
+    fn negotiate_protocol_version_echoes_supported_else_falls_back() {
+        let supported = ["v-old", "v-new"];
+        // A supported version that is NOT the latest comes back unchanged — this
+        // is what distinguishes real negotiation from always answering `latest`.
+        assert_eq!(
+            negotiate_protocol_version(Some("v-old"), &supported, "v-new"),
+            "v-old"
+        );
+        assert_eq!(
+            negotiate_protocol_version(Some("v-new"), &supported, "v-new"),
+            "v-new"
+        );
+        // Unsupported or absent -> the latest (fallback), never the client's ask.
+        assert_eq!(
+            negotiate_protocol_version(Some("v-bogus"), &supported, "v-new"),
+            "v-new"
+        );
+        assert_eq!(
+            negotiate_protocol_version(None, &supported, "v-new"),
+            "v-new"
+        );
     }
 
     /// Every advertised tool must dispatch, and dispatch must not accept
