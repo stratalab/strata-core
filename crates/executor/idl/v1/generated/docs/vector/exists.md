@@ -1,7 +1,7 @@
 ---
 title: "Check vector existence"
 description: "Check whether one vector key exists."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: vector
 ---
 

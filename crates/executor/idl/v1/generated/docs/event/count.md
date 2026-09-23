@@ -1,7 +1,7 @@
 ---
 title: "Count events"
 description: "Count visible events in the log."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: event
 ---
 

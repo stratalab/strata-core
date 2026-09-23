@@ -1,7 +1,7 @@
 ---
 title: "vector commands"
 description: "Command reference for the vector family."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: vector
 ---
 

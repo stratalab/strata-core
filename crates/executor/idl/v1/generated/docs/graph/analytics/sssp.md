@@ -1,7 +1,7 @@
 ---
 title: "Compute graph shortest paths"
 description: "Compute shortest-path distances from a source."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: graph
 ---
 

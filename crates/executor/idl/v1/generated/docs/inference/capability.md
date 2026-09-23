@@ -1,7 +1,7 @@
 ---
 title: "Report model capabilities"
 description: "Report capabilities for a model spec."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: inference
 ---
 

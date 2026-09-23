@@ -1,7 +1,7 @@
 ---
 title: "Create product space"
 description: "Create a product space on a branch."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: space
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Read JSON document history"
 description: "Read retained version history for one JSON document."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: json
 ---
 
