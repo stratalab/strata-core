@@ -22,6 +22,24 @@
 # `mutation_partition_guard.rs` now fails on an exclusion that names a symbol
 # its own lane cannot reach, so the mistake is caught at `cargo test` time.
 #
+# KNOWN BLIND SPOT — storage `Result` aliases (#3227, accepted). cargo-mutants
+# recognizes a `Result` return only by the literal type name, so a storage
+# function returning a `Result` ALIAS (`BackendResult`, `BranchRuntimeResult`,
+# `StorageApiResult`, `WalServiceResult`, `LayoutResult`,
+# `CheckpointServiceResult` — ~890 signatures) gets only UNVIABLE
+# whole-body-replacement mutants, and the `error_values` below never reach it
+# either (they apply only to recognized-`Result` functions). The "does any test
+# notice if this function does nothing?" mutant is therefore not judged for
+# those functions. This is accepted, not fixed: their body-replacement
+# assurance is this crate's deterministic-simulation / dual-mutation-fuzz /
+# golden / conformance suites and their exact-facts pins (the strength mechanism
+# the exclusions below already name), plus the per-run `mutation-vacuity` job,
+# which fails any diff whose storage mutants are ALL unviable. Engine and
+# executor instead spell the return out as `Result<T, E>` and are guarded
+# against regressing (#3343); the gap is storage-only, and closing it would mean
+# a ~890-signature rewrite of the most correctness-sensitive crate. See
+# `docs/architecture/v1-storage-testing-taxonomy-and-gaps.md` row 11.
+#
 # Constructible `Err(..)` replacements for `Result`-returning functions
 # (#3258). Without these, a function whose Ok payload or error type has no
 # `Default` gets ONLY unviable body mutants — the gate proves nothing about
