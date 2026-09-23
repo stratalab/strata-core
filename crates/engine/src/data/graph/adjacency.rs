@@ -102,6 +102,7 @@ pub struct GraphAdjacencyIndex {
     outgoing: Vec<Vec<GraphAdjacencyEdge>>,
     incoming: Vec<Vec<GraphAdjacencyEdge>>,
     edge_count: u64,
+    has_negative_weight: bool,
 }
 
 impl GraphAdjacencyIndex {
@@ -121,6 +122,16 @@ impl GraphAdjacencyIndex {
     /// Returns the edge count.
     pub const fn edge_count(&self) -> u64 {
         self.edge_count
+    }
+
+    #[must_use]
+    /// Returns true when any edge in this snapshot has a negative weight.
+    ///
+    /// Recorded once at build time (#3460) so `sssp` can refuse negatives with
+    /// a single check instead of re-scanning every edge on each query — the
+    /// snapshot is immutable, so the answer cannot change after it is built.
+    pub const fn has_negative_weight(&self) -> bool {
+        self.has_negative_weight
     }
 
     #[must_use]
@@ -189,6 +200,7 @@ pub(crate) struct GraphAdjacencyIndexBuilder {
     outgoing: Vec<Vec<GraphAdjacencyEdge>>,
     incoming: Vec<Vec<GraphAdjacencyEdge>>,
     edge_count: u64,
+    has_negative_weight: bool,
     nodes_finished: bool,
 }
 
@@ -204,6 +216,7 @@ impl GraphAdjacencyIndexBuilder {
             outgoing: Vec::new(),
             incoming: Vec::new(),
             edge_count: 0,
+            has_negative_weight: false,
             nodes_finished: false,
         }
     }
@@ -272,6 +285,10 @@ impl GraphAdjacencyIndexBuilder {
             edge_type: edge_type_index,
             weight,
         });
+        // #3460: record the negative-weight verdict once, at build time, so
+        // `sssp` need not re-scan every edge on each query. `-0.0 < 0.0` is
+        // false, so a signed zero is treated as non-negative.
+        self.has_negative_weight |= weight < 0.0;
         self.edge_count += 1;
         Ok(())
     }
@@ -305,6 +322,7 @@ impl GraphAdjacencyIndexBuilder {
             outgoing: self.outgoing,
             incoming: self.incoming,
             edge_count: self.edge_count,
+            has_negative_weight: self.has_negative_weight,
         }
     }
 }
