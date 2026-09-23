@@ -1,7 +1,7 @@
 ---
 title: "Update vector metadata"
 description: "Patch metadata for one vector."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: vector
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "List graphs"
 description: "List graph names."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: graph
 ---
 

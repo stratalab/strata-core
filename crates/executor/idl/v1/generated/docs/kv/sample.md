@@ -1,7 +1,7 @@
 ---
 title: "Sample KV rows"
 description: "Sample visible KV rows."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: kv
 ---
 

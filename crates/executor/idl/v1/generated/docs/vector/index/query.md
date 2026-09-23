@@ -1,7 +1,7 @@
 ---
 title: "Query vector index"
 description: "Search vectors and return index diagnostics."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: vector
 ---
 

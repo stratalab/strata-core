@@ -4,6 +4,73 @@ All notable changes to StrataDB are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.4] - 2026-09-23
+
+A storage-footprint release. A graph database that took ~120 MB on disk for
+~3 MB of data now lands close to its logical size: durable table blocks
+default to Zstd, a covered WAL segment is reclaimed at truncation, and MVCC
+version pruning is available opt-in for rewrite-heavy workloads. Recovery now
+streams its WAL replay and flushes under the memory budget, so reopening a
+large database holds a bounded envelope. The rest is correctness and honesty
+fixes — refusals that name the right condition, reads resolved at the right
+snapshot, and typed errors where a bare miss used to be.
+
+### Added
+
+- **Vector `update-embedding`** — the mirror of `update-metadata`, so an
+  entry's vector can be replaced without rewriting its metadata (#3120).
+- **Opt-in MVCC version retention.** A durable database can bound how many
+  obsolete row versions it keeps; pruning runs in compaction behind a
+  shared-table safety gate and is off by default, so time-travel is unchanged
+  unless you ask for it (#3502).
+
+### Changed
+
+- **Durable table blocks default to Zstd.** The frozen format already carried
+  the codec; production tables now use it, cutting the on-disk size of
+  compressible data sharply (the graph amplification repro drops from ~8.3x to
+  ~0.77x). Existing uncompressed tables keep reading; no format-version bump
+  (#3499, #3492).
+- **WAL segments are reclaimed at truncation** — a covered active segment is
+  freed instead of accumulating, bounding WAL growth (#3494).
+- **Recovery holds its memory envelope.** WAL replay streams rather than
+  materializing the tail, and replayed state is flushed under the budget, so
+  recovering a large database no longer spikes memory (#3319).
+- **MCP `initialize` negotiates `protocolVersion`** instead of echoing the
+  client's requested version verbatim — an unsupported version gets the
+  server's latest, not a false agreement (#2572).
+- **Dataset-clone export is point-in-time** and declares it: no history and no
+  time travel in the exported artifact (#3198).
+
+### Fixed
+
+- **`describe` honors `--space`** instead of always reporting the default
+  space (#3385).
+- **Concurrent history readers** are gated on the first commit signal, closing
+  a race on freshly-opened databases (#3009).
+- **Attach paths no longer create.** Opening a database at a path that does not
+  exist reports a typed database-missing error rather than silently making one
+  (#2630).
+- **`--durability` is refused on a brokered connection**, naming the running
+  owner's mode rather than silently ignoring the flag (#3395).
+- **`agents skill --write`** no longer reports a pending no-op as written; it
+  distinguishes created, replaced, unchanged, and pending (#3384).
+- **Graph batch-write names the ordering rule** when an edge precedes its
+  endpoints in the same batch, instead of a bare missing-endpoint error
+  (#3192).
+- **Vector collection existence resolves at the read snapshot**, not at head,
+  so a time-travel read sees the collection that existed then (#3229).
+- **Deregistered-space collection configs are tombstoned** on promotion so a
+  target-added config does not linger (#2972).
+- **`stratadb` builds for wasm32** via a localfs passthrough, so the typed
+  facade compiles for the browser target (#3536).
+- **Retention and timestamp-coverage correctness** across reopen, fork, and the
+  read fallback — pruning only runs when the retained-history floor can be
+  attested, and an `as_of` below the floor raises rather than misreads (#3515,
+  #3516, #3519, #3520, #3524, #3526).
+- **`Value` constructors document NaN to null coercion**, so a float NaN is
+  recorded as JSON null rather than silently mishandled elsewhere (#3434).
+
 ## [1.2.3] - 2026-09-17
 
 A correctness-and-honesty release: thirty-four fixes, none of which add a

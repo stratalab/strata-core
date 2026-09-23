@@ -1,7 +1,7 @@
 ---
 title: "Get vector"
 description: "Read one vector by key."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: vector
 ---
 

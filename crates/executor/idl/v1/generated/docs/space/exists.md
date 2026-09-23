@@ -1,7 +1,7 @@
 ---
 title: "Check product space existence"
 description: "Check whether a product space exists on a branch."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: space
 ---
 

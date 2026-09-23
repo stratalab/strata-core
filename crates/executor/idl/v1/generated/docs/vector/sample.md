@@ -1,7 +1,7 @@
 ---
 title: "Sample vectors"
 description: "Sample vectors with values and version facts."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: vector
 ---
 

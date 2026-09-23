@@ -1,7 +1,7 @@
 ---
 title: "Batch set JSON values"
 description: "Set multiple JSON values in one itemwise batch."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: json
 ---
 

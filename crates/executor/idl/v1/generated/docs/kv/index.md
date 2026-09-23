@@ -1,7 +1,7 @@
 ---
 title: "kv commands"
 description: "Command reference for the kv family."
-source: strata-core@1.2.3
+source: strata-core@1.2.4
 section: kv
 ---
 
