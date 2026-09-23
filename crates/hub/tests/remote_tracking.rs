@@ -138,17 +138,66 @@ fn sample_ref(fetched_at_secs: i64, hash: &str) -> RemoteTrackingRef {
 }
 
 #[test]
-fn reading_a_ref_from_a_path_that_is_not_a_database_reports_not_found() {
-    // Opening a path that holds no existing database surfaces the engine's
-    // not-found code through the remote-tracking layer (TCP3.13). The engine
-    // area is a known layering wrinkle recorded in the error-code guard.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let error =
-        read_remote_tracking_ref(&dir.path().join("no-such-db")).expect_err("must not find a db");
-    match error {
-        RemoteRefError::Engine { code } => {
-            assert_eq!(code, "not_found.engine.database");
-        }
-        other => panic!("expected an engine not-found, got {other:?}"),
+fn error_display_renders_each_variant() {
+    // Covers the Display impl (lane A cannot: `remote` is `#[cfg(feature =
+    // "ingest")]`, so its mutants are vacuous there — this is the hub-ingest
+    // lane's job). Each arm must render its own content, never an empty string.
+    assert!(RemoteRefError::Engine {
+        code: "not_found.engine.branch".to_owned(),
     }
+    .to_string()
+    .contains("not_found.engine.branch"));
+    assert!(RemoteRefError::Malformed {
+        detail: "bad record".to_owned(),
+    }
+    .to_string()
+    .contains("bad record"));
+    let missing = RemoteRefError::DatabaseMissing {
+        path: std::path::PathBuf::from("/tmp/no-such-db"),
+    }
+    .to_string();
+    assert!(
+        missing.contains("/tmp/no-such-db"),
+        "DatabaseMissing names the path: {missing}"
+    );
+}
+
+#[test]
+fn reading_a_ref_from_a_missing_path_reports_missing_without_creating() {
+    // #2630: a tracking-ref read ATTACHES to an existing database and must not
+    // create one. A path with no database is a typed hub `DatabaseMissing`, not
+    // the fabricated engine code `not_found.engine.database` (which the engine
+    // never emits), and the failed attach leaves no database debris on disk.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("no-such-db");
+    let error = read_remote_tracking_ref(&missing).expect_err("must not find a db");
+    assert!(
+        matches!(error, RemoteRefError::DatabaseMissing { .. }),
+        "expected DatabaseMissing, got {error:?}"
+    );
+    assert!(
+        !missing.exists(),
+        "a failed attach must not create the database directory (#2630)"
+    );
+}
+
+#[test]
+fn writing_a_ref_to_a_missing_path_reports_missing_without_creating() {
+    // The write path shares `open_database`, so it refuses a missing path the
+    // same way: typed, and without materializing a database (#2630).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("no-such-db");
+    let tracking_ref = sample_ref(
+        1_780_000_000,
+        "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+    );
+    let error = write_remote_tracking_ref(&missing, &tracking_ref).expect_err("must not find a db");
+    assert!(
+        matches!(error, RemoteRefError::DatabaseMissing { .. }),
+        "expected DatabaseMissing, got {error:?}"
+    );
+    assert!(
+        !missing.exists(),
+        "a failed attach must not create the database directory (#2630)"
+    );
 }
