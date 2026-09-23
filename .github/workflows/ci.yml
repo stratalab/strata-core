@@ -533,6 +533,13 @@ jobs:
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
         run: cargo test --locked -p strata-wasm --target wasm32-unknown-unknown
+      - name: Typed facade builds for the browser
+        # #3536: stratadb is the typed Rust API a browser app targets directly,
+        # not through strata-wasm's string interface. It must build for wasm32
+        # with default features off — localfs pulls fs2/file locks wasm lacks.
+        # The rest of the chain already gates localfs; this keeps the facade in
+        # lockstep so the gap cannot silently return.
+        run: cargo check --locked -p stratadb --target wasm32-unknown-unknown --no-default-features
 
   msrv:
     runs-on: ubuntu-latest
