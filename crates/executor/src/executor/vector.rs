@@ -843,7 +843,8 @@ impl Executor {
     }
 }
 
-#[cfg(all(test, feature = "inference"))]
+#[cfg(test)]
+#[cfg(feature = "inference")]
 mod embed_purpose_tests {
     use super::EmbedPurpose;
     use strata_inference::InputType;

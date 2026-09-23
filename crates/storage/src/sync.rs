@@ -133,7 +133,8 @@ impl Deadline {
     }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use super::Deadline;
     use std::time::Duration;

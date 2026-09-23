@@ -571,7 +571,8 @@ pub(crate) use listing::{SnapshotDeleteFailure, SnapshotDeleteOutcome, SnapshotO
 #[cfg(test)]
 mod listing_tests;
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod listing_property_tests;
 
 #[cfg(test)]

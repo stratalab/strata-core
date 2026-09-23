@@ -5,7 +5,8 @@
 //! real rotations at CI scale — hence they live in-crate rather than in the
 //! public-API integration suite (whose sole-deletion cases need no knob).
 
-#[cfg(all(test, feature = "localfs", not(target_arch = "wasm32")))]
+#[cfg(test)]
+#[cfg(all(feature = "localfs", not(target_arch = "wasm32")))]
 mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};

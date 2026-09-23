@@ -463,3 +463,53 @@ fn identifiers_are_pulled_out_of_regex_syntax() {
     // Grammar words below the length floor are not symbols.
     assert!(!identifiers("delete ! in IpcServer::stop").contains("stop"));
 }
+
+/// #3292: cargo-mutants only recognises the LITERAL `#[cfg(test)]` when deciding
+/// to skip a module — a module gated `#[cfg(all(test, …))]` is treated as
+/// product code, so its non-`#[test]` HELPER functions become mutants (vacuous
+/// MISSED when the extra condition is not compiled in the lane, or pure `cargo
+/// test` waste when it is). Stack the gates instead — `#[cfg(test)]` first, then
+/// the rest — so cargo-mutants reads the `#[cfg(test)]` and skips the whole
+/// module. Individual `#[test]` functions are always skipped, so this guards
+/// MODULE gates only.
+fn declares_module(line: &str) -> bool {
+    let mut rest = line.trim_start();
+    for prefix in ["pub(crate) ", "pub(super) ", "pub "] {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped.trim_start();
+            break;
+        }
+    }
+    rest.starts_with("mod ")
+}
+
+#[test]
+fn test_only_modules_stack_the_cfg_test_gate() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    for relative in source_files(&root) {
+        let text = read(&root, &relative);
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains("#[cfg(all(test") {
+                continue;
+            }
+            // The gated item is whatever the next non-attribute line declares.
+            let gates_a_module = lines[index + 1..]
+                .iter()
+                .find(|following| !following.trim_start().starts_with("#["))
+                .is_some_and(|following| declares_module(following));
+            if gates_a_module {
+                offenders.push(format!("{relative}:{}", index + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a test-only module must stack `#[cfg(test)]` ABOVE the feature/platform gate — \
+         cargo-mutants skips only a literal `#[cfg(test)]` module, so a combined \
+         `#[cfg(all(test, …))]` leaks its helper functions as mutants (#3292). Rewrite as \
+         `#[cfg(test)]` then `#[cfg(<rest>)]`. Offenders:\n  {}",
+        offenders.join("\n  ")
+    );
+}

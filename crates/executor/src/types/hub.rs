@@ -393,7 +393,8 @@ fn wire_convert_error(error: &serde_json::Error) -> crate::ExecutorError {
     )
 }
 
-#[cfg(all(test, feature = "hub"))]
+#[cfg(test)]
+#[cfg(feature = "hub")]
 mod tests {
     use super::{wire_convert, HubRefList};
     use crate::public_error_code_entry;
