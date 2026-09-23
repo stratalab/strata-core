@@ -195,7 +195,8 @@ pub struct AdminDescribeSummary {
     pub branches: Vec<BranchName>,
     /// Registered spaces on the described branch.
     pub spaces: Vec<ProductSpace>,
-    /// Primitive summaries for the default space.
+    /// Primitive summaries for the described space (the selected `space`, or
+    /// the default space when none was selected).
     pub primitives: AdminPrimitiveSummary,
     /// Sanitized config summary.
     pub config: AdminConfigSummary,
@@ -297,10 +298,17 @@ impl<'a> AdminService<'a> {
     pub fn describe(
         &mut self,
         branch: Option<&BranchName>,
+        space: Option<&ProductSpace>,
     ) -> Result<AdminDescribeSummary, EngineError> {
         self.control.require_healthy()?;
         let branch = self.resolved_branch(branch).clone();
-        let space = ProductSpace::new(control_space::DEFAULT_SPACE)?;
+        // #3385: the primitive counts are scoped to this space. Callers select
+        // it (`--space` everywhere else); default to the default space when the
+        // caller does not, preserving the prior behaviour for a bare describe.
+        let space = match space {
+            Some(space) => space.clone(),
+            None => ProductSpace::new(control_space::DEFAULT_SPACE)?,
+        };
         let branches = self
             .control
             .list_branches()

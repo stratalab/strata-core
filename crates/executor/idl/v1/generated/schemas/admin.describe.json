@@ -289,6 +289,13 @@
           "null"
         ]
       },
+      "space": {
+        "description": "Space whose primitive counts should be described. Defaults to the default space.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "type": {
         "const": "describe",
         "type": "string"

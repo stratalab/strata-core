@@ -111,10 +111,14 @@ impl Executor {
     pub(super) fn execute_describe(
         &mut self,
         branch: Option<&str>,
+        space: Option<&str>,
     ) -> Result<Output, ExecutorError> {
         let branch = branch_name(branch, &self.default_branch)?;
+        // #3385: honor --space, like every other space-scoped command, instead
+        // of hard-coding the default; primitive counts are scoped to it.
+        let space = product_space(space, &self.default_space)?;
         let mut admin = self.database.admin()?;
-        let summary = admin.describe(Some(&branch))?;
+        let summary = admin.describe(Some(&branch), Some(&space))?;
         Ok(Output::Described(output_admin_describe(&summary)))
     }
 

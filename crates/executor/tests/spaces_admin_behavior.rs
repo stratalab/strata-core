@@ -343,7 +343,10 @@ fn admin_commands_report_sanitized_database_facts() {
     assert_eq!(metrics.control_status, AdminHealthStatus::Healthy);
 
     let Output::Described(describe) = executor
-        .execute(Command::Describe { branch: None })
+        .execute(Command::Describe {
+            branch: None,
+            space: None,
+        })
         .expect("describe succeeds")
     else {
         panic!("unexpected describe output");
@@ -412,7 +415,10 @@ fn admin_read_commands_do_not_mutate_catalog_state() {
         Command::Info { branch: None },
         Command::Health { branch: None },
         Command::Metrics { branch: None },
-        Command::Describe { branch: None },
+        Command::Describe {
+            branch: None,
+            space: None,
+        },
         Command::ConfigGet {},
         Command::ConfigureGetKey {
             key: "target".to_owned(),

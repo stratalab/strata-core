@@ -678,7 +678,10 @@ fn admin_and_space_write_classification_is_explicit() {
         Command::Info { branch: None },
         Command::Health { branch: None },
         Command::Metrics { branch: None },
-        Command::Describe { branch: None },
+        Command::Describe {
+            branch: None,
+            space: None,
+        },
         Command::ConfigGet {},
         Command::ConfigureGetKey {
             key: "target".to_owned(),
