@@ -11,8 +11,17 @@ description = "Strata: an embedded, branchable, time-traveling database for AI a
 # the crates.io names are decided: stratadb (this facade) and strata-cli.
 publish = false
 
+[features]
+# Mirrors the localfs passthrough that engine, executor and storage already
+# carry, so the typed facade builds for wasm32 (browser) with
+# `--no-default-features`. `localfs` pulls `fs2`/file locks that do not exist on
+# wasm; a wasm consumer of the typed API relies on this gate (#3536). `default`
+# keeps `localfs` on, so native builds are unchanged.
+default = ["localfs"]
+localfs = ["strata-engine/localfs"]
+
 [dependencies]
-strata-engine = { path = "../engine" }
+strata-engine = { path = "../engine", default-features = false }
 
 [dev-dependencies]
 serde_json = { workspace = true }
