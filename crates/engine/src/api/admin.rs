@@ -415,7 +415,7 @@ impl<'a> AdminService<'a> {
                 .collect()
         };
         let graphs = {
-            let mut service = GraphService::new(
+            let service = GraphService::new(
                 self.persistence,
                 self.control,
                 branch.clone(),

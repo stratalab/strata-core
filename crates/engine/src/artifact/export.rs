@@ -216,7 +216,7 @@ fn export_graphs(
     sections: &mut Vec<ArtifactSection>,
     tracker: &mut TimestampTracker,
 ) -> Result<(), EngineError> {
-    let mut service = db.graph(branch.clone(), space.clone())?;
+    let service = db.graph(branch.clone(), space.clone())?;
     let mut graphs: Vec<GraphName> = Vec::new();
     let mut cursor: Option<GraphName> = None;
     loop {
