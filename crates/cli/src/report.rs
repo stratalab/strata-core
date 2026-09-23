@@ -182,9 +182,51 @@ fn receipt(kind: &str, data: &Value) -> Option<String> {
                 None => written,
             }
         }
-        "agents_skill" => plural(count("written"), "skill", "wrote"),
+        "agents_skill" => render_agents_skill(data),
         _ => return None,
     })
+}
+
+/// `agents skill --write` reports per entry what actually happened, not one
+/// count of every entry (#3384). `write_owned_file` returns `created`/`replaced`
+/// for a real write, `unchanged` for a no-op that already matched, and `pending`
+/// for a file that differs and needs `--force` — the last of which wrote
+/// NOTHING and carries a `next` hint saying how to proceed. Counting all four as
+/// `wrote N` told a user a skill was installed while the old content sat on disk,
+/// and hid the hint. Report each state, never counting `pending` as written, and
+/// surface its hint.
+fn render_agents_skill(data: &Value) -> String {
+    let entries = match data.get("written").and_then(Value::as_array) {
+        Some(list) => list.as_slice(),
+        None => &[],
+    };
+    let mut wrote = 0usize;
+    let mut unchanged = 0usize;
+    let mut pending: Vec<&Value> = Vec::new();
+    for entry in entries {
+        match entry.get("state").and_then(Value::as_str) {
+            Some("created" | "replaced") => wrote += 1,
+            Some("unchanged") => unchanged += 1,
+            Some("pending") => pending.push(entry),
+            _ => {}
+        }
+    }
+
+    let mut clauses = vec![plural(wrote, "skill", "wrote")];
+    if unchanged > 0 {
+        clauses.push(format!("{unchanged} unchanged"));
+    }
+    if !pending.is_empty() {
+        clauses.push(format!("{} pending", pending.len()));
+    }
+    let mut report = clauses.join("; ");
+    for entry in &pending {
+        if let Some(next) = entry.get("next").and_then(Value::as_str) {
+            report.push_str("\n  ");
+            report.push_str(next);
+        }
+    }
+    report
 }
 
 /// `wrote 2 files`, `removed 1 path` — the verb, the count, and its noun.
@@ -507,10 +549,11 @@ mod tests {
     fn the_agent_files_report_counts_what_it_wrote() {
         // `agents init` and `agents skill --write` both answer with the files
         // they planted, under the key each one uses.
+        // Real write states (#3384): only created/replaced count as written.
         assert_eq!(
             human(&json!({"type": "agents_skill", "data": {"written": [
-                {"agent": "claude", "path": ".claude/skills/strata/SKILL.md", "state": "written"},
-                {"agent": "cursor", "path": ".cursor/rules/strata.mdc", "state": "written"}
+                {"agent": "claude", "path": ".claude/skills/strata/SKILL.md", "state": "created"},
+                {"agent": "cursor", "path": ".cursor/rules/strata.mdc", "state": "replaced"}
             ]}})),
             "wrote 2 skills\n"
         );
@@ -518,6 +561,40 @@ mod tests {
             human(&json!({"type": "agents_skill", "data": {"written": []}})),
             "wrote 0 skills\n"
         );
+        // #3384: a `pending` entry (differs, no --force) is NOT a write, and it
+        // surfaces its hint — the regression reported "wrote 1 skill" here.
+        assert_eq!(
+            human(&json!({"type": "agents_skill", "data": {"written": [
+                {"agent": "claude", "path": "p", "state": "pending",
+                 "next": "an existing p differs; re-run with --force to replace it"}
+            ]}})),
+            "wrote 0 skills; 1 pending\n  an existing p differs; re-run with --force to replace it\n"
+        );
+        // An already-matching skill is unchanged, not written.
+        assert_eq!(
+            human(&json!({"type": "agents_skill", "data": {"written": [
+                {"agent": "claude", "path": "p", "state": "unchanged"}
+            ]}})),
+            "wrote 0 skills; 1 unchanged\n"
+        );
+        // A mix reports every state, and the human write count equals the JSON's
+        // created/replaced entries — never the total (the #3384 regression).
+        let mixed = json!({"type": "agents_skill", "data": {"written": [
+            {"agent": "a", "path": "pa", "state": "created"},
+            {"agent": "b", "path": "pb", "state": "unchanged"},
+            {"agent": "c", "path": "pc", "state": "pending", "next": "re-run with --force"}
+        ]}});
+        assert_eq!(
+            human(&mixed),
+            "wrote 1 skill; 1 unchanged; 1 pending\n  re-run with --force\n"
+        );
+        let wrote_in_json = mixed["data"]["written"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e["state"].as_str(), Some("created" | "replaced")))
+            .count();
+        assert!(human(&mixed).starts_with(&format!("wrote {wrote_in_json} skill")));
         // A script gets the paths and their states, not the sentence.
         assert!(
             raw(&json!({"type": "agents_init", "data": {"written": [".strata/AGENTS.md"]}}))
