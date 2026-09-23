@@ -476,6 +476,37 @@ jobs:
           done
           exit "$failed"
 
+  mutation-exclusion-audit:
+    # #3220: a lane excludes code it "does not compile" via `exclude_globs`, but
+    # cargo-mutants mutates source text without evaluating cfg, so a glob that
+    # actually matches COMPILED code silences killable mutants. Three such
+    # exclusions were wrong — `--features X` ADDS to a crate's defaults, so lane
+    # C compiles every cloud provider, and exclusions written on the opposite
+    # assumption hid ten killable mutants. This builds each lane with the same
+    # targets/features cargo-mutants uses (`cargo check --tests`), harvests the
+    # compiled-source set from dep-info, and fails a `crates/*/src/**` glob that
+    # excludes a compiled file unless it is on the script's reasoned allowlist of
+    # deliberate compiled-code exclusions. Non-sharded: one check-build per lane,
+    # no mutation. The decision logic is also guarded in the `test` job by
+    # crates/storage/tests/mutation_exclusion_audit.rs.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authorize private git dependencies
+        run: git config --global url."https://x-access-token:${{ secrets.STRATAHUB_READ_TOKEN }}@github.com/stratalab/stratahub".insteadOf "https://github.com/stratalab/stratahub"
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify each lane's "not compiled" exclusions against a real build
+        run: |
+          python3 scripts/verify_mutation_exclusions.py --self-test
+          python3 scripts/verify_mutation_exclusions.py --lane A --config .cargo/mutants.toml
+          python3 scripts/verify_mutation_exclusions.py --lane B --config .cargo/mutants-executor.toml \
+            --package strata-executor --features idl-tooling,inference,testkit
+          python3 scripts/verify_mutation_exclusions.py --lane C --config .cargo/mutants-inference.toml \
+            --package strata-inference --features download,testkit
+
   wasm:
     needs: check
     runs-on: ubuntu-latest
