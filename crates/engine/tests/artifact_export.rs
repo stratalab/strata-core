@@ -239,6 +239,72 @@ fn kv_records_decode_under_sap1_framing() {
     assert!(records[0].2 > 0, "timestamps ride along");
 }
 
+/// #3198: a dataset clone artifact is POINT-IN-TIME — it carries the current
+/// committed value of each document, not its version history. A document with
+/// two versions at the source exports as a single record holding the latest
+/// value. This pins the deliberate V1 contract (see
+/// docs/architecture/engine/dataset-clone-artifact-contract.md); a future
+/// history-carrying export would change this and must do so consciously, and
+/// declare a `time_travel` bundle capability.
+#[test]
+fn json_export_is_point_in_time_not_history() {
+    use strata_engine::artifact::{decode_section, ArtifactRecord};
+
+    let mut db = Database::open_cache(CacheOpenOptions::new())
+        .expect("cache open")
+        .into_database();
+    {
+        let mut json = db.json(branch(), space()).expect("json service");
+        json.set_or_create(
+            JsonDocumentId::new("iris:35").expect("id"),
+            &JsonPath::root(),
+            JsonValue::new(json!({ "petal_width": 0.1 })).expect("v1"),
+        )
+        .expect("v1 set");
+        json.set_or_create(
+            JsonDocumentId::new("iris:35").expect("id"),
+            &JsonPath::root(),
+            JsonValue::new(json!({ "petal_width": 0.2 })).expect("v2"),
+        )
+        .expect("v2 set");
+
+        // The source genuinely retains both versions, so the pin is non-vacuous:
+        // export dropping history is the point-in-time contract, not an empty DB.
+        let history = json
+            .get_versions(&JsonDocumentId::new("iris:35").expect("id"))
+            .expect("history read")
+            .expect("document exists");
+        assert_eq!(history.rows().len(), 2, "source retains two versions");
+    }
+
+    let artifact = export(&mut db);
+    let section = artifact
+        .sections()
+        .iter()
+        .find(|section| section.model() == ArtifactModel::Json)
+        .expect("json section");
+
+    let mut docs = Vec::new();
+    for record in decode_section(section.model(), section.bytes()) {
+        if let ArtifactRecord::Json { id, doc, .. } = record.expect("record decodes") {
+            let value: serde_json::Value =
+                serde_json::from_slice(&doc).expect("exported doc parses");
+            docs.push((id, value));
+        }
+    }
+    assert_eq!(
+        docs.len(),
+        1,
+        "export carries one record per document, not one per version"
+    );
+    assert_eq!(docs[0].0, "iris:35");
+    assert_eq!(
+        docs[0].1,
+        json!({ "petal_width": 0.2 }),
+        "export carries the current value, not the retained history"
+    );
+}
+
 fn read_u32(bytes: &mut &[u8]) -> u32 {
     let mut buffer = [0_u8; 4];
     buffer.copy_from_slice(&bytes[..4]);

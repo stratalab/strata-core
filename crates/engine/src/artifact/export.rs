@@ -1,4 +1,13 @@
 //! Branch content enumeration + SAP1 record encoding.
+//!
+//! Export is **point-in-time**: each document, KV pair, vector entry, event,
+//! and graph element is written at its current committed value on the branch
+//! (via `get_versioned` / latest-visible reads), not across its version
+//! history. A cloned dataset therefore shows one version per document even
+//! where the source retained several. This is the deliberate V1 dataset-clone
+//! contract (#3198); see `docs/architecture/engine/dataset-clone-artifact-contract.md`.
+//! A history-carrying export would be a new capability and would declare
+//! `time_travel` in the bundle's `required_capabilities`.
 
 use strata_core::Timestamp;
 

@@ -166,6 +166,17 @@ fn export_satisfies_the_output_invariants() {
         output.manifest.engine_compatibility.required_capabilities,
         vec!["graph", "json", "kv", "vectors"]
     );
+    // #3198: a dataset clone is point-in-time, so it never claims the
+    // `time_travel` bundle capability. The exact list above already pins this;
+    // the explicit negative keeps the contract legible next to it.
+    assert!(
+        !output
+            .manifest
+            .engine_compatibility
+            .required_capabilities
+            .contains(&"time_travel".to_owned()),
+        "a point-in-time clone must not declare time_travel (#3198)"
+    );
 
     // Structure: control document first, then section chunks.
     assert_eq!(output.objects[0].path.as_str(), "control/bundle.json");

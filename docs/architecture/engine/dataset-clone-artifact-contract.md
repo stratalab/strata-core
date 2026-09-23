@@ -183,6 +183,19 @@ database.
 
 This is the required V1 path.
 
+**Point-in-time, not history (#3198).** A dataset clone captures the *current*
+committed value of each document, KV pair, vector entry, event, and graph
+element on the exported branch — not its version history. Reopening a clone
+shows one version per document even where the source retained several. This is
+deliberate: the clone is an MVCC-consistent snapshot, so `time_travel` is **not**
+a dataset-clone bundle capability and export never declares it in
+`required_capabilities`. A history-carrying export is a possible future
+capability (compare the Database Backup Artifact's "may preserve more history"
+below); were it to land, it would declare `time_travel` and revise this
+statement. Pinned by `json_export_is_point_in_time_not_history` in
+`crates/engine/tests/artifact_export.rs`, and the capability absence by
+`export_satisfies_the_output_invariants` in `crates/hub/tests/export_bundle.rs`.
+
 ### Database Backup Artifact
 
 A backup-oriented artifact may use the same outer contract but different
