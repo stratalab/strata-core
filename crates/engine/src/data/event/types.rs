@@ -106,6 +106,9 @@ impl EventPayload {
     /// [`VectorEmbedding::from_wire`] refuses one with
     /// `invalid_argument.engine.vector_embedding`.
     ///
+    /// The engine error-and-diagnostics contract states this once for all four
+    /// `Value`-taking constructors under "Non-Finite Floats In JSON Values".
+    ///
     /// [`VectorEmbedding::from_wire`]: crate::VectorEmbedding::from_wire
     pub fn new(value: Value) -> Result<Self, EngineError> {
         if !value.is_object() {
