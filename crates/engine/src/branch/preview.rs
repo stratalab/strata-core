@@ -453,8 +453,18 @@ pub(crate) fn preview_branches(
     // config metadata, so without this a preview reports clean on a promotion the
     // service would refuse. Read-only: the carry mutations are discarded.
     let source_spaces = registered_spaces(persistence, source)?;
-    let (_, collection_conflicts) =
-        plan_collection_promotion(persistence, source, target, &source_spaces, strategy_result)?;
+    // Preview reports conflicts only and discards the carry mutations, so the
+    // deregistered-space config cleanup (#2972, a mutation-only concern with no
+    // conflict) does not apply here: pass an empty set so every space keeps its
+    // full three-way conflict scan.
+    let (_, collection_conflicts) = plan_collection_promotion(
+        persistence,
+        source,
+        target,
+        &source_spaces,
+        &[],
+        strategy_result,
+    )?;
     conflicts.extend(collection_conflicts);
 
     let coverage = branch_workflow_coverage(persistence, source, target, &promoted)?;

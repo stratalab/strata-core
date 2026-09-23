@@ -443,6 +443,75 @@ fn test_promotion_removes_collection_configs_in_a_source_deleted_space() {
     );
 }
 
+#[test]
+fn test_promotion_removes_a_target_added_collection_config_in_a_deregistered_space() {
+    let mut database = open_cache_database().expect("cache open succeeds");
+    let doomed = space("doomed");
+    // The space exists at the fork (base-present) but holds no collection there.
+    database
+        .spaces(branch("default"))
+        .expect("space service opens")
+        .create(doomed.clone())
+        .expect("create space");
+    database
+        .branches()
+        .expect("branch service opens")
+        .fork_current(&branch("default"), branch("feature"))
+        .expect("fork succeeds");
+    // The source deletes the whole space.
+    database
+        .spaces(branch("feature"))
+        .expect("space service opens")
+        .delete(&doomed, true)
+        .expect("delete space");
+    // The TARGET adds an empty collection (config, no vectors) into that space
+    // AFTER the fork — the #2972 case: target-added, absent from the base, so
+    // the promotion three-way keeps it, yet the space deregisters because the
+    // collection holds no rows to retain it.
+    database
+        .vector(branch("default"), doomed.clone())
+        .expect("vector service opens")
+        .create_collection(
+            collection(),
+            VectorConfig::new(2, VectorDistanceMetric::Cosine).expect("valid config"),
+        )
+        .expect("create collection");
+
+    let outcome = database
+        .branches()
+        .expect("branch service opens")
+        .promote(
+            &branch("feature"),
+            &branch("default"),
+            PromotionStrategy::Strict,
+        )
+        .expect("strict promote succeeds");
+    assert!(outcome.conflicts().is_empty());
+    // The space is deregistered on the target: the source deleted it, and the
+    // target's empty collection holds no rows to keep it alive.
+    assert!(!database
+        .spaces(branch("default"))
+        .expect("space service opens")
+        .exists(&doomed)
+        .expect("exists succeeds"));
+
+    // #2972: re-creating the space must NOT resurface the target-added config.
+    database
+        .spaces(branch("default"))
+        .expect("space service opens")
+        .create(doomed.clone())
+        .expect("re-create space");
+    assert!(
+        database
+            .vector(branch("default"), doomed.clone())
+            .expect("vector service opens")
+            .collection_info(&collection())
+            .expect("info succeeds")
+            .is_none(),
+        "a target-added collection config in a deregistered space must not linger and resurface (#2972)"
+    );
+}
+
 // A collection the source deleted while the target independently reshaped it
 // (delete + recreate with a different config) is a modify/delete divergence.
 fn reshaped_deletion_database() -> Database {
