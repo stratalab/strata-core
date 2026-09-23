@@ -242,13 +242,15 @@ impl GraphAdjacencyIndex {
                 "graph node was not found in this snapshot",
             ));
         };
-        for node in 0..self.node_count() {
-            if self.outgoing(node).iter().any(|edge| edge.weight() < 0.0) {
-                return Err(EngineError::conflict(
-                    "failed_precondition.engine.graph_negative_weight",
-                    "shortest-path distances require non-negative edge weights",
-                ));
-            }
+        // #3460: the negative-weight verdict is recorded once at build time,
+        // so refusing negatives is a single check rather than an O(E) re-scan
+        // on every query. The snapshot is immutable — it cannot gain a negative
+        // edge without being rebuilt.
+        if self.has_negative_weight() {
+            return Err(EngineError::conflict(
+                "failed_precondition.engine.graph_negative_weight",
+                "shortest-path distances require non-negative edge weights",
+            ));
         }
 
         let mut distances: Vec<Option<f64>> = vec![None; self.node_count()];
@@ -520,6 +522,31 @@ mod tests {
             .expect_err("negative weight");
         assert_eq!(
             error.code(),
+            "failed_precondition.engine.graph_negative_weight"
+        );
+    }
+
+    #[test]
+    fn has_negative_weight_is_recorded_at_build_time() {
+        // #3460: the bit is set iff SOME edge is negative, recorded once at
+        // build time. A zero weight is non-negative, so a clean graph keeps the
+        // bit clear and sssp runs.
+        let clean = make_index(&[("A", "B", 1.0), ("B", "C", 0.0)], &[]);
+        assert!(!clean.has_negative_weight());
+        clean
+            .sssp(&node("A"), GraphDirection::Outgoing)
+            .expect("a non-negative snapshot runs sssp");
+
+        // Negatives that are NOT the last edge added still set the bit, and two
+        // of them must not cancel — this guards the accumulation itself (`|=`),
+        // not just the final edge's sign. sssp then refuses off the bit.
+        let negative = make_index(&[("A", "B", -0.5), ("A", "C", -2.0), ("B", "C", 1.0)], &[]);
+        assert!(negative.has_negative_weight());
+        assert_eq!(
+            negative
+                .sssp(&node("A"), GraphDirection::Outgoing)
+                .expect_err("a negative snapshot refuses sssp")
+                .code(),
             "failed_precondition.engine.graph_negative_weight"
         );
     }
