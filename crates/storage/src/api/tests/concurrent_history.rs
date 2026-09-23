@@ -26,7 +26,7 @@
 //! headroom; read-atomicity + phantom-value are the #2682-relevant subset.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::*;
 use crate::testkit::{leak_static, ProgressTicker, ProgressWatchdog};
@@ -189,13 +189,21 @@ fn run_writer(
     writer: usize,
     ops: usize,
     counter: &AtomicU64,
+    first_commit: &AtomicBool,
     ticker: &ProgressTicker,
 ) -> Vec<u64> {
     let mut committed = Vec::with_capacity(ops);
-    for _ in 0..ops {
+    for index in 0..ops {
         let stamp = counter.fetch_add(1, Ordering::Relaxed);
         commit_linked_batch(runtime, stamp, &format!("writer {writer}"));
         committed.push(stamp);
+        if index == 0 {
+            // #3009: a linked batch is now committed and visible. Release the
+            // gate so readers can begin scanning a populated set; the Release
+            // pairs with each reader's Acquire load, so the committed rows are
+            // visible to the first scan that passes the gate.
+            first_commit.store(true, Ordering::Release);
+        }
         ticker.tick();
     }
     committed
@@ -207,9 +215,20 @@ fn run_reader(
     runtime: &StorageRuntime<'static>,
     reader: usize,
     ops: usize,
+    first_commit: &AtomicBool,
     ticker: &ProgressTicker,
 ) -> Vec<ScanObservation> {
     let branch = StorageRuntime::default_branch_id_for_test();
+    // #3009: begin scanning only after the first linked batch is committed. A
+    // committed batch never empties the set, so every scan from here observes a
+    // populated snapshot and the read-atomicity oracle judges it — the concurrent
+    // scans are non-vacuous deterministically rather than by luck of the
+    // interleaving. Readers still race writers 2..N: the gate opens on the FIRST
+    // commit, not the last. The watchdog ticker bounds the wait.
+    while !first_commit.load(Ordering::Acquire) {
+        std::thread::yield_now();
+        ticker.tick();
+    }
     let mut observations = Vec::with_capacity(ops);
     for index in 0..ops {
         let outcome = runtime
@@ -264,6 +283,9 @@ fn run_concurrent_history(
     .into_runtime();
 
     let counter = AtomicU64::new(0);
+    // #3009: opened by the first writer to commit a batch; readers wait on it so
+    // their concurrent scans are guaranteed to observe a populated linked set.
+    let first_commit = AtomicBool::new(false);
     let watchdog = ProgressWatchdog::arm(
         "concurrent_history",
         std::time::Duration::from_secs(120),
@@ -279,14 +301,19 @@ fn run_concurrent_history(
         for writer in 0..writers {
             let runtime = &runtime;
             let counter = &counter;
+            let first_commit = &first_commit;
             let ticker = &ticker;
             writer_handles
-                .push(scope.spawn(move || run_writer(runtime, writer, ops, counter, ticker)));
+                .push(scope.spawn(move || {
+                    run_writer(runtime, writer, ops, counter, first_commit, ticker)
+                }));
         }
         for reader in 0..readers {
             let runtime = &runtime;
+            let first_commit = &first_commit;
             let ticker = &ticker;
-            reader_handles.push(scope.spawn(move || run_reader(runtime, reader, ops, ticker)));
+            reader_handles
+                .push(scope.spawn(move || run_reader(runtime, reader, ops, first_commit, ticker)));
         }
         for handle in writer_handles {
             committed.extend(handle.join().expect("writer joined"));
@@ -296,13 +323,13 @@ fn run_concurrent_history(
         }
     });
 
-    // Structural non-vacuity (#3002): the concurrent scans are the fuzzed
-    // dimension, and on a loaded runner every one of them can legitimately
-    // land before the first commit — so record one final observation after
-    // every writer has joined, when the linked set is deterministically
-    // populated. The check stays a correctness oracle either way; this
-    // guarantees it is never vacuously green NOR flakily red.
-    all_observations.extend(run_reader(&runtime, readers, 1, &ticker));
+    // #3009: no post-join crutch read. #3002 added one final observation after
+    // every writer joined, because a concurrent scan could legitimately land
+    // before the first commit and the whole run then judged nothing concurrent.
+    // The write-then-signal gate removes that possibility at the source — every
+    // recorded observation is a concurrent scan taken after the first commit, so
+    // the merged history is non-vacuous by construction, not by a sequential
+    // read appended afterwards.
 
     runtime.wait_background_idle_for_test();
     let status = runtime.maintenance_status().expect("maintenance status");
@@ -328,9 +355,20 @@ fn concurrent_linked_reads_are_atomic_on_one_shared_database() {
     let stats = check_concurrent_history(&observations, &committed).unwrap_or_else(|anomaly| {
         panic!("concurrent history anomaly: {anomaly:?}");
     });
-    assert!(
-        stats.non_empty_scans > 0,
-        "readers must observe the linked set at least once (non-vacuity)"
+    // #3009: non-vacuity is now DETERMINISTIC, not hoped-for. Every recorded scan
+    // is a concurrent reader scan (no post-join crutch), so `scans` is exactly
+    // `readers * ops`; and the signal gate means every one was taken after the
+    // first commit, so every one observed a populated, atomic snapshot the oracle
+    // judged. If the gate regressed, early pre-commit scans would make
+    // `non_empty_scans < scans` and this reds instead of passing vacuously.
+    assert_eq!(
+        stats.scans,
+        readers.saturating_mul(ops),
+        "every recorded scan must be a concurrent reader scan (no post-join crutch)"
+    );
+    assert_eq!(
+        stats.non_empty_scans, stats.scans,
+        "the write-then-signal gate must make every concurrent scan non-vacuous"
     );
 }
 
@@ -415,6 +453,8 @@ mod tests {
         let (observations, committed) = run_concurrent_history(root, writers, readers, ops);
         let stats =
             check_concurrent_history(&observations, &committed).expect("soak history is clean");
-        assert!(stats.non_empty_scans > 0);
+        // #3009: deterministic non-vacuity — every concurrent scan populated.
+        assert_eq!(stats.scans, readers.saturating_mul(ops));
+        assert_eq!(stats.non_empty_scans, stats.scans);
     }
 }
