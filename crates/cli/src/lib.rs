@@ -817,6 +817,7 @@ pub(crate) fn execute_parsed_command(
         })?,
         options::TopCommand::Describe => run(Command::Describe {
             branch: scope.branch.clone(),
+            space: scope.space.clone(),
         })?,
         options::TopCommand::Config(args) => run(config_command(args.command)?)?,
         options::TopCommand::Ipc(args) => match args.command {
@@ -3127,6 +3128,7 @@ fn command_to_executor(command: options::TopCommand, scope: &Scope) -> Result<Co
         },
         Top::Describe => Command::Describe {
             branch: scope.branch.clone(),
+            space: scope.space.clone(),
         },
         Top::Config(args) => {
             if matches!(

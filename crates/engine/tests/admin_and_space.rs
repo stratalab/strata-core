@@ -52,7 +52,7 @@ fn admin_reports_sanitized_database_and_primitive_facts() {
     assert_eq!(metrics.space_count, 2);
 
     let describe = admin
-        .describe(Some(&branch("default")))
+        .describe(Some(&branch("default")), None)
         .expect("describe succeeds");
     assert_eq!(describe.branch.as_str(), "default");
     assert_eq!(
@@ -85,6 +85,56 @@ fn admin_reports_sanitized_database_and_primitive_facts() {
             .config_value("openai_api_key")
             .expect("secret-like unknown key is hidden"),
         None
+    );
+}
+
+#[test]
+fn describe_scopes_primitive_counts_to_the_selected_space() {
+    let mut database = open_cache_database().expect("cache database opens");
+    database
+        .kv(branch("default"), space("default"))
+        .expect("default KV service opens")
+        .put(key(b"alpha"), value(b"one"))
+        .expect("default kv put");
+    database
+        .spaces(branch("default"))
+        .expect("space service opens")
+        .create(space("analytics"))
+        .expect("space create");
+    {
+        let mut analytics = database
+            .kv(branch("default"), space("analytics"))
+            .expect("analytics KV service opens");
+        analytics.put(key(b"z"), value(b"v")).expect("put z");
+        analytics.put(key(b"y"), value(b"v")).expect("put y");
+        analytics.put(key(b"w"), value(b"v")).expect("put w");
+    }
+
+    let mut admin = database.admin().expect("admin service opens");
+    // #3385: describe's primitive counts are scoped to the SELECTED space. Before
+    // the fix the space was hard-coded to default, so both of these reported the
+    // default space's single key regardless of what the caller asked for.
+    let default_view = admin
+        .describe(Some(&branch("default")), None)
+        .expect("describe default");
+    assert_eq!(default_view.primitives.kv_count, 1, "default space count");
+
+    let analytics_view = admin
+        .describe(Some(&branch("default")), Some(&space("analytics")))
+        .expect("describe analytics");
+    assert_eq!(
+        analytics_view.primitives.kv_count, 3,
+        "counts must reflect the selected space, not always default (#3385)"
+    );
+
+    // Both views list every registered space regardless of which one is counted.
+    assert_eq!(
+        analytics_view
+            .spaces
+            .iter()
+            .map(ProductSpace::as_str)
+            .collect::<Vec<_>>(),
+        vec!["analytics", "default"]
     );
 }
 

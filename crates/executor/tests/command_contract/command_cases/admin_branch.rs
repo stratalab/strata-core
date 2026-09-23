@@ -10,6 +10,7 @@ pub(super) fn admin_space_commands() -> Vec<Command> {
         Command::Metrics { branch: None },
         Command::Describe {
             branch: Some("feature".to_owned()),
+            space: Some("analytics".to_owned()),
         },
         Command::ConfigGet {},
         Command::ConfigureGetKey {

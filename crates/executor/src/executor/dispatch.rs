@@ -25,7 +25,9 @@ impl Executor {
             Command::Info { branch } => self.execute_info(branch.as_deref()),
             Command::Health { branch } => self.execute_health(branch.as_deref()),
             Command::Metrics { branch } => self.execute_metrics(branch.as_deref()),
-            Command::Describe { branch } => self.execute_describe(branch.as_deref()),
+            Command::Describe { branch, space } => {
+                self.execute_describe(branch.as_deref(), space.as_deref())
+            }
             Command::ConfigGet {} => self.execute_config_get(),
             Command::IpcStatus {} => Ok(self.execute_ipc_status()),
             Command::IpcStop {} => Ok(self.execute_ipc_stop()),

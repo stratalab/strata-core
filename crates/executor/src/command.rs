@@ -52,6 +52,9 @@ pub enum Command {
         /// Branch whose primitive data should be described. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
+        /// Space whose primitive counts should be described. Defaults to the default space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
     },
     /// Returns sanitized configuration facts.
     ConfigGet {},

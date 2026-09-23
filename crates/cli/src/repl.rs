@@ -77,8 +77,10 @@ fn banner_for(connection: &Connection, format: Format) -> Option<Vec<String>> {
     if format != Format::Human {
         return None;
     }
-    let Ok(Output::Described(describe)) = connection.execute(Command::Describe { branch: None })
-    else {
+    let Ok(Output::Described(describe)) = connection.execute(Command::Describe {
+        branch: None,
+        space: None,
+    }) else {
         return None;
     };
     let value = serde_json::to_value(&describe).ok()?;
