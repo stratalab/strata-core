@@ -827,10 +827,164 @@ fn exercise_graph_batch_write(mut database: Database) {
         .batch_write(&graph_name("deps"), &invalid)
         .expect_err("invalid batch fails");
     assert_eq!(error.class(), EngineErrorClass::InvalidInput);
+    assert_eq!(error.code(), "invalid_argument.engine.graph_edge_endpoint");
+    // A genuinely-missing endpoint (never upserted, here or later) gets the
+    // plain error, not the batch-ordering hint (#3192).
+    assert!(!error.to_string().contains("same batch"));
     assert!(graph
         .get_node(&graph_name("deps"), &node("orphan"))
         .expect("orphan read succeeds")
         .is_none());
+
+    // #3192: an UpsertEdge whose endpoints are upserted LATER in the same batch
+    // is refused (order is semantic), and the error names the ordering rule
+    // rather than reporting a bare missing endpoint.
+    let out_of_order = GraphBatchWrite::new(vec![
+        GraphBatchOperation::UpsertEdge {
+            src: node("late_a"),
+            edge_type: edge_type("links"),
+            dst: node("late_b"),
+            data: edge_data(1.0, json!({})),
+        },
+        GraphBatchOperation::UpsertNode {
+            node_id: node("late_a"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+        GraphBatchOperation::UpsertNode {
+            node_id: node("late_b"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+    ]);
+    let ordering = graph
+        .batch_write(&graph_name("deps"), &out_of_order)
+        .expect_err("an edge before its endpoints is refused");
+    assert_eq!(
+        ordering.code(),
+        "invalid_argument.engine.graph_edge_endpoint"
+    );
+    assert!(
+        ordering.to_string().contains("same batch"),
+        "the error names the batch ordering rule (#3192): {ordering}"
+    );
+    assert!(
+        graph
+            .get_node(&graph_name("deps"), &node("late_a"))
+            .expect("read succeeds")
+            .is_none(),
+        "the refused batch persists nothing"
+    );
+
+    // #3192: the ordering rule is symmetric across endpoints — an edge whose
+    // src exists but whose DST is upserted later in the batch is refused with
+    // the ordering hint too, not a bare missing endpoint. (Without this the dst
+    // half of the check is never the deciding term and its logic goes untested.)
+    let dst_upserted_later = GraphBatchWrite::new(vec![
+        GraphBatchOperation::UpsertNode {
+            node_id: node("present_src"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+        GraphBatchOperation::UpsertEdge {
+            src: node("present_src"),
+            edge_type: edge_type("links"),
+            dst: node("late_dst"),
+            data: edge_data(1.0, json!({})),
+        },
+        GraphBatchOperation::UpsertNode {
+            node_id: node("late_dst"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+    ]);
+    let dst_ordering = graph
+        .batch_write(&graph_name("deps"), &dst_upserted_later)
+        .expect_err("an edge before its dst endpoint is refused");
+    assert_eq!(
+        dst_ordering.code(),
+        "invalid_argument.engine.graph_edge_endpoint"
+    );
+    assert!(
+        dst_ordering.to_string().contains("same batch"),
+        "a dst upserted later names the ordering rule (#3192): {dst_ordering}"
+    );
+
+    // #3192: conversely, a src that exists paired with a DST that is never
+    // upserted (here or later) is a genuine missing endpoint, not an ordering
+    // problem — the dst half must be a real conjunction, not "dst is absent".
+    let dst_never_upserted = GraphBatchWrite::new(vec![
+        GraphBatchOperation::UpsertNode {
+            node_id: node("present_src2"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+        GraphBatchOperation::UpsertEdge {
+            src: node("present_src2"),
+            edge_type: edge_type("bad"),
+            dst: node("never_dst"),
+            data: edge_data(1.0, json!({})),
+        },
+    ]);
+    let dst_missing = graph
+        .batch_write(&graph_name("deps"), &dst_never_upserted)
+        .expect_err("an edge to a never-upserted dst fails");
+    assert_eq!(
+        dst_missing.code(),
+        "invalid_argument.engine.graph_edge_endpoint"
+    );
+    assert!(
+        !dst_missing.to_string().contains("same batch"),
+        "a never-upserted dst is a plain missing endpoint, not an ordering error (#3192): {dst_missing}"
+    );
+
+    // #3192: symmetric on the src side — an edge whose dst exists but whose SRC
+    // is upserted later names the ordering rule too, so the src half of the
+    // check is the deciding term here (out_of_order has both endpoints late, so
+    // either half alone could carry the verdict there).
+    let src_upserted_later = GraphBatchWrite::new(vec![
+        GraphBatchOperation::UpsertNode {
+            node_id: node("present_dst"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+        GraphBatchOperation::UpsertEdge {
+            src: node("late_src"),
+            edge_type: edge_type("links"),
+            dst: node("present_dst"),
+            data: edge_data(1.0, json!({})),
+        },
+        GraphBatchOperation::UpsertNode {
+            node_id: node("late_src"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+    ]);
+    let src_ordering = graph
+        .batch_write(&graph_name("deps"), &src_upserted_later)
+        .expect_err("an edge before its src endpoint is refused");
+    assert_eq!(
+        src_ordering.code(),
+        "invalid_argument.engine.graph_edge_endpoint"
+    );
+    assert!(
+        src_ordering.to_string().contains("same batch"),
+        "a src upserted later names the ordering rule (#3192): {src_ordering}"
+    );
+
+    // The same operations with nodes first succeed.
+    let in_order = GraphBatchWrite::new(vec![
+        GraphBatchOperation::UpsertNode {
+            node_id: node("late_a"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+        GraphBatchOperation::UpsertNode {
+            node_id: node("late_b"),
+            data: node_data(json!({"kind": "n"}), None),
+        },
+        GraphBatchOperation::UpsertEdge {
+            src: node("late_a"),
+            edge_type: edge_type("links"),
+            dst: node("late_b"),
+            data: edge_data(1.0, json!({})),
+        },
+    ]);
+    graph
+        .batch_write(&graph_name("deps"), &in_order)
+        .expect("nodes before edges succeed in one batch");
 
     let deletes = GraphBatchWrite::new(vec![
         GraphBatchOperation::DeleteEdge {

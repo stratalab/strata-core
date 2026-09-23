@@ -537,7 +537,9 @@ pub enum GraphBatchOperation {
         /// Node id.
         node_id: GraphNodeId,
     },
-    /// Upserts one edge.
+    /// Upserts one edge. Within a batch both endpoints must already be visible,
+    /// including from an `UpsertNode` earlier in the same batch; one listed
+    /// later is not yet applied and the edge is refused (see [`GraphBatchWrite`]).
     UpsertEdge {
         /// Source node id.
         src: GraphNodeId,
@@ -560,6 +562,15 @@ pub enum GraphBatchOperation {
 }
 
 /// All-or-nothing graph batch write request.
+///
+/// Operations apply **in order** against a batch-local view, so their order is
+/// semantic (#3192). An [`GraphBatchOperation::UpsertEdge`] must appear after
+/// the `UpsertNode` of both endpoints — a node upserted later in the same batch
+/// is not yet visible and the edge is refused with
+/// `invalid_argument.engine.graph_edge_endpoint`. A
+/// [`GraphBatchOperation::DeleteNode`] drops its incident edges as it is
+/// applied, so it must come after any surviving node it re-links and before an
+/// edge to a node it is about to remove. In short: sort nodes before edges.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GraphBatchWrite(Vec<GraphBatchOperation>);
