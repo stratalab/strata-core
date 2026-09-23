@@ -117,7 +117,7 @@ fn a_graph_node_record_with_a_bad_version_byte_is_rejected_as_corruption() {
     });
 
     db.inject_scan_corruption_for_test(RowCorruption::SetValue(BAD_RECORD_BYTES.to_vec()));
-    let mut graph = db
+    let graph = db
         .graph(branch("default"), space("default"))
         .expect("graph opens");
     let error = graph
@@ -155,7 +155,7 @@ fn a_graph_edge_record_with_a_bad_version_byte_is_rejected_as_corruption() {
     });
 
     db.inject_scan_corruption_for_test(RowCorruption::SetValue(BAD_RECORD_BYTES.to_vec()));
-    let mut graph = db
+    let graph = db
         .graph(branch("default"), space("default"))
         .expect("graph opens");
     let error = graph
@@ -196,7 +196,7 @@ fn a_graph_type_index_record_with_a_bad_version_byte_is_rejected_as_corruption()
 
     // The type-index row's key decodes fine; its value is malformed.
     db.inject_scan_corruption_for_test(RowCorruption::SetValue(BAD_RECORD_BYTES.to_vec()));
-    let mut graph = db
+    let graph = db
         .graph(branch("default"), space("default"))
         .expect("graph opens");
     let error = graph
@@ -222,7 +222,7 @@ fn a_graph_type_index_key_that_is_malformed_is_rejected_as_corruption() {
     // Corrupt the row *key*: the type-index key decoder rejects it before the
     // value is ever read.
     db.inject_scan_corruption_for_test(RowCorruption::SetKey(vec![0xFF, 0x00, 0x01]));
-    let mut graph = db
+    let graph = db
         .graph(branch("default"), space("default"))
         .expect("graph opens");
     let error = graph

@@ -187,7 +187,7 @@ fn imported_content_is_queryable_through_normal_reads() {
     let verification = events.verify_chain().expect("verify");
     assert!(verification.is_valid(), "hash chain re-derives cleanly");
 
-    let mut graph = target.graph(branch(), space("default")).expect("graph");
+    let graph = target.graph(branch(), space("default")).expect("graph");
     let ontology = graph
         .ontology(&GraphName::new("social").expect("name"))
         .expect("read")

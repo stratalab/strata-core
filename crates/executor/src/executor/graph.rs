@@ -58,7 +58,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let page = if let Some(as_of) = as_of {
             service.list_graphs_at(cursor.as_ref(), limit, as_of)?
         } else {
@@ -79,7 +79,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let info = if let Some(as_of) = as_of {
             service.graph_info_at(&graph, as_of)?
         } else {
@@ -132,7 +132,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let node = if let Some(as_of) = as_of {
             service.get_node_at(&graph, &node_id, as_of)?
         } else {
@@ -171,7 +171,7 @@ impl Executor {
     ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let count = optional_limit(count)?.unwrap_or(10);
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let (total_count, nodes) = service.sample_nodes(&graph, count)?;
         Ok(Output::GraphSampleResult {
             total_count,
@@ -199,7 +199,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let page = if let Some(as_of) = as_of {
             service.list_nodes_at(&graph, prefix.as_ref(), cursor.as_ref(), limit, as_of)?
         } else {
@@ -250,7 +250,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let edge = if let Some(as_of) = as_of {
             service.get_edge_at(&graph, &src, &edge_type, &dst, as_of)?
         } else {
@@ -307,7 +307,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let page = if let Some(as_of) = as_of {
             service.neighbors_at(
                 &graph,
@@ -347,7 +347,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let page = if let Some(as_of) = as_of {
             service.bindings_for_entity_at(&target, cursor, limit, as_of)?
         } else {
@@ -486,7 +486,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let ontology = if let Some(as_of) = as_of {
             service.ontology_at(&graph, as_of)?
         } else {
@@ -509,7 +509,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let summary = if let Some(as_of) = as_of {
             service.ontology_summary_at(&graph, as_of)?
         } else {
@@ -539,7 +539,7 @@ impl Executor {
         // #3112 S3b: resolve any wall-clock instant to a logical timestamp
         // BEFORE the service borrow, so both forms run the identical as-of path.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         let page = if let Some(as_of) = as_of {
             service.nodes_by_type_at(&graph, &object_type, cursor.as_ref(), limit, as_of)?
         } else {
@@ -574,7 +574,7 @@ impl Executor {
         // #3112 S3b: the analytics family shares one resolution point — every
         // `graph <algorithm>` command reaches its snapshot through here.
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
-        let mut service = self.graph_service(branch, space)?;
+        let service = self.graph_service(branch, space)?;
         Ok(if let Some(as_of) = as_of {
             service.adjacency_index_at(graph, &budget, as_of)?
         } else {

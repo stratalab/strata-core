@@ -7,9 +7,10 @@ mod common;
 use serde_json::json;
 use strata_core::CommitVersion;
 use strata_engine::{
-    BranchName, Database, EngineErrorClass, GraphBatchOperation, GraphBatchWrite,
-    GraphBindingPrimitive, GraphBindingTarget, GraphDirection, GraphEdgeData, GraphEdgeType,
-    GraphEntityBinding, GraphName, GraphNodeData, GraphNodeId, GraphProperties, GraphService,
+    BranchName, Database, EngineErrorClass, GraphAnalyticsBudget, GraphBatchOperation,
+    GraphBatchWrite, GraphBindingPrimitive, GraphBindingTarget, GraphDirection, GraphEdgeData,
+    GraphEdgeType, GraphEntityBinding, GraphName, GraphNodeData, GraphNodeId, GraphProperties,
+    GraphService,
 };
 
 use common::{branch, open_cache_database, open_durable_database, space};
@@ -57,6 +58,11 @@ fn graph_commit_counts_exclude_derived_rows_in_cache_and_durable_modes() {
 #[test]
 fn graph_batch_ordering_and_failure_regressions_run_in_cache_and_durable_modes() {
     run_database_modes(exercise_graph_batch_ordering_and_failure_regressions);
+}
+
+#[test]
+fn graph_reads_take_shared_ref_so_one_handle_serves_concurrent_readers() {
+    run_database_modes(exercise_graph_reads_take_shared_ref);
 }
 
 #[test]
@@ -149,7 +155,7 @@ fn graph_branch_and_space_isolation_match_other_primitives() {
     }
 
     {
-        let mut parent = graph_service(&mut database, "default", "default");
+        let parent = graph_service(&mut database, "default", "default");
         let node = parent
             .get_node(&graph_name("deps"), &node("shared"))
             .expect("parent read succeeds")
@@ -205,7 +211,7 @@ fn graph_branch_and_space_isolation_match_other_primitives() {
     }
 
     {
-        let mut parent = graph_service(&mut database, "default", "default");
+        let parent = graph_service(&mut database, "default", "default");
         let node = parent
             .get_node(&graph_name("deps"), &node("shared"))
             .expect("parent read succeeds")
@@ -242,7 +248,7 @@ fn graph_branch_and_space_isolation_match_other_primitives() {
     }
 
     {
-        let mut parent = graph_service(&mut database, "default", "default");
+        let parent = graph_service(&mut database, "default", "default");
         assert!(parent
             .graph_info(&graph_name("deps"))
             .expect("parent graph info succeeds")
@@ -339,7 +345,7 @@ fn graph_durable_reopen_preserves_core_indexes() {
     }
 
     let mut reopened = open_durable_database(tempdir.path()).expect("durable reopen succeeds");
-    let mut graph = graph_service(&mut reopened, "default", "default");
+    let graph = graph_service(&mut reopened, "default", "default");
     assert!(graph
         .graph_info(&graph_name("deps"))
         .expect("graph info succeeds")
@@ -489,7 +495,7 @@ fn graph_durable_delete_reopen_and_recreate_drops_stale_indexes() {
 
     let mut database =
         open_durable_database(tempdir.path()).expect("durable second reopen succeeds");
-    let mut graph = graph_service(&mut database, "default", "default");
+    let graph = graph_service(&mut database, "default", "default");
     assert!(graph
         .graph_info(&graph_name("deps"))
         .expect("recreated graph info succeeds")
@@ -2013,6 +2019,76 @@ fn exercise_graph_commit_counts_exclude_derived_rows(mut database: Database) {
         .expect("edge delete succeeds");
     let commit = removed.commit().expect("delete commits");
     assert_eq!(commit.delete_count(), 1);
+}
+
+/// #3459: graph read methods take `&self`, so ONE `GraphService` handle serves
+/// several readers at once — a snapshot from one read stays live while another
+/// read runs on the SAME shared `&service`. Under the old `&mut self` receivers
+/// this could not compile; `reads_through_shared_ref` is the compile-time guard
+/// (it can only reach the reads through `&GraphService`), and holding `index`
+/// across the second read exercises the concurrent-reader guarantee at runtime.
+fn exercise_graph_reads_take_shared_ref(mut database: Database) {
+    {
+        let mut graph = graph_service(&mut database, "default", "default");
+        graph
+            .create_graph(graph_name("roads"))
+            .expect("graph create succeeds");
+        for id in ["a", "b", "c"] {
+            graph
+                .upsert_node(&graph_name("roads"), node(id), node_data(json!({}), None))
+                .expect("node upsert succeeds");
+        }
+        graph
+            .upsert_edge(
+                &graph_name("roads"),
+                node("a"),
+                edge_type("to"),
+                node("b"),
+                edge_data(1.0, json!({})),
+            )
+            .expect("edge a->b upsert succeeds");
+        graph
+            .upsert_edge(
+                &graph_name("roads"),
+                node("a"),
+                edge_type("to"),
+                node("c"),
+                edge_data(1.0, json!({})),
+            )
+            .expect("edge a->c upsert succeeds");
+    }
+
+    // A single, NON-mut handle: every call below is `&self`.
+    let service = graph_service(&mut database, "default", "default");
+    let index = service
+        .adjacency_index(&graph_name("roads"), &GraphAnalyticsBudget::default())
+        .expect("adjacency index builds from a shared handle");
+    // Second read while `index` is still alive — two immutable borrows of the
+    // same `service` coexist, which `&mut self` reads would forbid.
+    let out_neighbors = reads_through_shared_ref(&service, &graph_name("roads"));
+    assert_eq!(out_neighbors, 2, "a has two out-neighbors (b and c)");
+    // `index` remains valid here, held across the second read.
+    assert_eq!(
+        index.node_count(),
+        3,
+        "the snapshot survived the second read"
+    );
+}
+
+/// Compile-time guard for #3459: each read below is reached through a shared
+/// `&GraphService`. If any reverts to `&mut self`, this stops compiling.
+fn reads_through_shared_ref(service: &GraphService<'_>, name: &GraphName) -> usize {
+    service
+        .graph_info(name)
+        .expect("graph_info reads via &self");
+    service
+        .list_nodes(name, None, None, 10)
+        .expect("list_nodes reads via &self");
+    service
+        .neighbors(name, &node("a"), GraphDirection::Outgoing, None, None, 10)
+        .expect("neighbors reads via &self")
+        .neighbors()
+        .len()
 }
 
 fn run_database_modes(exercise: fn(Database)) {

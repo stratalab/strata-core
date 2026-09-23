@@ -179,7 +179,7 @@ impl<'a> GraphService<'a> {
 
     /// Lists visible graphs.
     pub fn list_graphs(
-        &mut self,
+        &self,
         cursor: Option<&GraphName>,
         limit: usize,
     ) -> Result<GraphNamePage, EngineError> {
@@ -188,7 +188,7 @@ impl<'a> GraphService<'a> {
 
     /// Lists graphs visible at a commit version.
     pub fn list_graphs_at_version(
-        &mut self,
+        &self,
         cursor: Option<&GraphName>,
         limit: usize,
         version: CommitVersion,
@@ -198,7 +198,7 @@ impl<'a> GraphService<'a> {
 
     /// Lists graphs visible at a timestamp.
     pub fn list_graphs_at(
-        &mut self,
+        &self,
         cursor: Option<&GraphName>,
         limit: usize,
         timestamp: Timestamp,
@@ -207,7 +207,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn list_graphs_with_selector(
-        &mut self,
+        &self,
         cursor: Option<&GraphName>,
         limit: usize,
         selector: ReadSelector,
@@ -242,13 +242,13 @@ impl<'a> GraphService<'a> {
     }
 
     /// Returns graph metadata when the graph exists.
-    pub fn graph_info(&mut self, name: &GraphName) -> Result<Option<GraphInfo>, EngineError> {
+    pub fn graph_info(&self, name: &GraphName) -> Result<Option<GraphInfo>, EngineError> {
         self.graph_info_with_selector(name, ReadSelector::Latest)
     }
 
     /// Returns graph metadata visible at a commit version.
     pub fn graph_info_at_version(
-        &mut self,
+        &self,
         name: &GraphName,
         version: CommitVersion,
     ) -> Result<Option<GraphInfo>, EngineError> {
@@ -257,7 +257,7 @@ impl<'a> GraphService<'a> {
 
     /// Returns graph metadata visible at a timestamp.
     pub fn graph_info_at(
-        &mut self,
+        &self,
         name: &GraphName,
         timestamp: Timestamp,
     ) -> Result<Option<GraphInfo>, EngineError> {
@@ -265,7 +265,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn graph_info_with_selector(
-        &mut self,
+        &self,
         name: &GraphName,
         selector: ReadSelector,
     ) -> Result<Option<GraphInfo>, EngineError> {
@@ -390,7 +390,7 @@ impl<'a> GraphService<'a> {
     /// graph targets use composite addresses and report
     /// [`GraphTargetStatus::Unsupported`].
     pub fn resolve_binding_target(
-        &mut self,
+        &self,
         target: &GraphBindingTarget,
     ) -> Result<GraphTargetStatus, EngineError> {
         let record = self.branch_record()?;
@@ -399,7 +399,7 @@ impl<'a> GraphService<'a> {
 
     /// Resolves a binding target's status at a commit version.
     pub fn resolve_binding_target_at_version(
-        &mut self,
+        &self,
         target: &GraphBindingTarget,
         version: CommitVersion,
     ) -> Result<GraphTargetStatus, EngineError> {
@@ -409,7 +409,7 @@ impl<'a> GraphService<'a> {
 
     /// Resolves a binding target's status at a timestamp.
     pub fn resolve_binding_target_at(
-        &mut self,
+        &self,
         target: &GraphBindingTarget,
         timestamp: Timestamp,
     ) -> Result<GraphTargetStatus, EngineError> {
@@ -421,7 +421,7 @@ impl<'a> GraphService<'a> {
     /// Row existence only: value decoding and interpretation stay with
     /// the owning capability.
     fn binding_target_status(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         target: &GraphBindingTarget,
         selector: ReadSelector,
@@ -462,7 +462,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn neighbor_target_status(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         node: &GraphNode,
         selector: ReadSelector,
@@ -568,7 +568,7 @@ impl<'a> GraphService<'a> {
 
     /// Reads one visible graph node.
     pub fn get_node(
-        &mut self,
+        &self,
         graph: &GraphName,
         node_id: &GraphNodeId,
     ) -> Result<Option<GraphNode>, EngineError> {
@@ -577,7 +577,7 @@ impl<'a> GraphService<'a> {
 
     /// Reads one graph node visible at a commit version.
     pub fn get_node_at_version(
-        &mut self,
+        &self,
         graph: &GraphName,
         node_id: &GraphNodeId,
         version: CommitVersion,
@@ -587,7 +587,7 @@ impl<'a> GraphService<'a> {
 
     /// Reads one graph node visible at a timestamp.
     pub fn get_node_at(
-        &mut self,
+        &self,
         graph: &GraphName,
         node_id: &GraphNodeId,
         timestamp: Timestamp,
@@ -596,7 +596,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn get_node_with_selector(
-        &mut self,
+        &self,
         graph: &GraphName,
         node_id: &GraphNodeId,
         selector: ReadSelector,
@@ -643,7 +643,7 @@ impl<'a> GraphService<'a> {
     /// over the ordered live nodes. Returns the total live node count and the
     /// sample.
     pub fn sample_nodes(
-        &mut self,
+        &self,
         graph: &GraphName,
         count: usize,
     ) -> Result<(u64, Vec<GraphNode>), EngineError> {
@@ -672,7 +672,7 @@ impl<'a> GraphService<'a> {
 
     /// Lists visible graph nodes.
     pub fn list_nodes(
-        &mut self,
+        &self,
         graph: &GraphName,
         prefix: Option<&GraphNodeId>,
         cursor: Option<&GraphNodeId>,
@@ -683,7 +683,7 @@ impl<'a> GraphService<'a> {
 
     /// Lists graph nodes visible at a commit version.
     pub fn list_nodes_at_version(
-        &mut self,
+        &self,
         graph: &GraphName,
         prefix: Option<&GraphNodeId>,
         cursor: Option<&GraphNodeId>,
@@ -701,7 +701,7 @@ impl<'a> GraphService<'a> {
 
     /// Lists graph nodes visible at a timestamp.
     pub fn list_nodes_at(
-        &mut self,
+        &self,
         graph: &GraphName,
         prefix: Option<&GraphNodeId>,
         cursor: Option<&GraphNodeId>,
@@ -718,7 +718,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn list_nodes_with_selector(
-        &mut self,
+        &self,
         graph: &GraphName,
         prefix: Option<&GraphNodeId>,
         cursor: Option<&GraphNodeId>,
@@ -942,7 +942,7 @@ impl<'a> GraphService<'a> {
     /// Validates every bulk input before the first commit: a mid-stream
     /// refusal must not leave earlier chunks half-applied.
     fn validate_bulk_input(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         nodes: &[(GraphNodeId, super::GraphNodeData)],
@@ -994,7 +994,7 @@ impl<'a> GraphService<'a> {
 
     /// Reads one graph edge.
     pub fn get_edge(
-        &mut self,
+        &self,
         graph: &GraphName,
         src: &GraphNodeId,
         edge_type: &GraphEdgeType,
@@ -1005,7 +1005,7 @@ impl<'a> GraphService<'a> {
 
     /// Reads one graph edge visible at a commit version.
     pub fn get_edge_at_version(
-        &mut self,
+        &self,
         graph: &GraphName,
         src: &GraphNodeId,
         edge_type: &GraphEdgeType,
@@ -1017,7 +1017,7 @@ impl<'a> GraphService<'a> {
 
     /// Reads one graph edge visible at a timestamp.
     pub fn get_edge_at(
-        &mut self,
+        &self,
         graph: &GraphName,
         src: &GraphNodeId,
         edge_type: &GraphEdgeType,
@@ -1034,7 +1034,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn get_edge_with_selector(
-        &mut self,
+        &self,
         graph: &GraphName,
         src: &GraphNodeId,
         edge_type: &GraphEdgeType,
@@ -1069,7 +1069,7 @@ impl<'a> GraphService<'a> {
 
     /// Looks up neighboring nodes.
     pub fn neighbors(
-        &mut self,
+        &self,
         graph: &GraphName,
         node_id: &GraphNodeId,
         direction: GraphDirection,
@@ -1090,7 +1090,7 @@ impl<'a> GraphService<'a> {
 
     /// Looks up neighboring nodes visible at a commit version.
     pub fn neighbors_at_version(
-        &mut self,
+        &self,
         graph: &GraphName,
         node_id: &GraphNodeId,
         direction: GraphDirection,
@@ -1112,7 +1112,7 @@ impl<'a> GraphService<'a> {
 
     /// Looks up neighboring nodes visible at a timestamp.
     pub fn neighbors_at(
-        &mut self,
+        &self,
         graph: &GraphName,
         node_id: &GraphNodeId,
         direction: GraphDirection,
@@ -1133,7 +1133,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn neighbors_with_selector(
-        &mut self,
+        &self,
         graph: &GraphName,
         node_id: &GraphNodeId,
         direction: GraphDirection,
@@ -1172,7 +1172,7 @@ impl<'a> GraphService<'a> {
 
     /// Looks up graph nodes bound to an entity target.
     pub fn bindings_for_entity(
-        &mut self,
+        &self,
         target: &GraphBindingTarget,
         cursor: Option<&str>,
         limit: usize,
@@ -1182,7 +1182,7 @@ impl<'a> GraphService<'a> {
 
     /// Looks up graph nodes bound to an entity target at a commit version.
     pub fn bindings_for_entity_at_version(
-        &mut self,
+        &self,
         target: &GraphBindingTarget,
         cursor: Option<&str>,
         limit: usize,
@@ -1198,7 +1198,7 @@ impl<'a> GraphService<'a> {
 
     /// Looks up graph nodes bound to an entity target at a timestamp.
     pub fn bindings_for_entity_at(
-        &mut self,
+        &self,
         target: &GraphBindingTarget,
         cursor: Option<&str>,
         limit: usize,
@@ -1213,7 +1213,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn bindings_for_entity_with_selector(
-        &mut self,
+        &self,
         target: &GraphBindingTarget,
         cursor: Option<&str>,
         limit: usize,
@@ -1450,13 +1450,13 @@ impl<'a> GraphService<'a> {
     }
 
     /// Returns the graph's ontology, or `None` before any type was defined.
-    pub fn ontology(&mut self, graph: &GraphName) -> Result<Option<GraphOntology>, EngineError> {
+    pub fn ontology(&self, graph: &GraphName) -> Result<Option<GraphOntology>, EngineError> {
         self.ontology_with_selector(graph, ReadSelector::Latest)
     }
 
     /// Returns the ontology visible at a commit version.
     pub fn ontology_at_version(
-        &mut self,
+        &self,
         graph: &GraphName,
         version: CommitVersion,
     ) -> Result<Option<GraphOntology>, EngineError> {
@@ -1465,7 +1465,7 @@ impl<'a> GraphService<'a> {
 
     /// Returns the ontology visible at a timestamp.
     pub fn ontology_at(
-        &mut self,
+        &self,
         graph: &GraphName,
         timestamp: Timestamp,
     ) -> Result<Option<GraphOntology>, EngineError> {
@@ -1473,7 +1473,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn ontology_with_selector(
-        &mut self,
+        &self,
         graph: &GraphName,
         selector: ReadSelector,
     ) -> Result<Option<GraphOntology>, EngineError> {
@@ -1605,7 +1605,7 @@ impl<'a> GraphService<'a> {
     /// regardless of ontology status, so this works for draft-era and
     /// undeclared types too.
     pub fn nodes_by_type(
-        &mut self,
+        &self,
         graph: &GraphName,
         object_type: &GraphTypeName,
         cursor: Option<&GraphNodeId>,
@@ -1616,7 +1616,7 @@ impl<'a> GraphService<'a> {
 
     /// Lists nodes declaring `object_type` visible at a commit version.
     pub fn nodes_by_type_at_version(
-        &mut self,
+        &self,
         graph: &GraphName,
         object_type: &GraphTypeName,
         cursor: Option<&GraphNodeId>,
@@ -1634,7 +1634,7 @@ impl<'a> GraphService<'a> {
 
     /// Lists nodes declaring `object_type` visible at a timestamp.
     pub fn nodes_by_type_at(
-        &mut self,
+        &self,
         graph: &GraphName,
         object_type: &GraphTypeName,
         cursor: Option<&GraphNodeId>,
@@ -1651,7 +1651,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn nodes_by_type_with_selector(
-        &mut self,
+        &self,
         graph: &GraphName,
         object_type: &GraphTypeName,
         cursor: Option<&GraphNodeId>,
@@ -1714,7 +1714,7 @@ impl<'a> GraphService<'a> {
     /// from the type index, edge counts from one pass over the graph's
     /// visible edges (no counter rows).
     pub fn ontology_summary(
-        &mut self,
+        &self,
         graph: &GraphName,
     ) -> Result<Option<GraphOntologySummary>, EngineError> {
         self.ontology_summary_with_selector(graph, ReadSelector::Latest)
@@ -1722,7 +1722,7 @@ impl<'a> GraphService<'a> {
 
     /// Returns the ontology summary visible at a commit version.
     pub fn ontology_summary_at_version(
-        &mut self,
+        &self,
         graph: &GraphName,
         version: CommitVersion,
     ) -> Result<Option<GraphOntologySummary>, EngineError> {
@@ -1731,7 +1731,7 @@ impl<'a> GraphService<'a> {
 
     /// Returns the ontology summary visible at a timestamp.
     pub fn ontology_summary_at(
-        &mut self,
+        &self,
         graph: &GraphName,
         timestamp: Timestamp,
     ) -> Result<Option<GraphOntologySummary>, EngineError> {
@@ -1739,7 +1739,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn ontology_summary_with_selector(
-        &mut self,
+        &self,
         graph: &GraphName,
         selector: ReadSelector,
     ) -> Result<Option<GraphOntologySummary>, EngineError> {
@@ -1817,7 +1817,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn type_index_rows(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -1837,7 +1837,7 @@ impl<'a> GraphService<'a> {
     /// with `resource_exhausted.engine.graph_analytics_budget` instead
     /// of exhausting memory.
     pub fn adjacency_index(
-        &mut self,
+        &self,
         graph: &GraphName,
         budget: &GraphAnalyticsBudget,
     ) -> Result<GraphAdjacencyIndex, EngineError> {
@@ -1846,7 +1846,7 @@ impl<'a> GraphService<'a> {
 
     /// Builds the adjacency snapshot visible at a commit version.
     pub fn adjacency_index_at_version(
-        &mut self,
+        &self,
         graph: &GraphName,
         budget: &GraphAnalyticsBudget,
         version: CommitVersion,
@@ -1856,7 +1856,7 @@ impl<'a> GraphService<'a> {
 
     /// Builds the adjacency snapshot visible at a timestamp.
     pub fn adjacency_index_at(
-        &mut self,
+        &self,
         graph: &GraphName,
         budget: &GraphAnalyticsBudget,
         timestamp: Timestamp,
@@ -1865,7 +1865,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn adjacency_index_with_selector(
-        &mut self,
+        &self,
         graph: &GraphName,
         budget: &GraphAnalyticsBudget,
         selector: ReadSelector,
@@ -1905,7 +1905,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn ontology_row(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -1934,7 +1934,7 @@ impl<'a> GraphService<'a> {
     /// ontology is absent or still Draft (no write validation in either
     /// case — GO2 enforcement is freeze-gated).
     fn frozen_ontology(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
     ) -> Result<Option<GraphOntologyRecord>, EngineError> {
@@ -1951,7 +1951,7 @@ impl<'a> GraphService<'a> {
     /// Draft when none exists yet. Frozen ontologies are immutable —
     /// every mutation (freeze included) refuses.
     fn mutable_ontology(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
     ) -> Result<GraphOntologyRecord, EngineError> {
@@ -1969,7 +1969,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn write_ontology(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         ontology: &GraphOntologyRecord,
@@ -2063,7 +2063,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn graph_metadata_row(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -2076,7 +2076,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn require_graph(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
     ) -> Result<(), EngineError> {
@@ -2084,7 +2084,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn require_graph_with_selector(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -2106,7 +2106,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn graph_info_from_row(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         row: &PersistenceReadRow,
         selector: ReadSelector,
@@ -2151,7 +2151,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn node_row_with_selector(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         node_id: &GraphNodeId,
@@ -2165,7 +2165,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn node_record(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         node_id: &GraphNodeId,
@@ -2174,7 +2174,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn node_record_with_selector(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         node_id: &GraphNodeId,
@@ -2186,7 +2186,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn edge_row_with_selector(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         src: &GraphNodeId,
@@ -2202,7 +2202,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn edge_record(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         src: &GraphNodeId,
@@ -2215,7 +2215,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn node_rows(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -2230,7 +2230,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn edge_rows(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -2245,7 +2245,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn reverse_edge_rows(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -2260,7 +2260,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn binding_rows_for_space(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         selector: ReadSelector,
     ) -> Result<Vec<PersistenceReadRow>, EngineError> {
@@ -2274,7 +2274,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn node_record_map(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -2290,7 +2290,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn edge_record_map(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         selector: ReadSelector,
@@ -2306,7 +2306,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn outgoing_neighbors(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         node_id: &GraphNodeId,
@@ -2342,7 +2342,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn incoming_neighbors(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         node_id: &GraphNodeId,
@@ -2378,7 +2378,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn visible_node_or_corruption(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         node_id: &GraphNodeId,
@@ -2394,7 +2394,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn get_node_with_record(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         node_id: &GraphNodeId,
@@ -2537,7 +2537,7 @@ impl<'a> GraphService<'a> {
     }
 
     fn commit_batch(
-        &mut self,
+        &self,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
     ) -> Result<CommitOutcome, EngineError> {
