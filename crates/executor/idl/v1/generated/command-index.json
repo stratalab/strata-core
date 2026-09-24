@@ -3579,6 +3579,10 @@
         {
           "code": "invalid_argument.engine.graph_edge_type",
           "docs": "https://stratadb.org/e/invalid_argument.engine.graph_edge_type"
+        },
+        {
+          "code": "invalid_argument.engine.graph_cursor",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.graph_cursor"
         }
       ],
       "fixtures": {
@@ -3591,6 +3595,16 @@
           "requests/v1/setup/graph_add_carol.json",
           "requests/v1/graph/edge_add.json",
           "requests/v1/setup/graph_edge_alice_carol.json"
+        ],
+        "error_cases": [
+          {
+            "setup": [
+              "requests/v1/graph/create.json",
+              "requests/v1/graph/node_add.json"
+            ],
+            "request": "requests/v1/graph/neighbors_bad_cursor.json",
+            "expected_error": "responses/v1/errors/graph/neighbors_bad_cursor.json"
+          }
         ]
       },
       "source": {

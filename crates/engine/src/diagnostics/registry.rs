@@ -50,6 +50,7 @@ const INVALID_INPUT_CODES: &[&str] = &[
     "invalid_argument.engine.event_record",
     "invalid_argument.engine.event_type",
     "invalid_argument.engine.graph_binding",
+    "invalid_argument.engine.graph_cursor",
     "invalid_argument.engine.graph_edge_endpoint",
     "invalid_argument.engine.graph_edge_type",
     "invalid_argument.engine.graph_edge_type_reserved",

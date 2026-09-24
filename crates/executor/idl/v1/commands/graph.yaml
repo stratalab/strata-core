@@ -283,6 +283,7 @@ commands:
     errors+:
       - invalid_argument.engine.graph_node_id
       - invalid_argument.engine.graph_edge_type
+      - invalid_argument.engine.graph_cursor
     display:
       columns:
         - field: /data/items/*/node_id
@@ -302,6 +303,12 @@ commands:
         - requests/v1/setup/graph_edge_alice_carol.json
       request: requests/v1/graph/neighbors.json
       response: responses/v1/graph/neighbors_page.json
+      error_cases:
+        - setup:
+            - requests/v1/graph/create.json
+            - requests/v1/graph/node_add.json
+          request: requests/v1/graph/neighbors_bad_cursor.json
+          expected_error: responses/v1/errors/graph/neighbors_bad_cursor.json
   - id: graph.bindings
     kind: read.page
     title: List graph bindings for entity

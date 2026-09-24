@@ -10,8 +10,9 @@ use crate::commit::CommitOutcome;
 use crate::control::ControlPlane;
 use crate::diagnostics::{EngineError, EngineResult};
 use crate::persistence::{
-    decode_kv_key, encode_kv_key, encode_kv_key_bytes, encode_kv_space_prefix, CommitPlan,
-    PersistenceReadRow, ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
+    decode_kv_key, encode_kv_key, encode_kv_key_bytes, encode_kv_space_prefix, exclusive_after_key,
+    next_prefix, CommitPlan, PersistenceReadRow, ReadSelector, RowAddress, RowClass, RowMutation,
+    StoragePersistence,
 };
 
 use super::{
@@ -725,22 +726,4 @@ fn row_value(row: &PersistenceReadRow) -> Result<KvValue, EngineError> {
             "stored KV row is missing a value",
         )
     })
-}
-
-fn next_prefix(prefix: &[u8]) -> Vec<u8> {
-    let mut upper = prefix.to_vec();
-    for index in (0..upper.len()).rev() {
-        if upper[index] != u8::MAX {
-            upper[index] += 1;
-            upper.truncate(index + 1);
-            return upper;
-        }
-    }
-    vec![u8::MAX]
-}
-
-fn exclusive_after_key(key: &[u8]) -> Vec<u8> {
-    let mut next = key.to_vec();
-    next.push(0);
-    next
 }

@@ -492,6 +492,34 @@ impl Database {
         Ok(u64::try_from(count).unwrap_or(u64::MAX))
     }
 
+    /// Rows persistence scans have handed to the engine since the last reset —
+    /// the storage work a read actually did, for tests that pin a paginated
+    /// read to page-sized work (#3458, #3473, #3489).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn scanned_rows_for_test(&self) -> u64 {
+        self.persistence.scanned_rows_for_test()
+    }
+
+    /// Zeroes the scanned-row counter so a test can measure one operation.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn reset_scanned_rows_for_test(&self) {
+        self.persistence.reset_scanned_rows_for_test();
+    }
+
+    /// Corrupts the row returned by the point read that follows `skip`
+    /// further point reads — used to prove a paginated read hydrates only its
+    /// page: the read past the page must never be issued (see
+    /// [`Self::inject_read_corruption_for_test`]).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn inject_read_corruption_after_for_test(
+        &mut self,
+        skip: usize,
+        corruption: RowCorruption,
+    ) {
+        self.persistence
+            .arm_row_corruption(FaultOp::Read, corruption, skip);
+    }
+
     /// Flushes a branch into immutable storage sources for tests.
     #[cfg(any(test, feature = "testkit"))]
     pub fn flush_storage_branch_for_test(

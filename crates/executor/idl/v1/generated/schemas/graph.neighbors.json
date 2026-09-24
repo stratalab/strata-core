@@ -228,7 +228,7 @@
   "command": "graph.neighbors",
   "request": {
     "additionalProperties": false,
-    "description": "Lists neighboring graph nodes.",
+    "description": "Lists neighboring graph nodes.\n\n# Guaranteed semantics\n\n- **Ordering.** Incoming hits precede outgoing ones; within a\n  direction, hits order by edge type, then neighbor id (string order).\n  `edge_type` narrows to one type.\n- **Cursor.** `cursor` is the cursor of the previous page, exclusive —\n  a position this listing produced, not an offset, identical at any\n  `as_of`. A cursor this listing never produced is refused with\n  `invalid_argument.engine.graph_cursor`.\n- **Bounded work.** A page seeks the adjacency from its cursor, reads\n  only its own edge rows plus one lookahead, and hydrates only its own\n  neighbors — page-sized work on a hub of any degree.",
     "properties": {
       "as_of": {
         "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. Reads the graph state visible at that timeline\nposition. To read as of a real time, use `as_of_time` instead.",

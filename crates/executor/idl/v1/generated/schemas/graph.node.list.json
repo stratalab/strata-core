@@ -119,7 +119,7 @@
   "command": "graph.node.list",
   "request": {
     "additionalProperties": false,
-    "description": "Lists graph nodes.",
+    "description": "Lists graph nodes.\n\n# Guaranteed semantics\n\n- **Ordering.** Nodes are returned in node-id order — byte-wise string\n  order, not spatial or insertion order; `prefix` narrows to ids that\n  start with it.\n- **Cursor.** `cursor` is the last node id of the previous page,\n  exclusive — a position, not an offset, so writes before it can\n  neither skip nor repeat a node across pages, and the same cursor\n  names the same position at any `as_of`. `has_more` speaks for the\n  prefix: rows beyond it never make the last matching page claim more.\n- **Bounded work.** A page reads only its own rows plus one lookahead\n  from storage and decodes only those — page-sized work wherever the\n  page sits, never a scan of the whole graph.",
     "properties": {
       "as_of": {
         "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. Reads the graph state visible at that timeline\nposition. To read as of a real time, use `as_of_time` instead.",
