@@ -277,3 +277,48 @@ fn exercise_bulk_refusals(database: Database) {
         .expect("cascade applies");
     assert_eq!(outcome.nodes_affected(), 1);
 }
+
+/// The items-per-chunk size clamps to 800 (#3214).
+///
+/// A caller's chunk request is documented to clamp at 800 so one chunk fits
+/// one storage commit. That number is only observable through the resulting
+/// commit count: with an over-max chunk request, 800 nodes still fit one
+/// commit while 801 need two — which is exactly what an 800-item cap means,
+/// and an off-by-one in the cap would move the boundary. Cache mode alone,
+/// since the clamp is mode-independent arithmetic on the request.
+#[test]
+fn bulk_insert_clamps_chunk_size_to_800() {
+    let bulk_nodes = |count: usize| -> Vec<(GraphNodeId, GraphNodeData)> {
+        (0..count)
+            .map(|index| (node_id(&format!("n{index}")), GraphNodeData::default()))
+            .collect()
+    };
+
+    let database = open_cache_database().expect("cache open succeeds");
+    let mut graph = database
+        .graph(branch("default"), space("default"))
+        .expect("graph service opens");
+    let name = graph_name("clamp");
+    graph.create_graph(name.clone()).expect("graph created");
+
+    // A chunk far above the cap: 800 nodes fit one commit; 801 spill to two.
+    let at = graph
+        .bulk_insert(&name, &bulk_nodes(800), &[], Some(100_000))
+        .expect("800-node ingest");
+    assert_eq!(at.nodes_inserted(), 800);
+    assert_eq!(
+        at.commits(),
+        1,
+        "800 nodes fit one chunk when the request clamps to 800"
+    );
+
+    let over = graph
+        .bulk_insert(&name, &bulk_nodes(801), &[], Some(100_000))
+        .expect("801-node ingest");
+    assert_eq!(over.nodes_inserted(), 801);
+    assert_eq!(
+        over.commits(),
+        2,
+        "801 nodes need a second chunk, so the cap is exactly 800"
+    );
+}

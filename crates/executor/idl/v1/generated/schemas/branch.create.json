@@ -161,7 +161,7 @@
   "command": "branch.create",
   "request": {
     "additionalProperties": false,
-    "description": "Creates an empty root branch.",
+    "description": "Creates an empty root branch.\n\n# Guaranteed semantics\n\n- **Limits.** A branch name is at most **255 bytes**\n  (`invalid_argument.engine.branch_name`), refused before the branch is\n  created.",
     "properties": {
       "branch": {
         "description": "Branch name.",

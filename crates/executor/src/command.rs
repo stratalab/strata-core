@@ -173,6 +173,9 @@ pub enum Command {
     ///   space is visible to every subsequent command on any handle of the
     ///   same database — `SpaceExists` reports `true` and data commands
     ///   targeting the space are accepted.
+    /// - **Limits.** A product space name is at most **65,535 bytes**
+    ///   (`invalid_argument.engine.product_space`), refused before the space is
+    ///   created.
     SpaceCreate {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,6 +222,12 @@ pub enum Command {
         at_timestamp: Option<u64>,
     },
     /// Creates an empty root branch.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Limits.** A branch name is at most **255 bytes**
+    ///   (`invalid_argument.engine.branch_name`), refused before the branch is
+    ///   created.
     BranchCreate {
         /// Branch name.
         branch: String,
@@ -1000,6 +1009,14 @@ pub enum Command {
         space: Option<String>,
     },
     /// Creates a vector collection.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Limits.** A collection name is at most **256 bytes**
+    ///   (`invalid_argument.engine.vector_collection`), and the embedding
+    ///   dimension is between 1 and **32,768**
+    ///   (`invalid_argument.engine.vector_dimension`). Each is refused before
+    ///   the collection is created.
     VectorCreateCollection {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1125,6 +1142,14 @@ pub enum Command {
         count: Option<u64>,
     },
     /// Upserts one vector.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Limits.** A vector key is at most **1,024 bytes**
+    ///   (`invalid_argument.engine.vector_key`), and metadata is at most
+    ///   **16 MiB** serialized
+    ///   (`invalid_argument.engine.vector_metadata_too_large`). Each is refused
+    ///   before anything is written.
     VectorUpsert {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1747,6 +1772,12 @@ pub enum Command {
         as_of_time: Option<u64>,
     },
     /// Adds or replaces a graph node.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Limits.** A node id is at most **1,024 bytes**
+    ///   (`invalid_argument.engine.graph_node_id`), refused before anything is
+    ///   written.
     GraphAddNode {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2010,6 +2041,13 @@ pub enum Command {
         operations: Vec<GraphBatchOperation>,
     },
     /// Defines (or, while the ontology is draft, redefines) an object type.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Limits.** A type name is at most **256 bytes**
+    ///   (`invalid_argument.engine.graph_type_name`), and each property name is
+    ///   at most **256 bytes** (`invalid_argument.engine.graph_property_name`).
+    ///   Each is refused before the definition is recorded.
     GraphDefineObjectType {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2026,6 +2064,13 @@ pub enum Command {
         properties: std::collections::BTreeMap<String, GraphPropertyDef>,
     },
     /// Defines (or, while the ontology is draft, redefines) a link type.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Limits.** A type name is at most **256 bytes**
+    ///   (`invalid_argument.engine.graph_type_name`), and each property name is
+    ///   at most **256 bytes** (`invalid_argument.engine.graph_property_name`).
+    ///   Each is refused before the definition is recorded.
     GraphDefineLinkType {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2376,6 +2421,14 @@ pub enum Command {
         as_of_time: Option<u64>,
     },
     /// Ingests nodes and edges in chunked commits.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Limits.** Each node id is at most **1,024 bytes**
+    ///   (`invalid_argument.engine.graph_node_id`), refused before anything is
+    ///   written. The items-per-chunk size defaults to 512 and clamps to
+    ///   **800** so one chunk fits one storage commit — a larger request is
+    ///   reduced, not refused.
     GraphBulkInsert {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]

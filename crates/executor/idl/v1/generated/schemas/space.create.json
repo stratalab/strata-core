@@ -134,7 +134,7 @@
   "command": "space.create",
   "request": {
     "additionalProperties": false,
-    "description": "Creates a product space for a branch.\n\n# Guaranteed semantics\n\n- **Idempotent success.** Creating a space that already exists is not\n  an error: the command succeeds with `created: false` and no mutation\n  effect. `created: true` is reported only by the call that first\n  materialized the space.\n- **Immediate visibility.** Once the command returns success, the\n  space is visible to every subsequent command on any handle of the\n  same database — `SpaceExists` reports `true` and data commands\n  targeting the space are accepted.",
+    "description": "Creates a product space for a branch.\n\n# Guaranteed semantics\n\n- **Idempotent success.** Creating a space that already exists is not\n  an error: the command succeeds with `created: false` and no mutation\n  effect. `created: true` is reported only by the call that first\n  materialized the space.\n- **Immediate visibility.** Once the command returns success, the\n  space is visible to every subsequent command on any handle of the\n  same database — `SpaceExists` reports `true` and data commands\n  targeting the space are accepted.\n- **Limits.** A product space name is at most **65,535 bytes**\n  (`invalid_argument.engine.product_space`), refused before the space is\n  created.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

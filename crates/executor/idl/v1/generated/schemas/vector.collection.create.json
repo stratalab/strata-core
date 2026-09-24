@@ -61,7 +61,7 @@
   "command": "vector.collection.create",
   "request": {
     "additionalProperties": false,
-    "description": "Creates a vector collection.",
+    "description": "Creates a vector collection.\n\n# Guaranteed semantics\n\n- **Limits.** A collection name is at most **256 bytes**\n  (`invalid_argument.engine.vector_collection`), and the embedding\n  dimension is between 1 and **32,768**\n  (`invalid_argument.engine.vector_dimension`). Each is refused before\n  the collection is created.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

@@ -116,6 +116,15 @@ mod tests {
         assert_eq!(error.code(), "invalid_argument.engine.branch_name");
     }
 
+    /// A branch name is bounded at 255 bytes (#3214).
+    #[test]
+    fn branch_name_limit_is_the_refusal_boundary() {
+        const LIMIT: usize = 255;
+        BranchName::new("a".repeat(LIMIT)).expect("the longest accepted branch name");
+        let error = BranchName::new("a".repeat(LIMIT + 1)).expect_err("one byte past");
+        assert_eq!(error.code(), "invalid_argument.engine.branch_name");
+    }
+
     #[test]
     fn branch_name_rejects_whitespace_only_names() {
         let error = BranchName::new(" \t ").expect_err("whitespace branch must fail");
