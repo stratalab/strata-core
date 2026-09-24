@@ -262,7 +262,17 @@ struct MapDecl {
     /// Header over the value column; the key column is always `NODE`.
     header: String,
     sort: CliDisplaySort,
+    /// Further node-keyed objects, one column each after the value column
+    /// (#3564).
+    join: Vec<MapJoin>,
     conditions: Conditions,
+}
+
+/// One joined map: its pointer and the header over its column.
+#[derive(Clone, Debug)]
+struct MapJoin {
+    pointer: String,
+    header: String,
 }
 
 /// A parsed record declaration: the commands whose answer is one record,
@@ -610,6 +620,14 @@ impl MapDecl {
                 .clone()
                 .ok_or_else(|| "a map declares the header over its values".to_owned())?,
             sort: display.sort.unwrap_or(CliDisplaySort::Key),
+            join: display
+                .join
+                .iter()
+                .map(|join| MapJoin {
+                    pointer: join.pointer.clone(),
+                    header: join.header.clone(),
+                })
+                .collect(),
             conditions: Conditions::parse(display),
         })
     }
@@ -964,8 +982,9 @@ fn batch_summary(envelope: &Value, items: &[Value], out: &mut String) {
 
 /// Output contract R1-table for an analytics map: one row per node under
 /// `NODE` and the declared header, ordered as declared — by value (ties by
-/// node) or by node. `(nil)` when the map is absent, `(empty)` when it has
-/// no entries, human only.
+/// node) or by node — plus one column per joined map, read at the same
+/// node (the null cell when the node is absent from it). `(nil)` when the
+/// map is absent, `(empty)` when it has no entries, human only.
 fn render_map(envelope: &Value, decl: &MapDecl, format: Format) -> Rendered {
     let mut stdout = String::new();
     let mut shown = 0;
@@ -991,13 +1010,26 @@ fn render_map(envelope: &Value, decl: &MapDecl, format: Format) -> Rendered {
                     value_order(value_b, value_a).then_with(|| node_a.cmp(node_b))
                 }
             });
-            let mut table = Table::new(vec!["NODE".to_owned(), decl.header.clone()]);
+            let mut headers = vec!["NODE".to_owned(), decl.header.clone()];
+            headers.extend(decl.join.iter().map(|join| join.header.clone()));
+            let joined: Vec<Option<&serde_json::Map<String, Value>>> = decl
+                .join
+                .iter()
+                .map(|join| envelope.pointer(&join.pointer).and_then(Value::as_object))
+                .collect();
+            let mut table = Table::new(headers);
             shown = rows.len();
             for (node, value) in rows {
-                table.push(vec![
+                let mut cells = vec![
                     Cell::text(escape_cell(node)),
                     cell(Some(value), None, format),
-                ]);
+                ];
+                cells.extend(
+                    joined
+                        .iter()
+                        .map(|map| cell(map.and_then(|map| map.get(node.as_str())), None, format)),
+                );
+                table.push(cells);
             }
             stdout = match format {
                 Format::Human => table.human(),
@@ -2592,7 +2624,9 @@ mod tests {
         MutationEffect, Output, PageInfo, SampleItem, SpaceComparisonItem, VectorMatch,
     };
 
-    use strata_executor::cli_metadata::{CliDisplay, CliDisplayAs, CliDisplayField};
+    use strata_executor::cli_metadata::{
+        CliDisplay, CliDisplayAs, CliDisplayField, CliDisplayJoin, CliDisplaySort,
+    };
     use strata_executor::{AdminPing, Command, MutationEffectKind};
 
     use super::{
@@ -3296,6 +3330,50 @@ mod tests {
         assert_eq!(
             render_map(&with, &decl, Format::Human),
             only_stdout("NODE  RANK\nn        1\n")
+        );
+    }
+
+    #[test]
+    fn an_analytics_map_joins_further_maps_by_node() {
+        // #3564: sssp's `predecessors` sits beside `distances`, keyed by the
+        // same nodes; a join reads it at each row's node so a reader gets the
+        // route without `--json`. The source has no predecessor: null cell.
+        let decl = MapDecl::parse(&CliDisplay {
+            map: Some("/data/distances".to_owned()),
+            header: Some("DISTANCE".to_owned()),
+            sort: Some(CliDisplaySort::Asc),
+            join: vec![CliDisplayJoin {
+                pointer: "/data/predecessors".to_owned(),
+                header: "VIA".to_owned(),
+            }],
+            ..CliDisplay::default()
+        })
+        .expect("a map with a join parses");
+        let envelope = json!({"data": {
+            "distances": {"c": 3.0, "a": 0.0, "b": 1.0},
+            "predecessors": {"b": "a", "c": "b"},
+        }});
+        assert_eq!(
+            render_map(&envelope, &decl, Format::Human),
+            only_stdout(concat!(
+                "NODE  DISTANCE  VIA\n",
+                "a          0.0  -\n",
+                "b          1.0  a\n",
+                "c          3.0  b\n",
+            )),
+            "rows keep the primary map's order; the source shows the null cell"
+        );
+        assert_eq!(
+            render_map(&envelope, &decl, Format::Raw),
+            only_stdout("a\t0.0\t\nb\t1.0\ta\nc\t3.0\tb\n"),
+            "raw keeps the column so a script can split on tabs"
+        );
+        // A joined map that is missing altogether reads as all-absent rather
+        // than failing the table the primary map still owns.
+        let alone = json!({"data": {"distances": {"a": 0.0, "b": 1.0}}});
+        assert_eq!(
+            render_map(&alone, &decl, Format::Human),
+            only_stdout("NODE  DISTANCE  VIA\na          0.0  -\nb          1.0  -\n")
         );
     }
 

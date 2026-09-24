@@ -4687,7 +4687,13 @@
       "display": {
         "map": "/data/distances",
         "header": "DISTANCE",
-        "sort": "asc"
+        "sort": "asc",
+        "join": [
+          {
+            "pointer": "/data/predecessors",
+            "header": "VIA"
+          }
+        ]
       },
       "encoding": null
     },

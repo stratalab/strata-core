@@ -55,15 +55,15 @@ failed_precondition.engine.graph_negative_weight: command failed∎
 ### graph.analytics.sssp · responses/v1/errors/graph/sssp_negative_weight.json · raw
 failed_precondition.engine.graph_negative_weight: command failed∎
 ### graph.analytics.sssp · responses/v1/graph/sssp_distances.json · human
-NODE   DISTANCE
-alice       0.0
-bob         1.0
-carol       3.0
+NODE   DISTANCE  VIA
+alice       0.0  -
+bob         1.0  alice
+carol       3.0  bob
 ∎
 ### graph.analytics.sssp · responses/v1/graph/sssp_distances.json · raw
-alice	0.0
-bob	1.0
-carol	3.0
+alice	0.0	
+bob	1.0	alice
+carol	3.0	bob
 ∎
 ### graph.analytics.wcc · responses/v1/graph/wcc_components.json · human
 NODE   COMPONENT

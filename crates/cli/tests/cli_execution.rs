@@ -1505,6 +1505,39 @@ fn a_truncated_answer_says_it_is_partial() {
     assert!(stdout(&scripted).contains("\"truncated\":true"));
 }
 
+/// #3564: a shortest-path table shows the route, not just the cost — each
+/// row's `VIA` is the node its cheapest walk arrived from, read from the
+/// `predecessors` map beside `distances`; the source has none.
+#[test]
+fn a_shortest_path_table_shows_the_route_beside_each_distance() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let db = dir.path().join("db");
+    let db = db.to_str().expect("path is utf-8");
+    for args in [
+        vec!["graph", "create", "g"],
+        vec!["graph", "add-node", "g", "a"],
+        vec!["graph", "add-node", "g", "b"],
+        vec!["graph", "add-node", "g", "c"],
+        vec!["graph", "add-edge", "g", "a", "knows", "b"],
+        vec!["graph", "add-edge", "g", "b", "knows", "c"],
+    ] {
+        let mut full = vec!["--db", db];
+        full.extend(args);
+        assert_ok(&strata(&full), "seed");
+    }
+
+    let human = strata(&["--db", db, "graph", "sssp", "g", "a"]);
+    assert_ok(&human, "sssp");
+    assert_eq!(
+        stdout(&human),
+        "NODE  DISTANCE  VIA\na          0.0  -\nb          1.0  a\nc          2.0  b\n"
+    );
+    // Raw keeps the column, empty for the source, so a script splits on tabs.
+    let raw = strata(&["--db", db, "--raw", "graph", "sssp", "g", "a"]);
+    assert_ok(&raw, "raw sssp");
+    assert_eq!(stdout(&raw), "a\t0.0\t\nb\t1.0\ta\nc\t2.0\tb\n");
+}
+
 /// A JSON-valued cell must be invertible: a consumer that knows the column is
 /// `as: json` can recover the value that was stored (#3372).
 ///

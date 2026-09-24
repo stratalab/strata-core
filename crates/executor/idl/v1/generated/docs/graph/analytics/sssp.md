@@ -29,10 +29,10 @@ created edge a -[knows]-> b in g
 $ strata graph add-edge g b knows c
 created edge b -[knows]-> c in g
 $ strata graph sssp g a --direction outgoing
-NODE  DISTANCE
-a          0.0
-b          1.0
-c          2.0
+NODE  DISTANCE  VIA
+a          0.0  -
+b          1.0  a
+c          2.0  b
 ```
 
 ### Wire

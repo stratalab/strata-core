@@ -951,31 +951,46 @@ fn check_map(schema: &SchemaDoc<'_>, display: &CliDisplay) -> Check {
     let Some(pointer) = display.map.as_deref() else {
         return Err("`map` is missing".to_owned());
     };
-    if pointer.contains('*') {
-        return Err(format!(
-            "`map` names the object itself, not its values: `{pointer}`"
-        ));
-    }
-    let node = schema.resolve(pointer)?;
-    if node.ty != SchemaType::Map {
-        return Err(format!(
-            "`map` needs an object keyed by node, but `{pointer}` is {}",
-            article(node.ty)
-        ));
-    }
-    let values = schema.element(pointer, &node)?;
-    if !values.ty.is_scalar() {
-        return Err(format!(
-            "`map` values must be scalars, but `{pointer}/*` is {}",
-            article(values.ty)
-        ));
-    }
+    check_node_map(schema, "map", pointer)?;
     if display
         .header
         .as_deref()
         .is_some_and(|header| header.trim().is_empty())
     {
         return Err("`header` is empty".to_owned());
+    }
+    // A joined map is held to the map's own rules: it is the same kind of
+    // object, read at the same node keys, one column over.
+    for join in &display.join {
+        check_node_map(schema, "join", &join.pointer)?;
+        if join.header.trim().is_empty() {
+            return Err(format!("`join` header for `{}` is empty", join.pointer));
+        }
+    }
+    Ok(())
+}
+
+/// Checks that `pointer` names an object keyed by node whose values are
+/// scalars — the shape both the primary `map` and every `join` need.
+fn check_node_map(schema: &SchemaDoc<'_>, key: &str, pointer: &str) -> Check {
+    if pointer.contains('*') {
+        return Err(format!(
+            "`{key}` names the object itself, not its values: `{pointer}`"
+        ));
+    }
+    let node = schema.resolve(pointer)?;
+    if node.ty != SchemaType::Map {
+        return Err(format!(
+            "`{key}` needs an object keyed by node, but `{pointer}` is {}",
+            article(node.ty)
+        ));
+    }
+    let values = schema.element(pointer, &node)?;
+    if !values.ty.is_scalar() {
+        return Err(format!(
+            "`{key}` values must be scalars, but `{pointer}/*` is {}",
+            article(values.ty)
+        ));
     }
     Ok(())
 }
@@ -986,7 +1001,10 @@ mod tests {
 
     use serde_json::{json, Value};
 
-    use super::{assert_no_display_keys, classify, nullable_variant, SchemaType};
+    use super::{
+        assert_no_display_keys, check_map, classify, nullable_variant, SchemaDoc, SchemaType,
+    };
+    use crate::cli_metadata::{CliDisplay, CliDisplayJoin, CliDisplaySort};
     use crate::idl_tooling::IdlError;
 
     /// The schema walk's two pure decisions, truth-tabled: the generated
@@ -1145,5 +1163,68 @@ mod tests {
             Path::new("command-index.json"),
         )
         .expect("values are not keys");
+    }
+
+    /// #3564: a joined map is held to the primary map's rules — an object
+    /// keyed by node with scalar values, named without `*`, under a header
+    /// that says something.
+    #[test]
+    fn a_join_is_held_to_the_map_rules() {
+        let document = json!({"response": {"properties": {"data": {
+            "type": "object",
+            "properties": {
+                "distances": {"type": "object", "additionalProperties": {"type": "number"}},
+                "predecessors": {"type": "object", "additionalProperties": {"type": "string"}},
+                "source": {"type": "string"},
+                "edges": {
+                    "type": "object",
+                    "additionalProperties": {"type": "object", "properties": {"w": {"type": "number"}}}
+                }
+            }
+        }}}});
+        let schema = SchemaDoc {
+            document: &document,
+            command_id: "graph.analytics.sssp",
+        };
+        let display = |joins: &[(&str, &str)]| CliDisplay {
+            map: Some("/data/distances".to_owned()),
+            header: Some("DISTANCE".to_owned()),
+            sort: Some(CliDisplaySort::Asc),
+            join: joins
+                .iter()
+                .map(|(pointer, header)| CliDisplayJoin {
+                    pointer: (*pointer).to_owned(),
+                    header: (*header).to_owned(),
+                })
+                .collect(),
+            ..CliDisplay::default()
+        };
+        check_map(&schema, &display(&[])).expect("no join is the plain map");
+        check_map(&schema, &display(&[("/data/predecessors", "VIA")]))
+            .expect("a node-keyed scalar map joins");
+        let scalar = check_map(&schema, &display(&[("/data/source", "VIA")]))
+            .expect_err("a scalar is not a map");
+        assert!(
+            scalar.contains("`join` needs an object keyed by node"),
+            "{scalar}"
+        );
+        let records = check_map(&schema, &display(&[("/data/edges", "VIA")]))
+            .expect_err("record values are not scalars");
+        assert!(
+            records.contains("`join` values must be scalars"),
+            "{records}"
+        );
+        let starred = check_map(&schema, &display(&[("/data/predecessors/*", "VIA")]))
+            .expect_err("the join names the object, not its values");
+        assert!(
+            starred.contains("`join` names the object itself"),
+            "{starred}"
+        );
+        let blank = check_map(&schema, &display(&[("/data/predecessors", " ")]))
+            .expect_err("a blank header says nothing");
+        assert!(
+            blank.contains("`join` header for `/data/predecessors` is empty"),
+            "{blank}"
+        );
     }
 }

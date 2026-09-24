@@ -10,8 +10,9 @@ use thiserror::Error;
 mod display;
 pub use display::{
     validate_display_shape, validate_encoding_shape, CliDisplay, CliDisplayAs, CliDisplayDecl,
-    CliDisplayField, CliDisplayShape, CliDisplaySort, CliRenderRule, CliWireEncoding,
-    ReceiptFilter, ReceiptPlaceholder, ReceiptSegment, ReceiptTemplate, ReceiptValue,
+    CliDisplayField, CliDisplayJoin, CliDisplayShape, CliDisplaySort, CliRenderRule,
+    CliWireEncoding, ReceiptFilter, ReceiptPlaceholder, ReceiptSegment, ReceiptTemplate,
+    ReceiptValue,
 };
 
 /// Embedded generated CLI command metadata JSON.

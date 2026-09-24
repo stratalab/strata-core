@@ -593,6 +593,9 @@ commands:
       map: /data/distances
       header: DISTANCE
       sort: asc
+      join:
+        - pointer: /data/predecessors
+          header: VIA
     fixtures:
       setup:
         - requests/v1/graph/create.json

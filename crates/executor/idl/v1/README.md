@@ -131,7 +131,7 @@ shape:
 | value | `value` pointer (+ `as`) | `optional`, `status_value` |
 | fields | `fields:` list of `{field, header?, as?, fields?}` | `optional`, `status_value`, `status_sections` |
 | columns | `columns:` list (+ `fields:` only under `search`, for the diagnostics block) | `history`, `page`, `search`, `batch`, `status_value`, `status_sections` |
-| map | `map` + `header` + `sort` | `analytics` |
+| map | `map` + `header` + `sort` (+ `join:` list of `{pointer, header}`, one more column per node-keyed map) | `analytics` |
 
 Every `/…` string is a pointer into the command's **generated schema**:
 `/data/…` walks the response payload, `/request/…` the request; `*` steps into

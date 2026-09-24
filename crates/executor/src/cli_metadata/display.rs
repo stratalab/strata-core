@@ -205,6 +205,11 @@ pub struct CliDisplay {
     /// Row order for the map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<CliDisplaySort>,
+    /// Further node-keyed maps joined onto the same rows, one column each
+    /// in declared order; a node absent from a joined map leaves that cell
+    /// empty (#3564).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join: Vec<CliDisplayJoin>,
     /// Where to find the flag saying this answer was cut short (#3358 F6).
     /// The rule writes the notice; the command says where the fact lives, so
     /// the renderer never looks for a field by name. A complete answer stays
@@ -248,6 +253,16 @@ pub struct CliDisplayField {
     /// guard refuses a declaration that carries them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<CliDisplayField>,
+}
+
+/// One map joined onto an analytics table by node key (#3564).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliDisplayJoin {
+    /// Schema pointer to the joined node-keyed object.
+    pub pointer: String,
+    /// Column header over the joined values.
+    pub header: String,
 }
 
 /// Presentation of a value beyond its scalar text.
@@ -475,7 +490,7 @@ pub enum CliDisplayShape {
     Fields,
     /// `columns` (+ `fields` under the search rule).
     Columns,
-    /// `map` + `header` + `sort`.
+    /// `map` + `header` + `sort` (+ `join`).
     Map,
 }
 
@@ -529,6 +544,10 @@ impl CliDisplay {
                 "header",
             ),
             (shape != CliDisplayShape::Map && self.sort.is_some(), "sort"),
+            (
+                shape != CliDisplayShape::Map && !self.join.is_empty(),
+                "join",
+            ),
         ]
         .into_iter()
         .find_map(|(is_stray, key)| is_stray.then_some(key));
@@ -668,8 +687,8 @@ pub fn validate_encoding_shape(
 mod tests {
     use super::{
         validate_display_shape, validate_encoding_shape, CliDisplay, CliDisplayAs, CliDisplayDecl,
-        CliRenderRule, CliWireEncoding, ReceiptFilter, ReceiptPlaceholder, ReceiptSegment,
-        ReceiptTemplate, ReceiptValue,
+        CliDisplayField, CliDisplayShape, CliRenderRule, CliWireEncoding, ReceiptFilter,
+        ReceiptPlaceholder, ReceiptSegment, ReceiptTemplate, ReceiptValue,
     };
 
     fn value(pointer: &str, filter: Option<ReceiptFilter>) -> ReceiptSegment {
@@ -908,6 +927,49 @@ mod tests {
             error
                 .to_string()
                 .contains("expected `bespoke` or a display shape map"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn join_belongs_to_the_map_shape_and_round_trips() {
+        // #3564: a joined map is a map-shape key like `header` and `sort`.
+        let joined: CliDisplay = serde_json::from_str(
+            r#"{"map":"/data/distances","header":"DISTANCE","sort":"asc","join":[{"pointer":"/data/predecessors","header":"VIA"}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(joined.shape(), Ok(CliDisplayShape::Map));
+        assert_eq!(joined.join.len(), 1);
+        assert_eq!(joined.join[0].pointer, "/data/predecessors");
+        assert_eq!(joined.join[0].header, "VIA");
+        assert_eq!(
+            serde_json::to_string(&joined).expect("serializes"),
+            r#"{"map":"/data/distances","header":"DISTANCE","sort":"asc","join":[{"pointer":"/data/predecessors","header":"VIA"}]}"#
+        );
+        // Under any other shape it is a stray key, named as such.
+        let stray = CliDisplay {
+            columns: vec![CliDisplayField {
+                field: "/data/items/*/id".to_owned(),
+                tombstone: None,
+                header: None,
+                as_: None,
+                fields: Vec::new(),
+                columns: Vec::new(),
+            }],
+            join: joined.join.clone(),
+            ..CliDisplay::default()
+        };
+        assert_eq!(
+            stray.shape(),
+            Err("`join` is not part of the `columns` shape".to_owned())
+        );
+        // A join entry carries exactly a pointer and a header.
+        let error = serde_json::from_str::<CliDisplay>(
+            r#"{"map":"/d","header":"D","sort":"key","join":[{"pointer":"/p","header":"P","missing":"-"}]}"#,
+        )
+        .expect_err("unknown join keys are rejected");
+        assert!(
+            error.to_string().contains("unknown field `missing`"),
             "{error}"
         );
     }
