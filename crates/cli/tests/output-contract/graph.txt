@@ -46,6 +46,14 @@ bob	0.3174603047943687
 carol	0.3174603047943687
 dave	0.04761908561689371
 ∎
+### graph.analytics.sssp · responses/v1/errors/graph/sssp_edge_type.json · human
+invalid_argument.engine.graph_edge_type: command failed∎
+### graph.analytics.sssp · responses/v1/errors/graph/sssp_edge_type.json · raw
+invalid_argument.engine.graph_edge_type: command failed∎
+### graph.analytics.sssp · responses/v1/errors/graph/sssp_negative_weight.json · human
+failed_precondition.engine.graph_negative_weight: command failed∎
+### graph.analytics.sssp · responses/v1/errors/graph/sssp_negative_weight.json · raw
+failed_precondition.engine.graph_negative_weight: command failed∎
 ### graph.analytics.sssp · responses/v1/graph/sssp_distances.json · human
 NODE   DISTANCE
 alice       0.0

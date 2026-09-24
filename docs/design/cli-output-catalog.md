@@ -2066,17 +2066,21 @@ human today         {
                         "c": 2.0
                       },
                       "graph": "g",
+                      "predecessors": {
+                        "b": "a",
+                        "c": "b"
+                      },
                       "source": "a"
                     }
 human proposed      NODE  DISTANCE
                     a          0.0
                     b          1.0
                     c          2.0
-raw today           {"direction":"outgoing","distances":{"a":0.0,"b":1.0,"c":2.0},"graph":"g","source":"a"}
+raw today           {"direction":"outgoing","distances":{"a":0.0,"b":1.0,"c":2.0},"graph":"g","predecessors":{"b":"a","c":"b"},"source":"a"}
 raw proposed        a⇥0.0
                     b⇥1.0
                     c⇥2.0
---json (unchanged)  {"data":{"direction":"outgoing","distances":{"a":0.0,"b":1.0,"c":2.0},"graph":"g","source":"a"},"type":"graph_sssp_result"}
+--json (unchanged)  {"data":{"direction":"outgoing","distances":{"a":0.0,"b":1.0,"c":2.0},"graph":"g","predecessors":{"b":"a","c":"b"},"source":"a"},"type":"graph_sssp_result"}
 ```
 
 #### `graph.analytics.wcc` — `strata graph wcc`

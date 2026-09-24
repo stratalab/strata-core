@@ -25,7 +25,7 @@ const COMPLETE_FAMILIES: &[&str] = &["json", "kv"];
 ///
 /// Raise it when you document more. It is a ratchet, not a target: the point
 /// is that coverage cannot quietly regress the way it sat at 3 unnoticed.
-const DOCUMENTED_FLOOR: usize = 41;
+const DOCUMENTED_FLOOR: usize = 42;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

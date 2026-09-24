@@ -2184,6 +2184,7 @@ fn graph_command(command: GraphCommand, scope: &Scope) -> Result<Command, CliErr
             graph,
             source,
             direction,
+            edge_types,
             as_of,
             as_of_time,
         } => Command::GraphSssp {
@@ -2192,6 +2193,11 @@ fn graph_command(command: GraphCommand, scope: &Scope) -> Result<Command, CliErr
             graph,
             source,
             direction: Some(direction.into()),
+            edge_types: if edge_types.is_empty() {
+                None
+            } else {
+                Some(edge_types)
+            },
             budget: None,
             as_of,
             as_of_time: as_of_time_micros(as_of_time.as_deref())?,

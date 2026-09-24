@@ -55,10 +55,14 @@
 # download_disabled and unsupported_provider stay: they are environment facts
 # the fake world fixes, covered by the inference resolution matrix and the
 # real-runtime executor tests instead.
-budget: 111
+# 111 -> 109 (#3456/#3471): failed_precondition.engine.graph_negative_weight and
+# invalid_argument.engine.graph_edge_type leave the list — `graph.analytics.sssp`
+# now declares both (it is the only raiser of the first) and replays each from
+# an error case: a negative edge in the setup, and a blank edge type in the
+# request's new `edge_types` filter.
+budget: 109
 unreplayed:
   - already_exists.engine.json_index
-  - failed_precondition.engine.graph_negative_weight
   - failed_precondition.engine.graph_ontology_edge_type
   - failed_precondition.engine.graph_ontology_endpoint_type
   - failed_precondition.engine.graph_ontology_freeze
@@ -96,7 +100,6 @@ unreplayed:
   - invalid_argument.engine.event_payload_too_large
   - invalid_argument.engine.graph_binding
   - invalid_argument.engine.graph_edge_endpoint
-  - invalid_argument.engine.graph_edge_type
   - invalid_argument.engine.graph_edge_type_reserved
   - invalid_argument.engine.graph_edge_weight
   - invalid_argument.engine.graph_name_reserved

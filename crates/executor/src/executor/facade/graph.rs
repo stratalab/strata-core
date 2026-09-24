@@ -408,12 +408,14 @@ impl Executor {
         })
     }
 
-    /// Executes a default-branch shortest-path command.
+    /// Executes a default-branch shortest-path command, restricted to
+    /// `edge_types` when given.
     pub fn graph_sssp(
         &mut self,
         graph: impl Into<String>,
         source: impl Into<String>,
         direction: Option<GraphDirection>,
+        edge_types: Option<Vec<String>>,
     ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphSssp {
             branch: None,
@@ -421,6 +423,7 @@ impl Executor {
             graph: graph.into(),
             source: source.into(),
             direction,
+            edge_types,
             budget: None,
             as_of: None,
             as_of_time: None,

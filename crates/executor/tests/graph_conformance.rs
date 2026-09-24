@@ -277,6 +277,7 @@ fn sssp_matches_the_ldbc_reference() {
                 graph,
                 source: "1".to_owned(),
                 direction: Some(direction),
+                edge_types: None,
                 budget: None,
                 as_of: None,
                 as_of_time: None,

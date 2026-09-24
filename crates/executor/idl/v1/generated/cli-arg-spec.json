@@ -533,7 +533,8 @@
       "flags": {
         "as_of": "as-of",
         "as_of_time": "as-of-time",
-        "direction": "direction"
+        "direction": "direction",
+        "edge_types": "edge-type"
       }
     },
     "graph wcc": {

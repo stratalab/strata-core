@@ -7,6 +7,10 @@
       "carol": 3.0
     },
     "graph": "social",
+    "predecessors": {
+      "bob": "alice",
+      "carol": "bob"
+    },
     "source": "alice"
   },
   "type": "graph_sssp_result"

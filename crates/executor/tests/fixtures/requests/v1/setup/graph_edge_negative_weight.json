@@ -1,0 +1,8 @@
+{
+  "type": "graph_add_edge",
+  "graph": "social",
+  "src": "alice",
+  "edge_type": "owes",
+  "dst": "bob",
+  "weight": -1.0
+}

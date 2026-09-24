@@ -1,0 +1,7 @@
+{
+  "class": "invalid_argument",
+  "code": "invalid_argument.engine.graph_edge_type",
+  "commit_outcome": "not_started",
+  "retry_policy": "never",
+  "retryable": false
+}
