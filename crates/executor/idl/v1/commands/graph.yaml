@@ -203,15 +203,8 @@ commands:
     output: Output::GraphEdgeWriteResult
     prose: commands/graph.edge.add.md
     errors+:
-      - invalid_argument.engine.graph_node_id
-      - invalid_argument.engine.graph_edge_type
+      - set:graph.edge_write
       - invalid_argument.engine.graph_edge_type_reserved
-      - invalid_argument.engine.graph_edge_weight
-      - invalid_argument.engine.graph_edge_endpoint
-      - invalid_argument.engine.graph_properties
-      - invalid_argument.engine.graph_properties_too_large
-      - failed_precondition.engine.graph_negative_weight
-      - failed_precondition.engine.graph_ontology_edge_type
       - failed_precondition.engine.graph_ontology_endpoint_type
     display:
       receipt: "{verb} edge {/data/src} -[{/data/edge_type}]-> {/data/dst} in {/data/graph}"
@@ -363,10 +356,7 @@ commands:
     output: Output::GraphOntologyWriteResult
     prose: commands/graph.ontology.define_object_type.md
     errors+:
-      - invalid_argument.engine.graph_type_name
-      - invalid_argument.engine.graph_type_name_reserved
-      - invalid_argument.engine.graph_property_name
-      - failed_precondition.engine.graph_ontology_frozen
+      - set:graph.ontology_definition
     display:
       receipt: "{verb} object type {/data/type_name} in {/data/graph}"
       noun: "object type"
@@ -384,10 +374,7 @@ commands:
     output: Output::GraphOntologyWriteResult
     prose: commands/graph.ontology.define_link_type.md
     errors+:
-      - invalid_argument.engine.graph_type_name
-      - invalid_argument.engine.graph_type_name_reserved
-      - invalid_argument.engine.graph_property_name
-      - failed_precondition.engine.graph_ontology_frozen
+      - set:graph.ontology_definition
     display:
       receipt: "{verb} link type {/data/type_name} in {/data/graph}"
       noun: "link type"
@@ -698,15 +685,8 @@ commands:
     prose: commands/graph.bulk_insert.md
     wire_status: transitional
     errors+:
-      - invalid_argument.engine.graph_node_id
-      - invalid_argument.engine.graph_edge_type
-      - invalid_argument.engine.graph_edge_weight
-      - invalid_argument.engine.graph_edge_endpoint
-      - invalid_argument.engine.graph_properties
-      - invalid_argument.engine.graph_properties_too_large
-      - failed_precondition.engine.graph_negative_weight
+      - set:graph.edge_write
       - failed_precondition.engine.graph_ontology_node_type
-      - failed_precondition.engine.graph_ontology_edge_type
     display:
       receipt: "inserted {/data/nodes_inserted|plural:node}, {/data/edges_inserted|plural:edge} into {/data/graph}"
       identity:

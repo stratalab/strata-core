@@ -6,14 +6,7 @@ commands:
     output: Output::JsonWriteResult
     prose: commands/json.set.md
     errors+:
-      - invalid_argument.engine.json_path
-      - invalid_argument.engine.json_path_too_long
-      - invalid_argument.engine.json_path_not_found
-      - invalid_argument.engine.json_path_type
-      - invalid_argument.engine.json_value
-      - invalid_argument.engine.json_document_too_large
-      - invalid_argument.engine.json_document_too_deep
-      - invalid_argument.engine.json_array_too_large
+      - set:json.document_write
     display:
       receipt: "{verb} {/data/key}"
       noun: key
@@ -124,14 +117,7 @@ commands:
     output: Output::JsonBatchResults
     prose: commands/json.batch_set.md
     errors+:
-      - invalid_argument.engine.json_path
-      - invalid_argument.engine.json_path_too_long
-      - invalid_argument.engine.json_path_not_found
-      - invalid_argument.engine.json_path_type
-      - invalid_argument.engine.json_value
-      - invalid_argument.engine.json_document_too_large
-      - invalid_argument.engine.json_document_too_deep
-      - invalid_argument.engine.json_array_too_large
+      - set:json.document_write
       - invalid_argument.executor.json_batch_duplicate_key
     display:
       columns:

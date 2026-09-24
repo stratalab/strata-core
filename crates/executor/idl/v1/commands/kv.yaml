@@ -94,9 +94,7 @@ commands:
     output: Output::BatchResults
     prose: commands/kv.batch_put.md
     errors+:
-      - invalid_argument.engine.kv_batch
-      - invalid_argument.engine.kv_batch_duplicate_key
-      - invalid_argument.executor.kv_batch_duplicate_key
+      - set:kv.batch_input
     display:
       columns:
         - field: /data/items/*/result/key
@@ -134,9 +132,7 @@ commands:
     output: Output::BatchResults
     prose: commands/kv.batch_delete.md
     errors+:
-      - invalid_argument.engine.kv_batch
-      - invalid_argument.engine.kv_batch_duplicate_key
-      - invalid_argument.executor.kv_batch_duplicate_key
+      - set:kv.batch_input
     display:
       columns:
         - field: /data/items/*/result/key

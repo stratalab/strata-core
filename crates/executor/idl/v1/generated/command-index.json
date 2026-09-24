@@ -644,20 +644,12 @@
           "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_format"
         },
         {
-          "code": "invalid_argument.executor.arrow_empty_export",
-          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_empty_export"
-        },
-        {
-          "code": "invalid_argument.executor.arrow_vector_dimension",
-          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_vector_dimension"
+          "code": "invalid_argument.executor.arrow_collection",
+          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_collection"
         },
         {
           "code": "invalid_argument.executor.arrow_graph",
           "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_graph"
-        },
-        {
-          "code": "invalid_argument.executor.arrow_collection",
-          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_collection"
         },
         {
           "code": "unavailable.executor.arrow_io",
@@ -666,6 +658,14 @@
         {
           "code": "internal.executor.arrow",
           "docs": "https://stratadb.org/e/internal.executor.arrow"
+        },
+        {
+          "code": "invalid_argument.executor.arrow_empty_export",
+          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_empty_export"
+        },
+        {
+          "code": "invalid_argument.executor.arrow_vector_dimension",
+          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_vector_dimension"
         }
       ],
       "fixtures": {
@@ -733,6 +733,22 @@
           "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_format"
         },
         {
+          "code": "invalid_argument.executor.arrow_collection",
+          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_collection"
+        },
+        {
+          "code": "invalid_argument.executor.arrow_graph",
+          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_graph"
+        },
+        {
+          "code": "unavailable.executor.arrow_io",
+          "docs": "https://stratadb.org/e/unavailable.executor.arrow_io"
+        },
+        {
+          "code": "internal.executor.arrow",
+          "docs": "https://stratadb.org/e/internal.executor.arrow"
+        },
+        {
           "code": "invalid_argument.executor.arrow_input_missing",
           "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_input_missing"
         },
@@ -743,10 +759,6 @@
         {
           "code": "invalid_argument.executor.arrow_value_column",
           "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_value_column"
-        },
-        {
-          "code": "invalid_argument.executor.arrow_collection",
-          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_collection"
         },
         {
           "code": "invalid_argument.executor.arrow_embedding_type",
@@ -777,20 +789,8 @@
           "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_event"
         },
         {
-          "code": "invalid_argument.executor.arrow_graph",
-          "docs": "https://stratadb.org/e/invalid_argument.executor.arrow_graph"
-        },
-        {
           "code": "not_found.engine.vector_collection",
           "docs": "https://stratadb.org/e/not_found.engine.vector_collection"
-        },
-        {
-          "code": "unavailable.executor.arrow_io",
-          "docs": "https://stratadb.org/e/unavailable.executor.arrow_io"
-        },
-        {
-          "code": "internal.executor.arrow",
-          "docs": "https://stratadb.org/e/internal.executor.arrow"
         }
       ],
       "fixtures": {
@@ -2938,12 +2938,12 @@
           "docs": "https://stratadb.org/e/failed_precondition.engine.graph_negative_weight"
         },
         {
-          "code": "failed_precondition.engine.graph_ontology_node_type",
-          "docs": "https://stratadb.org/e/failed_precondition.engine.graph_ontology_node_type"
-        },
-        {
           "code": "failed_precondition.engine.graph_ontology_edge_type",
           "docs": "https://stratadb.org/e/failed_precondition.engine.graph_ontology_edge_type"
+        },
+        {
+          "code": "failed_precondition.engine.graph_ontology_node_type",
+          "docs": "https://stratadb.org/e/failed_precondition.engine.graph_ontology_node_type"
         }
       ],
       "fixtures": {
@@ -3183,10 +3183,6 @@
           "docs": "https://stratadb.org/e/invalid_argument.engine.graph_edge_type"
         },
         {
-          "code": "invalid_argument.engine.graph_edge_type_reserved",
-          "docs": "https://stratadb.org/e/invalid_argument.engine.graph_edge_type_reserved"
-        },
-        {
           "code": "invalid_argument.engine.graph_edge_weight",
           "docs": "https://stratadb.org/e/invalid_argument.engine.graph_edge_weight"
         },
@@ -3209,6 +3205,10 @@
         {
           "code": "failed_precondition.engine.graph_ontology_edge_type",
           "docs": "https://stratadb.org/e/failed_precondition.engine.graph_ontology_edge_type"
+        },
+        {
+          "code": "invalid_argument.engine.graph_edge_type_reserved",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.graph_edge_type_reserved"
         },
         {
           "code": "failed_precondition.engine.graph_ontology_endpoint_type",

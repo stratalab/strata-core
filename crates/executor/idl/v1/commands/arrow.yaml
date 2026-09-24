@@ -8,13 +8,10 @@ commands:
     commit: commits_on_success
     prose: commands/arrow.import.md
     errors+:
-      - invalid_argument.engine.product_space
-      - unsupported.executor.arrow_feature_disabled
-      - invalid_argument.executor.arrow_format
+      - set:arrow.io
       - invalid_argument.executor.arrow_input_missing
       - invalid_argument.executor.arrow_key_column
       - invalid_argument.executor.arrow_value_column
-      - invalid_argument.executor.arrow_collection
       - invalid_argument.executor.arrow_embedding_type
       - invalid_argument.executor.arrow_encoding
       - invalid_argument.executor.arrow_json_key
@@ -22,10 +19,7 @@ commands:
       - invalid_argument.executor.arrow_base64
       - invalid_argument.executor.arrow_vector_key
       - invalid_argument.executor.arrow_event
-      - invalid_argument.executor.arrow_graph
       - not_found.engine.vector_collection
-      - unavailable.executor.arrow_io
-      - internal.executor.arrow
     display:
       receipt: "imported {/data/rows_imported|plural:row} into {/data/target} from {/data/file_path} ({/data/rows_skipped} skipped)"
     fixtures:
@@ -40,15 +34,9 @@ commands:
     access: read
     prose: commands/arrow.export.md
     errors+:
-      - invalid_argument.engine.product_space
-      - unsupported.executor.arrow_feature_disabled
-      - invalid_argument.executor.arrow_format
+      - set:arrow.io
       - invalid_argument.executor.arrow_empty_export
       - invalid_argument.executor.arrow_vector_dimension
-      - invalid_argument.executor.arrow_graph
-      - invalid_argument.executor.arrow_collection
-      - unavailable.executor.arrow_io
-      - internal.executor.arrow
     display:
       receipt: "exported {/data/row_count|plural:row} of {/data/primitive} to {/data/paths/0} ({/data/size_bytes|size})"
     fixtures:
