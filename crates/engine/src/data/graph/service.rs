@@ -107,13 +107,36 @@ impl<'a> GraphService<'a> {
     }
 
     /// Deletes a graph and all visible graph data rows.
-    pub fn delete_graph(&mut self, name: &GraphName) -> Result<GraphDeleteOutcome, EngineError> {
+    pub fn delete_graph(
+        &mut self,
+        name: &GraphName,
+        force: bool,
+    ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
         if self
             .graph_metadata_row(&record, name, ReadSelector::Latest)?
             .is_none()
         {
             return Ok(GraphDeleteOutcome::new(name.clone(), false, None));
+        }
+
+        // #3122: a populated graph refuses deletion without force, matching
+        // `space delete` — deleting a graph destroys every node and edge in it,
+        // so a mistyped name must not silently wipe data the caller did not
+        // name. Nodes are the content (edges require both endpoints).
+        let live_nodes: Vec<_> = self
+            .node_rows(&record, name, ReadSelector::Latest)?
+            .into_iter()
+            .filter(|row| !row.is_tombstone())
+            .collect();
+        if !live_nodes.is_empty() && !force {
+            return Err(EngineError::conflict(
+                "failed_precondition.engine.graph_not_empty",
+                format!(
+                    "graph `{}` contains visible data; retry with force=true to delete it",
+                    name.as_str()
+                ),
+            ));
         }
 
         let mut mutations = Vec::new();
@@ -124,14 +147,12 @@ impl<'a> GraphService<'a> {
         {
             mutations.push(RowMutation::delete(self.ontology_address(&record, name)));
         }
-        for row in self.node_rows(&record, name, ReadSelector::Latest)? {
-            if !row.is_tombstone() {
-                mutations.push(RowMutation::delete(RowAddress::new(
-                    record.storage_branch_id(),
-                    RowClass::GraphNode,
-                    row.key().to_vec(),
-                )));
-            }
+        for row in live_nodes {
+            mutations.push(RowMutation::delete(RowAddress::new(
+                record.storage_branch_id(),
+                RowClass::GraphNode,
+                row.key().to_vec(),
+            )));
         }
         for row in self.edge_rows(&record, name, ReadSelector::Latest)? {
             if !row.is_tombstone() {

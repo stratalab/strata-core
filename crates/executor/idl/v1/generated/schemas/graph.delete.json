@@ -143,6 +143,10 @@
           "null"
         ]
       },
+      "force": {
+        "description": "Delete the graph's nodes and edges before dropping it. A populated\ngraph is refused without this.",
+        "type": "boolean"
+      },
       "graph": {
         "description": "Graph name.",
         "type": "string"

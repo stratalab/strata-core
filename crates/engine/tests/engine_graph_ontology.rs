@@ -720,7 +720,7 @@ fn graph_ontology_space_isolation_reopen_and_delete_cleanup_on_durable() {
 
     // Deleting the graph removes its ontology: a recreated graph starts
     // with no ontology and a mutable draft.
-    graph.delete_graph(&name).expect("delete succeeds");
+    graph.delete_graph(&name, true).expect("delete succeeds");
     graph.create_graph(name.clone()).expect("recreate succeeds");
     assert!(
         graph.ontology(&name).expect("read succeeds").is_none(),

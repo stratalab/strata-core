@@ -32,11 +32,12 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         graph: String,
+        force: bool,
     ) -> Result<Output, ExecutorError> {
         let graph = graph_name(graph)?;
         let mut service = self.graph_service(branch, space)?;
         Ok(graph_delete_output(
-            &service.delete_graph(&graph)?,
+            &service.delete_graph(&graph, force)?,
             None,
             None,
             None,

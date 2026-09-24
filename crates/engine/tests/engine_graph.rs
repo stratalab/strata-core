@@ -71,6 +71,51 @@ fn graph_list_edges_streams_full_edge_data_with_a_cursor() {
 }
 
 #[test]
+fn graph_delete_guards_a_populated_graph_without_force() {
+    run_database_modes(exercise_graph_delete_force_guard);
+}
+
+/// #3122: deleting a graph destroys every node and edge in it, so a populated
+/// graph refuses deletion without force (matching space delete) while an empty
+/// one deletes freely.
+fn exercise_graph_delete_force_guard(mut database: Database) {
+    let mut graph = graph_service(&mut database, "default", "default");
+
+    // An empty graph deletes without force — no data is at risk.
+    graph
+        .create_graph(graph_name("empty"))
+        .expect("empty graph create succeeds");
+    assert!(graph
+        .delete_graph(&graph_name("empty"), false)
+        .expect("an empty graph deletes without force")
+        .deleted());
+
+    // A populated graph refuses deletion without force...
+    graph
+        .create_graph(graph_name("deps"))
+        .expect("deps graph create succeeds");
+    graph
+        .upsert_node(&graph_name("deps"), node("a"), node_data(json!({}), None))
+        .expect("node upsert succeeds");
+    let refused = graph
+        .delete_graph(&graph_name("deps"), false)
+        .expect_err("a populated graph refuses deletion without force");
+    assert_eq!(refused.class(), EngineErrorClass::Conflict);
+    assert_eq!(refused.code(), "failed_precondition.engine.graph_not_empty");
+    // ...and the refusal is zero-mutation — the node is still there.
+    assert!(graph
+        .get_node(&graph_name("deps"), &node("a"))
+        .expect("read succeeds")
+        .is_some());
+
+    // With force, it deletes.
+    assert!(graph
+        .delete_graph(&graph_name("deps"), true)
+        .expect("force deletes a populated graph")
+        .deleted());
+}
+
+#[test]
 fn graph_branch_and_space_isolation_match_other_primitives() {
     let mut database = open_cache_database().expect("cache open succeeds");
     let parent_binding = binding(GraphBindingPrimitive::Json, "docs", "parent-bound");
@@ -233,7 +278,7 @@ fn graph_branch_and_space_isolation_match_other_primitives() {
             .create_graph(graph_name("feature-only"))
             .expect("feature graph create succeeds");
         assert!(feature
-            .delete_graph(&graph_name("deps"))
+            .delete_graph(&graph_name("deps"), true)
             .expect("feature graph delete succeeds")
             .deleted());
         assert!(feature
@@ -441,7 +486,7 @@ fn graph_durable_delete_reopen_and_recreate_drops_stale_indexes() {
             )
             .expect("edge upsert succeeds");
         assert!(graph
-            .delete_graph(&graph_name("deps"))
+            .delete_graph(&graph_name("deps"), true)
             .expect("graph delete succeeds")
             .deleted());
         assert!(graph
@@ -743,7 +788,7 @@ fn exercise_graph_lifecycle_node_edge_and_binding(mut database: Database) {
         .is_empty());
 
     assert!(graph
-        .delete_graph(&graph_name("deps"))
+        .delete_graph(&graph_name("deps"), true)
         .expect("graph delete succeeds")
         .deleted());
     assert!(graph
@@ -1223,7 +1268,7 @@ fn exercise_graph_temporal_reads(mut database: Database) {
 fn exercise_graph_lifecycle_pagination_and_recreate(mut database: Database) {
     let mut graph = graph_service(&mut database, "default", "default");
     assert!(!graph
-        .delete_graph(&graph_name("missing"))
+        .delete_graph(&graph_name("missing"), true)
         .expect("missing graph delete succeeds")
         .deleted());
 
@@ -1259,7 +1304,7 @@ fn exercise_graph_lifecycle_pagination_and_recreate(mut database: Database) {
     assert!(!second_page.has_more());
 
     assert!(graph
-        .delete_graph(&graph_name("alpha"))
+        .delete_graph(&graph_name("alpha"), true)
         .expect("empty graph delete succeeds")
         .deleted());
     assert!(graph
@@ -1285,7 +1330,7 @@ fn exercise_graph_lifecycle_pagination_and_recreate(mut database: Database) {
         )
         .expect("self edge upsert succeeds");
     assert!(graph
-        .delete_graph(&graph_name("beta"))
+        .delete_graph(&graph_name("beta"), true)
         .expect("non-empty graph delete succeeds")
         .deleted());
     assert!(graph

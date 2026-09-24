@@ -554,6 +554,7 @@ fn vector_mapping_collection_commands() -> Vec<Command> {
             branch: None,
             space: None,
             collection: "other".to_owned(),
+            force: true,
         },
         Command::VectorListCollections {
             branch: None,
@@ -1950,6 +1951,7 @@ fn delete_collection(executor: &mut Executor, collection: &str) -> bool {
             branch: None,
             space: None,
             collection: collection.to_owned(),
+            force: true,
         })
         .expect("delete collection succeeds")
     else {

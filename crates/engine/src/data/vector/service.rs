@@ -176,16 +176,34 @@ impl<'a> VectorService<'a> {
     }
 
     /// Deletes a vector collection and all currently visible vectors in it.
-    pub fn delete_collection(&mut self, name: &VectorCollectionName) -> Result<bool, EngineError> {
+    pub fn delete_collection(
+        &mut self,
+        name: &VectorCollectionName,
+        force: bool,
+    ) -> Result<bool, EngineError> {
         let record = self.branch_record()?;
         let Some(_) = self.collection_config_row(&record, name, ReadSelector::Latest)? else {
             return Ok(false);
         };
+        // #3122: a populated collection refuses deletion without force, matching
+        // `space delete` — deleting a collection destroys every vector in it, so
+        // a mistyped name must not silently wipe data the caller did not name.
+        let live: Vec<_> = self
+            .vector_rows(&record, name, ReadSelector::Latest)?
+            .into_iter()
+            .filter(|row| !row.is_tombstone())
+            .collect();
+        if !live.is_empty() && !force {
+            return Err(EngineError::conflict(
+                "failed_precondition.engine.vector_collection_not_empty",
+                format!(
+                    "vector collection `{}` contains visible data; retry with force=true to delete it",
+                    name.as_str()
+                ),
+            ));
+        }
         let mut mutations = vec![RowMutation::delete(self.collection_address(&record, name))];
-        for row in self.vector_rows(&record, name, ReadSelector::Latest)? {
-            if row.is_tombstone() {
-                continue;
-            }
+        for row in live {
             mutations.push(RowMutation::delete(RowAddress::new(
                 record.storage_branch_id(),
                 RowClass::Vector,

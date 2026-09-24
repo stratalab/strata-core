@@ -14,11 +14,16 @@ impl Executor {
     }
 
     /// Executes a default-branch graph-delete command.
-    pub fn graph_delete(&mut self, graph: impl Into<String>) -> Result<Output, ExecutorError> {
+    pub fn graph_delete(
+        &mut self,
+        graph: impl Into<String>,
+        force: bool,
+    ) -> Result<Output, ExecutorError> {
         self.execute(Command::GraphDelete {
             branch: None,
             space: None,
             graph: graph.into(),
+            force,
         })
     }
 

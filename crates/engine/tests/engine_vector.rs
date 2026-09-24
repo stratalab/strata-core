@@ -149,7 +149,7 @@ fn assert_collection_delete_hides_rows(
     docs: &VectorCollectionName,
 ) {
     assert!(vectors
-        .delete_collection(docs)
+        .delete_collection(docs, true)
         .expect("collection delete succeeds"));
     assert!(vectors
         .collection_info(docs)
@@ -756,7 +756,7 @@ fn exercise_vector_snapshot_existence_contract(database: &mut Database) {
         .expect("upsert into the soon-dropped collection succeeds");
     let alive = alive.commit().timestamp();
     assert!(vectors
-        .delete_collection(&dropped)
+        .delete_collection(&dropped, true)
         .expect("collection delete succeeds"));
 
     assert_eq!(

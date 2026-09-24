@@ -1036,6 +1036,10 @@ pub enum Command {
         space: Option<String>,
         /// Collection name.
         collection: String,
+        /// Delete the collection's vectors before dropping it. A populated
+        /// collection is refused without this.
+        #[serde(default, skip_serializing_if = "is_false")]
+        force: bool,
     },
     /// Lists vector collections.
     VectorListCollections {
@@ -1683,6 +1687,10 @@ pub enum Command {
         space: Option<String>,
         /// Graph name.
         graph: String,
+        /// Delete the graph's nodes and edges before dropping it. A populated
+        /// graph is refused without this.
+        #[serde(default, skip_serializing_if = "is_false")]
+        force: bool,
     },
     /// Lists graphs.
     GraphList {

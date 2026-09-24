@@ -37,6 +37,7 @@ $ strata vector collection list
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `collection` | `string` | yes | Collection name. |
+| `force` | `boolean` | no | Delete the collection's vectors before dropping it. A populated collection is refused without this. |
 
 Plus the optional scope: `branch` and `space` (default to the session branch and the `"default"` space).
 
@@ -54,6 +55,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.vector_collection`](https://stratadb.org/e/invalid_argument.engine.vector_collection)
 - [`invalid_argument.engine.vector_key`](https://stratadb.org/e/invalid_argument.engine.vector_key)
 - [`not_found.engine.vector_collection`](https://stratadb.org/e/not_found.engine.vector_collection)
+- [`failed_precondition.engine.vector_collection_not_empty`](https://stratadb.org/e/failed_precondition.engine.vector_collection_not_empty)
 
 ## Invocation
 

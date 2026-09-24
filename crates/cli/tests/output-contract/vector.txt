@@ -97,6 +97,10 @@ created collection docs (2 dimensions, cosine)
 ### vector.collection.create · responses/v1/vector/collection_list.json · raw
 docs
 ∎
+### vector.collection.delete · responses/v1/errors/vector/collection_delete_not_empty.json · human
+failed_precondition.engine.vector_collection_not_empty: command failed∎
+### vector.collection.delete · responses/v1/errors/vector/collection_delete_not_empty.json · raw
+failed_precondition.engine.vector_collection_not_empty: command failed∎
 ### vector.collection.delete · responses/v1/vector/collection_delete_true.json · human
 deleted collection docs
 ∎
