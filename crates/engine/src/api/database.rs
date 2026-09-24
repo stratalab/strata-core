@@ -300,11 +300,12 @@ impl Database {
     /// Returns a byte-oriented KV service for the selected branch and space.
     pub fn kv(
         &self,
-        branch: BranchName,
-        space: ProductSpace,
+        branch: impl Into<BranchName>,
+        space: impl Into<ProductSpace>,
     ) -> Result<KvService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
+        let (branch, space) = (branch.into(), space.into());
         self.require_branch(&branch)?;
         Ok(KvService::new(
             &self.persistence,
@@ -348,11 +349,12 @@ impl Database {
     /// Returns a JSON document service for the selected branch and space.
     pub fn json(
         &self,
-        branch: BranchName,
-        space: ProductSpace,
+        branch: impl Into<BranchName>,
+        space: impl Into<ProductSpace>,
     ) -> Result<JsonService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
+        let (branch, space) = (branch.into(), space.into());
         self.require_branch(&branch)?;
         Ok(JsonService::new(
             &self.persistence,
@@ -371,11 +373,12 @@ impl Database {
     /// follow-up work rather than decided here.
     pub fn vector(
         &mut self,
-        branch: BranchName,
-        space: ProductSpace,
+        branch: impl Into<BranchName>,
+        space: impl Into<ProductSpace>,
     ) -> Result<VectorService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
+        let (branch, space) = (branch.into(), space.into());
         self.require_branch(&branch)?;
         Ok(VectorService::new(
             &mut self.persistence,
@@ -389,11 +392,12 @@ impl Database {
     /// Returns an event log service for the selected branch and space.
     pub fn event(
         &self,
-        branch: BranchName,
-        space: ProductSpace,
+        branch: impl Into<BranchName>,
+        space: impl Into<ProductSpace>,
     ) -> Result<EventService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
+        let (branch, space) = (branch.into(), space.into());
         self.require_branch(&branch)?;
         Ok(EventService::new(
             &self.persistence,
@@ -406,11 +410,12 @@ impl Database {
     /// Returns a graph core service for the selected branch and space.
     pub fn graph(
         &self,
-        branch: BranchName,
-        space: ProductSpace,
+        branch: impl Into<BranchName>,
+        space: impl Into<ProductSpace>,
     ) -> Result<GraphService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
+        let (branch, space) = (branch.into(), space.into());
         self.require_branch(&branch)?;
         Ok(GraphService::new(
             &self.persistence,
@@ -421,9 +426,13 @@ impl Database {
     }
 
     /// Returns a product space service for the selected branch.
-    pub fn spaces(&mut self, branch: BranchName) -> Result<SpaceService<'_>, EngineError> {
+    pub fn spaces(
+        &mut self,
+        branch: impl Into<BranchName>,
+    ) -> Result<SpaceService<'_>, EngineError> {
         self.require_open()?;
         self.control.require_healthy()?;
+        let branch = branch.into();
         Ok(SpaceService::new(
             &mut self.persistence,
             &mut self.control,

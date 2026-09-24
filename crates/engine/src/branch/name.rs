@@ -42,6 +42,15 @@ impl TryFrom<&str> for BranchName {
     }
 }
 
+/// A borrowed name is already validated, so owning a copy is a plain clone.
+/// This is what lets a session-long name be lent to every service accessor
+/// instead of cloned at each call (#3191).
+impl From<&BranchName> for BranchName {
+    fn from(name: &BranchName) -> Self {
+        name.clone()
+    }
+}
+
 impl<'de> Deserialize<'de> for BranchName {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
