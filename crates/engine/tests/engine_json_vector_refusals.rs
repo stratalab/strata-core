@@ -11,7 +11,10 @@
 mod common;
 
 use serde_json::json;
-use strata_engine::{JsonDocumentId, JsonIndexName, VectorMetadata};
+use strata_engine::{
+    JsonDocumentId, JsonIndexName, VectorCollectionName, VectorConfig, VectorDistanceMetric,
+    VectorKey, VectorMetadata,
+};
 
 use common::{branch, open_cache_database, space};
 
@@ -169,4 +172,54 @@ fn json_path_segment_limit_is_the_refusal_boundary() {
     let error =
         strata_engine::JsonPath::from_segments(path(LIMIT + 1)).expect_err("one segment past");
     assert_eq!(error.code(), "invalid_argument.engine.json_path_too_long");
+}
+
+/// A collection dimension is bounded at 32,768.
+#[test]
+fn vector_dimension_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 32_768;
+    VectorConfig::new(LIMIT, VectorDistanceMetric::Cosine).expect("the widest accepted dimension");
+    let error =
+        VectorConfig::new(LIMIT + 1, VectorDistanceMetric::Cosine).expect_err("one dimension past");
+    assert_eq!(error.code(), "invalid_argument.engine.vector_dimension");
+}
+
+/// A collection name is bounded at 256 bytes.
+#[test]
+fn vector_collection_name_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 256;
+    VectorCollectionName::new("a".repeat(LIMIT)).expect("the longest accepted name");
+    let error = VectorCollectionName::new("a".repeat(LIMIT + 1)).expect_err("one byte past");
+    assert_eq!(error.code(), "invalid_argument.engine.vector_collection");
+}
+
+/// A vector key is bounded at 1,024 bytes.
+#[test]
+fn vector_key_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 1024;
+    VectorKey::new("a".repeat(LIMIT)).expect("the longest accepted key");
+    let error = VectorKey::new("a".repeat(LIMIT + 1)).expect_err("one byte past");
+    assert_eq!(error.code(), "invalid_argument.engine.vector_key");
+}
+
+/// Metadata is bounded at 16 MiB of encoded JSON.
+#[test]
+fn vector_metadata_size_limit_is_the_refusal_boundary() {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    // `{"v":"<pad>"}` is the payload plus six bytes of framing and two quotes.
+    let framing = json!({ "v": "" }).to_string().len();
+    let at = json!({ "v": "a".repeat(LIMIT - framing) });
+    assert_eq!(
+        serde_json::to_vec(&at).expect("encode").len(),
+        LIMIT,
+        "the fixture is exactly at the limit"
+    );
+    VectorMetadata::new(at).expect("metadata exactly at the limit");
+
+    let over = json!({ "v": "a".repeat(LIMIT - framing + 1) });
+    let error = VectorMetadata::new(over).expect_err("one byte past");
+    assert_eq!(
+        error.code(),
+        "invalid_argument.engine.vector_metadata_too_large"
+    );
 }

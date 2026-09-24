@@ -216,7 +216,7 @@
   "command": "graph.bulk_insert",
   "request": {
     "additionalProperties": false,
-    "description": "Ingests nodes and edges in chunked commits.",
+    "description": "Ingests nodes and edges in chunked commits.\n\n# Guaranteed semantics\n\n- **Limits.** Each node id is at most **1,024 bytes**\n  (`invalid_argument.engine.graph_node_id`), refused before anything is\n  written. The items-per-chunk size defaults to 512 and clamps to\n  **800** so one chunk fits one storage commit — a larger request is\n  reduced, not refused.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

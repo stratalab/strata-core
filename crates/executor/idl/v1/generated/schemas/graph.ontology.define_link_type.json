@@ -150,7 +150,7 @@
   "command": "graph.ontology.define_link_type",
   "request": {
     "additionalProperties": false,
-    "description": "Defines (or, while the ontology is draft, redefines) a link type.",
+    "description": "Defines (or, while the ontology is draft, redefines) a link type.\n\n# Guaranteed semantics\n\n- **Limits.** A type name is at most **256 bytes**\n  (`invalid_argument.engine.graph_type_name`), and each property name is\n  at most **256 bytes** (`invalid_argument.engine.graph_property_name`).\n  Each is refused before the definition is recorded.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

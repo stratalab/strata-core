@@ -134,7 +134,7 @@
   "command": "vector.upsert",
   "request": {
     "additionalProperties": false,
-    "description": "Upserts one vector.",
+    "description": "Upserts one vector.\n\n# Guaranteed semantics\n\n- **Limits.** A vector key is at most **1,024 bytes**\n  (`invalid_argument.engine.vector_key`), and metadata is at most\n  **16 MiB** serialized\n  (`invalid_argument.engine.vector_metadata_too_large`). Each is refused\n  before anything is written.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

@@ -147,4 +147,13 @@ mod tests {
         assert_eq!(error.class(), EngineErrorClass::InvalidInput);
         assert_eq!(error.code(), "invalid_argument.engine.product_space");
     }
+
+    /// A product space is bounded at 65,535 bytes (#3214).
+    #[test]
+    fn product_space_limit_is_the_refusal_boundary() {
+        const LIMIT: usize = u16::MAX as usize;
+        ProductSpace::new("s".repeat(LIMIT)).expect("the longest accepted product space");
+        let error = ProductSpace::new("s".repeat(LIMIT + 1)).expect_err("one byte past");
+        assert_eq!(error.code(), "invalid_argument.engine.product_space");
+    }
 }

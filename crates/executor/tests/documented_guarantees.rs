@@ -25,7 +25,7 @@ const COMPLETE_FAMILIES: &[&str] = &["json", "kv"];
 ///
 /// Raise it when you document more. It is a ratchet, not a target: the point
 /// is that coverage cannot quietly regress the way it sat at 3 unnoticed.
-const DOCUMENTED_FLOOR: usize = 31;
+const DOCUMENTED_FLOOR: usize = 38;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -125,84 +125,139 @@ fn complete_families_are_real_and_non_empty() {
     }
 }
 
-/// A published limit must be the constant the engine enforces (#3214).
+/// The declared value of `const {name}` in an engine module's source, with
+/// `u16::MAX` and product expressions like `16 * 1024 * 1024` evaluated the
+/// way the source writes them.
+///
+/// Reads the engine source rather than the constants themselves: they are
+/// private, and making them `pub` to satisfy a test would widen the D4 surface
+/// to document it.
+fn engine_constant(module_src: &str, module: &str, name: &str) -> u64 {
+    let line = module_src
+        .lines()
+        .find(|line| line.contains(&format!("const {name}:")))
+        .unwrap_or_else(|| panic!("`{name}` is no longer declared in {module}"));
+    let expr = line
+        .split('=')
+        .nth(1)
+        .expect("a constant has a value")
+        .trim()
+        .trim_end_matches(';')
+        .replace('_', "");
+    if expr.contains("u16::MAX") {
+        return u64::from(u16::MAX);
+    }
+    expr.split('*')
+        .map(|part| {
+            part.trim()
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("`{name}` has an unexpected value `{expr}`"))
+        })
+        .product()
+}
+
+/// The numeric meaning of a rendered limit like `**16 MiB**` or `**1,024
+/// bytes**`, so the comparison is against the constant and not another string.
+fn rendered_as_number(rendered: &str) -> u64 {
+    let digits: String = rendered.chars().filter(char::is_ascii_digit).collect();
+    let value: u64 = digits.parse().expect("a documented limit is a number");
+    if rendered.contains("MiB") {
+        value * 1024 * 1024
+    } else {
+        value
+    }
+}
+
+/// Every published limit must be the constant the engine enforces (#3214).
 ///
 /// The `Limits` bullets state numbers a caller will plan against. Those
 /// numbers are written as prose, and the engine's are `const` declarations —
 /// two copies of one fact, which is the drift this issue exists to fix. A
 /// boundary test in `strata-engine` proves each constant is the real refusal
-/// point; this proves the documented number is that constant, so changing the
-/// limit fails here until the prose follows.
-///
-/// Reads the engine source rather than the constants themselves: they are
-/// private, and making them `pub` to satisfy a test would widen the D4 surface
-/// to document it.
+/// point (a clamp point, for the graph chunk size); this proves the documented
+/// number is that constant, so changing the limit fails here until the prose
+/// follows.
 #[test]
-fn every_documented_json_limit_matches_the_engine_constant() {
-    let types = std::fs::read_to_string(repo_root().join("crates/engine/src/data/json/types.rs"))
-        .expect("read the JSON types module");
+fn every_documented_limit_matches_the_engine_constant() {
     let command = std::fs::read_to_string(repo_root().join("crates/executor/src/command.rs"))
         .expect("read the command module");
 
-    // The constant's declared value, with `u16::MAX` and `16 * 1024 * 1024`
-    // evaluated the way the source writes them.
-    let constant = |name: &str| -> u64 {
-        let line = types
-            .lines()
-            .find(|line| line.contains(&format!("const {name}:")))
-            .unwrap_or_else(|| panic!("`{name}` is no longer declared in json/types.rs"));
-        let expr = line
-            .split('=')
-            .nth(1)
-            .expect("a constant has a value")
-            .trim()
-            .trim_end_matches(';')
-            .replace('_', "");
-        if expr.contains("u16::MAX") {
-            return u64::from(u16::MAX);
-        }
-        expr.split('*')
-            .map(|part| {
-                part.trim()
-                    .parse::<u64>()
-                    .unwrap_or_else(|_| panic!("`{name}` has an unexpected value `{expr}`"))
-            })
-            .product()
-    };
-
-    // Each published number, and the constant it claims to be. The doc text is
-    // searched inside the JSON command blocks only, which is where this PR
-    // published them.
-    let documented: Vec<(&str, &str)> = vec![
-        ("MAX_DOCUMENT_ID_BYTES", "**65,535 bytes**"),
-        ("MAX_INDEX_NAME_BYTES", "**256 bytes**"),
-        ("MAX_DOCUMENT_BYTES", "**16 MiB**"),
-        ("MAX_NESTING_DEPTH", "**100**"),
-        ("MAX_ARRAY_SIZE", "**1,000,000**"),
-        ("MAX_PATH_SEGMENTS", "**256 segments**"),
+    // Each row: the engine module the constant lives in, the constant name, and
+    // the exact string the command blocks publish for it. The doc text is
+    // searched across all command blocks — the number's presence plus its
+    // numeric equality to the constant is what this pins, not its placement.
+    let documented: &[(&str, &str, &str)] = &[
+        // JSON
+        (
+            "data/json/types.rs",
+            "MAX_DOCUMENT_ID_BYTES",
+            "**65,535 bytes**",
+        ),
+        (
+            "data/json/types.rs",
+            "MAX_INDEX_NAME_BYTES",
+            "**256 bytes**",
+        ),
+        ("data/json/types.rs", "MAX_DOCUMENT_BYTES", "**16 MiB**"),
+        ("data/json/types.rs", "MAX_NESTING_DEPTH", "**100**"),
+        ("data/json/types.rs", "MAX_ARRAY_SIZE", "**1,000,000**"),
+        (
+            "data/json/types.rs",
+            "MAX_PATH_SEGMENTS",
+            "**256 segments**",
+        ),
+        // Vector
+        (
+            "data/vector/types.rs",
+            "MAX_COLLECTION_NAME_BYTES",
+            "**256 bytes**",
+        ),
+        ("data/vector/types.rs", "MAX_VECTOR_DIMENSION", "**32,768**"),
+        (
+            "data/vector/types.rs",
+            "MAX_VECTOR_KEY_BYTES",
+            "**1,024 bytes**",
+        ),
+        ("data/vector/types.rs", "MAX_METADATA_BYTES", "**16 MiB**"),
+        // Graph
+        (
+            "data/graph/types.rs",
+            "MAX_NODE_ID_BYTES",
+            "**1,024 bytes**",
+        ),
+        (
+            "data/graph/ontology.rs",
+            "MAX_TYPE_NAME_BYTES",
+            "**256 bytes**",
+        ),
+        (
+            "data/graph/ontology.rs",
+            "MAX_PROPERTY_NAME_BYTES",
+            "**256 bytes**",
+        ),
+        ("data/graph/service.rs", "MAX_BULK_CHUNK_SIZE", "**800**"),
+        // Branch
+        ("branch/name.rs", "MAX_BRANCH_NAME_BYTES", "**255 bytes**"),
+        // Space
+        (
+            "data/kv/types.rs",
+            "MAX_PRODUCT_SPACE_BYTES",
+            "**65,535 bytes**",
+        ),
     ];
 
-    // What each rendering means as a number, so the comparison is against the
-    // constant and not against another string.
-    let as_number = |rendered: &str| -> u64 {
-        let digits: String = rendered.chars().filter(char::is_ascii_digit).collect();
-        let value: u64 = digits.parse().expect("a documented limit is a number");
-        if rendered.contains("MiB") {
-            value * 1024 * 1024
-        } else {
-            value
-        }
-    };
-
-    for (name, rendered) in documented {
+    for (module, name, rendered) in documented {
+        let module_src =
+            std::fs::read_to_string(repo_root().join("crates/engine/src").join(module))
+                .unwrap_or_else(|error| panic!("read {module}: {error}"));
         assert!(
             command.contains(rendered),
             "`{name}` is no longer published as `{rendered}` in any command block; \
              the documented limit and the engine constant have drifted"
         );
         assert_eq!(
-            as_number(rendered),
-            constant(name),
+            rendered_as_number(rendered),
+            engine_constant(&module_src, module, name),
             "`{name}` is documented as `{rendered}` and enforced as a different number"
         );
     }

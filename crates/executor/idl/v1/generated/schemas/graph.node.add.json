@@ -202,7 +202,7 @@
   "command": "graph.node.add",
   "request": {
     "additionalProperties": false,
-    "description": "Adds or replaces a graph node.",
+    "description": "Adds or replaces a graph node.\n\n# Guaranteed semantics\n\n- **Limits.** A node id is at most **1,024 bytes**\n  (`invalid_argument.engine.graph_node_id`), refused before anything is\n  written.",
     "properties": {
       "binding": {
         "anyOf": [
