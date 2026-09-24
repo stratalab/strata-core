@@ -2763,10 +2763,6 @@
           "docs": "https://stratadb.org/e/not_found.engine.graph"
         },
         {
-          "code": "invalid_argument.engine.graph_batch",
-          "docs": "https://stratadb.org/e/invalid_argument.engine.graph_batch"
-        },
-        {
           "code": "invalid_argument.engine.graph_node_id",
           "docs": "https://stratadb.org/e/invalid_argument.engine.graph_node_id"
         },

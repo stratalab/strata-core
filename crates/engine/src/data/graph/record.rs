@@ -185,9 +185,7 @@ struct StoredGraphTypeIndex {
     node_id: String,
 }
 
-pub(crate) fn encode_graph_type_index_record(
-    record: &GraphTypeIndexRecord,
-) -> Result<Vec<u8>, EngineError> {
+pub(crate) fn encode_graph_type_index_record(record: &GraphTypeIndexRecord) -> Vec<u8> {
     let stored = StoredGraphTypeIndex {
         graph: record.graph().as_str().to_owned(),
         object_type: record.object_type().as_str().to_owned(),
@@ -196,7 +194,6 @@ pub(crate) fn encode_graph_type_index_record(
     encode_json_record(
         GRAPH_TYPE_INDEX_FORMAT_VERSION,
         &stored,
-        "invalid_argument.engine.graph_type_index_record",
         "graph type index record cannot be encoded",
     )
 }
@@ -271,16 +268,13 @@ struct StoredGraphBindingTarget {
     key: String,
 }
 
-pub(crate) fn encode_graph_metadata_record(
-    record: &GraphMetadataRecord,
-) -> Result<Vec<u8>, EngineError> {
+pub(crate) fn encode_graph_metadata_record(record: &GraphMetadataRecord) -> Vec<u8> {
     let stored = StoredGraphMetadata {
         graph: record.graph().as_str().to_owned(),
     };
     encode_json_record(
         GRAPH_METADATA_FORMAT_VERSION,
         &stored,
-        "invalid_argument.engine.graph_metadata",
         "graph metadata cannot be encoded",
     )
 }
@@ -316,7 +310,7 @@ pub(crate) fn decode_graph_metadata_record(
     Ok(GraphMetadataRecord::new(graph))
 }
 
-pub(crate) fn encode_graph_node_record(record: &GraphNodeRecord) -> Result<Vec<u8>, EngineError> {
+pub(crate) fn encode_graph_node_record(record: &GraphNodeRecord) -> Vec<u8> {
     let stored = StoredGraphNode {
         graph: record.graph().as_str().to_owned(),
         node_id: record.node_id().as_str().to_owned(),
@@ -330,7 +324,6 @@ pub(crate) fn encode_graph_node_record(record: &GraphNodeRecord) -> Result<Vec<u
     encode_json_record(
         GRAPH_NODE_FORMAT_VERSION,
         &stored,
-        "invalid_argument.engine.graph_node_record",
         "graph node record cannot be encoded",
     )
 }
@@ -404,7 +397,7 @@ pub(crate) fn decode_graph_node_record(
     Ok(GraphNodeRecord::new(graph, node_id, data))
 }
 
-pub(crate) fn encode_graph_edge_record(record: &GraphEdgeRecord) -> Result<Vec<u8>, EngineError> {
+pub(crate) fn encode_graph_edge_record(record: &GraphEdgeRecord) -> Vec<u8> {
     let stored = StoredGraphEdge {
         graph: record.graph().as_str().to_owned(),
         src: record.src().as_str().to_owned(),
@@ -416,7 +409,6 @@ pub(crate) fn encode_graph_edge_record(record: &GraphEdgeRecord) -> Result<Vec<u
     encode_json_record(
         GRAPH_EDGE_FORMAT_VERSION,
         &stored,
-        "invalid_argument.engine.graph_edge_record",
         "graph edge record cannot be encoded",
     )
 }
@@ -493,9 +485,7 @@ pub(crate) fn decode_graph_edge_record(
     Ok(GraphEdgeRecord::new(graph, src, edge_type, dst, data))
 }
 
-pub(crate) fn encode_graph_binding_record(
-    record: &GraphBindingRecord,
-) -> Result<Vec<u8>, EngineError> {
+pub(crate) fn encode_graph_binding_record(record: &GraphBindingRecord) -> Vec<u8> {
     let stored = StoredGraphNode {
         graph: record.graph().as_str().to_owned(),
         node_id: record.node_id().as_str().to_owned(),
@@ -506,7 +496,6 @@ pub(crate) fn encode_graph_binding_record(
     encode_json_record(
         GRAPH_BINDING_FORMAT_VERSION,
         &stored,
-        "invalid_argument.engine.graph_binding_record",
         "graph binding record cannot be encoded",
     )
 }
@@ -559,18 +548,15 @@ pub(crate) fn decode_graph_binding_record(
     ))
 }
 
-fn encode_json_record<T: Serialize>(
-    version: u8,
-    value: &T,
-    code: &'static str,
-    message: &'static str,
-) -> Result<Vec<u8>, EngineError> {
+/// Encodes a validated record. #2651: `serde_json::to_vec` of a plain
+/// `#[derive(Serialize)]` value built from already-validated fields cannot fail,
+/// so this `.expect()`s rather than surfacing an unreachable
+/// `invalid_argument.engine.graph_*_record` code. The fallible mirror is the
+/// decode side (`data_loss.engine.graph_*`).
+fn encode_json_record<T: Serialize>(version: u8, value: &T, message: &'static str) -> Vec<u8> {
     let mut bytes = vec![version];
-    bytes.extend(
-        serde_json::to_vec(value)
-            .map_err(|error| EngineError::invalid_input(code, format!("{message}: {error}")))?,
-    );
-    Ok(bytes)
+    bytes.extend(serde_json::to_vec(value).expect(message));
+    bytes
 }
 
 fn binding_to_stored(binding: &GraphEntityBinding) -> StoredGraphBinding {
@@ -663,20 +649,13 @@ mod tests {
         );
 
         assert_eq!(
-            decode_graph_metadata_record(
-                &graph,
-                &encode_graph_metadata_record(&metadata).expect("encoded")
-            )
-            .expect("decoded"),
+            decode_graph_metadata_record(&graph, &encode_graph_metadata_record(&metadata))
+                .expect("decoded"),
             metadata
         );
         assert_eq!(
-            decode_graph_node_record(
-                &graph,
-                &node,
-                &encode_graph_node_record(&node_record).expect("encoded")
-            )
-            .expect("decoded"),
+            decode_graph_node_record(&graph, &node, &encode_graph_node_record(&node_record))
+                .expect("decoded"),
             node_record
         );
         assert_eq!(
@@ -685,7 +664,7 @@ mod tests {
                 edge_record.src(),
                 edge_record.edge_type(),
                 edge_record.dst(),
-                &encode_graph_edge_record(&edge_record).expect("encoded")
+                &encode_graph_edge_record(&edge_record)
             )
             .expect("decoded"),
             edge_record
@@ -694,7 +673,7 @@ mod tests {
             decode_graph_binding_record(
                 &graph,
                 &node,
-                &encode_graph_binding_record(&binding_record).expect("encoded")
+                &encode_graph_binding_record(&binding_record)
             )
             .expect("decoded"),
             binding_record
@@ -706,11 +685,8 @@ mod tests {
         let graph = GraphName::new("deps").expect("graph");
         let other = GraphName::new("other").expect("graph");
         let metadata = GraphMetadataRecord::new(graph);
-        let error = decode_graph_metadata_record(
-            &other,
-            &encode_graph_metadata_record(&metadata).expect("encoded"),
-        )
-        .expect_err("wrong graph rejected");
+        let error = decode_graph_metadata_record(&other, &encode_graph_metadata_record(&metadata))
+            .expect_err("wrong graph rejected");
         assert_eq!(error.class(), EngineErrorClass::Corruption);
         assert_eq!(error.code(), "data_loss.engine.graph_metadata");
     }

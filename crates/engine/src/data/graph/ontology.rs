@@ -731,9 +731,7 @@ struct StoredPropertyDef {
     required: bool,
 }
 
-pub(crate) fn encode_graph_ontology_record(
-    record: &GraphOntologyRecord,
-) -> Result<Vec<u8>, EngineError> {
+pub(crate) fn encode_graph_ontology_record(record: &GraphOntologyRecord) -> Vec<u8> {
     let stored = StoredGraphOntology {
         graph: record.graph().as_str().to_owned(),
         status: match record.status() {
@@ -768,14 +766,13 @@ pub(crate) fn encode_graph_ontology_record(
             })
             .collect(),
     };
+    // #2651: encoding a validated ontology built from a plain Serialize value
+    // cannot fail, so this `.expect()`s rather than surfacing an unreachable
+    // `invalid_argument.engine.graph_ontology_record` code (the fallible mirror
+    // is the decode side's `data_loss.engine.graph_ontology_record`).
     let mut bytes = vec![GRAPH_ONTOLOGY_FORMAT_VERSION];
-    bytes.extend(serde_json::to_vec(&stored).map_err(|error| {
-        EngineError::invalid_input(
-            "invalid_argument.engine.graph_ontology_record",
-            format!("graph ontology cannot be encoded: {error}"),
-        )
-    })?);
-    Ok(bytes)
+    bytes.extend(serde_json::to_vec(&stored).expect("graph ontology cannot be encoded"));
+    bytes
 }
 
 pub(crate) fn decode_graph_ontology_record(
@@ -945,7 +942,7 @@ mod tests {
         );
         record.freeze();
 
-        let bytes = encode_graph_ontology_record(&record).expect("encoded");
+        let bytes = encode_graph_ontology_record(&record);
         let decoded = decode_graph_ontology_record(&graph, &bytes).expect("decoded");
         assert_eq!(decoded, record);
         assert_eq!(decoded.status(), GraphOntologyStatus::Frozen);

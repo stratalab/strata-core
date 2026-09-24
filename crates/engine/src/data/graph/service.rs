@@ -91,7 +91,7 @@ impl<'a> GraphService<'a> {
             &record,
             vec![RowMutation::put(
                 address,
-                encode_graph_metadata_record(&metadata)?,
+                encode_graph_metadata_record(&metadata),
             )],
         )?;
         let info = GraphInfo::new(
@@ -357,7 +357,7 @@ impl<'a> GraphService<'a> {
                     let detached = GraphNodeRecord::new(graph.clone(), node_id.clone(), data);
                     mutations.put(
                         self.node_address(&record, graph, node_id),
-                        encode_graph_node_record(&detached)?,
+                        encode_graph_node_record(&detached),
                     );
                     mutations.delete(self.binding_address(&record, target, graph, node_id));
                 }
@@ -563,19 +563,19 @@ impl<'a> GraphService<'a> {
                     graph.clone(),
                     new_type.clone(),
                     node_id.clone(),
-                ))?,
+                )),
             ));
         }
         mutations.push(RowMutation::put(
             self.node_address(&record, graph, &node_id),
-            encode_graph_node_record(&new_record)?,
+            encode_graph_node_record(&new_record),
         ));
         if let Some(binding) = new_record.data().binding() {
             let binding_record =
                 GraphBindingRecord::new(graph.clone(), node_id.clone(), binding.clone());
             mutations.push(RowMutation::put(
                 self.binding_address(&record, binding.target(), graph, &node_id),
-                encode_graph_binding_record(&binding_record)?,
+                encode_graph_binding_record(&binding_record),
             ));
         }
         let commit = self.commit_batch(&record, mutations)?;
@@ -811,11 +811,11 @@ impl<'a> GraphService<'a> {
             vec![
                 RowMutation::put(
                     self.edge_address(&record, graph, &src, &edge_type, &dst),
-                    encode_graph_edge_record(&edge)?,
+                    encode_graph_edge_record(&edge),
                 ),
                 RowMutation::put(
                     self.reverse_edge_address(&record, graph, &dst, &edge_type, &src),
-                    encode_graph_edge_record(&edge)?,
+                    encode_graph_edge_record(&edge),
                 ),
             ],
         )?;
@@ -911,12 +911,12 @@ impl<'a> GraphService<'a> {
                             graph.clone(),
                             new_type.clone(),
                             node_id.clone(),
-                        ))?,
+                        )),
                     );
                 }
                 mutations.put(
                     self.node_address(&record, graph, node_id),
-                    encode_graph_node_record(&new_record)?,
+                    encode_graph_node_record(&new_record),
                 );
                 if let Some(binding) = new_record.data().binding() {
                     mutations.put(
@@ -925,7 +925,7 @@ impl<'a> GraphService<'a> {
                             graph.clone(),
                             node_id.clone(),
                             binding.clone(),
-                        ))?,
+                        )),
                     );
                 }
             }
@@ -944,11 +944,11 @@ impl<'a> GraphService<'a> {
                 );
                 mutations.put(
                     self.edge_address(&record, graph, src, edge_type, dst),
-                    encode_graph_edge_record(&edge)?,
+                    encode_graph_edge_record(&edge),
                 );
                 mutations.put(
                     self.reverse_edge_address(&record, graph, dst, edge_type, src),
-                    encode_graph_edge_record(&edge)?,
+                    encode_graph_edge_record(&edge),
                 );
             }
             last_commit = Some(self.commit_batch(&record, mutations.into_mutations())?);
@@ -1399,13 +1399,13 @@ impl<'a> GraphService<'a> {
                                 graph.clone(),
                                 new_type.clone(),
                                 node_id.clone(),
-                            ))?,
+                            )),
                         );
                     }
                     let node = GraphNodeRecord::new(graph.clone(), node_id.clone(), data.clone());
                     mutations.put(
                         self.node_address(&record, graph, node_id),
-                        encode_graph_node_record(&node)?,
+                        encode_graph_node_record(&node),
                     );
                     if let Some(binding) = node.data().binding() {
                         let binding_record = GraphBindingRecord::new(
@@ -1415,7 +1415,7 @@ impl<'a> GraphService<'a> {
                         );
                         mutations.put(
                             self.binding_address(&record, binding.target(), graph, node_id),
-                            encode_graph_binding_record(&binding_record)?,
+                            encode_graph_binding_record(&binding_record),
                         );
                     }
                     nodes.insert(node_id.clone(), node);
@@ -2072,7 +2072,7 @@ impl<'a> GraphService<'a> {
             record,
             vec![RowMutation::put(
                 self.ontology_address(record, graph),
-                encode_graph_ontology_record(ontology)?,
+                encode_graph_ontology_record(ontology),
             )],
         )
     }
@@ -2577,13 +2577,18 @@ impl<'a> GraphService<'a> {
         binding_from_index_row(&self.space, row)
     }
 
+    // #2651: infallible now that edge encoding is, but kept `Result` for
+    // symmetry with the sibling mutation-builders (`put_node_mutations`,
+    // ontology writes) that stay fallible, so callers treat the family
+    // uniformly.
+    #[allow(clippy::unnecessary_wraps)]
     fn put_edge_mutations(
         &self,
         record: &BranchCatalogRecord,
         mutations: &mut MutationMap,
         edge: &GraphEdgeRecord,
     ) -> Result<(), EngineError> {
-        let encoded = encode_graph_edge_record(edge)?;
+        let encoded = encode_graph_edge_record(edge);
         mutations.put(
             self.edge_address(
                 record,
@@ -2635,12 +2640,14 @@ impl<'a> GraphService<'a> {
         mutations: Vec<RowMutation>,
     ) -> Result<CommitOutcome, EngineError> {
         let mut mutations = mutations;
-        if mutations.is_empty() {
-            return Err(EngineError::invalid_input(
-                "invalid_argument.engine.graph_batch",
-                "graph batch must contain at least one mutation",
-            ));
-        }
+        // #2651: every caller builds at least one mutation before reaching here
+        // (an empty public batch returns success earlier), so the old
+        // `invalid_argument.engine.graph_batch` refusal was unreachable. Keep
+        // the invariant as a debug assertion rather than an unreachable code.
+        debug_assert!(
+            !mutations.is_empty(),
+            "commit_batch requires at least one mutation"
+        );
         // Count only authored rows (graph metadata, nodes, forward edges) for
         // the user-facing commit counts. Derived reverse-edge and binding-index
         // rows are engine-maintained and must not inflate the caller's view of
@@ -2852,7 +2859,7 @@ mod tests {
         let record = GraphBindingRecord::new(graph.clone(), node_id.clone(), binding);
         let row = PersistenceReadRow::for_test(
             encode_graph_binding_key(&space, &key_target, &graph, &node_id),
-            Some(encode_graph_binding_record(&record).expect("record encodes")),
+            Some(encode_graph_binding_record(&record)),
             false,
         );
 

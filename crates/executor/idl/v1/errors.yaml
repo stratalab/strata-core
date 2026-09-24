@@ -79,7 +79,6 @@ errors:
   - invalid_argument.engine.graph_properties_too_large
   - invalid_argument.engine.graph_type_hint
   - invalid_argument.engine.graph_binding
-  - invalid_argument.engine.graph_batch
   - invalid_argument.engine.graph_type_name
   - invalid_argument.engine.graph_type_name_reserved
   - invalid_argument.engine.graph_property_name
