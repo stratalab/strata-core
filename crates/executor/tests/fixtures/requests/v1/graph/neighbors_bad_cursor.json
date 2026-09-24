@@ -1,0 +1,8 @@
+{
+  "type": "graph_neighbors",
+  "graph": "social",
+  "node_id": "alice",
+  "direction": "outgoing",
+  "cursor": "not-a-cursor",
+  "limit": 10
+}

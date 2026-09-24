@@ -1134,6 +1134,11 @@ fn graph_neighbors_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn graph_neighbors_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json"], "requests/v1/graph/neighbors_bad_cursor.json", "responses/v1/errors/graph/neighbors_bad_cursor.json");
+}
+
+#[test]
 fn graph_neighbors_replay_observes_a_declared_output() {
     support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_alice_carol.json"], "requests/v1/graph/neighbors.json", &["graph_neighbor_page"]);
 }

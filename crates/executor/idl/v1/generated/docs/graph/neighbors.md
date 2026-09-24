@@ -67,6 +67,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`not_found.engine.graph`](https://stratadb.org/e/not_found.engine.graph)
 - [`invalid_argument.engine.graph_node_id`](https://stratadb.org/e/invalid_argument.engine.graph_node_id)
 - [`invalid_argument.engine.graph_edge_type`](https://stratadb.org/e/invalid_argument.engine.graph_edge_type)
+- [`invalid_argument.engine.graph_cursor`](https://stratadb.org/e/invalid_argument.engine.graph_cursor)
 
 ## Invocation
 

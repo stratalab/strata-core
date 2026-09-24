@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "b43de89292a5f04468b82252daed4035ff631662af72cc4654f581916047f3fd",
+    "checksum_sha256": "d9798b8546444127554c430cb6e1aa6009315872194e9a0e6bfa27b3a59f638d",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -3503,6 +3503,10 @@
         {
           "code": "invalid_argument.engine.graph_edge_type",
           "docs": "https://stratadb.org/e/invalid_argument.engine.graph_edge_type"
+        },
+        {
+          "code": "invalid_argument.engine.graph_cursor",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.graph_cursor"
         }
       ],
       "fixtures": {
@@ -3515,6 +3519,16 @@
           "requests/v1/setup/graph_add_carol.json",
           "requests/v1/graph/edge_add.json",
           "requests/v1/setup/graph_edge_alice_carol.json"
+        ],
+        "error_cases": [
+          {
+            "setup": [
+              "requests/v1/graph/create.json",
+              "requests/v1/graph/node_add.json"
+            ],
+            "request": "requests/v1/graph/neighbors_bad_cursor.json",
+            "expected_error": "responses/v1/errors/graph/neighbors_bad_cursor.json"
+          }
         ]
       },
       "wire_status": "stable",

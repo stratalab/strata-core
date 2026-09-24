@@ -559,6 +559,21 @@ pub(crate) fn encode_graph_outgoing_edge_prefix(
     encode_user_key(GRAPH_EDGE_DISCRIMINATOR, space, &suffix)
 }
 
+/// Every outgoing edge of `src` with one edge type: the prefix a type-filtered
+/// neighbor page seeks within, leaving only `dst` to vary (#3489).
+pub(crate) fn encode_graph_outgoing_edge_type_prefix(
+    space: &ProductSpace,
+    graph: &GraphName,
+    src: &GraphNodeId,
+    edge_type: &GraphEdgeType,
+) -> Vec<u8> {
+    let mut suffix = Vec::new();
+    encode_length_prefixed_text(&mut suffix, graph.as_str());
+    encode_length_prefixed_text(&mut suffix, src.as_str());
+    encode_length_prefixed_text(&mut suffix, edge_type.as_str());
+    encode_user_key(GRAPH_EDGE_DISCRIMINATOR, space, &suffix)
+}
+
 pub(crate) fn decode_graph_edge_key(
     space: &ProductSpace,
     encoded: &[u8],
@@ -607,6 +622,21 @@ pub(crate) fn encode_graph_incoming_edge_prefix(
     let mut suffix = Vec::new();
     encode_length_prefixed_text(&mut suffix, graph.as_str());
     encode_length_prefixed_text(&mut suffix, dst.as_str());
+    encode_user_key(GRAPH_REVERSE_EDGE_DISCRIMINATOR, space, &suffix)
+}
+
+/// Every incoming edge of `dst` with one edge type: the reverse-space twin of
+/// [`encode_graph_outgoing_edge_type_prefix`], leaving only `src` to vary.
+pub(crate) fn encode_graph_incoming_edge_type_prefix(
+    space: &ProductSpace,
+    graph: &GraphName,
+    dst: &GraphNodeId,
+    edge_type: &GraphEdgeType,
+) -> Vec<u8> {
+    let mut suffix = Vec::new();
+    encode_length_prefixed_text(&mut suffix, graph.as_str());
+    encode_length_prefixed_text(&mut suffix, dst.as_str());
+    encode_length_prefixed_text(&mut suffix, edge_type.as_str());
     encode_user_key(GRAPH_REVERSE_EDGE_DISCRIMINATOR, space, &suffix)
 }
 
@@ -903,6 +933,61 @@ fn encode_length_prefixed_text(output: &mut Vec<u8>, value: &str) {
     let value_len = u16::try_from(value_bytes.len()).expect("validated vector key field length");
     output.extend_from_slice(&value_len.to_be_bytes());
     output.extend_from_slice(value_bytes);
+}
+
+/// The smallest key greater than every key that starts with `prefix` — the
+/// exclusive end of a prefix range. All-`0xFF` prefixes have no such key;
+/// `[0xFF]` then bounds the scan at the top of the space.
+pub(crate) fn next_prefix(prefix: &[u8]) -> Vec<u8> {
+    let mut upper = prefix.to_vec();
+    for index in (0..upper.len()).rev() {
+        if upper[index] != u8::MAX {
+            upper[index] += 1;
+            upper.truncate(index + 1);
+            return upper;
+        }
+    }
+    vec![u8::MAX]
+}
+
+/// The smallest key strictly greater than `key` — where a scan resumes after
+/// it.
+pub(crate) fn exclusive_after_key(key: &[u8]) -> Vec<u8> {
+    let mut next = key.to_vec();
+    next.push(0);
+    next
+}
+
+/// The first key of the length bucket holding every `len`-byte text value
+/// that follows `fixed_prefix`: text components are `u16 len || bytes`, so a
+/// bucket is contiguous and, within it, byte order is string order. Its
+/// exclusive end is `next_prefix` of this.
+pub(crate) fn text_bucket_start(fixed_prefix: &[u8], len: usize) -> Vec<u8> {
+    let len = u16::try_from(len).expect("text components are at most u16 bytes long");
+    let mut key = fixed_prefix.to_vec();
+    key.extend_from_slice(&len.to_be_bytes());
+    key
+}
+
+/// The key a `len`-byte text value with the given bytes would have after
+/// `fixed_prefix` — a seek target inside one length bucket. `bytes` is padded
+/// with `fill` up to `len`, so a shorter value seeks to the first (`0x00`) or
+/// last (`0xFF`) key that extends it.
+pub(crate) fn text_bucket_key(fixed_prefix: &[u8], len: usize, bytes: &[u8], fill: u8) -> Vec<u8> {
+    debug_assert!(bytes.len() <= len, "a bucket key never truncates its text");
+    let mut key = text_bucket_start(fixed_prefix, len);
+    key.extend_from_slice(bytes);
+    key.resize(key.len() + (len - bytes.len()), fill);
+    key
+}
+
+/// The text component that follows `fixed_prefix` in `key` — the `bytes` of
+/// the `u16 len || bytes` component right after the prefix, whether or not
+/// further components follow it.
+pub(crate) fn next_text_component<'a>(key: &'a [u8], fixed_prefix: &[u8]) -> Option<&'a [u8]> {
+    let rest = key.strip_prefix(fixed_prefix)?;
+    let (len, text) = rest.split_first_chunk::<2>()?;
+    text.get(..usize::from(u16::from_be_bytes(*len)))
 }
 
 fn decode_length_prefixed_text<'a>(

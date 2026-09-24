@@ -1840,6 +1840,20 @@ pub enum Command {
         node_id: String,
     },
     /// Lists graph nodes.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Ordering.** Nodes are returned in node-id order — byte-wise string
+    ///   order, not spatial or insertion order; `prefix` narrows to ids that
+    ///   start with it.
+    /// - **Cursor.** `cursor` is the last node id of the previous page,
+    ///   exclusive — a position, not an offset, so writes before it can
+    ///   neither skip nor repeat a node across pages, and the same cursor
+    ///   names the same position at any `as_of`. `has_more` speaks for the
+    ///   prefix: rows beyond it never make the last matching page claim more.
+    /// - **Bounded work.** A page reads only its own rows plus one lookahead
+    ///   from storage and decodes only those — page-sized work wherever the
+    ///   page sits, never a scan of the whole graph.
     GraphListNodes {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1959,6 +1973,19 @@ pub enum Command {
         dst: String,
     },
     /// Lists neighboring graph nodes.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Ordering.** Incoming hits precede outgoing ones; within a
+    ///   direction, hits order by edge type, then neighbor id (string order).
+    ///   `edge_type` narrows to one type.
+    /// - **Cursor.** `cursor` is the cursor of the previous page, exclusive —
+    ///   a position this listing produced, not an offset, identical at any
+    ///   `as_of`. A cursor this listing never produced is refused with
+    ///   `invalid_argument.engine.graph_cursor`.
+    /// - **Bounded work.** A page seeks the adjacency from its cursor, reads
+    ///   only its own edge rows plus one lookahead, and hydrates only its own
+    ///   neighbors — page-sized work on a hub of any degree.
     GraphNeighbors {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2181,7 +2208,18 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
     },
-    /// Lists nodes declaring an object type (node-id ordered).
+    /// Lists nodes declaring an object type.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Ordering.** Nodes are returned in node-id order — byte-wise string
+    ///   order.
+    /// - **Cursor.** `cursor` is the last node id of the previous page,
+    ///   exclusive — a position, not an offset, stable across writes and
+    ///   identical at any `as_of`.
+    /// - **Bounded work.** A page seeks the type index from its cursor, reads
+    ///   only its own index rows plus one lookahead, and hydrates only the
+    ///   page — never the whole type.
     GraphNodesByType {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]

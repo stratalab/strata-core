@@ -314,6 +314,9 @@ the public registry when adding, renaming, or removing a public error code.
 <a id="invalid_argument.engine.graph_binding_record"></a>
 - `invalid_argument.engine.graph_binding_record`
 
+<a id="invalid_argument.engine.graph_cursor"></a>
+- `invalid_argument.engine.graph_cursor`
+
 <a id="invalid_argument.engine.graph_edge_endpoint"></a>
 - `invalid_argument.engine.graph_edge_endpoint`
 

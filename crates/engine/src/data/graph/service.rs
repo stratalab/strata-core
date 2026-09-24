@@ -1,5 +1,6 @@
 //! Graph core service.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use strata_core::{CommitVersion, Timestamp};
@@ -17,13 +18,14 @@ use crate::persistence::{
     decode_graph_node_key, decode_graph_reverse_edge_key, encode_event_key,
     encode_graph_binding_key, encode_graph_binding_space_prefix,
     encode_graph_binding_target_prefix, encode_graph_edge_key, encode_graph_edge_prefix,
-    encode_graph_incoming_edge_prefix, encode_graph_metadata_key, encode_graph_metadata_prefix,
-    encode_graph_node_key, encode_graph_node_prefix, encode_graph_ontology_key,
-    encode_graph_outgoing_edge_prefix, encode_graph_reverse_edge_key,
+    encode_graph_incoming_edge_prefix, encode_graph_incoming_edge_type_prefix,
+    encode_graph_metadata_key, encode_graph_metadata_prefix, encode_graph_node_key,
+    encode_graph_node_prefix, encode_graph_ontology_key, encode_graph_outgoing_edge_prefix,
+    encode_graph_outgoing_edge_type_prefix, encode_graph_reverse_edge_key,
     encode_graph_reverse_edge_prefix, encode_graph_type_index_graph_prefix,
     encode_graph_type_index_key, encode_graph_type_index_type_prefix, encode_json_key,
-    encode_kv_key_bytes, CommitPlan, PersistenceReadRow, ReadSelector, RowAddress, RowClass,
-    RowMutation, StoragePersistence,
+    encode_kv_key_bytes, CommitPlan, OrderedTextScan, PersistenceReadRow, ReadSelector, RowAddress,
+    RowClass, RowMutation, StoragePersistence,
 };
 
 use super::{
@@ -755,19 +757,25 @@ impl<'a> GraphService<'a> {
         if limit == 0 {
             return Ok(GraphNodePage::new(Vec::new(), false, None));
         }
-        let mut nodes = self
-            .node_rows(&record, graph, selector)?
-            .into_iter()
-            .filter(|row| !row.is_tombstone())
-            .map(|row| self.node_from_row(&row))
-            .collect::<EngineResult<Vec<_>>>()?;
-        nodes.sort_by(|left, right| left.node_id().cmp(right.node_id()));
-        if let Some(prefix) = prefix {
-            nodes.retain(|node| node.node_id().as_str().starts_with(prefix.as_str()));
-        }
-        if let Some(cursor) = cursor {
-            nodes.retain(|node| node.node_id() > cursor);
-        }
+        // Seek from the cursor rather than slice a whole-graph scan: the page
+        // reads its rows plus one lookahead, in node-id order, and decodes
+        // only those (#3458).
+        let mut nodes = OrderedTextScan::new(
+            self.persistence,
+            record.storage_branch_id(),
+            RowClass::GraphNode,
+            encode_graph_node_prefix(&self.space, graph),
+            selector,
+            "data_loss.engine.graph_node_key",
+        )
+        .rows_after(
+            cursor.map(|id| id.as_str().as_bytes()),
+            prefix.map(|id| id.as_str().as_bytes()),
+            limit + 1,
+        )?
+        .iter()
+        .map(|row| self.node_from_row(row))
+        .collect::<EngineResult<Vec<_>>>()?;
         let has_more = nodes.len() > limit;
         if has_more {
             nodes.truncate(limit);
@@ -1169,6 +1177,7 @@ impl<'a> GraphService<'a> {
     ) -> Result<GraphNeighborPage, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
+        let position = cursor.map(parse_neighbor_cursor).transpose()?;
         if limit == 0
             || self
                 .node_record_with_selector(&record, graph, node_id, selector)?
@@ -1176,16 +1185,40 @@ impl<'a> GraphService<'a> {
         {
             return Ok(GraphNeighborPage::new(Vec::new(), false, None));
         }
-        let mut hits = Vec::new();
-        if matches!(direction, GraphDirection::Outgoing | GraphDirection::Both) {
-            hits.extend(self.outgoing_neighbors(&record, graph, node_id, edge_type, selector)?);
-        }
-        if matches!(direction, GraphDirection::Incoming | GraphDirection::Both) {
-            hits.extend(self.incoming_neighbors(&record, graph, node_id, edge_type, selector)?);
-        }
-        hits.sort_by_key(neighbor_cursor);
-        if let Some(cursor) = cursor {
-            hits.retain(|hit| neighbor_cursor(hit).as_str() > cursor);
+        // Incoming hits order before outgoing ones (a cursor's leading `i`
+        // sorts before `o`), so `Both` drains the reverse space and then the
+        // forward space — a concatenation, not a merge. Each leg seeks from
+        // the cursor when the cursor names it, starts fresh when the cursor
+        // precedes it, and is skipped when the cursor is already past it.
+        // Only the page's hits are hydrated (#3489).
+        let target = limit + 1;
+        let mut hits = Vec::with_capacity(target);
+        for leg in [GraphDirection::Incoming, GraphDirection::Outgoing] {
+            if hits.len() >= target || !direction_includes(direction, leg) {
+                continue;
+            }
+            let leg_position = match position.as_ref() {
+                Some(position) => match leg_rank(leg).cmp(&leg_rank(position.direction)) {
+                    // The cursor names this leg: seek from it.
+                    Ordering::Equal => Some(position),
+                    // The cursor is already past this leg.
+                    Ordering::Less => continue,
+                    // The cursor precedes this leg: start it fresh.
+                    Ordering::Greater => None,
+                },
+                None => None,
+            };
+            self.neighbor_leg(
+                &record,
+                graph,
+                node_id,
+                leg,
+                edge_type,
+                leg_position,
+                target,
+                selector,
+                &mut hits,
+            )?;
         }
         let has_more = hits.len() > limit;
         if has_more {
@@ -1193,6 +1226,165 @@ impl<'a> GraphService<'a> {
         }
         let cursor = has_more.then(|| neighbor_cursor(hits.last().expect("non-empty page")));
         Ok(GraphNeighborPage::new(hits, has_more, cursor))
+    }
+
+    /// Appends one direction's hits to `hits` until it holds `target`, in
+    /// `(edge type, neighbor)` order, seeking from `position` when the cursor
+    /// named this leg.
+    #[allow(clippy::too_many_arguments)]
+    fn neighbor_leg(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        node_id: &GraphNodeId,
+        leg: GraphDirection,
+        edge_type: Option<&GraphEdgeType>,
+        position: Option<&NeighborPosition>,
+        target: usize,
+        selector: ReadSelector,
+        hits: &mut Vec<GraphNeighbor>,
+    ) -> Result<(), EngineError> {
+        let (row_class, key_code) = match leg {
+            GraphDirection::Incoming => (
+                RowClass::GraphReverseEdge,
+                "data_loss.engine.graph_reverse_edge_key",
+            ),
+            GraphDirection::Outgoing => (RowClass::GraphEdge, "data_loss.engine.graph_edge_key"),
+            GraphDirection::Both => unreachable!("a leg is a single direction"),
+        };
+        if let Some(filter) = edge_type {
+            // One type. A cursor past it means this leg has nothing left; a
+            // cursor within it positions the neighbors; any other starts fresh.
+            if position.is_some_and(|position| position.edge_type > *filter) {
+                return Ok(());
+            }
+            let after = position
+                .filter(|position| position.edge_type == *filter)
+                .map(|position| position.neighbor.as_str().as_bytes());
+            let prefix = self.edge_type_prefix(graph, node_id, leg, filter);
+            return self.neighbor_rows_into(
+                record, graph, leg, row_class, key_code, prefix, after, target, selector, hits,
+            );
+        }
+        // Every type, in string order, from the cursor's own type inclusive —
+        // it may still hold neighbors past the cursor. Each distinct type is
+        // one seek, however many edges it has.
+        let type_scan = OrderedTextScan::new(
+            self.persistence,
+            record.storage_branch_id(),
+            row_class,
+            self.edge_prefix(graph, node_id, leg),
+            selector,
+            key_code,
+        );
+        let mut from = position.map(|position| position.edge_type.as_str().as_bytes().to_vec());
+        let mut exclusive = false;
+        loop {
+            let want = target.saturating_sub(hits.len());
+            if want == 0 {
+                break;
+            }
+            let types = type_scan.distinct_values(from.as_deref(), exclusive, want)?;
+            let fetched = types.len();
+            for (raw, discovered_from) in types {
+                // The row a type was discovered from is a row this read
+                // touched: decode it so corruption in it surfaces here, as it
+                // would from any read that returned it.
+                match leg {
+                    GraphDirection::Incoming => self.edge_from_reverse_row(&discovered_from)?,
+                    _ => self.edge_from_forward_row(&discovered_from)?,
+                };
+                let edge_type = edge_type_from_key(&raw, key_code)?;
+                let after = position
+                    .filter(|position| position.edge_type == edge_type)
+                    .map(|position| position.neighbor.as_str().as_bytes());
+                let prefix = self.edge_type_prefix(graph, node_id, leg, &edge_type);
+                self.neighbor_rows_into(
+                    record, graph, leg, row_class, key_code, prefix, after, target, selector, hits,
+                )?;
+                from = Some(raw);
+                exclusive = true;
+                if hits.len() >= target {
+                    break;
+                }
+            }
+            if fetched < want {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads one type's neighbors after `after` until `hits` holds `target`,
+    /// hydrating each hit's node as it goes — so only the page is hydrated.
+    #[allow(clippy::too_many_arguments)]
+    fn neighbor_rows_into(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        leg: GraphDirection,
+        row_class: RowClass,
+        key_code: &'static str,
+        prefix: Vec<u8>,
+        after: Option<&[u8]>,
+        target: usize,
+        selector: ReadSelector,
+        hits: &mut Vec<GraphNeighbor>,
+    ) -> Result<(), EngineError> {
+        let rows = OrderedTextScan::new(
+            self.persistence,
+            record.storage_branch_id(),
+            row_class,
+            prefix,
+            selector,
+            key_code,
+        )
+        .rows_after(after, None, target.saturating_sub(hits.len()))?;
+        for row in &rows {
+            let edge = match leg {
+                GraphDirection::Incoming => self.edge_from_reverse_row(row)?,
+                _ => self.edge_from_forward_row(row)?,
+            };
+            let neighbor = match leg {
+                GraphDirection::Incoming => edge.src(),
+                _ => edge.dst(),
+            };
+            let node = self.visible_node_or_corruption(record, graph, neighbor, selector)?;
+            let target_status = self.neighbor_target_status(record, &node, selector)?;
+            hits.push(GraphNeighbor::new(node, edge, leg, target_status));
+        }
+        Ok(())
+    }
+
+    /// The adjacency prefix of one node in one direction.
+    fn edge_prefix(
+        &self,
+        graph: &GraphName,
+        node_id: &GraphNodeId,
+        leg: GraphDirection,
+    ) -> Vec<u8> {
+        match leg {
+            GraphDirection::Incoming => {
+                encode_graph_incoming_edge_prefix(&self.space, graph, node_id)
+            }
+            _ => encode_graph_outgoing_edge_prefix(&self.space, graph, node_id),
+        }
+    }
+
+    /// The adjacency prefix of one node, one direction and one edge type.
+    fn edge_type_prefix(
+        &self,
+        graph: &GraphName,
+        node_id: &GraphNodeId,
+        leg: GraphDirection,
+        edge_type: &GraphEdgeType,
+    ) -> Vec<u8> {
+        match leg {
+            GraphDirection::Incoming => {
+                encode_graph_incoming_edge_type_prefix(&self.space, graph, node_id, edge_type)
+            }
+            _ => encode_graph_outgoing_edge_type_prefix(&self.space, graph, node_id, edge_type),
+        }
     }
 
     /// Lists a graph's edges with their full data, page by page.
@@ -1756,17 +1948,20 @@ impl<'a> GraphService<'a> {
         if limit == 0 {
             return Ok(GraphNodePage::new(Vec::new(), false, None));
         }
-        let mut node_ids = Vec::new();
-        for row in self.persistence.scan_prefix(
+        // Seek the type index from the cursor: the page reads its index rows
+        // plus one lookahead, validates only those, and hydrates only the
+        // page (#3473).
+        let mut node_ids = Vec::with_capacity(limit + 1);
+        for row in OrderedTextScan::new(
+            self.persistence,
             record.storage_branch_id(),
             RowClass::GraphTypeIndex,
             encode_graph_type_index_type_prefix(&self.space, graph, object_type),
             selector,
-            None,
-        )? {
-            if row.is_tombstone() {
-                continue;
-            }
+            "data_loss.engine.graph_type_index_key",
+        )
+        .rows_after(cursor.map(|id| id.as_str().as_bytes()), None, limit + 1)?
+        {
             let (row_graph, row_type, node_id) =
                 crate::persistence::decode_graph_type_index_key(&self.space, row.key())?;
             let value = row.value().ok_or_else(|| {
@@ -1777,10 +1972,6 @@ impl<'a> GraphService<'a> {
             })?;
             decode_graph_type_index_record(&row_graph, &row_type, &node_id, value)?;
             node_ids.push(node_id);
-        }
-        node_ids.sort();
-        if let Some(cursor) = cursor {
-            node_ids.retain(|node_id| node_id > cursor);
         }
         let has_more = node_ids.len() > limit;
         if has_more {
@@ -2398,78 +2589,6 @@ impl<'a> GraphService<'a> {
             .collect()
     }
 
-    fn outgoing_neighbors(
-        &self,
-        record: &BranchCatalogRecord,
-        graph: &GraphName,
-        node_id: &GraphNodeId,
-        edge_type: Option<&GraphEdgeType>,
-        selector: ReadSelector,
-    ) -> Result<Vec<GraphNeighbor>, EngineError> {
-        self.persistence
-            .scan_prefix(
-                record.storage_branch_id(),
-                RowClass::GraphEdge,
-                encode_graph_outgoing_edge_prefix(&self.space, graph, node_id),
-                selector,
-                None,
-            )?
-            .into_iter()
-            .filter(|row| !row.is_tombstone())
-            .map(|row| {
-                let edge = self.edge_from_forward_row(&row)?;
-                if edge_type.is_some_and(|expected| edge.edge_type() != expected) {
-                    return Ok(None);
-                }
-                let node = self.visible_node_or_corruption(record, graph, edge.dst(), selector)?;
-                let target_status = self.neighbor_target_status(record, &node, selector)?;
-                Ok(Some(GraphNeighbor::new(
-                    node,
-                    edge,
-                    GraphDirection::Outgoing,
-                    target_status,
-                )))
-            })
-            .filter_map(Result::transpose)
-            .collect()
-    }
-
-    fn incoming_neighbors(
-        &self,
-        record: &BranchCatalogRecord,
-        graph: &GraphName,
-        node_id: &GraphNodeId,
-        edge_type: Option<&GraphEdgeType>,
-        selector: ReadSelector,
-    ) -> Result<Vec<GraphNeighbor>, EngineError> {
-        self.persistence
-            .scan_prefix(
-                record.storage_branch_id(),
-                RowClass::GraphReverseEdge,
-                encode_graph_incoming_edge_prefix(&self.space, graph, node_id),
-                selector,
-                None,
-            )?
-            .into_iter()
-            .filter(|row| !row.is_tombstone())
-            .map(|row| {
-                let edge = self.edge_from_reverse_row(&row)?;
-                if edge_type.is_some_and(|expected| edge.edge_type() != expected) {
-                    return Ok(None);
-                }
-                let node = self.visible_node_or_corruption(record, graph, edge.src(), selector)?;
-                let target_status = self.neighbor_target_status(record, &node, selector)?;
-                Ok(Some(GraphNeighbor::new(
-                    node,
-                    edge,
-                    GraphDirection::Incoming,
-                    target_status,
-                )))
-            })
-            .filter_map(Result::transpose)
-            .collect()
-    }
-
     fn visible_node_or_corruption(
         &self,
         record: &BranchCatalogRecord,
@@ -2751,6 +2870,79 @@ fn neighbor_cursor(hit: &GraphNeighbor) -> String {
     )
 }
 
+/// The position a neighbor cursor names: the direction, edge type and
+/// neighbor of the last hit on the previous page.
+#[derive(Debug)]
+struct NeighborPosition {
+    direction: GraphDirection,
+    edge_type: GraphEdgeType,
+    neighbor: GraphNodeId,
+}
+
+/// Parses a cursor exactly as [`neighbor_cursor`] formats one —
+/// `direction␟edge_type␟neighbor␟dst`. Anything else was never produced by
+/// this listing and is refused rather than seeked from (#3489); a component
+/// that no longer validates is refused with that component's own code.
+fn parse_neighbor_cursor(cursor: &str) -> Result<NeighborPosition, EngineError> {
+    let refuse = |why: &str| {
+        EngineError::invalid_input(
+            "invalid_argument.engine.graph_cursor",
+            format!("graph neighbor cursor {why}"),
+        )
+    };
+    let parts: Vec<&str> = cursor.split('\u{1f}').collect();
+    let [direction, edge_type, neighbor, dst] = parts.as_slice() else {
+        return Err(refuse(
+            "does not have the four components this listing produces",
+        ));
+    };
+    let direction = match *direction {
+        "i" => GraphDirection::Incoming,
+        "o" => GraphDirection::Outgoing,
+        _ => return Err(refuse("names a direction this listing never produces")),
+    };
+    GraphNodeId::new(*dst)?;
+    Ok(NeighborPosition {
+        direction,
+        edge_type: GraphEdgeType::new(*edge_type)?,
+        neighbor: GraphNodeId::new(*neighbor)?,
+    })
+}
+
+/// An edge type read back from an adjacency key component; one that no
+/// longer validates is a corrupt key.
+fn edge_type_from_key(raw: &[u8], key_code: &'static str) -> Result<GraphEdgeType, EngineError> {
+    std::str::from_utf8(raw)
+        .ok()
+        .and_then(|text| GraphEdgeType::new(text).ok())
+        .ok_or_else(|| {
+            EngineError::corruption(
+                key_code,
+                "stored adjacency row key names an edge type that does not validate",
+            )
+        })
+}
+
+/// Where a direction sorts among neighbor hits: incoming before outgoing,
+/// matching the `i` / `o` a cursor leads with.
+const fn leg_rank(direction: GraphDirection) -> u8 {
+    match direction {
+        GraphDirection::Incoming => 0,
+        GraphDirection::Outgoing => 1,
+        GraphDirection::Both => 2,
+    }
+}
+
+/// Whether a requested direction walks the given single-direction leg.
+const fn direction_includes(direction: GraphDirection, leg: GraphDirection) -> bool {
+    matches!(
+        (direction, leg),
+        (GraphDirection::Both, _)
+            | (GraphDirection::Incoming, GraphDirection::Incoming)
+            | (GraphDirection::Outgoing, GraphDirection::Outgoing)
+    )
+}
+
 /// #3457: orders a graph's edges by `(src, type, dst)` for `list_edges`
 /// pagination, with a unit separator so component boundaries can't collide.
 fn edge_cursor(edge: &GraphEdge) -> String {
@@ -2795,6 +2987,80 @@ fn binding_from_index_row(
         row.commit_version(),
         row.commit_timestamp(),
     ))
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    const US: char = '\u{1f}';
+
+    /// A cursor this listing produced names its direction, type and neighbor.
+    #[test]
+    fn a_produced_cursor_parses_to_its_position() {
+        let outgoing = parse_neighbor_cursor(&format!("o{US}knows{US}bob{US}bob")).expect("parses");
+        assert_eq!(outgoing.direction, GraphDirection::Outgoing);
+        assert_eq!(outgoing.edge_type.as_str(), "knows");
+        assert_eq!(outgoing.neighbor.as_str(), "bob");
+
+        let incoming =
+            parse_neighbor_cursor(&format!("i{US}knows{US}alice{US}bob")).expect("parses");
+        assert_eq!(incoming.direction, GraphDirection::Incoming);
+        assert_eq!(incoming.neighbor.as_str(), "alice");
+    }
+
+    /// The wrong number of components, or a direction the listing never
+    /// emits, is refused as a cursor.
+    #[test]
+    fn a_cursor_of_another_shape_is_refused() {
+        for cursor in [
+            String::from("not-a-cursor"),
+            format!("o{US}knows{US}bob"),
+            format!("o{US}knows{US}bob{US}bob{US}extra"),
+            format!("b{US}knows{US}bob{US}bob"),
+            format!("x{US}knows{US}bob{US}bob"),
+        ] {
+            let error = parse_neighbor_cursor(&cursor).expect_err("refused");
+            assert_eq!(
+                error.code(),
+                "invalid_argument.engine.graph_cursor",
+                "{cursor:?}"
+            );
+        }
+    }
+
+    /// A component that no longer validates carries its own code, so a caller
+    /// learns which part is wrong.
+    #[test]
+    fn a_cursor_with_an_invalid_component_is_refused_by_that_component() {
+        let error = parse_neighbor_cursor(&format!("o{US}{US}bob{US}bob")).expect_err("empty type");
+        assert_eq!(error.code(), "invalid_argument.engine.graph_edge_type");
+        let error =
+            parse_neighbor_cursor(&format!("o{US}knows{US}{US}bob")).expect_err("empty neighbor");
+        assert_eq!(error.code(), "invalid_argument.engine.graph_node_id");
+        let error =
+            parse_neighbor_cursor(&format!("o{US}knows{US}bob{US}")).expect_err("empty dst");
+        assert_eq!(error.code(), "invalid_argument.engine.graph_node_id");
+    }
+
+    #[test]
+    fn legs_rank_incoming_before_outgoing_and_directions_include_their_legs() {
+        assert!(leg_rank(GraphDirection::Incoming) < leg_rank(GraphDirection::Outgoing));
+        for (direction, incoming, outgoing) in [
+            (GraphDirection::Incoming, true, false),
+            (GraphDirection::Outgoing, false, true),
+            (GraphDirection::Both, true, true),
+        ] {
+            assert_eq!(
+                direction_includes(direction, GraphDirection::Incoming),
+                incoming
+            );
+            assert_eq!(
+                direction_includes(direction, GraphDirection::Outgoing),
+                outgoing
+            );
+        }
+    }
 }
 
 #[cfg(test)]

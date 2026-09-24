@@ -71,6 +71,7 @@ errors:
   - invalid_argument.engine.graph_name
   - invalid_argument.engine.graph_name_reserved
   - invalid_argument.engine.graph_node_id
+  - invalid_argument.engine.graph_cursor
   - invalid_argument.engine.graph_edge_type
   - invalid_argument.engine.graph_edge_type_reserved
   - invalid_argument.engine.graph_edge_weight

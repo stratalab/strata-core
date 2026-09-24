@@ -119,7 +119,7 @@
   "command": "graph.nodes_by_type",
   "request": {
     "additionalProperties": false,
-    "description": "Lists nodes declaring an object type (node-id ordered).",
+    "description": "Lists nodes declaring an object type.\n\n# Guaranteed semantics\n\n- **Ordering.** Nodes are returned in node-id order — byte-wise string\n  order.\n- **Cursor.** `cursor` is the last node id of the previous page,\n  exclusive — a position, not an offset, stable across writes and\n  identical at any `as_of`.\n- **Bounded work.** A page seeks the type index from its cursor, reads\n  only its own index rows plus one lookahead, and hydrates only the\n  page — never the whole type.",
     "properties": {
       "as_of": {
         "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. Reads the graph state visible at that timeline\nposition. To read as of a real time, use `as_of_time` instead.",

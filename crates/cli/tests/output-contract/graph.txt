@@ -325,6 +325,10 @@ carol	outgoing	knows	alice	carol	1.0
 ∎
 ### graph.neighbors · edge:items=[] · raw
 ∎
+### graph.neighbors · responses/v1/errors/graph/neighbors_bad_cursor.json · human
+invalid_argument.engine.graph_cursor: command failed∎
+### graph.neighbors · responses/v1/errors/graph/neighbors_bad_cursor.json · raw
+invalid_argument.engine.graph_cursor: command failed∎
 ### graph.neighbors · responses/v1/graph/neighbors_page.json · human
 NODE_ID  DIRECTION  EDGE_TYPE  SRC    DST    WEIGHT
 bob      outgoing   follows    alice  bob       1.0

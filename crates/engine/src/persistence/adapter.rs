@@ -152,6 +152,12 @@ pub(crate) struct StoragePersistence {
     faults: FaultSchedule,
     #[cfg(any(test, feature = "testkit"))]
     corruption: CorruptionSchedule,
+    /// Rows handed to the engine by scan verbs since the last reset — the
+    /// storage work a paginated read actually did, so a test can assert a
+    /// page costs page-sized work rather than a whole-prefix walk (#3458,
+    /// #3473, #3489).
+    #[cfg(any(test, feature = "testkit"))]
+    scanned_rows: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -454,6 +460,8 @@ impl StoragePersistence {
                 faults: FaultSchedule::default(),
                 #[cfg(any(test, feature = "testkit"))]
                 corruption: CorruptionSchedule::default(),
+                #[cfg(any(test, feature = "testkit"))]
+                scanned_rows: std::sync::atomic::AtomicU64::new(0),
             },
             PersistenceOpenSummary {
                 created,
@@ -505,6 +513,34 @@ impl StoragePersistence {
                 corruption.apply(&mut row.key, &mut row.value);
             }
         }
+    }
+
+    /// Counts rows a scan verb handed to the engine (see `scanned_rows`).
+    #[cfg(any(test, feature = "testkit"))]
+    fn record_scanned_rows(&self, rows: usize) {
+        self.scanned_rows.fetch_add(
+            u64::try_from(rows).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Production builds keep no scan counter, so this is a no-op — the call
+    /// shape matches the test build so scan verbs need no `cfg` branching.
+    #[cfg(not(any(test, feature = "testkit")))]
+    #[allow(clippy::unused_self)]
+    const fn record_scanned_rows(&self, _rows: usize) {}
+
+    /// Rows scan verbs have handed to the engine since the last reset.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn scanned_rows_for_test(&self) -> u64 {
+        self.scanned_rows.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Zeroes the scanned-row counter so a test can measure one operation.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn reset_scanned_rows_for_test(&self) {
+        self.scanned_rows
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Production builds carry no corruption schedule, so this is a no-op — the
@@ -883,6 +919,7 @@ impl StoragePersistence {
             .map(PersistenceReadRow::from_storage)
             .collect();
         self.corrupt_rows(FaultOp::Scan, &mut rows);
+        self.record_scanned_rows(rows.len());
         Ok(rows)
     }
 
@@ -912,6 +949,7 @@ impl StoragePersistence {
             .map(PersistenceReadRow::from_storage)
             .collect();
         self.corrupt_rows(FaultOp::Scan, &mut rows);
+        self.record_scanned_rows(rows.len());
         Ok(rows)
     }
 
