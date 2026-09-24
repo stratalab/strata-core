@@ -65,10 +65,13 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.product_space`](https://stratadb.org/e/invalid_argument.engine.product_space)
 - [`unsupported.executor.arrow_feature_disabled`](https://stratadb.org/e/unsupported.executor.arrow_feature_disabled)
 - [`invalid_argument.executor.arrow_format`](https://stratadb.org/e/invalid_argument.executor.arrow_format)
+- [`invalid_argument.executor.arrow_collection`](https://stratadb.org/e/invalid_argument.executor.arrow_collection)
+- [`invalid_argument.executor.arrow_graph`](https://stratadb.org/e/invalid_argument.executor.arrow_graph)
+- [`unavailable.executor.arrow_io`](https://stratadb.org/e/unavailable.executor.arrow_io)
+- [`internal.executor.arrow`](https://stratadb.org/e/internal.executor.arrow)
 - [`invalid_argument.executor.arrow_input_missing`](https://stratadb.org/e/invalid_argument.executor.arrow_input_missing)
 - [`invalid_argument.executor.arrow_key_column`](https://stratadb.org/e/invalid_argument.executor.arrow_key_column)
 - [`invalid_argument.executor.arrow_value_column`](https://stratadb.org/e/invalid_argument.executor.arrow_value_column)
-- [`invalid_argument.executor.arrow_collection`](https://stratadb.org/e/invalid_argument.executor.arrow_collection)
 - [`invalid_argument.executor.arrow_embedding_type`](https://stratadb.org/e/invalid_argument.executor.arrow_embedding_type)
 - [`invalid_argument.executor.arrow_encoding`](https://stratadb.org/e/invalid_argument.executor.arrow_encoding)
 - [`invalid_argument.executor.arrow_json_key`](https://stratadb.org/e/invalid_argument.executor.arrow_json_key)
@@ -76,10 +79,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.executor.arrow_base64`](https://stratadb.org/e/invalid_argument.executor.arrow_base64)
 - [`invalid_argument.executor.arrow_vector_key`](https://stratadb.org/e/invalid_argument.executor.arrow_vector_key)
 - [`invalid_argument.executor.arrow_event`](https://stratadb.org/e/invalid_argument.executor.arrow_event)
-- [`invalid_argument.executor.arrow_graph`](https://stratadb.org/e/invalid_argument.executor.arrow_graph)
 - [`not_found.engine.vector_collection`](https://stratadb.org/e/not_found.engine.vector_collection)
-- [`unavailable.executor.arrow_io`](https://stratadb.org/e/unavailable.executor.arrow_io)
-- [`internal.executor.arrow`](https://stratadb.org/e/internal.executor.arrow)
 
 ## Invocation
 

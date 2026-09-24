@@ -66,12 +66,12 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.product_space`](https://stratadb.org/e/invalid_argument.engine.product_space)
 - [`unsupported.executor.arrow_feature_disabled`](https://stratadb.org/e/unsupported.executor.arrow_feature_disabled)
 - [`invalid_argument.executor.arrow_format`](https://stratadb.org/e/invalid_argument.executor.arrow_format)
-- [`invalid_argument.executor.arrow_empty_export`](https://stratadb.org/e/invalid_argument.executor.arrow_empty_export)
-- [`invalid_argument.executor.arrow_vector_dimension`](https://stratadb.org/e/invalid_argument.executor.arrow_vector_dimension)
-- [`invalid_argument.executor.arrow_graph`](https://stratadb.org/e/invalid_argument.executor.arrow_graph)
 - [`invalid_argument.executor.arrow_collection`](https://stratadb.org/e/invalid_argument.executor.arrow_collection)
+- [`invalid_argument.executor.arrow_graph`](https://stratadb.org/e/invalid_argument.executor.arrow_graph)
 - [`unavailable.executor.arrow_io`](https://stratadb.org/e/unavailable.executor.arrow_io)
 - [`internal.executor.arrow`](https://stratadb.org/e/internal.executor.arrow)
+- [`invalid_argument.executor.arrow_empty_export`](https://stratadb.org/e/invalid_argument.executor.arrow_empty_export)
+- [`invalid_argument.executor.arrow_vector_dimension`](https://stratadb.org/e/invalid_argument.executor.arrow_vector_dimension)
 
 ## Invocation
 

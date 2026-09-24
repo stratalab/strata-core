@@ -55,3 +55,60 @@ sets:
       - set:inference.provider_failure
       - inference.unsupported_provider
       - inference.unsupported_parameter
+  # What validating a KV batch's shape can raise: a malformed batch, or a key
+  # repeated within it (caught at the engine or the executor). Shared by
+  # `kv.batch_put` and `kv.batch_delete` (#3273).
+  - id: kv.batch_input
+    errors:
+      - invalid_argument.engine.kv_batch
+      - invalid_argument.engine.kv_batch_duplicate_key
+      - invalid_argument.executor.kv_batch_duplicate_key
+  # What writing a JSON document can raise: a bad path, an unwritable value, or
+  # a document that breaks a structural limit. Shared by `json.set` and each
+  # entry of `json.batch_set` (which adds its own duplicate-id code) (#3273).
+  - id: json.document_write
+    errors:
+      - invalid_argument.engine.json_path
+      - invalid_argument.engine.json_path_too_long
+      - invalid_argument.engine.json_path_not_found
+      - invalid_argument.engine.json_path_type
+      - invalid_argument.engine.json_value
+      - invalid_argument.engine.json_document_too_large
+      - invalid_argument.engine.json_document_too_deep
+      - invalid_argument.engine.json_array_too_large
+  # What defining a graph ontology type can raise: a bad or reserved type name,
+  # a bad property name, or a write against a frozen ontology. Shared by
+  # `graph.ontology.define_object_type` and `define_link_type` (#3273).
+  - id: graph.ontology_definition
+    errors:
+      - invalid_argument.engine.graph_type_name
+      - invalid_argument.engine.graph_type_name_reserved
+      - invalid_argument.engine.graph_property_name
+      - failed_precondition.engine.graph_ontology_frozen
+  # What writing a graph edge can raise: a bad node id, edge type, weight,
+  # endpoint, or properties, a negative weight, or an ontology edge-type
+  # violation. Shared by `graph.edge.add` and `graph.bulk_insert`, each of
+  # which adds its own ontology codes (#3273).
+  - id: graph.edge_write
+    errors:
+      - invalid_argument.engine.graph_node_id
+      - invalid_argument.engine.graph_edge_type
+      - invalid_argument.engine.graph_edge_weight
+      - invalid_argument.engine.graph_edge_endpoint
+      - invalid_argument.engine.graph_properties
+      - invalid_argument.engine.graph_properties_too_large
+      - failed_precondition.engine.graph_negative_weight
+      - failed_precondition.engine.graph_ontology_edge_type
+  # What every Arrow import/export shares: an invalid space, the feature built
+  # out, a bad format or collection or graph target, an IO fault, or an
+  # internal Arrow error. Each command adds its own direction-specific codes
+  # (#3273).
+  - id: arrow.io
+    errors:
+      - invalid_argument.engine.product_space
+      - unsupported.executor.arrow_feature_disabled
+      - invalid_argument.executor.arrow_format
+      - invalid_argument.executor.arrow_collection
+      - invalid_argument.executor.arrow_graph
+      - unavailable.executor.arrow_io
+      - internal.executor.arrow

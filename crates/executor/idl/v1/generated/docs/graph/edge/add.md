@@ -72,13 +72,13 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`not_found.engine.graph`](https://stratadb.org/e/not_found.engine.graph)
 - [`invalid_argument.engine.graph_node_id`](https://stratadb.org/e/invalid_argument.engine.graph_node_id)
 - [`invalid_argument.engine.graph_edge_type`](https://stratadb.org/e/invalid_argument.engine.graph_edge_type)
-- [`invalid_argument.engine.graph_edge_type_reserved`](https://stratadb.org/e/invalid_argument.engine.graph_edge_type_reserved)
 - [`invalid_argument.engine.graph_edge_weight`](https://stratadb.org/e/invalid_argument.engine.graph_edge_weight)
 - [`invalid_argument.engine.graph_edge_endpoint`](https://stratadb.org/e/invalid_argument.engine.graph_edge_endpoint)
 - [`invalid_argument.engine.graph_properties`](https://stratadb.org/e/invalid_argument.engine.graph_properties)
 - [`invalid_argument.engine.graph_properties_too_large`](https://stratadb.org/e/invalid_argument.engine.graph_properties_too_large)
 - [`failed_precondition.engine.graph_negative_weight`](https://stratadb.org/e/failed_precondition.engine.graph_negative_weight)
 - [`failed_precondition.engine.graph_ontology_edge_type`](https://stratadb.org/e/failed_precondition.engine.graph_ontology_edge_type)
+- [`invalid_argument.engine.graph_edge_type_reserved`](https://stratadb.org/e/invalid_argument.engine.graph_edge_type_reserved)
 - [`failed_precondition.engine.graph_ontology_endpoint_type`](https://stratadb.org/e/failed_precondition.engine.graph_ontology_endpoint_type)
 
 ## Invocation
