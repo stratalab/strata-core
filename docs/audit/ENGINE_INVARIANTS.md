@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (11, one retired), SCALE (11), DUR (17) = 79 entries, 78 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (13, one retired), SCALE (12), DUR (18) = 85 entries, 84 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -521,6 +521,35 @@ arms (`api/runtime/mod.rs::branch`) — a fork arm that validates only
 `read_at_version_below_retained_history_floor_is_rejected` (`api/tests/read.rs`),
 `api_fork_below_retained_history_floor_is_rejected` (`api/tests/maintenance.rs`).
 
+### MVCC-010: Paginated reads seek from version-independent key positions and re-seek past tombstones
+
+A page cursor is a key position, never an offset, and every seek target derived from it
+is a pure function of the cursor bytes and the key layout — never of the version being
+read. Two consequences carry the contract: a write landing before the cursor can neither
+skip nor repeat a row across pages, and the same cursor names the same position at every
+`as_of`, so a historical walk and a latest walk over the same cursor chain visit the same
+keys. Storage scans are `*_including_tombstones` and the engine filters, so a page loop
+bounds *visible* rows by re-seeking: it resumes at `exclusive_after_key` of the last *raw*
+row it saw and keeps scanning until it holds `limit` live rows or the range is spent.
+Counting tombstones toward the page — the obvious "optimization" — under-fills pages, most
+visibly on `as_of` reads at versions where most rows are tombstoned. KV list has relied on
+both rules since V1 (`kv/service.rs::scan_keys_after_cursor`); the graph node, type-index
+and neighbor pages joined them when they moved from materialize-and-slice to seek-and-bound
+(#3458 / #3473 / #3489, `persistence/scan_ordered.rs`). Encoding the read version into a
+cursor, seeking by "skip N rows", or requesting `limit` raw rows once and filtering after is
+the violation.
+
+**Audit**: Verify every cursor-paginated read derives its seek key from the cursor and the
+key layout only — `bucket_seek_start(fixed_prefix, len, bound, inclusive)` in
+`persistence/scan_ordered.rs` and the `text_bucket_*` / `next_prefix` /
+`exclusive_after_key` helpers in `persistence/key.rs` take no version or selector; the
+`ReadSelector` reaches the adapter's `scan_range` unchanged. Verify each page loop resumes
+at `exclusive_after_key` of the last raw row and filters tombstones after the scan. Tests:
+`tombstone_heavy_walk_fills_pages_with_live_rows` (`tests/engine_graph_cursor_contract.rs`),
+`kv_list_page_cursor_walk_and_tombstone_skip_cross_raw_page_boundary`
+(`tests/kv_pagination.rs`), and `both_direction_walk_crosses_legs_and_holds_at_version`
+(`tests/engine_graph_cursor_contract.rs`) for the same-cursor-at-every-`as_of` half.
+
 ---
 
 ## ACID — Atomicity, Consistency, Isolation, Durability Invariants
@@ -876,6 +905,62 @@ does not enforce is not merely a mode divergence — it can be an acknowledged w
 takes the branch down. A new durable artifact with a size or shape limit of its own must
 extend `validate_mutation_encodable_size`.
 
+### ARCH-012: Capability accessors gate open → healthy → branch before construction
+
+No capability service is constructible on a closed database, an unhealthy database, or
+(where the service is branch-scoped) a missing branch — and the checks run in that order.
+Every accessor on `Database` that returns a capability service (`kv`, `json`, `vector`,
+`event`, `graph`, `spaces`, `branches`) calls `require_open()`, then
+`control.require_healthy()`, then `require_branch(&branch)` for the branch-scoped five,
+before `*Service::new(...)` runs (`api/database.rs`). This is the API-layer face of
+DUR-007: lossy recovery health fail-closes mutating admission inside the runtime, but the
+accessor gate is what makes an unhealthy or closed database refuse *before any service
+exists*, so no capability method can run against it at all. `AdminService` is the
+deliberate exception — it gates on `require_open()` only, because health must be
+inspectable on a degraded database. #3191 moved the branch-name conversion between the
+health gate and the branch check and preserved this order on purpose; an accessor that
+skips `require_healthy`, or constructs the service and gates afterwards, is the regression.
+
+**Audit**: In `api/database.rs`, for every `pub fn` returning a `*Service<'_>`, confirm
+the body reaches `Service::new(` only after `require_open()` and
+`control.require_healthy()` in that order, and after `require_branch` where the service
+takes a branch; `grep -n "Service::new(" api/database.rs` and read each site upward. The
+only accessor without `require_healthy` must be `admin`. Tests:
+`closed_database_rejects_new_operations` (`tests/persistence_adapter.rs`),
+`closed_runtime_rejected` (`tests/capability_conformance.rs`),
+`fail_closed_control_plane_degrades_health_and_rejects_work`
+(`tests/control_plane_lifecycle.rs`), and DUR-007's guards.
+
+### ARCH-013: Graph analytics are a pure function of the visible snapshot
+
+Every graph analytic and traversal (wcc, lcc, sssp, pagerank, cdlp, bfs, subgraph) runs on
+one immutable `GraphAdjacencyIndex` built from the visible KV rows at the read selector, and
+its result depends only on that snapshot's content — never on row insertion order, the
+walk's own history, or wall-clock. The index makes this structural: `finish_nodes` sorts
+node ids so index order is id order, `finish` name-sorts the interned edge types and sorts
+every adjacency list by `(edge type, neighbor)`, so two builds over the same visible rows
+are byte-identical (`adjacency.rs`). The algorithms inherit it: the Dijkstra frontier pops
+by `(distance, node index)`, edges relax in list order, and a predecessor is recorded only
+on a *strict* distance drop, so ties resolve to the first-discovered walk and
+`predecessors` / `path_to` are as deterministic as `distances` (#3456); bfs visits in list
+order; wcc labels are canonical (smallest index in the component). Because the snapshot is
+the whole input, an `as_of` run equals a latest run over the same rows — the property the
+`historical == latest` integration tests pin. Derived rows never enter the snapshot as
+authority (ARCH-003). A `HashMap`-ordered iteration, an unsorted adjacency list, a
+`>=` in the relaxation, or a time-seeded tie-break is the violation.
+
+**Audit**: Verify the sorts in `GraphAdjacencyIndexBuilder::finish_nodes` and `finish`
+(`data/graph/adjacency.rs`). Where an analytic uses a `HashMap`/`HashSet` (the CDLP label
+tally in `data/graph/iterative.rs`, the WCC root set in `analytics.rs`), verify every
+reduction over it is order-independent — CDLP breaks a frequency tie with `min` over the
+tied labels, WCC only takes `len` — and no output order or choice comes from map iteration
+order. Verify the sssp relaxation compares with `<` and records the predecessor inside that
+branch (`data/graph/analytics.rs::sssp_with`). Tests:
+`index_is_deterministic_and_id_ordered` (`adjacency.rs`),
+`sssp_tie_break_keeps_the_first_discovered_path` (`analytics.rs`),
+`subgraph_keeps_self_loops_and_is_deterministic` (`traversal.rs`), and the `historical ==
+latest` comparisons in `tests/engine_graph_analytics.rs`.
+
 ---
 
 ## SCALE — Scale-Span Invariants (Pi Zero to Billion-Key Server)
@@ -1027,6 +1112,29 @@ it would wedge the engine exactly when pressure is highest. The split is the
 compaction sites (`lifecycle/compaction.rs`, `lifecycle/durable/maintenance.rs`) and that no
 required-admission arm consults it. DUR-009's registry law governs the predicate's
 authority.
+
+### SCALE-012: The graph analytics budget gates snapshot construction only
+
+`GraphAnalyticsBudget` bounds what an analytic may *load* — `add_node` refuses past
+`max_nodes` and `add_edge` past `max_edges`, each with the typed
+`resource_exhausted.engine.graph_analytics_budget` before the snapshot exists
+(`data/graph/adjacency.rs`) — and nothing else. Query-time options that narrow a run over an
+already-built snapshot (`edge_types` on bfs and sssp, `max_depth` / `max_nodes` on bfs,
+direction) are budget-neutral: they filter during the walk and never consult the budget, so
+a filtered run can never be refused that an unfiltered run over the same snapshot admits,
+and a caller cannot dodge the budget by filtering. This is what keeps the budget an honest
+memory bound (SCALE-010's "explicit degradation, never OOM" for graphs): the snapshot's
+size is decided entirely at build time from the visible rows. Moving the budget check into
+a walk, or letting a walk option change what the builder loads, is the violation.
+
+**Audit**: Verify the only `budget` consults are in `GraphAdjacencyIndexBuilder::add_node`
+and `add_edge` (`grep -n budget data/graph/{adjacency,traversal,analytics,iterative}.rs`
+must hit `adjacency.rs` alone) and that `GraphService::adjacency_index` passes the budget to
+the builder only. Tests: `budget_refusals_are_typed` (`adjacency.rs`),
+`adjacency_budget_refusals_surface_by_code_in_cache_and_durable_modes`
+(`tests/engine_graph_analytics.rs`), and the filtered-run tests
+(`sssp_edge_type_filter_excludes_other_types`, `bfs_edge_type_filter_applies_at_every_hop`)
+that succeed under the same budget as their unfiltered siblings.
 
 ---
 
