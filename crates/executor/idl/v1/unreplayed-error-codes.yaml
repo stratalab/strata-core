@@ -55,7 +55,7 @@
 # download_disabled and unsupported_provider stay: they are environment facts
 # the fake world fixes, covered by the inference resolution matrix and the
 # real-runtime executor tests instead.
-budget: 112
+budget: 111
 unreplayed:
   - already_exists.engine.json_index
   - failed_precondition.engine.graph_negative_weight
@@ -94,7 +94,6 @@ unreplayed:
   - invalid_argument.engine.event_batch
   - invalid_argument.engine.event_payload
   - invalid_argument.engine.event_payload_too_large
-  - invalid_argument.engine.graph_batch
   - invalid_argument.engine.graph_binding
   - invalid_argument.engine.graph_edge_endpoint
   - invalid_argument.engine.graph_edge_type

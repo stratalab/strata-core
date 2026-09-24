@@ -61,7 +61,6 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.product_space`](https://stratadb.org/e/invalid_argument.engine.product_space)
 - [`invalid_argument.engine.graph_name`](https://stratadb.org/e/invalid_argument.engine.graph_name)
 - [`not_found.engine.graph`](https://stratadb.org/e/not_found.engine.graph)
-- [`invalid_argument.engine.graph_batch`](https://stratadb.org/e/invalid_argument.engine.graph_batch)
 - [`invalid_argument.engine.graph_node_id`](https://stratadb.org/e/invalid_argument.engine.graph_node_id)
 - [`invalid_argument.engine.graph_edge_type`](https://stratadb.org/e/invalid_argument.engine.graph_edge_type)
 - [`invalid_argument.engine.graph_edge_endpoint`](https://stratadb.org/e/invalid_argument.engine.graph_edge_endpoint)

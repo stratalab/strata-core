@@ -342,7 +342,6 @@ commands:
     output: Output::GraphBatchWriteResult
     prose: commands/graph.batch_write.md
     errors+:
-      - invalid_argument.engine.graph_batch
       - invalid_argument.engine.graph_node_id
       - invalid_argument.engine.graph_edge_type
       - invalid_argument.engine.graph_edge_endpoint
