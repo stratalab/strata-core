@@ -48,7 +48,7 @@
 //! let (default, space) = (BranchName::new("default")?, ProductSpace::new("default")?);
 //!
 //! let seed = database
-//!     .kv(default.clone(), space)?
+//!     .kv(&default, &space)?
 //!     .put(KvKey::new("k")?, KvValue::new("v"))?;
 //!
 //! database.branches()?.fork_current(&default, BranchName::new("experiment")?)?;
@@ -90,9 +90,9 @@
 //! let database = Database::open_cache(CacheOpenOptions::new())?.into_database();
 //! let (branch, space) = (BranchName::new("default")?, ProductSpace::new("default")?);
 //!
-//! let mut kv = database.kv(branch.clone(), space.clone())?;
-//! let mut json = database.json(branch.clone(), space.clone())?;
-//! let mut events = database.event(branch, space)?;
+//! let mut kv = database.kv(&branch, &space)?;
+//! let mut json = database.json(&branch, &space)?;
+//! let mut events = database.event(&branch, &space)?;
 //! # let _ = (&mut kv, &mut json, &mut events);
 //! # Ok::<(), stratadb::EngineError>(())
 //! ```

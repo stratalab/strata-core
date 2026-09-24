@@ -58,6 +58,15 @@ impl TryFrom<&str> for ProductSpace {
     }
 }
 
+/// A borrowed space is already validated, so owning a copy is a plain clone.
+/// This is what lets a session-long space be lent to every service accessor
+/// instead of cloned at each call (#3191).
+impl From<&ProductSpace> for ProductSpace {
+    fn from(space: &ProductSpace) -> Self {
+        space.clone()
+    }
+}
+
 impl<'de> Deserialize<'de> for ProductSpace {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
