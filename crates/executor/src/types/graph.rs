@@ -1077,6 +1077,9 @@ pub struct GraphSsspData {
     source: String,
     direction: GraphDirection,
     distances: std::collections::BTreeMap<String, f64>,
+    /// The node each reachable node's cheapest walk arrived from; the source
+    /// has no entry. Following it back to the source unpacks the path.
+    predecessors: std::collections::BTreeMap<String, String>,
 }
 
 impl GraphSsspData {
@@ -1086,13 +1089,20 @@ impl GraphSsspData {
         source: String,
         direction: GraphDirection,
         distances: std::collections::BTreeMap<String, f64>,
+        predecessors: std::collections::BTreeMap<String, String>,
     ) -> Self {
         Self {
             graph,
             source,
             direction,
             distances,
+            predecessors,
         }
+    }
+
+    /// Returns the predecessor per reachable node id (the source has none).
+    pub const fn predecessors(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.predecessors
     }
 
     /// Returns the graph name.

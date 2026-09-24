@@ -48,9 +48,9 @@ pub use graph::{
     GraphNeighbor, GraphNeighborPage, GraphNode, GraphNodeData, GraphNodeId, GraphNodePage,
     GraphObjectTypeDef, GraphObjectTypeSummary, GraphOntology, GraphOntologyFreezeOutcome,
     GraphOntologyStatus, GraphOntologySummary, GraphOntologyWriteOutcome, GraphPageRankOptions,
-    GraphPageRankResult, GraphProperties, GraphPropertyDef, GraphService, GraphSsspResult,
-    GraphSubgraphResult, GraphTargetStatus, GraphTraversalEdge, GraphTypeName, GraphWccResult,
-    GraphWriteOutcome,
+    GraphPageRankResult, GraphProperties, GraphPropertyDef, GraphService, GraphSsspOptions,
+    GraphSsspResult, GraphSubgraphResult, GraphTargetStatus, GraphTraversalEdge, GraphTypeName,
+    GraphWccResult, GraphWriteOutcome,
 };
 pub use json::{
     JsonBatchDeleteOutcome, JsonBatchSetItemOutcome, JsonBatchSetOutcome, JsonDeleteOutcome,

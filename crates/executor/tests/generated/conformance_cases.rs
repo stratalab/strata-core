@@ -833,6 +833,16 @@ fn graph_analytics_sssp_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn graph_analytics_sssp_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json"], "requests/v1/graph/sssp_bad_edge_type.json", "responses/v1/errors/graph/sssp_edge_type.json");
+}
+
+#[test]
+fn graph_analytics_sssp_error_case_1_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_edge_negative_weight.json"], "requests/v1/graph/sssp.json", "responses/v1/errors/graph/sssp_negative_weight.json");
+}
+
+#[test]
 fn graph_analytics_sssp_replay_observes_a_declared_output() {
     support::replay_observes_declared(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json", "requests/v1/setup/graph_add_bob.json", "requests/v1/setup/graph_add_carol.json", "requests/v1/graph/edge_add.json", "requests/v1/setup/graph_edge_bob_carol.json"], "requests/v1/graph/sssp.json", &["graph_sssp_result"]);
 }

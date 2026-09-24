@@ -61,6 +61,13 @@
         "graph": {
           "type": "string"
         },
+        "predecessors": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The node each reachable node's cheapest walk arrived from; the source\nhas no entry. Following it back to the source unpacks the path.",
+          "type": "object"
+        },
         "source": {
           "type": "string"
         }
@@ -69,7 +76,8 @@
         "graph",
         "source",
         "direction",
-        "distances"
+        "distances",
+        "predecessors"
       ],
       "type": "object"
     }
@@ -79,7 +87,7 @@
   "command": "graph.analytics.sssp",
   "request": {
     "additionalProperties": false,
-    "description": "Computes shortest-path distances from a source node.",
+    "description": "Computes shortest-path distances and predecessors from a source node.\n\n# Guaranteed semantics\n\n- **Cheapest walk, not a route.** Distances are Dijkstra over edge\n  weights on one consistent snapshot; `predecessors` gives, for every\n  reachable node but the source, the node its cheapest walk arrived\n  from, so a path unpacks by following it back to the source. Under\n  `both`, a step may run against an edge's stored direction; the result\n  is a node sequence, not a legal drive (turn restrictions are not\n  modelled).\n- **Ties are deterministic.** Two equal-cost walks resolve to the one\n  discovered first: the frontier pops by (distance, node id order),\n  edges relax in (edge type, neighbor) order, and an equal-cost\n  alternative never replaces a recorded predecessor — the same\n  snapshot always yields the same predecessors.\n- **Edge-type filter.** `edge_types` restricts every relaxation to the\n  listed types; absent, every type is walked. A type the graph does\n  not contain restricts to nothing rather than failing — the same rule\n  as `bfs`.\n- **Negative weights refuse for the edges the walk may use.** A\n  negative edge of a selected type — any type, when unrestricted —\n  refuses with `failed_precondition.engine.graph_negative_weight`\n  before any work; a negative edge of an excluded type does not.",
     "properties": {
       "as_of": {
         "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. Reads the graph state visible at that timeline\nposition. To read as of a real time, use `as_of_time` instead.",
@@ -127,6 +135,16 @@
           }
         ],
         "description": "Optional traversal direction. Defaults to outgoing."
+      },
+      "edge_types": {
+        "description": "Optional edge-type restriction applied at every relaxation.",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
       },
       "graph": {
         "description": "Graph name.",

@@ -202,6 +202,7 @@ pub(super) fn graph_commands() -> Vec<Command> {
             graph: "deps".to_owned(),
             source: "node-a".to_owned(),
             direction: Some(GraphDirection::Both),
+            edge_types: Some(vec!["street".to_owned()]),
             budget: None,
             as_of: None,
             as_of_time: None,

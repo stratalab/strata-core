@@ -72,8 +72,11 @@ fn exercise_analytics_commands(executor: &mut Executor) {
     assert!(lcc.coefficients()["lone"].abs() < 1e-10);
 
     // SSSP from a: the two-hop route to c beats the direct edge, and the
-    // unreachable node is omitted from the wire map.
-    let Output::GraphSsspResult(sssp) = executor.graph_sssp("web", "a", None).expect("sssp runs")
+    // unreachable node is omitted from the wire map. Predecessors unpack
+    // that route — c came from b, b from a — and the source has none.
+    let Output::GraphSsspResult(sssp) = executor
+        .graph_sssp("web", "a", None, None)
+        .expect("sssp runs")
     else {
         panic!("unexpected sssp output");
     };
@@ -82,6 +85,42 @@ fn exercise_analytics_commands(executor: &mut Executor) {
     assert!((sssp.distances()["c"] - 3.0).abs() < 1e-10);
     assert!((sssp.distances()["d"] - 4.0).abs() < 1e-10);
     assert!(!sssp.distances().contains_key("lone"));
+    assert_eq!(sssp.predecessors()["b"], "a");
+    assert_eq!(sssp.predecessors()["c"], "b");
+    assert_eq!(sssp.predecessors()["d"], "c");
+    assert!(!sssp.predecessors().contains_key("a"));
+    assert!(!sssp.predecessors().contains_key("lone"));
+
+    // The wire predecessor map is a tree rooted at the source: following it
+    // from any reachable node reaches the source and never cycles.
+    for start in ["b", "c", "d"] {
+        let mut at = start.to_owned();
+        let mut steps = 0;
+        while let Some(previous) = sssp.predecessors().get(&at) {
+            at = previous.clone();
+            steps += 1;
+            assert!(
+                steps <= sssp.distances().len(),
+                "predecessor walk from {start} cycles"
+            );
+        }
+        assert_eq!(
+            at, "a",
+            "the predecessor walk from {start} ends at the source"
+        );
+    }
+
+    // Restricted to type `e`, the `f` edge into d is not walked: d becomes
+    // unreachable and everything else is unchanged.
+    let Output::GraphSsspResult(only_e) = executor
+        .graph_sssp("web", "a", None, Some(vec!["e".to_owned()]))
+        .expect("filtered sssp runs")
+    else {
+        panic!("unexpected sssp output");
+    };
+    assert!((only_e.distances()["c"] - 3.0).abs() < 1e-10);
+    assert!(!only_e.distances().contains_key("d"));
+    assert!(!only_e.predecessors().contains_key("d"));
 
     // PageRank conserves mass; the personalized variant concentrates it.
     let Output::GraphPagerankResult(uniform) =
@@ -227,9 +266,32 @@ fn exercise_refusals(executor: &mut Executor) {
         .expect_err("missing start");
     assert_eq!(error.code(), "not_found.engine.graph_node");
     let error = executor
-        .graph_sssp("web", "ghost", None)
+        .graph_sssp("web", "ghost", None, None)
         .expect_err("missing source");
     assert_eq!(error.code(), "not_found.engine.graph_node");
+
+    // An unknown filter type restricts the walk to nothing rather than
+    // refusing; a malformed type name refuses before the snapshot builds.
+    let Output::GraphSsspResult(none) = executor
+        .graph_sssp("web", "a", None, Some(vec!["ghost-type".to_owned()]))
+        .expect("unknown type filters to nothing")
+    else {
+        panic!("unexpected sssp output");
+    };
+    assert_eq!(none.distances().len(), 1, "only the source is reachable");
+    assert!(none.predecessors().is_empty());
+    let error = executor
+        .graph_sssp("web", "a", None, Some(vec![String::new()]))
+        .expect_err("empty type name");
+    assert_eq!(error.code(), "invalid_argument.engine.graph_edge_type");
+
+    // The type filter is validated before the snapshot and the source-existence
+    // check: a malformed name with a source that does not exist refuses on the
+    // name, not on the missing node.
+    let error = executor
+        .graph_sssp("web", "ghost", None, Some(vec![String::new()]))
+        .expect_err("malformed type name precedes the source check");
+    assert_eq!(error.code(), "invalid_argument.engine.graph_edge_type");
 
     // A snapshot budget that cannot hold the graph refuses.
     let error = executor
@@ -273,6 +335,63 @@ fn exercise_refusals(executor: &mut Executor) {
         error.code(),
         "invalid_argument.engine.graph_personalization"
     );
+}
+
+#[test]
+fn sssp_negative_weight_scopes_to_selected_types_in_cache_and_durable_modes() {
+    run_modes(exercise_sssp_negative_weight_scope);
+}
+
+/// The per-type negative-weight refusal must scope to the edges a query can
+/// actually walk, all the way through the wire — not just in the engine. A
+/// negative edge of an excluded type does not refuse; an unrestricted or
+/// including query does.
+fn exercise_sssp_negative_weight_scope(executor: &mut Executor) {
+    // a -knows(1.0)-> b (non-negative), a -owes(-1.0)-> c (negative).
+    executor.graph_create("scoped").expect("graph created");
+    for id in ["a", "b", "c"] {
+        executor
+            .graph_add_node("scoped", id, None, None)
+            .expect("node added");
+    }
+    executor
+        .graph_add_edge("scoped", "a", "knows", "b", Some(1.0), None)
+        .expect("non-negative edge added");
+    executor
+        .graph_add_edge("scoped", "a", "owes", "c", Some(-1.0), None)
+        .expect("negative edge added");
+
+    // Restricted to the non-negative type, the query runs: the negative edge is
+    // out of scope, so it does not refuse at the wire level.
+    let Output::GraphSsspResult(knows) = executor
+        .graph_sssp("scoped", "a", None, Some(vec!["knows".to_owned()]))
+        .expect("a query that excludes the negative edge runs")
+    else {
+        panic!("unexpected sssp output");
+    };
+    assert!((knows.distances()["b"] - 1.0).abs() < 1e-10);
+    assert!(
+        !knows.distances().contains_key("c"),
+        "the negative edge is not walked"
+    );
+    assert_eq!(knows.predecessors()["b"], "a");
+
+    // The negative edge refuses when it is in scope: unrestricted, restricted to
+    // its own type, or a list that includes it.
+    for edge_types in [
+        None,
+        Some(vec!["owes".to_owned()]),
+        Some(vec!["knows".to_owned(), "owes".to_owned()]),
+    ] {
+        let error = executor
+            .graph_sssp("scoped", "a", None, edge_types.clone())
+            .expect_err("a query that includes the negative edge refuses");
+        assert_eq!(
+            error.code(),
+            "failed_precondition.engine.graph_negative_weight",
+            "refusal expected for {edge_types:?}"
+        );
+    }
 }
 
 #[test]

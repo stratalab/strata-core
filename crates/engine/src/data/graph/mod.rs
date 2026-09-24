@@ -17,7 +17,7 @@ pub(crate) use adapter::{
 };
 pub(crate) use adjacency::GraphAdjacencyIndexBuilder;
 pub use adjacency::{GraphAdjacencyEdge, GraphAdjacencyIndex, GraphAnalyticsBudget};
-pub use analytics::{GraphLccResult, GraphSsspResult, GraphWccResult};
+pub use analytics::{GraphLccResult, GraphSsspOptions, GraphSsspResult, GraphWccResult};
 pub use iterative::{GraphCdlpOptions, GraphCdlpResult, GraphPageRankOptions, GraphPageRankResult};
 pub use ontology::{
     GraphLinkTypeDef, GraphLinkTypeSummary, GraphObjectTypeDef, GraphObjectTypeSummary,

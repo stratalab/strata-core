@@ -2308,7 +2308,30 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
     },
-    /// Computes shortest-path distances from a source node.
+    /// Computes shortest-path distances and predecessors from a source node.
+    ///
+    /// # Guaranteed semantics
+    ///
+    /// - **Cheapest walk, not a route.** Distances are Dijkstra over edge
+    ///   weights on one consistent snapshot; `predecessors` gives, for every
+    ///   reachable node but the source, the node its cheapest walk arrived
+    ///   from, so a path unpacks by following it back to the source. Under
+    ///   `both`, a step may run against an edge's stored direction; the result
+    ///   is a node sequence, not a legal drive (turn restrictions are not
+    ///   modelled).
+    /// - **Ties are deterministic.** Two equal-cost walks resolve to the one
+    ///   discovered first: the frontier pops by (distance, node id order),
+    ///   edges relax in (edge type, neighbor) order, and an equal-cost
+    ///   alternative never replaces a recorded predecessor — the same
+    ///   snapshot always yields the same predecessors.
+    /// - **Edge-type filter.** `edge_types` restricts every relaxation to the
+    ///   listed types; absent, every type is walked. A type the graph does
+    ///   not contain restricts to nothing rather than failing — the same rule
+    ///   as `bfs`.
+    /// - **Negative weights refuse for the edges the walk may use.** A
+    ///   negative edge of a selected type — any type, when unrestricted —
+    ///   refuses with `failed_precondition.engine.graph_negative_weight`
+    ///   before any work; a negative edge of an excluded type does not.
     GraphSssp {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2323,6 +2346,9 @@ pub enum Command {
         /// Optional traversal direction. Defaults to outgoing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<GraphDirection>,
+        /// Optional edge-type restriction applied at every relaxation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge_types: Option<Vec<String>>,
         /// Optional snapshot size bounds. Defaults to the engine limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GraphAnalyticsBudget>,

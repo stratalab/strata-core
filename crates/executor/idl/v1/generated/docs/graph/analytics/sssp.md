@@ -5,7 +5,7 @@ source: strata-core@1.2.4
 section: graph
 ---
 
-Computes weighted shortest-path distances from a source node over a consistent snapshot. Edge weights (default 1.0) accumulate along paths; unreachable nodes are omitted from the result. Direction defaults to `outgoing`. The source node must exist (`not_found.engine.graph_node`). Accepts an optional snapshot budget and `as_of` for time travel.
+Computes weighted shortest-path distances from a source node over a consistent snapshot, and for every reachable node the predecessor its cheapest walk arrived from — follow `predecessors` back to the source to unpack a path. Edge weights (default 1.0) accumulate along paths; unreachable nodes are omitted from the result. Direction defaults to `outgoing`. `edge_types` restricts the walk to the listed types (a type the graph does not contain restricts to nothing, as for `bfs`); a negative-weight edge among the selected types refuses with `failed_precondition.engine.graph_negative_weight`. The source node must exist (`not_found.engine.graph_node`). Accepts an optional snapshot budget and `as_of` for time travel.
 
 Analytics commands compute over a consistent snapshot of the visible graph and return a complete result payload in one response. They accept optional snapshot budgets and an `as_of` timestamp for time travel; results are deterministic for a fixed graph state.
 
@@ -55,6 +55,7 @@ c          2.0
 | `as_of_time` | `integer` | no | Read as of a real time: a wall-clock instant in microseconds since the Unix epoch (UTC), as reported by `committed_at` on a write ack or on any `history` row. Resolves to the commit at or before that instant, and fails rather than guessing if the instant falls outside the branch's recorded history. Mutually exclusive with `as_of`. |
 | `budget` | `GraphAnalyticsBudget` | no | Optional snapshot size bounds. Defaults to the engine limits. |
 | `direction` | `GraphDirection` | no | Optional traversal direction. Defaults to outgoing. |
+| `edge_types` | `string[]` | no | Optional edge-type restriction applied at every relaxation. |
 | `graph` | `string` | yes | Graph name. |
 | `source` | `string` | yes | Source node id. |
 
@@ -72,7 +73,9 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.graph_name`](https://stratadb.org/e/invalid_argument.engine.graph_name)
 - [`not_found.engine.graph`](https://stratadb.org/e/not_found.engine.graph)
 - [`invalid_argument.engine.graph_node_id`](https://stratadb.org/e/invalid_argument.engine.graph_node_id)
+- [`invalid_argument.engine.graph_edge_type`](https://stratadb.org/e/invalid_argument.engine.graph_edge_type)
 - [`not_found.engine.graph_node`](https://stratadb.org/e/not_found.engine.graph_node)
+- [`failed_precondition.engine.graph_negative_weight`](https://stratadb.org/e/failed_precondition.engine.graph_negative_weight)
 - [`resource_exhausted.engine.graph_analytics_budget`](https://stratadb.org/e/resource_exhausted.engine.graph_analytics_budget)
 - [`invalid_argument.executor.graph_analytics_budget`](https://stratadb.org/e/invalid_argument.executor.graph_analytics_budget)
 

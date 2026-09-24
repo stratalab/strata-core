@@ -99,6 +99,9 @@ pub(super) fn graph_read_outputs() -> Vec<Output> {
             [("node-a".to_owned(), 0.0), ("node-b".to_owned(), 1.5)]
                 .into_iter()
                 .collect(),
+            [("node-b".to_owned(), "node-a".to_owned())]
+                .into_iter()
+                .collect(),
         )),
         Output::GraphPagerankResult(GraphPagerankData::new(
             "deps".to_owned(),

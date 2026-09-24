@@ -1772,7 +1772,7 @@ pub(crate) enum GraphCommand {
         #[arg(long, value_name = "TIME")]
         as_of_time: Option<String>,
     },
-    /// Compute shortest-path distances from a source node.
+    /// Compute shortest-path distances and predecessors from a source node.
     Sssp {
         /// Graph name.
         graph: String,
@@ -1781,6 +1781,9 @@ pub(crate) enum GraphCommand {
         /// Traversal direction.
         #[arg(long, value_enum, default_value_t = CliGraphDirection::Outgoing)]
         direction: CliGraphDirection,
+        /// Optional edge-type restriction (repeatable).
+        #[arg(long = "edge-type")]
+        edge_types: Vec<String>,
         /// Read as of a position on the logical commit timeline: the
         /// `timestamp` from `history` output, not the `version`. This is a
         /// per-commit counter, never a calendar date — to read as of a real

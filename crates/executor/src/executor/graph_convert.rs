@@ -13,9 +13,9 @@ use super::{
     EngineGraphObjectTypeDef, EngineGraphOntology, EngineGraphOntologyFreezeOutcome,
     EngineGraphOntologyStatus, EngineGraphOntologySummary, EngineGraphOntologyWriteOutcome,
     EngineGraphPageRankOptions, EngineGraphPageRankResult, EngineGraphProperties,
-    EngineGraphPropertyDef, EngineGraphSsspResult, EngineGraphTargetStatus, EngineGraphTypeName,
-    EngineGraphWccResult, EngineGraphWriteOutcome, ExecutorError, ExecutorResult,
-    GraphAnalyticsBudget, GraphBatchItemResult, GraphBatchOperation, GraphBfsData,
+    EngineGraphPropertyDef, EngineGraphSsspOptions, EngineGraphSsspResult, EngineGraphTargetStatus,
+    EngineGraphTypeName, EngineGraphWccResult, EngineGraphWriteOutcome, ExecutorError,
+    ExecutorResult, GraphAnalyticsBudget, GraphBatchItemResult, GraphBatchOperation, GraphBfsData,
     GraphBfsEdgeData, GraphBindingHit, GraphBindingPrimitive, GraphBindingTarget, GraphBulkEdge,
     GraphBulkNode, GraphCdlpData, GraphDeletePolicy, GraphDirection, GraphEdgeData,
     GraphEdgeDataOutput, GraphEntityBinding, GraphInfoData, GraphLccData, GraphLinkTypeDefData,
@@ -743,6 +743,27 @@ pub(super) fn engine_graph_bfs_options(
     ))
 }
 
+/// Validates shortest-path options: each edge-type name must be a valid
+/// type (`invalid_argument.engine.graph_edge_type`), and the direction
+/// defaults to outgoing.
+pub(super) fn engine_graph_sssp_options(
+    edge_types: Option<Vec<String>>,
+    direction: Option<GraphDirection>,
+) -> Result<EngineGraphSsspOptions, ExecutorError> {
+    let edge_types = edge_types
+        .map(|types| {
+            types
+                .into_iter()
+                .map(graph_edge_type)
+                .collect::<ExecutorResult<Vec<_>>>()
+        })
+        .transpose()?;
+    Ok(EngineGraphSsspOptions::new(
+        direction.map_or(EngineGraphDirection::Outgoing, engine_graph_direction),
+        edge_types,
+    ))
+}
+
 pub(super) fn engine_graph_personalization(
     personalization: std::collections::BTreeMap<String, f64>,
 ) -> Result<std::collections::HashMap<EngineGraphNodeId, f64>, ExecutorError> {
@@ -814,11 +835,23 @@ pub(super) fn graph_sssp_output(
             distance.map(|distance| (node_id.as_str().to_owned(), distance))
         })
         .collect();
+    // Every reachable node but the source has a predecessor; unreachable
+    // nodes and the source carry `None` and are omitted, like distances.
+    let predecessors = index
+        .node_ids()
+        .iter()
+        .zip(result.predecessors())
+        .filter_map(|(node_id, predecessor)| {
+            let previous = index.node_id((*predecessor)?)?;
+            Some((node_id.as_str().to_owned(), previous.as_str().to_owned()))
+        })
+        .collect();
     Output::GraphSsspResult(GraphSsspData::new(
         index.graph().as_str().to_owned(),
         source,
         direction,
         distances,
+        predecessors,
     ))
 }
 

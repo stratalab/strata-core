@@ -584,7 +584,9 @@ commands:
     prose: commands/graph.analytics.sssp.md
     errors+:
       - invalid_argument.engine.graph_node_id
+      - invalid_argument.engine.graph_edge_type
       - not_found.engine.graph_node
+      - failed_precondition.engine.graph_negative_weight
       - resource_exhausted.engine.graph_analytics_budget
       - invalid_argument.executor.graph_analytics_budget
     display:
@@ -601,6 +603,19 @@ commands:
         - requests/v1/setup/graph_edge_bob_carol.json
       request: requests/v1/graph/sssp.json
       response: responses/v1/graph/sssp_distances.json
+      error_cases:
+        - setup:
+            - requests/v1/graph/create.json
+            - requests/v1/graph/node_add.json
+          request: requests/v1/graph/sssp_bad_edge_type.json
+          expected_error: responses/v1/errors/graph/sssp_edge_type.json
+        - setup:
+            - requests/v1/graph/create.json
+            - requests/v1/graph/node_add.json
+            - requests/v1/setup/graph_add_bob.json
+            - requests/v1/setup/graph_edge_negative_weight.json
+          request: requests/v1/graph/sssp.json
+          expected_error: responses/v1/errors/graph/sssp_negative_weight.json
   - id: graph.analytics.pagerank
     kind: read.analytics
     title: Compute graph pagerank

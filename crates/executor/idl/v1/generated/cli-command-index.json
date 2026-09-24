@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "d9798b8546444127554c430cb6e1aa6009315872194e9a0e6bfa27b3a59f638d",
+    "checksum_sha256": "c36bbeeb0e38f2883a669816b90d97f9b26a467880c4e9cb83a7e0e39feb6786",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -4591,7 +4591,7 @@
       "kind": "read.analytics",
       "title": "Compute graph shortest paths",
       "summary": "Compute shortest-path distances from a source.",
-      "description": "Computes weighted shortest-path distances from a source node over a consistent snapshot. Edge weights (default 1.0) accumulate along paths; unreachable nodes are omitted from the result. Direction defaults to `outgoing`. The source node must exist (`not_found.engine.graph_node`). Accepts an optional snapshot budget and `as_of` for time travel.\n\nAnalytics commands compute over a consistent snapshot of the visible graph and return a complete result payload in one response. They accept optional snapshot budgets and an `as_of` timestamp for time travel; results are deterministic for a fixed graph state.",
+      "description": "Computes weighted shortest-path distances from a source node over a consistent snapshot, and for every reachable node the predecessor its cheapest walk arrived from — follow `predecessors` back to the source to unpack a path. Edge weights (default 1.0) accumulate along paths; unreachable nodes are omitted from the result. Direction defaults to `outgoing`. `edge_types` restricts the walk to the listed types (a type the graph does not contain restricts to nothing, as for `bfs`); a negative-weight edge among the selected types refuses with `failed_precondition.engine.graph_negative_weight`. The source node must exist (`not_found.engine.graph_node`). Accepts an optional snapshot budget and `as_of` for time travel.\n\nAnalytics commands compute over a consistent snapshot of the visible graph and return a complete result payload in one response. They accept optional snapshot budgets and an `as_of` timestamp for time travel; results are deterministic for a fixed graph state.",
       "docs": "/docs/graph/analytics/sssp",
       "feature": "core",
       "access": "read",
@@ -4630,8 +4630,16 @@
           "docs": "https://stratadb.org/e/invalid_argument.engine.graph_node_id"
         },
         {
+          "code": "invalid_argument.engine.graph_edge_type",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.graph_edge_type"
+        },
+        {
           "code": "not_found.engine.graph_node",
           "docs": "https://stratadb.org/e/not_found.engine.graph_node"
+        },
+        {
+          "code": "failed_precondition.engine.graph_negative_weight",
+          "docs": "https://stratadb.org/e/failed_precondition.engine.graph_negative_weight"
         },
         {
           "code": "resource_exhausted.engine.graph_analytics_budget",
@@ -4652,6 +4660,26 @@
           "requests/v1/setup/graph_add_carol.json",
           "requests/v1/graph/edge_add.json",
           "requests/v1/setup/graph_edge_bob_carol.json"
+        ],
+        "error_cases": [
+          {
+            "setup": [
+              "requests/v1/graph/create.json",
+              "requests/v1/graph/node_add.json"
+            ],
+            "request": "requests/v1/graph/sssp_bad_edge_type.json",
+            "expected_error": "responses/v1/errors/graph/sssp_edge_type.json"
+          },
+          {
+            "setup": [
+              "requests/v1/graph/create.json",
+              "requests/v1/graph/node_add.json",
+              "requests/v1/setup/graph_add_bob.json",
+              "requests/v1/setup/graph_edge_negative_weight.json"
+            ],
+            "request": "requests/v1/graph/sssp.json",
+            "expected_error": "responses/v1/errors/graph/sssp_negative_weight.json"
+          }
         ]
       },
       "wire_status": "stable",

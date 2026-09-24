@@ -1,0 +1,7 @@
+{
+  "class": "failed_precondition",
+  "code": "failed_precondition.engine.graph_negative_weight",
+  "commit_outcome": "not_started",
+  "retry_policy": "never",
+  "retryable": false
+}

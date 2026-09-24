@@ -553,10 +553,11 @@ impl Executor {
 use super::{
     engine_graph_bfs_options, engine_graph_budget, engine_graph_bulk_edges,
     engine_graph_bulk_nodes, engine_graph_cdlp_options, engine_graph_delete_policy,
-    engine_graph_pagerank_options, engine_graph_personalization, graph_bfs_output,
-    graph_bulk_insert_output, graph_cdlp_output, graph_delete_policy_output, graph_lcc_output,
-    graph_pagerank_output, graph_sssp_output, graph_wcc_output, EngineGraphAdjacencyIndex,
-    EngineGraphName, GraphAnalyticsBudget, GraphBulkEdge, GraphBulkNode, GraphDeletePolicy,
+    engine_graph_pagerank_options, engine_graph_personalization, engine_graph_sssp_options,
+    graph_bfs_output, graph_bulk_insert_output, graph_cdlp_output, graph_delete_policy_output,
+    graph_lcc_output, graph_pagerank_output, graph_sssp_output, graph_wcc_output,
+    EngineGraphAdjacencyIndex, EngineGraphName, GraphAnalyticsBudget, GraphBulkEdge, GraphBulkNode,
+    GraphDeletePolicy,
 };
 
 impl Executor {
@@ -611,6 +612,7 @@ impl Executor {
         Ok(graph_lcc_output(&index, &index.lcc()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn execute_graph_sssp(
         &mut self,
         branch: Option<&str>,
@@ -618,6 +620,7 @@ impl Executor {
         graph: String,
         source: String,
         direction: Option<GraphDirection>,
+        edge_types: Option<Vec<String>>,
         budget: Option<GraphAnalyticsBudget>,
         as_of: Option<u64>,
         as_of_time: Option<u64>,
@@ -625,8 +628,11 @@ impl Executor {
         let graph = graph_name(graph)?;
         let source = graph_node_id(source)?;
         let direction = direction.unwrap_or(GraphDirection::Outgoing);
+        // Validate the type filter before building the snapshot, so a bad
+        // name refuses without the snapshot's work.
+        let options = engine_graph_sssp_options(edge_types, Some(direction))?;
         let index = self.graph_analytics_index(branch, space, &graph, budget, as_of, as_of_time)?;
-        let result = index.sssp(&source, engine_graph_direction(direction))?;
+        let result = index.sssp_with(&source, &options)?;
         Ok(graph_sssp_output(&index, direction, &result))
     }
 

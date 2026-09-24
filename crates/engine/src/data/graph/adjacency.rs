@@ -103,6 +103,10 @@ pub struct GraphAdjacencyIndex {
     incoming: Vec<Vec<GraphAdjacencyEdge>>,
     edge_count: u64,
     has_negative_weight: bool,
+    /// Per interned edge type (name order): whether any edge of that type
+    /// is negative, so a type-filtered `sssp` refuses only for the types it
+    /// may walk (#3471).
+    negative_weight_types: Vec<bool>,
 }
 
 impl GraphAdjacencyIndex {
@@ -132,6 +136,14 @@ impl GraphAdjacencyIndex {
     /// snapshot is immutable, so the answer cannot change after it is built.
     pub const fn has_negative_weight(&self) -> bool {
         self.has_negative_weight
+    }
+
+    /// Returns true when an edge of the interned type at `index` has a
+    /// negative weight — recorded per type at build time so a type-filtered
+    /// `sssp` refuses only for the types it may walk (#3471). An index out
+    /// of range names no type, hence no negative edge.
+    pub(crate) fn edge_type_has_negative_weight(&self, index: usize) -> bool {
+        matches!(self.negative_weight_types.get(index), Some(true))
     }
 
     #[must_use]
@@ -201,6 +213,9 @@ pub(crate) struct GraphAdjacencyIndexBuilder {
     incoming: Vec<Vec<GraphAdjacencyEdge>>,
     edge_count: u64,
     has_negative_weight: bool,
+    /// Per interned edge type (first-encounter order until `finish`
+    /// remaps): whether any edge of that type is negative (#3471).
+    negative_weight_types: Vec<bool>,
     nodes_finished: bool,
 }
 
@@ -217,6 +232,7 @@ impl GraphAdjacencyIndexBuilder {
             incoming: Vec::new(),
             edge_count: 0,
             has_negative_weight: false,
+            negative_weight_types: Vec::new(),
             nodes_finished: false,
         }
     }
@@ -273,6 +289,7 @@ impl GraphAdjacencyIndexBuilder {
             let index = self.edge_types.len();
             self.edge_types.push(edge_type.clone());
             self.edge_type_lookup.insert(edge_type.clone(), index);
+            self.negative_weight_types.push(false);
             index
         };
         self.outgoing[src_index].push(GraphAdjacencyEdge {
@@ -286,9 +303,15 @@ impl GraphAdjacencyIndexBuilder {
             weight,
         });
         // #3460: record the negative-weight verdict once, at build time, so
-        // `sssp` need not re-scan every edge on each query. `-0.0 < 0.0` is
-        // false, so a signed zero is treated as non-negative.
-        self.has_negative_weight |= weight < 0.0;
+        // `sssp` need not re-scan every edge on each query — snapshot-wide
+        // and per edge type, so a filtered walk refuses only for the types
+        // it may use (#3471). `-0.0 < 0.0` is false, so a signed zero is
+        // treated as non-negative.
+        let negative = weight < 0.0;
+        self.has_negative_weight |= negative;
+        if negative {
+            self.negative_weight_types[edge_type_index] = true;
+        }
         self.edge_count += 1;
         Ok(())
     }
@@ -314,6 +337,11 @@ impl GraphAdjacencyIndexBuilder {
                 (left.edge_type, left.neighbor).cmp(&(right.edge_type, right.neighbor))
             });
         }
+        // The per-type negative verdict follows the same remap.
+        let mut negative_weight_types = vec![false; self.edge_types.len()];
+        for (old_index, negative) in self.negative_weight_types.iter().enumerate() {
+            negative_weight_types[remap[old_index]] = *negative;
+        }
         GraphAdjacencyIndex {
             graph: self.graph,
             node_ids: self.node_ids,
@@ -323,6 +351,7 @@ impl GraphAdjacencyIndexBuilder {
             incoming: self.incoming,
             edge_count: self.edge_count,
             has_negative_weight: self.has_negative_weight,
+            negative_weight_types,
         }
     }
 }

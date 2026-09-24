@@ -128,43 +128,58 @@ fn contract_2692_unit_weight_sssp_equals_bfs_depths() {
         json!({"type": "upsert_edge", "src": src, "dst": dst, "edge_type": "link",
                "data": {"weight": 1.0}})
     }));
+    // A `detour` shortcut a -> d: unfiltered, both algorithms take it (d at
+    // 1); restricted to `link`, both must ignore it (d at 2 via e).
+    operations.push(
+        json!({"type": "upsert_edge", "src": "a", "dst": "d", "edge_type": "detour",
+                           "data": {"weight": 1.0}}),
+    );
     support::run(
         &mut executor,
         &json!({"type": "graph_batch_write", "graph": "uw", "operations": operations}),
     );
 
-    let bfs = support::run(
-        &mut executor,
-        &json!({"type": "graph_bfs", "graph": "uw", "start": "a", "max_depth": 10}),
-    );
-    let depths = bfs["data"]["depths"]
-        .as_object()
-        .unwrap_or_else(|| panic!("bfs carries depths: {bfs}"));
+    let mut assert_sssp_equals_bfs = |edge_types: Option<Vec<&str>>, expected_d: u64| {
+        let mut bfs_request =
+            json!({"type": "graph_bfs", "graph": "uw", "start": "a", "max_depth": 10});
+        let mut sssp_request = json!({"type": "graph_sssp", "graph": "uw", "source": "a"});
+        if let Some(types) = &edge_types {
+            bfs_request["edge_types"] = json!(types);
+            sssp_request["edge_types"] = json!(types);
+        }
+        let bfs = support::run(&mut executor, &bfs_request);
+        let depths = bfs["data"]["depths"]
+            .as_object()
+            .unwrap_or_else(|| panic!("bfs carries depths: {bfs}"));
+        let sssp = support::run(&mut executor, &sssp_request);
+        let distances = sssp["data"]["distances"]
+            .as_object()
+            .unwrap_or_else(|| panic!("sssp carries distances: {sssp}"));
 
-    let sssp = support::run(
-        &mut executor,
-        &json!({"type": "graph_sssp", "graph": "uw", "source": "a"}),
-    );
-    let distances = sssp["data"]["distances"]
-        .as_object()
-        .unwrap_or_else(|| panic!("sssp carries distances: {sssp}"));
-
-    assert_eq!(
-        depths.len(),
-        distances.len(),
-        "both algorithms reach the same node set"
-    );
-    for (node, depth) in depths {
-        let depth = depth.as_u64().expect("depth is integral");
-        let distance = distances[node].as_f64().expect("distance is numeric");
-        // Depths here are tiny (<16); the u64->f64 cast is exact.
-        #[allow(clippy::cast_precision_loss)]
-        let depth_f = depth as f64;
-        assert!(
-            (distance - depth_f).abs() < f64::EPSILON,
-            "node `{node}`: sssp distance {distance} != bfs depth {depth} on unit weights"
+        assert_eq!(
+            depths.len(),
+            distances.len(),
+            "both algorithms reach the same node set under {edge_types:?}"
         );
-    }
+        assert_eq!(
+            depths["d"].as_u64(),
+            Some(expected_d),
+            "the detour is taken or ignored as the filter says"
+        );
+        for (node, depth) in depths {
+            let depth = depth.as_u64().expect("depth is integral");
+            let distance = distances[node].as_f64().expect("distance is numeric");
+            // Depths here are tiny (<16); the u64->f64 cast is exact.
+            #[allow(clippy::cast_precision_loss)]
+            let depth_f = depth as f64;
+            assert!(
+                (distance - depth_f).abs() < f64::EPSILON,
+                "node `{node}`: sssp distance {distance} != bfs depth {depth} on unit weights under {edge_types:?}"
+            );
+        }
+    };
+    assert_sssp_equals_bfs(None, 1);
+    assert_sssp_equals_bfs(Some(vec!["link"]), 2);
 }
 
 /// Minimal base64 (shared shape with the pivot oracle's helper).

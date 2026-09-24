@@ -73,14 +73,17 @@ impl GraphLccResult {
     }
 }
 
-/// Shortest-path distances from one source node.
+/// Shortest-path distances and predecessors from one source node.
 ///
 /// Distances are keyed by node index; `None` marks a node the source
-/// cannot reach under the requested direction.
+/// cannot reach under the requested direction. Each reachable node also
+/// records the node its cheapest route arrived from, so the route itself
+/// can be unpacked ([`Self::path_to`], #3456).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphSsspResult {
     source: usize,
     distances: Vec<Option<f64>>,
+    predecessors: Vec<Option<usize>>,
 }
 
 impl GraphSsspResult {
@@ -107,6 +110,86 @@ impl GraphSsspResult {
     /// Returns the number of reachable nodes, the source included.
     pub fn reachable_count(&self) -> usize {
         self.distances.iter().flatten().count()
+    }
+
+    #[must_use]
+    /// Returns the predecessor per node index — the node the cheapest route
+    /// arrived from; `None` for the source and for unreachable nodes.
+    pub fn predecessors(&self) -> &[Option<usize>] {
+        &self.predecessors
+    }
+
+    #[must_use]
+    /// Returns the predecessor of the node at `index` (`None` for the
+    /// source, an unreachable node, or an index out of range).
+    pub fn predecessor(&self, index: usize) -> Option<usize> {
+        self.predecessors.get(index).copied().flatten()
+    }
+
+    #[must_use]
+    /// Returns the cheapest route to the node at `index` as node indexes,
+    /// source first — `Some(vec![source])` for the source itself, `None`
+    /// when the node is unreachable or out of range.
+    ///
+    /// Ties resolve to the route discovered first: the frontier pops by
+    /// (distance, node index), edges relax in (edge type, neighbor) order,
+    /// and an equal-cost alternative never replaces a recorded predecessor.
+    /// Under [`GraphDirection::Both`] a step may run against an edge's
+    /// stored direction; the route is a node sequence, not a drive.
+    pub fn path_to(&self, index: usize) -> Option<Vec<usize>> {
+        self.distance(index)?;
+        let mut path = vec![index];
+        let mut at = index;
+        // The chain is a tree rooted at the source — a link is recorded only
+        // when a distance strictly drops — so it has fewer steps than there
+        // are nodes. The bound keeps the walk finite whatever the chain holds.
+        for _ in 0..self.predecessors.len() {
+            let Some(previous) = self.predecessor(at) else {
+                break;
+            };
+            path.push(previous);
+            at = previous;
+        }
+        path.reverse();
+        Some(path)
+    }
+}
+
+/// Options for a single-source shortest-path run (#3471).
+///
+/// Mirrors [`super::GraphBfsOptions`]: an edge-type list restricts every
+/// relaxation to those types, and `None` walks every type. A type this
+/// snapshot never saw restricts to nothing — it is not an error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphSsspOptions {
+    direction: GraphDirection,
+    edge_types: Option<Vec<super::GraphEdgeType>>,
+}
+
+impl GraphSsspOptions {
+    /// Creates explicit options: the direction to walk and, when given, the
+    /// edge types the walk may use.
+    #[must_use]
+    pub const fn new(
+        direction: GraphDirection,
+        edge_types: Option<Vec<super::GraphEdgeType>>,
+    ) -> Self {
+        Self {
+            direction,
+            edge_types,
+        }
+    }
+
+    #[must_use]
+    /// Returns the traversal direction.
+    pub const fn direction(&self) -> GraphDirection {
+        self.direction
+    }
+
+    #[must_use]
+    /// Returns the edge-type restriction, when set.
+    pub fn edge_types(&self) -> Option<&[super::GraphEdgeType]> {
+        self.edge_types.as_deref()
     }
 }
 
@@ -224,17 +307,29 @@ impl GraphAdjacencyIndex {
     }
 
     /// Computes shortest-path distances from `source` along `direction`
-    /// using Dijkstra's algorithm.
-    ///
-    /// Refuses with `not_found.engine.graph_node` when the source is not
-    /// in the snapshot, and with
-    /// `failed_precondition.engine.graph_negative_weight` when any edge
-    /// carries a negative weight (shortest distances are undefined
-    /// there, and the search could fail to terminate).
+    /// over every edge type — [`Self::sssp_with`] with no type restriction.
     pub fn sssp(
         &self,
         source: &GraphNodeId,
         direction: GraphDirection,
+    ) -> Result<GraphSsspResult, EngineError> {
+        self.sssp_with(source, &GraphSsspOptions::new(direction, None))
+    }
+
+    /// Computes shortest-path distances and predecessors from `source`
+    /// under `options`, using Dijkstra's algorithm.
+    ///
+    /// Refuses with `not_found.engine.graph_node` when the source is not
+    /// in the snapshot, and with
+    /// `failed_precondition.engine.graph_negative_weight` when an edge the
+    /// walk may use carries a negative weight — one of the selected types,
+    /// or any type when unrestricted (shortest distances are undefined
+    /// there, and the search could fail to terminate). A negative edge of
+    /// a type the options exclude does not refuse (#3471).
+    pub fn sssp_with(
+        &self,
+        source: &GraphNodeId,
+        options: &GraphSsspOptions,
     ) -> Result<GraphSsspResult, EngineError> {
         let Some(source_index) = self.node_index(source) else {
             return Err(EngineError::not_found(
@@ -242,11 +337,27 @@ impl GraphAdjacencyIndex {
                 "graph node was not found in this snapshot",
             ));
         };
-        // #3460: the negative-weight verdict is recorded once at build time,
-        // so refusing negatives is a single check rather than an O(E) re-scan
-        // on every query. The snapshot is immutable — it cannot gain a negative
-        // edge without being rebuilt.
-        if self.has_negative_weight() {
+        // Resolve the type restriction to interned indexes once; a name
+        // with no edges in this snapshot restricts to nothing.
+        let type_filter: Option<std::collections::HashSet<usize>> =
+            options.edge_types().map(|types| {
+                types
+                    .iter()
+                    .filter_map(|edge_type| self.edge_type_index(edge_type))
+                    .collect()
+            });
+        // #3460: the negative-weight verdict is recorded per edge type at
+        // build time, so refusing is a set probe rather than an O(E) re-scan
+        // on every query — and it covers only the types this walk may use.
+        // The snapshot is immutable: it cannot gain a negative edge without
+        // being rebuilt.
+        let negative_selected = match &type_filter {
+            None => self.has_negative_weight(),
+            Some(filter) => filter
+                .iter()
+                .any(|edge_type| self.edge_type_has_negative_weight(*edge_type)),
+        };
+        if negative_selected {
             return Err(EngineError::conflict(
                 "failed_precondition.engine.graph_negative_weight",
                 "shortest-path distances require non-negative edge weights",
@@ -255,35 +366,47 @@ impl GraphAdjacencyIndex {
 
         let mut distances: Vec<Option<f64>> = vec![None; self.node_count()];
         distances[source_index] = Some(0.0);
+        let mut predecessors: Vec<Option<usize>> = vec![None; self.node_count()];
+        let mut settled = vec![false; self.node_count()];
         let mut frontier = BinaryHeap::new();
         frontier.push(Reverse((FrontierDistance(0.0), source_index)));
 
         while let Some(Reverse((FrontierDistance(distance), node))) = frontier.pop() {
-            match distances[node] {
-                Some(known) if distance > known => continue,
-                _ => {}
+            // A node settles on its first pop, which carries its final
+            // distance under non-negative weights; every later entry for it
+            // is stale. Settling also bounds the walk to one relaxation per
+            // edge, so it ends whatever the weights do.
+            if std::mem::replace(&mut settled[node], true) {
+                continue;
             }
-            let mut relax = |neighbor: usize, weight: f64| {
-                let candidate = distance + weight;
-                if distances[neighbor].is_none_or(|current| candidate < current) {
-                    distances[neighbor] = Some(candidate);
-                    frontier.push(Reverse((FrontierDistance(candidate), neighbor)));
+            let mut relax = |edge: &super::GraphAdjacencyEdge| {
+                if type_filter
+                    .as_ref()
+                    .is_some_and(|filter| !filter.contains(&edge.edge_type()))
+                {
+                    return;
+                }
+                let candidate = distance + edge.weight();
+                if distances[edge.neighbor()].is_none_or(|current| candidate < current) {
+                    distances[edge.neighbor()] = Some(candidate);
+                    predecessors[edge.neighbor()] = Some(node);
+                    frontier.push(Reverse((FrontierDistance(candidate), edge.neighbor())));
                 }
             };
-            match direction {
+            match options.direction() {
                 GraphDirection::Outgoing => {
                     for edge in self.outgoing(node) {
-                        relax(edge.neighbor(), edge.weight());
+                        relax(edge);
                     }
                 }
                 GraphDirection::Incoming => {
                     for edge in self.incoming(node) {
-                        relax(edge.neighbor(), edge.weight());
+                        relax(edge);
                     }
                 }
                 GraphDirection::Both => {
                     for edge in self.outgoing(node).iter().chain(self.incoming(node)) {
-                        relax(edge.neighbor(), edge.weight());
+                        relax(edge);
                     }
                 }
             }
@@ -292,6 +415,7 @@ impl GraphAdjacencyIndex {
         Ok(GraphSsspResult {
             source: source_index,
             distances,
+            predecessors,
         })
     }
 }
@@ -337,6 +461,68 @@ mod tests {
         let weighted: Vec<(&str, &str, f64)> =
             edges.iter().map(|(src, dst)| (*src, *dst, 1.0)).collect();
         make_index(&weighted, extra_nodes)
+    }
+
+    /// Builds an index from `(src, edge type, dst, weight)` edges — the
+    /// heterogeneous shape the edge-type filter exists for (#3471).
+    fn make_typed_index(edges: &[(&str, &str, &str, f64)]) -> GraphAdjacencyIndex {
+        let mut ids: Vec<&str> = Vec::new();
+        for (src, _, dst, _) in edges {
+            ids.push(src);
+            ids.push(dst);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let mut builder = GraphAdjacencyIndexBuilder::new(
+            GraphName::new("g").expect("graph"),
+            GraphAnalyticsBudget::default(),
+        );
+        for id in ids {
+            builder.add_node(node(id)).expect("node fits");
+        }
+        builder.finish_nodes();
+        for (src, kind, dst, weight) in edges {
+            builder
+                .add_edge(
+                    &node(src),
+                    &GraphEdgeType::new(*kind).expect("edge type"),
+                    &node(dst),
+                    *weight,
+                )
+                .expect("edge fits");
+        }
+        builder.finish()
+    }
+
+    /// Builds the `edge_types` argument, which is `Option` at every call site.
+    #[allow(clippy::unnecessary_wraps)]
+    fn types(names: &[&str]) -> Option<Vec<GraphEdgeType>> {
+        Some(
+            names
+                .iter()
+                .map(|name| GraphEdgeType::new(*name).expect("edge type"))
+                .collect(),
+        )
+    }
+
+    /// The node ids along `path_to(id)`, source first.
+    fn path_of(
+        index: &GraphAdjacencyIndex,
+        sssp: &super::GraphSsspResult,
+        id: &str,
+    ) -> Option<Vec<String>> {
+        sssp.path_to(index.node_index(&node(id)).expect("node present"))
+            .map(|path| {
+                path.iter()
+                    .map(|step| {
+                        index
+                            .node_id(*step)
+                            .expect("index in range")
+                            .as_str()
+                            .to_owned()
+                    })
+                    .collect()
+            })
     }
 
     fn component_of(index: &GraphAdjacencyIndex, wcc: &super::GraphWccResult, id: &str) -> usize {
@@ -546,6 +732,220 @@ mod tests {
             negative
                 .sssp(&node("A"), GraphDirection::Outgoing)
                 .expect_err("a negative snapshot refuses sssp")
+                .code(),
+            "failed_precondition.engine.graph_negative_weight"
+        );
+    }
+
+    // --- predecessors and paths (#3456) ---------------------------------
+
+    /// The cheaper two-hop route unpacks to its node list — not just the
+    /// cheaper scalar. The source's path is itself; an unreachable node has
+    /// no path and no predecessor.
+    #[test]
+    fn sssp_path_to_unpacks_the_cheaper_two_hop_route() {
+        let index = make_index(
+            &[("A", "B", 1.0), ("B", "C", 2.0), ("A", "C", 10.0)],
+            &["Z"],
+        );
+        let sssp = index
+            .sssp(&node("A"), GraphDirection::Outgoing)
+            .expect("sssp runs");
+        assert_eq!(
+            path_of(&index, &sssp, "C"),
+            Some(vec!["A".to_owned(), "B".to_owned(), "C".to_owned()])
+        );
+        assert_eq!(path_of(&index, &sssp, "A"), Some(vec!["A".to_owned()]));
+        assert_eq!(
+            sssp.predecessor(index.node_index(&node("A")).expect("A")),
+            None
+        );
+        assert_eq!(path_of(&index, &sssp, "Z"), None);
+        assert_eq!(
+            sssp.predecessor(index.node_index(&node("Z")).expect("Z")),
+            None
+        );
+        assert_eq!(sssp.predecessors().len(), index.node_count());
+        // An index past the node set has no distance, no predecessor, and no
+        // path — the accessors bound-check rather than panic.
+        let out_of_range = index.node_count() + 5;
+        assert_eq!(sssp.distance(out_of_range), None);
+        assert_eq!(sssp.predecessor(out_of_range), None);
+        assert_eq!(sssp.path_to(out_of_range), None);
+    }
+
+    /// Two equal-cost routes: the one discovered first keeps the node, and
+    /// discovery order is the documented one — the frontier pops by
+    /// (distance, node index), so `B` (lower index) reaches `D` before `C`
+    /// does, and `C`'s equal-cost offer never replaces it.
+    #[test]
+    fn sssp_tie_break_keeps_the_first_discovered_path() {
+        let index = make_index(
+            &[
+                ("A", "B", 1.0),
+                ("A", "C", 1.0),
+                ("B", "D", 1.0),
+                ("C", "D", 1.0),
+            ],
+            &[],
+        );
+        let sssp = index
+            .sssp(&node("A"), GraphDirection::Outgoing)
+            .expect("sssp runs");
+        assert_eq!(distance_of(&index, &sssp, "D"), Some(2.0));
+        assert_eq!(
+            path_of(&index, &sssp, "D"),
+            Some(vec!["A".to_owned(), "B".to_owned(), "D".to_owned()])
+        );
+        // Deterministic: the same snapshot yields the same predecessors.
+        let again = index
+            .sssp(&node("A"), GraphDirection::Outgoing)
+            .expect("sssp runs");
+        assert_eq!(again, sssp);
+    }
+
+    /// Under `Both`, a predecessor is the neighbor the walk arrived from —
+    /// the path is a node sequence regardless of each edge's direction.
+    #[test]
+    fn sssp_path_under_both_follows_reverse_edges() {
+        let index = make_index(&[("A", "B", 1.0), ("C", "B", 1.0)], &[]);
+        let sssp = index
+            .sssp(&node("A"), GraphDirection::Both)
+            .expect("sssp runs");
+        assert_eq!(
+            path_of(&index, &sssp, "C"),
+            Some(vec!["A".to_owned(), "B".to_owned(), "C".to_owned()])
+        );
+    }
+
+    // --- edge-type filter (#3471) ---------------------------------------
+
+    /// #3471's mixed graph: a street edge and a two-hop semantic shortcut.
+    /// Unfiltered, the shortcut wins; street-only, the street distance is
+    /// the answer and the category node is unreachable; a type this
+    /// snapshot never saw restricts to nothing, as it does for bfs.
+    #[test]
+    fn sssp_edge_type_filter_excludes_other_types() {
+        let index = make_typed_index(&[
+            ("a", "street", "b", 100.0),
+            ("a", "member", "category", 1.0),
+            ("category", "member", "b", 1.0),
+        ]);
+        let unfiltered = index
+            .sssp(&node("a"), GraphDirection::Outgoing)
+            .expect("sssp runs");
+        assert_eq!(distance_of(&index, &unfiltered, "b"), Some(2.0));
+
+        let street = index
+            .sssp_with(
+                &node("a"),
+                &super::GraphSsspOptions::new(GraphDirection::Outgoing, types(&["street"])),
+            )
+            .expect("filtered sssp runs");
+        assert_eq!(distance_of(&index, &street, "b"), Some(100.0));
+        assert_eq!(distance_of(&index, &street, "category"), None);
+        assert_eq!(
+            path_of(&index, &street, "b"),
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
+
+        let member = index
+            .sssp_with(
+                &node("a"),
+                &super::GraphSsspOptions::new(GraphDirection::Outgoing, types(&["member"])),
+            )
+            .expect("filtered sssp runs");
+        assert_eq!(distance_of(&index, &member, "b"), Some(2.0));
+
+        for restricting_to_nothing in [types(&["unknown"]), types(&[])] {
+            let none = index
+                .sssp_with(
+                    &node("a"),
+                    &super::GraphSsspOptions::new(GraphDirection::Outgoing, restricting_to_nothing),
+                )
+                .expect("a filter that matches nothing still runs");
+            assert_eq!(none.reachable_count(), 1, "only the source is reachable");
+        }
+        // No filter at all is the unfiltered result.
+        let all = index
+            .sssp_with(
+                &node("a"),
+                &super::GraphSsspOptions::new(GraphDirection::Outgoing, None),
+            )
+            .expect("sssp runs");
+        assert_eq!(all, unfiltered);
+    }
+
+    /// The filter applies along incoming and both-direction walks too.
+    #[test]
+    fn sssp_edge_type_filter_applies_in_every_direction() {
+        let index = make_typed_index(&[("a", "street", "b", 5.0), ("c", "member", "b", 1.0)]);
+        for direction in [GraphDirection::Incoming, GraphDirection::Both] {
+            let street = index
+                .sssp_with(
+                    &node("b"),
+                    &super::GraphSsspOptions::new(direction, types(&["street"])),
+                )
+                .expect("filtered sssp runs");
+            assert_eq!(distance_of(&index, &street, "a"), Some(5.0));
+            assert_eq!(distance_of(&index, &street, "c"), None);
+        }
+    }
+
+    /// Negative weights are refused for the edges a query can actually
+    /// walk: a negative `hates` edge refuses an unfiltered or `hates`-only
+    /// query, and never a `knows`-only one — while the snapshot still
+    /// reports that it holds a negative weight.
+    #[test]
+    fn sssp_negative_weight_refusal_scopes_to_the_selected_types() {
+        let index = make_typed_index(&[("A", "knows", "B", 1.0), ("A", "hates", "C", -1.0)]);
+        assert!(index.has_negative_weight());
+        for options in [
+            super::GraphSsspOptions::new(GraphDirection::Outgoing, None),
+            super::GraphSsspOptions::new(GraphDirection::Outgoing, types(&["hates"])),
+            super::GraphSsspOptions::new(GraphDirection::Outgoing, types(&["knows", "hates"])),
+        ] {
+            assert_eq!(
+                index
+                    .sssp_with(&node("A"), &options)
+                    .expect_err("a selected negative edge refuses")
+                    .code(),
+                "failed_precondition.engine.graph_negative_weight"
+            );
+        }
+        let knows = index
+            .sssp_with(
+                &node("A"),
+                &super::GraphSsspOptions::new(GraphDirection::Outgoing, types(&["knows"])),
+            )
+            .expect("the negative edge is not selected");
+        assert_eq!(distance_of(&index, &knows, "B"), Some(1.0));
+        assert_eq!(distance_of(&index, &knows, "C"), None);
+    }
+
+    /// The builder interns types in first-encounter order and `finish`
+    /// remaps them to name order; the per-type negative verdict must follow
+    /// the remap. `z` is interned first and sorts last.
+    #[test]
+    fn negative_weight_types_follow_the_finish_remap() {
+        let index = make_typed_index(&[("A", "z", "B", 1.0), ("A", "a", "C", -1.0)]);
+        assert_eq!(
+            index.edge_type_index(&GraphEdgeType::new("a").expect("type")),
+            Some(0)
+        );
+        index
+            .sssp_with(
+                &node("A"),
+                &super::GraphSsspOptions::new(GraphDirection::Outgoing, types(&["z"])),
+            )
+            .expect("`z` carries no negative edge");
+        assert_eq!(
+            index
+                .sssp_with(
+                    &node("A"),
+                    &super::GraphSsspOptions::new(GraphDirection::Outgoing, types(&["a"])),
+                )
+                .expect_err("`a` carries the negative edge")
                 .code(),
             "failed_precondition.engine.graph_negative_weight"
         );
