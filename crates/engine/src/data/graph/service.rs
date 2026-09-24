@@ -609,6 +609,10 @@ impl<'a> GraphService<'a> {
     }
 
     /// Deletes one graph node and its incident edges.
+    ///
+    /// The incident-edge cascade is unconditional; there is no refuse-if-wired
+    /// mode in V1 (#3194). To refuse when a node still has edges, `neighbors()`
+    /// first and decide before calling this.
     pub fn delete_node(
         &mut self,
         graph: &GraphName,

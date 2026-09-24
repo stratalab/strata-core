@@ -233,6 +233,15 @@ impl GraphBindingPrimitive {
 }
 
 /// Typed product identity that can be attached to a graph node.
+///
+/// The optional `branch` names where the target lives (#3466). `None` means
+/// "this node's own branch" and is the portable choice: a fork copies the
+/// binding and it resolves against the child. `Some(branch)` is **rejected with
+/// `unsupported.engine.graph_binding_cross_branch` unless it equals the
+/// service's own branch** — cross-branch references are refused in V1, so a
+/// binding that names its branch explicitly breaks the moment the node is
+/// forked onto another. Prefer `None` unless you specifically need to assert
+/// the same-branch identity.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
 pub struct GraphBindingTarget {
     primitive: GraphBindingPrimitive,
@@ -533,6 +542,12 @@ pub enum GraphBatchOperation {
         data: GraphNodeData,
     },
     /// Deletes one node and its incident edges.
+    ///
+    /// The incident-edge cascade is **unconditional** — V1 has no
+    /// refuse-if-wired mode (#3194). A caller that wants "refuse when the node
+    /// still has edges" must `neighbors()`-scan and decide before deleting;
+    /// deleting the node while leaving dangling edges is not offered either
+    /// (the engine forbids an edge without both endpoints).
     DeleteNode {
         /// Node id.
         node_id: GraphNodeId,

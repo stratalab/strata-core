@@ -221,6 +221,13 @@ impl<'a> BranchService<'a> {
     /// Compares two branches, reporting the authored entities that differ,
     /// grouped by capability and space. The comparison is directional from
     /// `branch_a` to `branch_b`. Derived rows are omitted by default.
+    ///
+    /// This is a raw authored-difference report across ALL capabilities, **not**
+    /// a dry-run of [`Self::promote`] (#3177): it reports graph and event
+    /// differences even though promote does not carry them. For what a promotion
+    /// would actually apply — and which capabilities it treats as compare-only —
+    /// use [`Self::preview`], whose result flags them in
+    /// `capabilities_unsupported`.
     pub fn compare(
         &mut self,
         branch_a: &BranchName,
@@ -285,6 +292,12 @@ impl<'a> BranchService<'a> {
     /// or tombstone for each conflict and reports what it overwrote or deleted.
     /// A clean promotion that applies nothing leaves the target unchanged and
     /// writes no commit.
+    ///
+    /// Carry set (#3177): promote copies KV, JSON, and vector rows. It does NOT
+    /// carry event rows (promotion would break the sequence and hash chain) or
+    /// graph rows (there is no structural graph merge in V1); both are reported
+    /// in the outcome's `capabilities_unsupported`, and `compare` reporting a
+    /// difference in them is not a promotion that will apply it.
     pub fn promote(
         &mut self,
         source: &BranchName,
