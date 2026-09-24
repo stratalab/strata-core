@@ -17,6 +17,10 @@
         "description": "Collection name.",
         "type": "string"
       },
+      "force": {
+        "description": "Delete the collection's vectors before dropping it. A populated\ncollection is refused without this.",
+        "type": "boolean"
+      },
       "space": {
         "description": "Target product space. Defaults to `\"default\"`.",
         "type": [

@@ -997,6 +997,11 @@ fn graph_delete_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn graph_delete_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/graph/create.json", "requests/v1/graph/node_add.json"], "requests/v1/graph/delete.json", "responses/v1/errors/graph/delete_not_empty.json");
+}
+
+#[test]
 fn graph_delete_replay_observes_a_declared_output() {
     support::replay_observes_declared(&["requests/v1/graph/create.json"], "requests/v1/graph/delete.json", &["graph_delete_result"]);
 }
@@ -2714,6 +2719,11 @@ fn vector_collection_delete_response_wire_roundtrip_is_idempotent() {
 #[test]
 fn vector_collection_delete_request_rejects_unknown_keys_at_closed_objects() {
     support::unknown_keys_rejected("requests/v1/vector/collection_delete.json", &[""]);
+}
+
+#[test]
+fn vector_collection_delete_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&["requests/v1/vector/collection_create.json", "requests/v1/vector/upsert.json"], "requests/v1/vector/collection_delete.json", "responses/v1/errors/vector/collection_delete_not_empty.json");
 }
 
 #[test]

@@ -1456,12 +1456,10 @@ fn graph_create_in(
 }
 
 fn delete_graph(executor: &mut Executor, graph: &str) -> bool {
+    // Route through the facade `graph_delete` (with force) so its wiring is
+    // exercised, not just the raw Command (#3122).
     match executor
-        .execute(Command::GraphDelete {
-            branch: None,
-            space: None,
-            graph: graph.to_owned(),
-        })
+        .graph_delete(graph, true)
         .expect("graph delete succeeds")
     {
         Output::GraphDeleteResult { effect, .. } => effect.applied(),

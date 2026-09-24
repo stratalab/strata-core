@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "94931179f32cea49d06fe372bf235a323c86636397cc4f52660b3e9e3aa3f187",
+    "checksum_sha256": "a9c8c7f9a48e8102a8cab9723ff860461d37600354e213207b5ca9b9cc894d1c",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -2938,6 +2938,10 @@
         {
           "code": "not_found.engine.graph",
           "docs": "https://stratadb.org/e/not_found.engine.graph"
+        },
+        {
+          "code": "failed_precondition.engine.graph_not_empty",
+          "docs": "https://stratadb.org/e/failed_precondition.engine.graph_not_empty"
         }
       ],
       "fixtures": {
@@ -2945,6 +2949,16 @@
         "response": "responses/v1/graph/delete_applied.json",
         "setup": [
           "requests/v1/graph/create.json"
+        ],
+        "error_cases": [
+          {
+            "setup": [
+              "requests/v1/graph/create.json",
+              "requests/v1/graph/node_add.json"
+            ],
+            "request": "requests/v1/graph/delete.json",
+            "expected_error": "responses/v1/errors/graph/delete_not_empty.json"
+          }
         ]
       },
       "wire_status": "stable",
@@ -9367,6 +9381,10 @@
         {
           "code": "not_found.engine.vector_collection",
           "docs": "https://stratadb.org/e/not_found.engine.vector_collection"
+        },
+        {
+          "code": "failed_precondition.engine.vector_collection_not_empty",
+          "docs": "https://stratadb.org/e/failed_precondition.engine.vector_collection_not_empty"
         }
       ],
       "fixtures": {
@@ -9374,6 +9392,16 @@
         "response": "responses/v1/vector/collection_delete_true.json",
         "setup": [
           "requests/v1/vector/collection_create.json"
+        ],
+        "error_cases": [
+          {
+            "setup": [
+              "requests/v1/vector/collection_create.json",
+              "requests/v1/vector/upsert.json"
+            ],
+            "request": "requests/v1/vector/collection_delete.json",
+            "expected_error": "responses/v1/errors/vector/collection_delete_not_empty.json"
+          }
         ]
       },
       "wire_status": "transitional",

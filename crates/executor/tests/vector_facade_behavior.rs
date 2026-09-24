@@ -275,11 +275,12 @@ fn vector_facade_matches_explicit_commands() {
     );
     assert_facade_matches!(
         direct,
-        facade.vector_delete_collection("docs"),
+        facade.vector_delete_collection("docs", false),
         Command::VectorDeleteCollection {
             branch: None,
             space: None,
             collection: "docs".to_owned(),
+            force: false,
         }
     );
 }

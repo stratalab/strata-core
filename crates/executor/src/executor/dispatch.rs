@@ -336,10 +336,12 @@ impl Executor {
                 branch,
                 space,
                 collection,
+                force,
             } => self.execute_vector_delete_collection(
                 branch.as_deref(),
                 space.as_deref(),
                 collection,
+                force,
             ),
             Command::VectorListCollections { branch, space } => {
                 self.execute_vector_list_collections(branch.as_deref(), space.as_deref())
@@ -701,7 +703,8 @@ impl Executor {
                 branch,
                 space,
                 graph,
-            } => self.execute_graph_delete(branch.as_deref(), space.as_deref(), graph),
+                force,
+            } => self.execute_graph_delete(branch.as_deref(), space.as_deref(), graph, force),
             Command::GraphList {
                 branch,
                 space,

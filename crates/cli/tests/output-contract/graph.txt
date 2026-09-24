@@ -191,6 +191,10 @@ deleted graph social
 ### graph.delete · edge:committed_at=fixed · raw
 social
 ∎
+### graph.delete · responses/v1/errors/graph/delete_not_empty.json · human
+failed_precondition.engine.graph_not_empty: command failed∎
+### graph.delete · responses/v1/errors/graph/delete_not_empty.json · raw
+failed_precondition.engine.graph_not_empty: command failed∎
 ### graph.delete · responses/v1/graph/delete_applied.json · human
 deleted graph social
 ∎

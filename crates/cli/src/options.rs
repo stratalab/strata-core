@@ -1228,6 +1228,10 @@ pub(crate) enum VectorCollectionCommand {
     Delete {
         /// Collection name.
         collection: String,
+        /// Delete the collection's vectors before dropping it. A populated
+        /// collection is refused without this.
+        #[arg(long)]
+        force: bool,
     },
     /// List collections.
     List,
@@ -1494,6 +1498,10 @@ pub(crate) enum GraphCommand {
     Delete {
         /// Graph name.
         graph: String,
+        /// Delete the graph's nodes and edges before dropping it. A populated
+        /// graph is refused without this.
+        #[arg(long)]
+        force: bool,
     },
     /// List graphs.
     List {

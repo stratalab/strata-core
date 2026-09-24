@@ -242,6 +242,12 @@ the public registry when adding, renaming, or removing a public error code.
 <a id="failed_precondition.engine.space_not_empty"></a>
 - `failed_precondition.engine.space_not_empty`
 
+<a id="failed_precondition.engine.vector_collection_not_empty"></a>
+- `failed_precondition.engine.vector_collection_not_empty`
+
+<a id="failed_precondition.engine.graph_not_empty"></a>
+- `failed_precondition.engine.graph_not_empty`
+
 <a id="failed_precondition.engine.storage_registry"></a>
 - `failed_precondition.engine.storage_registry`
 

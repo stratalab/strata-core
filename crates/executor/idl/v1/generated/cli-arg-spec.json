@@ -336,7 +336,9 @@
       "positionals": [
         "graph"
       ],
-      "flags": {}
+      "flags": {
+        "force": "force"
+      }
     },
     "graph get-edge": {
       "positionals": [
@@ -945,7 +947,9 @@
       "positionals": [
         "collection"
       ],
-      "flags": {}
+      "flags": {
+        "force": "force"
+      }
     },
     "vector collection list": {
       "positionals": [],

@@ -36,6 +36,7 @@ $ strata graph list
 
 | Name | Type | Required | Description |
 |---|---|---|---|
+| `force` | `boolean` | no | Delete the graph's nodes and edges before dropping it. A populated graph is refused without this. |
 | `graph` | `string` | yes | Graph name. |
 
 Plus the optional scope: `branch` and `space` (default to the session branch and the `"default"` space).
@@ -51,6 +52,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.product_space`](https://stratadb.org/e/invalid_argument.engine.product_space)
 - [`invalid_argument.engine.graph_name`](https://stratadb.org/e/invalid_argument.engine.graph_name)
 - [`not_found.engine.graph`](https://stratadb.org/e/not_found.engine.graph)
+- [`failed_precondition.engine.graph_not_empty`](https://stratadb.org/e/failed_precondition.engine.graph_not_empty)
 
 ## Invocation
 

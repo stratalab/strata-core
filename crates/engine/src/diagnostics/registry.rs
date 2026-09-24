@@ -146,6 +146,8 @@ const CONFLICT_CODES: &[&str] = &[
     "failed_precondition.engine.embedding_model_mismatch",
     "failed_precondition.engine.embedding_model_missing",
     "failed_precondition.engine.space_not_empty",
+    "failed_precondition.engine.vector_collection_not_empty",
+    "failed_precondition.engine.graph_not_empty",
 ];
 
 const HISTORY_UNAVAILABLE_CODES: &[&str] = &["history_unavailable.engine.persistence_history"];

@@ -29,6 +29,8 @@ commands:
     output: Output::Bool
     prose: commands/vector.collection.delete.md
     wire_status: transitional
+    errors+:
+      - failed_precondition.engine.vector_collection_not_empty
     display:
       receipt: "deleted collection {/request/collection}"
       noun: collection
@@ -39,6 +41,12 @@ commands:
         - requests/v1/vector/collection_create.json
       request: requests/v1/vector/collection_delete.json
       response: responses/v1/vector/collection_delete_true.json
+      error_cases:
+        - setup:
+            - requests/v1/vector/collection_create.json
+            - requests/v1/vector/upsert.json
+          request: requests/v1/vector/collection_delete.json
+          expected_error: responses/v1/errors/vector/collection_delete_not_empty.json
   - id: vector.collection.list
     kind: read.page
     title: List vector collections

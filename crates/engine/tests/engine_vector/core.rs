@@ -46,6 +46,61 @@ fn vector_snapshot_existence_contract_runs_in_cache_and_durable_modes() {
 }
 
 #[test]
+fn vector_delete_collection_guards_a_populated_collection_without_force() {
+    run_database_modes(exercise_vector_delete_collection_force_guard);
+}
+
+/// #3122: deleting a collection destroys every vector in it, so a populated
+/// collection refuses deletion without force (matching space delete) while an
+/// empty one deletes freely.
+fn exercise_vector_delete_collection_force_guard(database: &mut Database) {
+    let mut vectors = vector_service(database, "default", "default");
+
+    // An empty collection deletes without force — no data is at risk.
+    vectors
+        .create_collection(collection("empty"), config(2, VectorDistanceMetric::Cosine))
+        .expect("empty collection create succeeds");
+    assert!(vectors
+        .delete_collection(&collection("empty"), false)
+        .expect("an empty collection deletes without force"));
+
+    // A populated collection refuses deletion without force...
+    vectors
+        .create_collection(collection("docs"), config(2, VectorDistanceMetric::Cosine))
+        .expect("docs collection create succeeds");
+    vectors
+        .upsert(
+            collection("docs"),
+            vector_key("a"),
+            embedding([1.0, 0.0]),
+            Some(metadata(json!({}))),
+        )
+        .expect("upsert succeeds");
+    let refused = vectors
+        .delete_collection(&collection("docs"), false)
+        .expect_err("a populated collection refuses deletion without force");
+    assert_eq!(refused.class(), EngineErrorClass::Conflict);
+    assert_eq!(
+        refused.code(),
+        "failed_precondition.engine.vector_collection_not_empty"
+    );
+    // ...and the refusal is zero-mutation — the vector is still there.
+    assert_eq!(
+        vectors.count(&collection("docs")).expect("count succeeds"),
+        1
+    );
+
+    // With force, it deletes.
+    assert!(vectors
+        .delete_collection(&collection("docs"), true)
+        .expect("force deletes a populated collection"));
+    assert!(vectors
+        .collection_info(&collection("docs"))
+        .expect("info succeeds")
+        .is_none());
+}
+
+#[test]
 fn vector_branch_and_space_isolation_match_other_primitives() {
     let mut database = open_cache_database().expect("cache open succeeds");
     {
@@ -190,7 +245,7 @@ fn vector_branch_destructive_operations_stay_isolated() {
         );
         assert_eq!(feature.count(&collection).expect("count succeeds"), 0);
         assert!(feature
-            .delete_collection(&collection)
+            .delete_collection(&collection, true)
             .expect("collection delete succeeds"));
         assert!(feature
             .collection_info(&collection)
@@ -264,7 +319,7 @@ fn vector_space_destructive_operations_stay_isolated() {
             1
         );
         assert!(other_space
-            .delete_collection(&collection)
+            .delete_collection(&collection, true)
             .expect("collection delete succeeds"));
     }
 
@@ -415,7 +470,7 @@ fn vector_durable_reopen_preserves_collection_delete() {
             )
             .expect("upsert succeeds");
         assert!(vectors
-            .delete_collection(&collection)
+            .delete_collection(&collection, true)
             .expect("collection delete succeeds"));
         assert!(vectors
             .collection_info(&collection)
@@ -760,14 +815,14 @@ fn vector_collection_delete_tombstones_visible_rows() {
         2
     );
     assert!(vectors
-        .delete_collection(&collection("scratch"))
+        .delete_collection(&collection("scratch"), true)
         .expect("collection delete succeeds"));
     assert!(vectors
         .collection_info(&collection("scratch"))
         .expect("info succeeds")
         .is_none());
     assert!(!vectors
-        .delete_collection(&collection("scratch"))
+        .delete_collection(&collection("scratch"), true)
         .expect("missing collection delete succeeds"));
     let error = vectors
         .query(&collection("scratch"), &embedding([1.0, 0.0]), 1, None)
@@ -800,7 +855,7 @@ fn vector_historical_reads_use_historical_collection_config_after_delete() {
     let timestamp = written.commit().timestamp();
 
     assert!(vectors
-        .delete_collection(&collection)
+        .delete_collection(&collection, true)
         .expect("collection delete succeeds"));
     assert!(vectors
         .collection_info(&collection)

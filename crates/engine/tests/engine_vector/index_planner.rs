@@ -568,7 +568,7 @@ fn exercise_vector_flat_delete_all_and_recreate_match_exact(database: &mut Datab
         .seed_flat_index_manifest_from_visible_rows_for_test(&recreate_docs, "source-a")
         .expect("flat artifact seed succeeds");
     assert!(vectors
-        .delete_collection(&recreate_docs)
+        .delete_collection(&recreate_docs, true)
         .expect("collection delete succeeds"));
     vectors
         .create_collection(
@@ -798,7 +798,7 @@ fn exercise_vector_recreated_collection_rejects_stale_flat_manifest(database: &m
         .seed_flat_index_manifest_from_visible_rows_for_test(&docs, "source-a")
         .expect("flat artifact seed succeeds");
     assert!(vectors
-        .delete_collection(&docs)
+        .delete_collection(&docs, true)
         .expect("collection delete succeeds"));
     vectors
         .create_collection(docs.clone(), config(2, VectorDistanceMetric::DotProduct))

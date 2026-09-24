@@ -25,11 +25,13 @@ impl Executor {
     pub fn vector_delete_collection(
         &mut self,
         collection: impl Into<String>,
+        force: bool,
     ) -> Result<Output, ExecutorError> {
         self.execute(Command::VectorDeleteCollection {
             branch: None,
             space: None,
             collection: collection.into(),
+            force,
         })
     }
 

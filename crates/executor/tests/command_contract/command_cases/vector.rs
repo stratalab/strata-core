@@ -21,6 +21,7 @@ pub(super) fn vector_collection_commands() -> Vec<Command> {
             branch: None,
             space: None,
             collection: "docs".to_owned(),
+            force: false,
         },
         Command::VectorListCollections {
             branch: None,

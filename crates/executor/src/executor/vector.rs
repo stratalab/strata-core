@@ -84,10 +84,11 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         collection: String,
+        force: bool,
     ) -> Result<Output, ExecutorError> {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
-        Ok(Output::Bool(service.delete_collection(&collection)?))
+        Ok(Output::Bool(service.delete_collection(&collection, force)?))
     }
 
     pub(super) fn execute_vector_list_collections(

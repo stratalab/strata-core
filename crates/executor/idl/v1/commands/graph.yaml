@@ -30,6 +30,8 @@ commands:
     input: Command::GraphDelete
     output: Output::GraphDeleteResult
     prose: commands/graph.delete.md
+    errors+:
+      - failed_precondition.engine.graph_not_empty
     display:
       receipt: "{verb} graph {/data/graph}"
       noun: graph
@@ -40,6 +42,12 @@ commands:
         - requests/v1/graph/create.json
       request: requests/v1/graph/delete.json
       response: responses/v1/graph/delete_applied.json
+      error_cases:
+        - setup:
+            - requests/v1/graph/create.json
+            - requests/v1/graph/node_add.json
+          request: requests/v1/graph/delete.json
+          expected_error: responses/v1/errors/graph/delete_not_empty.json
   - id: graph.list
     kind: read.page
     title: List graphs

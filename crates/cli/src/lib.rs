@@ -1831,10 +1831,11 @@ fn vector_collection_command(command: VectorCollectionCommand, scope: &Scope) ->
             metric: metric.into(),
             embedding_model,
         },
-        VectorCollectionCommand::Delete { collection } => Command::VectorDeleteCollection {
+        VectorCollectionCommand::Delete { collection, force } => Command::VectorDeleteCollection {
             branch: scope.branch.clone(),
             space: scope.space.clone(),
             collection,
+            force,
         },
         VectorCollectionCommand::List => Command::VectorListCollections {
             branch: scope.branch.clone(),
@@ -1973,10 +1974,11 @@ fn graph_command(command: GraphCommand, scope: &Scope) -> Result<Command, CliErr
             space: scope.space.clone(),
             graph,
         },
-        GraphCommand::Delete { graph } => Command::GraphDelete {
+        GraphCommand::Delete { graph, force } => Command::GraphDelete {
             branch: scope.branch.clone(),
             space: scope.space.clone(),
             graph,
+            force,
         },
         GraphCommand::List {
             cursor,

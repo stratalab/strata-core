@@ -202,7 +202,7 @@ fn test_promotion_removes_a_collection_deleted_on_source() {
     let deleted = database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete collection");
     assert!(deleted);
     let keep = VectorCollectionName::new("keep").expect("valid collection");
@@ -277,7 +277,7 @@ fn test_promotion_keeps_a_deleted_collection_the_target_still_uses() {
     let deleted = database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete collection");
     assert!(deleted);
     upsert(&mut database, "default", "t1", vec![0.0, 5.0]);
@@ -338,7 +338,7 @@ fn test_promotion_keeps_a_collection_whose_key_the_source_created_and_deleted() 
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete collection");
     // The target independently adds the SAME key `k` (vector keys are branch-
     // independent).
@@ -533,13 +533,13 @@ fn reshaped_deletion_database() -> Database {
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete collection");
     // Target deletes and recreates `emb` with a different (incompatible) config.
     database
         .vector(branch("default"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete collection");
     database
         .vector(branch("default"), space("default"))
@@ -716,7 +716,7 @@ fn test_target_only_collection_reshape_does_not_block_promotion() {
     database
         .vector(branch("default"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete emb");
     database
         .vector(branch("default"), space("default"))
@@ -791,7 +791,7 @@ fn test_source_only_collection_reshape_applies_when_target_unchanged() {
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete emb");
     database
         .vector(branch("feature"), space("default"))
@@ -850,7 +850,7 @@ fn test_source_reshape_conflicts_when_target_has_its_own_vectors() {
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete emb");
     database
         .vector(branch("feature"), space("default"))
@@ -918,7 +918,7 @@ fn test_target_reshape_with_source_unchanged_vector_does_not_conflict() {
     database
         .vector(branch("default"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete emb");
     database
         .vector(branch("default"), space("default"))
@@ -976,7 +976,7 @@ fn test_target_reshape_conflicts_when_source_carries_old_shape_vectors() {
     database
         .vector(branch("default"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete emb");
     database
         .vector(branch("default"), space("default"))
@@ -1044,12 +1044,12 @@ fn test_source_wins_keeps_a_reshaped_collection_the_target_still_uses_and_report
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("source deletes emb");
     database
         .vector(branch("default"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("target deletes emb");
     database
         .vector(branch("default"), space("default"))
@@ -1229,7 +1229,7 @@ fn test_deleted_vector_collection_is_visible_in_the_diff_as_removed() {
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete collection");
 
     let comparison = database
@@ -1271,7 +1271,7 @@ fn test_reshaped_vector_collection_is_visible_in_the_diff_as_modified() {
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete collection");
     database
         .vector(branch("feature"), space("default"))
@@ -1726,7 +1726,7 @@ fn source_recreates_over_retained_target_vectors(recreated_model: Option<&str>) 
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete emb");
     let recreated = VectorConfig::new(2, VectorDistanceMetric::Cosine).expect("valid config");
     let recreated = match recreated_model {
@@ -1798,7 +1798,7 @@ fn test_a_metric_change_over_retained_target_vectors_is_refused() {
     database
         .vector(branch("feature"), space("default"))
         .expect("vector service opens")
-        .delete_collection(&collection())
+        .delete_collection(&collection(), true)
         .expect("delete emb");
     database
         .vector(branch("feature"), space("default"))

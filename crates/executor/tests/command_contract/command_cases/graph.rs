@@ -12,6 +12,7 @@ pub(super) fn graph_commands() -> Vec<Command> {
             branch: None,
             space: None,
             graph: "deps".to_owned(),
+            force: false,
         },
         Command::GraphList {
             branch: None,
