@@ -98,6 +98,16 @@ fn line_matches(expected: &str, actual: &str) -> bool {
                 Some(tail) => rest = tail,
                 None => return false,
             },
+            // After the last `…`: the line must end this way. Matched from
+            // the end, because a leftmost search can land inside the text
+            // that varies — a timestamp whose microseconds happen to contain
+            // the value's digits (#3572) — and then wrongly reject the line.
+            _ if position + 1 == parts.len() => {
+                if !rest.ends_with(part) {
+                    return false;
+                }
+                rest = "";
+            }
             _ => match rest.find(part) {
                 Some(at) => rest = &rest[at + part.len()..],
                 None => return false,
@@ -247,6 +257,23 @@ mod matching_tests {
         assert!(!line_matches("pong …", "pang 1.2.2"));
         // A trailing fixed part must end the line.
         assert!(!line_matches("… applied", "1 applied, 0 deleted"));
+    }
+
+    /// #3572: the part after the last `…` is anchored to the end of the
+    /// line, so the value's digits turning up inside a timestamp earlier on
+    /// the line neither satisfy it nor stop the real ending from doing so.
+    #[test]
+    fn the_last_part_must_end_the_line_wherever_else_it_appears() {
+        let row = "         4        4  2026-09-25 04:28:29.615025 UTC  150";
+        assert!(line_matches("…150", row), "`150` sits inside `.615025`");
+        assert!(!line_matches("…200", row));
+        assert!(!line_matches(
+            "…150",
+            "         4        4  2026-09-25 04:28:29.615025 UTC  1500"
+        ));
+        // Middle parts still match anywhere in order; only the last is anchored.
+        assert!(line_matches("…4…150", row));
+        assert!(!line_matches("…UTC…4", row));
     }
 
     #[test]
