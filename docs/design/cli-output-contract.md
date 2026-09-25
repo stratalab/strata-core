@@ -372,7 +372,7 @@ generated (`strata-idl generate-cli`, gated by `check-cli`):
   | **value** | `value: <pointer>`; `as:` | `optional`, `status_value` |
   | **fields** | `fields: [{field, header?, as?, fields?}…]` | `optional`, `status_value`, `status_sections` |
   | **columns** | `columns: [{field, header?, as?}…]`; `fields:` only under `search` | `history`, `page`, `search`, `batch`, `status_value`, `status_sections` |
-  | **map** | `map: <pointer>`; `header:`; `sort: key \| asc \| desc` | `analytics` |
+  | **map** | `map: <pointer>`; `header:`; `sort: key \| asc \| desc`; `join: [{pointer, header}…]` | `analytics` |
 
   The family (via the kind's rule) fixes the layout; the shape says which
   facts appear, in which order, and how. A shape the rule cannot render, two
@@ -465,7 +465,11 @@ grows a second array cannot silently become the table. Rows come from an
 array, never from a map. `columns` pairs with `fields` only under `search`,
 where the fields are the diagnostics block that follows the table. A `map`
 names an object keyed by node whose values are scalars (the six analytics
-payloads), with `header` for the value column and `sort` for row order.
+payloads), with `header` for the value column and `sort` for row order. When
+the payload carries a second object keyed by the same nodes (`sssp`'s
+`predecessors` beside `distances`, #3564), `join` lists it with its own
+header and the table gains one column per entry, read at each row's node —
+the null cell where the node is absent, as the source is from `predecessors`.
 
 The declaration is keyed by command, not by DTO, because one DTO carries
 different identity fields under different commands (`graph_delete_result`

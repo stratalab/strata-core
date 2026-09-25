@@ -2054,7 +2054,7 @@ raw proposed        c⇥0.4744121179712114
 #### `graph.analytics.sssp` — `strata graph sssp`
 
 *read.analytics · AnalyticsResult<GraphSsspData> · stable*  
-display: table NODE, DISTANCE from `distances` sorted asc · raw TSV
+display: table NODE, DISTANCE from `distances` sorted asc, joined with VIA from `predecessors` (null cell for the source, #3564) · raw TSV
 
 ```text
 $ strata graph sssp g a
@@ -2072,14 +2072,14 @@ human today         {
                       },
                       "source": "a"
                     }
-human proposed      NODE  DISTANCE
-                    a          0.0
-                    b          1.0
-                    c          2.0
+human proposed      NODE  DISTANCE  VIA
+                    a          0.0  -
+                    b          1.0  a
+                    c          2.0  b
 raw today           {"direction":"outgoing","distances":{"a":0.0,"b":1.0,"c":2.0},"graph":"g","predecessors":{"b":"a","c":"b"},"source":"a"}
-raw proposed        a⇥0.0
-                    b⇥1.0
-                    c⇥2.0
+raw proposed        a⇥0.0⇥
+                    b⇥1.0⇥a
+                    c⇥2.0⇥b
 --json (unchanged)  {"data":{"direction":"outgoing","distances":{"a":0.0,"b":1.0,"c":2.0},"graph":"g","predecessors":{"b":"a","c":"b"},"source":"a"},"type":"graph_sssp_result"}
 ```
 

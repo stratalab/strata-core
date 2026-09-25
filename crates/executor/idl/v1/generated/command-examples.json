@@ -658,7 +658,7 @@
       },
       {
         "in": "strata graph sssp g a --direction outgoing",
-        "out": "NODE  DISTANCE\na          0.0\nb          1.0\nc          2.0",
+        "out": "NODE  DISTANCE  VIA\na          0.0  -\nb          1.0  a\nc          2.0  b",
         "reproducible": true
       }
     ],
