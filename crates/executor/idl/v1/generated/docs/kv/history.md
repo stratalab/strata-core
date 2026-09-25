@@ -1,7 +1,7 @@
 ---
 title: "Read KV history"
 description: "Read retained version history for one KV key."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: kv
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Stop IPC hosting"
 description: "Stop hosting the multi-process broker socket."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: admin
 ---
 

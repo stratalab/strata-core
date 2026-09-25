@@ -1,7 +1,7 @@
 ---
 title: "Compute graph clustering coefficients"
 description: "Compute local clustering coefficients."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: graph
 ---
 

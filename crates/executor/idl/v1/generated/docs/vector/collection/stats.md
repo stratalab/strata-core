@@ -1,7 +1,7 @@
 ---
 title: "Read vector collection stats"
 description: "Read facts for one vector collection."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: vector
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Drop JSON index"
 description: "Drop a JSON secondary index by name."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: json
 ---
 

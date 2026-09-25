@@ -1,7 +1,7 @@
 ---
 title: "space commands"
 description: "Command reference for the space family."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: space
 ---
 

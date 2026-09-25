@@ -1,7 +1,7 @@
 ---
 title: "List graph bindings for entity"
 description: "Find graph nodes bound to an entity."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: graph
 ---
 

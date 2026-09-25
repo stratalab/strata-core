@@ -3832,7 +3832,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strata-cli"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "base64",
  "chrono",
@@ -3844,7 +3844,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "shlex",
- "strata-executor 1.2.4",
+ "strata-executor 1.2.5",
  "strata-hub",
  "tempfile",
  "tracing",
@@ -3862,7 +3862,7 @@ dependencies = [
 
 [[package]]
 name = "strata-core"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "bincode",
  "proptest",
@@ -3888,7 +3888,7 @@ dependencies = [
 
 [[package]]
 name = "strata-engine"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "fast-hnsw",
  "getrandom 0.2.17",
@@ -3897,8 +3897,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "strata-core 1.2.4",
- "strata-storage 1.2.4",
+ "strata-core 1.2.5",
+ "strata-storage 1.2.5",
  "tempfile",
  "uuid",
  "web-time",
@@ -3921,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "strata-executor"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "arrow",
  "base64",
@@ -3934,8 +3934,8 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
- "strata-core 1.2.4",
- "strata-engine 1.2.4",
+ "strata-core 1.2.5",
+ "strata-engine 1.2.5",
  "strata-hub",
  "strata-inference",
  "tempfile",
@@ -3950,17 +3950,17 @@ dependencies = [
 
 [[package]]
 name = "strata-gpu-cache"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "pyo3",
- "strata-engine 1.2.4",
+ "strata-engine 1.2.5",
  "tempfile",
  "tracing",
 ]
 
 [[package]]
 name = "strata-hub"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3971,8 +3971,8 @@ dependencies = [
  "serde",
  "serde_jcs",
  "serde_json",
- "strata-core 1.2.4",
- "strata-engine 1.2.4",
+ "strata-core 1.2.5",
+ "strata-engine 1.2.5",
  "stratahub-client",
  "stratahub-ingest",
  "stratahub-protocol",
@@ -3987,7 +3987,7 @@ dependencies = [
 
 [[package]]
 name = "strata-inference"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "cmake",
  "schemars",
@@ -4020,7 +4020,7 @@ dependencies = [
 
 [[package]]
 name = "strata-storage"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "arc-swap",
  "crc32fast",
@@ -4030,7 +4030,7 @@ dependencies = [
  "proptest",
  "serde",
  "sha2 0.10.9",
- "strata-core 1.2.4",
+ "strata-core 1.2.5",
  "tempfile",
  "toml",
  "tracing",
@@ -4041,22 +4041,22 @@ dependencies = [
 
 [[package]]
 name = "strata-wasm"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "console_error_panic_hook",
  "serde_json",
  "strata-cli",
- "strata-executor 1.2.4",
+ "strata-executor 1.2.5",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
 
 [[package]]
 name = "stratadb"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "serde_json",
- "strata-engine 1.2.4",
+ "strata-engine 1.2.5",
  "tempfile",
 ]
 

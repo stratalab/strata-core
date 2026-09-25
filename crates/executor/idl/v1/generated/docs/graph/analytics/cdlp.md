@@ -1,7 +1,7 @@
 ---
 title: "Detect graph communities"
 description: "Detect communities via label propagation."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: graph
 ---
 
