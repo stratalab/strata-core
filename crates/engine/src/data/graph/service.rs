@@ -1,7 +1,7 @@
 //! Graph core service.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{btree_map, BTreeMap, HashSet};
 
 use strata_core::{CommitVersion, Timestamp};
 
@@ -550,21 +550,21 @@ impl<'a> GraphService<'a> {
                         .push(node_id.clone());
                 }
                 for (graph, node_ids) in &by_graph {
-                    let mut removed_edges = 0_i64;
-                    for edge in self
-                        .edge_record_map(&record, graph, ReadSelector::Latest)?
-                        .into_values()
-                    {
-                        if node_ids.contains(edge.src()) || node_ids.contains(edge.dst()) {
-                            self.delete_edge_mutations(&record, &mut mutations, &edge);
-                            removed_edges += 1;
-                        }
+                    // #3472: each node's own adjacency, merged by identity —
+                    // an edge between two cascaded nodes is found from both
+                    // ends and removed once.
+                    let mut incident: BTreeMap<EdgeIdentity, GraphEdgeRecord> = BTreeMap::new();
+                    for node_id in node_ids {
+                        incident.extend(self.stored_incident_edges(&record, graph, node_id)?);
+                    }
+                    for edge in incident.values() {
+                        self.delete_edge_mutations(&record, &mut mutations, edge);
                     }
                     touched.insert(
                         graph.clone(),
                         (
                             -i64::try_from(node_ids.len()).unwrap_or(i64::MAX),
-                            -removed_edges,
+                            -i64::try_from(incident.len()).unwrap_or(i64::MAX),
                         ),
                     );
                 }
@@ -838,16 +838,11 @@ impl<'a> GraphService<'a> {
         if let Some(object_type) = current.data().object_type() {
             mutations.delete(self.type_index_address(&record, graph, object_type, node_id));
         }
-        let mut removed_edges = 0_i64;
-        for edge in self
-            .edge_record_map(&record, graph, ReadSelector::Latest)?
-            .into_values()
-        {
-            if edge.src() == node_id || edge.dst() == node_id {
-                self.delete_edge_mutations(&record, &mut mutations, &edge);
-                removed_edges += 1;
-            }
+        let incident = self.stored_incident_edges(&record, graph, node_id)?;
+        for edge in incident.values() {
+            self.delete_edge_mutations(&record, &mut mutations, edge);
         }
+        let removed_edges = i64::try_from(incident.len()).unwrap_or(i64::MAX);
         let (metadata_address, metadata_value) =
             self.metadata_mutation(&record, graph, -1, -removed_edges)?;
         mutations.put(metadata_address, metadata_value);
@@ -1858,6 +1853,12 @@ impl<'a> GraphService<'a> {
     }
 
     /// Applies an all-or-nothing graph batch.
+    ///
+    /// Operations apply in order against the batch-local state: each reads
+    /// the nodes and edges it needs from storage the first time and sees
+    /// the batch's own earlier operations after that, so a batch costs what
+    /// it touches — point reads per node and edge, a deleted node's degree
+    /// in rows — and never a copy of the graph (#3472).
     #[allow(clippy::too_many_lines)]
     pub fn batch_write(
         &mut self,
@@ -1871,8 +1872,7 @@ impl<'a> GraphService<'a> {
         }
 
         let frozen = self.frozen_ontology(&record, graph)?;
-        let mut nodes = self.node_record_map(&record, graph, ReadSelector::Latest)?;
-        let mut edges = self.edge_record_map(&record, graph, ReadSelector::Latest)?;
+        let mut overlay = BatchOverlay::default();
         let mut mutations = MutationMap::default();
         let mut outcomes = Vec::with_capacity(batch.operations().len());
         // #3474: what the batch adds or removes among live nodes and edges,
@@ -1889,11 +1889,9 @@ impl<'a> GraphService<'a> {
                     if let Some(ontology) = frozen.as_ref() {
                         ontology.validate_node(data)?;
                     }
-                    let created = !nodes.contains_key(node_id);
-                    if let Some(old) = nodes
-                        .get(node_id)
-                        .and_then(|record| record.data().binding())
-                    {
+                    let current = self.overlay_node(&record, graph, &mut overlay, node_id)?;
+                    let created = current.is_none();
+                    if let Some(old) = current.and_then(|record| record.data().binding()) {
                         if data.binding() != Some(old) {
                             mutations.delete(self.binding_address(
                                 &record,
@@ -1903,9 +1901,7 @@ impl<'a> GraphService<'a> {
                             ));
                         }
                     }
-                    let old_type = nodes
-                        .get(node_id)
-                        .and_then(|record| record.data().object_type());
+                    let old_type = current.and_then(|record| record.data().object_type());
                     if let Some(old_type) = old_type {
                         if Some(old_type) != data.object_type() {
                             mutations
@@ -1938,12 +1934,14 @@ impl<'a> GraphService<'a> {
                             encode_graph_binding_record(&binding_record),
                         );
                     }
-                    nodes.insert(node_id.clone(), node);
+                    overlay.nodes.insert(node_id.clone(), Some(node));
                     node_delta += i64::from(created);
                     outcomes.push(GraphBatchOpOutcome::created(index, created));
                 }
                 GraphBatchOperation::DeleteNode { node_id } => {
-                    let removed = nodes.remove(node_id);
+                    self.overlay_node(&record, graph, &mut overlay, node_id)?;
+                    // Loaded just above, so the entry is there to take.
+                    let removed = overlay.nodes.insert(node_id.clone(), None).flatten();
                     let deleted = removed.is_some();
                     if let Some(removed) = removed {
                         mutations.delete(self.node_address(&record, graph, node_id));
@@ -1963,15 +1961,12 @@ impl<'a> GraphService<'a> {
                                 node_id,
                             ));
                         }
-                        let incident = edges
-                            .values()
-                            .filter(|edge| edge.src() == node_id || edge.dst() == node_id)
-                            .cloned()
-                            .collect::<Vec<_>>();
+                        let incident =
+                            self.overlay_incident_edges(&record, graph, &overlay, node_id)?;
                         node_delta -= 1;
                         edge_delta -= i64::try_from(incident.len()).unwrap_or(i64::MAX);
                         for edge in incident {
-                            edges.remove(&edge_identity(&edge));
+                            overlay.edges.insert(edge_identity(&edge), None);
                             self.delete_edge_mutations(&record, &mut mutations, &edge);
                         }
                     }
@@ -1983,8 +1978,9 @@ impl<'a> GraphService<'a> {
                     dst,
                     data,
                 } => {
-                    let (Some(src_record), Some(dst_record)) = (nodes.get(src), nodes.get(dst))
-                    else {
+                    let (src_state, dst_state) =
+                        self.overlay_endpoints(&record, graph, &mut overlay, src, dst)?;
+                    let (Some(src_record), Some(dst_record)) = (src_state, dst_state) else {
                         // #3192: when a missing endpoint is upserted LATER in this
                         // batch, name the ordering rule — operations apply in
                         // order, so nodes must precede their edges — rather than
@@ -2001,8 +1997,8 @@ impl<'a> GraphService<'a> {
                                 )
                             })
                         };
-                        if (!nodes.contains_key(src) && upserted_later(src))
-                            || (!nodes.contains_key(dst) && upserted_later(dst))
+                        if (src_state.is_none() && upserted_later(src))
+                            || (dst_state.is_none() && upserted_later(dst))
                         {
                             return Err(EngineError::invalid_input(
                                 "invalid_argument.engine.graph_edge_endpoint",
@@ -2019,7 +2015,9 @@ impl<'a> GraphService<'a> {
                         ontology.validate_edge(edge_type, src_record.data(), dst_record.data())?;
                     }
                     let identity = (src.clone(), edge_type.clone(), dst.clone());
-                    let created = !edges.contains_key(&identity);
+                    let created = self
+                        .overlay_edge(&record, graph, &mut overlay, &identity)?
+                        .is_none();
                     let edge = GraphEdgeRecord::new(
                         graph.clone(),
                         src.clone(),
@@ -2028,7 +2026,7 @@ impl<'a> GraphService<'a> {
                         data.clone(),
                     );
                     self.put_edge_mutations(&record, &mut mutations, &edge)?;
-                    edges.insert(identity, edge);
+                    overlay.edges.insert(identity, Some(edge));
                     edge_delta += i64::from(created);
                     outcomes.push(GraphBatchOpOutcome::created(index, created));
                 }
@@ -2038,8 +2036,11 @@ impl<'a> GraphService<'a> {
                     dst,
                 } => {
                     let identity = (src.clone(), edge_type.clone(), dst.clone());
-                    let deleted = edges.remove(&identity).is_some();
+                    let deleted = self
+                        .overlay_edge(&record, graph, &mut overlay, &identity)?
+                        .is_some();
                     if deleted {
+                        overlay.edges.insert(identity, None);
                         edge_delta -= 1;
                         let edge = GraphEdgeRecord::new(
                             graph.clone(),
@@ -3054,36 +3055,126 @@ impl<'a> GraphService<'a> {
         )
     }
 
-    fn node_record_map(
+    /// The live edges stored on `node_id`'s two adjacency prefixes — its
+    /// outgoing edges from the forward rows and its incoming edges from the
+    /// reverse rows — keyed by identity, so a self-loop, which sits on both,
+    /// is one edge. Costs the node's degree in rows, never the graph's
+    /// (#3472).
+    fn stored_incident_edges(
         &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
-        selector: ReadSelector,
-    ) -> Result<BTreeMap<GraphNodeId, GraphNodeRecord>, EngineError> {
-        self.node_rows(record, graph, selector)?
-            .into_iter()
-            .filter(|row| !row.is_tombstone())
-            .map(|row| {
-                let record = self.node_record_from_row(&row)?;
-                Ok((record.node_id().clone(), record))
-            })
-            .collect()
+        node_id: &GraphNodeId,
+    ) -> Result<BTreeMap<EdgeIdentity, GraphEdgeRecord>, EngineError> {
+        let branch_id = record.storage_branch_id();
+        let mut incident = BTreeMap::new();
+        for row in self.persistence.scan_prefix(
+            branch_id,
+            RowClass::GraphEdge,
+            encode_graph_outgoing_edge_prefix(&self.space, graph, node_id),
+            ReadSelector::Latest,
+            None,
+        )? {
+            if !row.is_tombstone() {
+                let edge = self.edge_record_from_forward_row(&row)?;
+                incident.insert(edge_identity(&edge), edge);
+            }
+        }
+        for row in self.persistence.scan_prefix(
+            branch_id,
+            RowClass::GraphReverseEdge,
+            encode_graph_incoming_edge_prefix(&self.space, graph, node_id),
+            ReadSelector::Latest,
+            None,
+        )? {
+            if !row.is_tombstone() {
+                let edge = self.edge_record_from_reverse_row(&row)?;
+                incident.insert(edge_identity(&edge), edge);
+            }
+        }
+        Ok(incident)
     }
 
-    fn edge_record_map(
+    /// The edges incident to `node_id` as a batch sees them: the stored
+    /// adjacency, with the batch's own answer replacing every edge it has
+    /// touched — one it deleted is gone, one it wrote is present, whether or
+    /// not storage has it.
+    fn overlay_incident_edges(
         &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
-        selector: ReadSelector,
-    ) -> Result<BTreeMap<EdgeIdentity, GraphEdgeRecord>, EngineError> {
-        self.edge_rows(record, graph, selector)?
-            .into_iter()
-            .filter(|row| !row.is_tombstone())
-            .map(|row| {
-                let record = self.edge_record_from_forward_row(&row)?;
-                Ok((edge_identity(&record), record))
-            })
-            .collect()
+        overlay: &BatchOverlay,
+        node_id: &GraphNodeId,
+    ) -> Result<Vec<GraphEdgeRecord>, EngineError> {
+        let mut incident = self.stored_incident_edges(record, graph, node_id)?;
+        for (identity, state) in &overlay.edges {
+            let (src, _, dst) = identity;
+            if src != node_id && dst != node_id {
+                continue;
+            }
+            match state {
+                Some(edge) => {
+                    incident.insert(identity.clone(), edge.clone());
+                }
+                None => {
+                    incident.remove(identity);
+                }
+            }
+        }
+        Ok(incident.into_values().collect())
+    }
+
+    /// The batch-local state of a node: read from storage the first time an
+    /// operation asks, then whatever the batch last made it.
+    fn overlay_node<'o>(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        overlay: &'o mut BatchOverlay,
+        node_id: &GraphNodeId,
+    ) -> Result<Option<&'o GraphNodeRecord>, EngineError> {
+        let state = match overlay.nodes.entry(node_id.clone()) {
+            btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            btree_map::Entry::Vacant(entry) => {
+                entry.insert(self.node_record(record, graph, node_id)?)
+            }
+        };
+        Ok(state.as_ref())
+    }
+
+    /// Both endpoints of an edge in their batch-local state, loaded one
+    /// after the other and then read side by side.
+    fn overlay_endpoints<'o>(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        overlay: &'o mut BatchOverlay,
+        src: &GraphNodeId,
+        dst: &GraphNodeId,
+    ) -> Result<(Option<&'o GraphNodeRecord>, Option<&'o GraphNodeRecord>), EngineError> {
+        self.overlay_node(record, graph, overlay, src)?;
+        self.overlay_node(record, graph, overlay, dst)?;
+        let overlay: &'o BatchOverlay = overlay;
+        Ok((overlay.node(src), overlay.node(dst)))
+    }
+
+    /// The batch-local state of an edge: read from storage the first time an
+    /// operation asks, then whatever the batch last made it.
+    fn overlay_edge<'o>(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        overlay: &'o mut BatchOverlay,
+        identity: &EdgeIdentity,
+    ) -> Result<Option<&'o GraphEdgeRecord>, EngineError> {
+        let state = match overlay.edges.entry(identity.clone()) {
+            btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            btree_map::Entry::Vacant(entry) => {
+                let (src, edge_type, dst) = identity;
+                entry.insert(self.edge_record(record, graph, src, edge_type, dst)?)
+            }
+        };
+        Ok(state.as_ref())
     }
 
     fn visible_node_or_corruption(
@@ -3335,6 +3426,28 @@ struct ScannedGraphState {
     edge_count: u64,
     updated_version: CommitVersion,
     updated_timestamp: Timestamp,
+}
+
+/// What a batch has learned or decided about the nodes and edges it has
+/// touched (#3472). `batch_write` reads a node or edge from storage the first
+/// time an operation needs it and keeps every later answer here, so
+/// operations see the batch's own earlier writes without a copy of the
+/// graph. An entry is the current batch-local state: `Some` is live —
+/// stored and unchanged, or written by the batch — and `None` is absent,
+/// whether never stored or deleted earlier in the batch. A node or edge
+/// without an entry has not been touched and is whatever storage says.
+#[derive(Default)]
+struct BatchOverlay {
+    nodes: BTreeMap<GraphNodeId, Option<GraphNodeRecord>>,
+    edges: BTreeMap<EdgeIdentity, Option<GraphEdgeRecord>>,
+}
+
+impl BatchOverlay {
+    /// The state of a node already loaded through
+    /// [`GraphService::overlay_node`].
+    fn node(&self, node_id: &GraphNodeId) -> Option<&GraphNodeRecord> {
+        self.nodes.get(node_id).and_then(Option::as_ref)
+    }
 }
 
 #[derive(Default)]

@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (16, one retired), SCALE (12), DUR (18) = 88 entries, 87 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (16, one retired), SCALE (13), DUR (18) = 89 entries, 88 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -1245,6 +1245,40 @@ the builder only. Tests: `budget_refusals_are_typed` (`adjacency.rs`),
 (`tests/engine_graph_analytics.rs`), and the filtered-run tests
 (`sssp_edge_type_filter_excludes_other_types`, `bfs_edge_type_filter_applies_at_every_hop`)
 that succeed under the same budget as their unfiltered siblings.
+
+---
+
+### SCALE-013: A graph mutation's read cost is bounded by the rows it touches, never the graph
+
+A graph write MUST read only the rows it needs to apply and count its change — its
+endpoints and the edge by point read, a deleted node's own adjacency by its two node-scoped
+prefixes — never a scan of every node or edge in the graph (#3472). `batch_write` stages
+over a `BatchOverlay` that point-reads each node and edge the first time an operation needs
+it and serves the batch's own earlier writes thereafter; `delete_node` and the `Cascade`
+binding policy read a node's incident edges through the single `stored_incident_edges`
+helper (its outgoing forward rows and incoming reverse rows, keyed by identity so a
+self-loop is one edge). So a one-edge batch over a million-node graph reads a handful of
+rows and a node delete reads its degree — the write-side counterpart of MVCC-010's
+seek-and-bound pagination and ARCH-014's point-read `graph_info`, and what keeps graph
+writes usable at billion-key scale. The one documented exception is the ARCH-014
+legacy-count backfill: a graph whose metadata row predates maintained counts scans once, on
+its next write, to seed them. A whole-graph `scan_prefix` over `RowClass::GraphNode` or
+`RowClass::GraphEdge` reintroduced on a per-element write path — the pre-#3472
+`node_record_map` / `edge_record_map` shape — is the violation.
+
+**Audit**: In `data/graph/service.rs`, `batch_write` builds no whole-graph map before its
+loop, reading through `overlay_node` / `overlay_edge` / `overlay_endpoints` (point reads via
+`node_record` / `edge_record`) and `overlay_incident_edges` / `stored_incident_edges`
+(node-scoped `scan_prefix` over the outgoing and incoming prefixes only). Every remaining
+whole-graph `scan_prefix` over `encode_graph_node_prefix` / `encode_graph_edge_prefix` must
+be a genuine graph-wide reader (`list_nodes`, `list_edges`, `scan_graph_state`,
+`sample_nodes`, `adjacency_index`, `ontology_summary`) or the `delete_graph` teardown
+(ARCH-015) — never a per-element mutation — and `metadata_mutation`'s only scan is its
+`counts == None` backfill branch. Tests: `tests/engine_graph_batch_cost.rs` (testkit) pins
+the scanned-row count per batch shape (`edge_batches_scan_nothing`,
+`node_batches_scan_nothing`, `delete_node_batch_scans_the_node_degree`,
+`single_delete_node_scans_the_node_degree`); `tests/engine_graph_batch_overlay.rs` pins
+that the overlay reproduces the whole-graph semantics without the testkit.
 
 ---
 
