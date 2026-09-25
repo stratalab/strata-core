@@ -1917,7 +1917,11 @@ pub enum Command {
         edge_type: String,
         /// Destination node id.
         dst: String,
-        /// Optional edge weight. Defaults to 1.0.
+        /// Optional edge weight. Defaults to 1.0. A finite number; a whole
+        /// number up to 2^53 − 1 (9007199254740991) is stored exactly, and
+        /// shortest-path distances summed from such weights stay exact up
+        /// to the same bound, so a graph weighted in meters or seconds
+        /// needs no parallel property.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<f64>,
         /// Optional edge properties.

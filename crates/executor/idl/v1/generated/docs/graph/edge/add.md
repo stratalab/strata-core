@@ -55,7 +55,7 @@ version     …
 | `graph` | `string` | yes | Graph name. |
 | `properties` | `any` | no | Optional edge properties. |
 | `src` | `string` | yes | Source node id. |
-| `weight` | `number` | no | Optional edge weight. Defaults to 1.0. |
+| `weight` | `number` | no | Optional edge weight. Defaults to 1.0. A finite number; a whole number up to 2^53 − 1 (9007199254740991) is stored exactly, and shortest-path distances summed from such weights stay exact up to the same bound, so a graph weighted in meters or seconds needs no parallel property. |
 
 Plus the optional scope: `branch` and `space` (default to the session branch and the `"default"` space).
 

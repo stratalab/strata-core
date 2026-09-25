@@ -107,6 +107,17 @@ impl GraphSsspResult {
     }
 
     #[must_use]
+    /// Returns the distance of the node at `index` as an exact count. Over
+    /// count weights ([`super::GraphEdgeData::from_count`]) every distance
+    /// up to [`super::GraphEdgeData::MAX_COUNT`] is exact — each partial sum along
+    /// the walk is smaller still — so this is `Some` exactly when the
+    /// distance can be trusted as an integer: `None` when unreachable, out
+    /// of range, fractional, or beyond the exact range (#3465).
+    pub fn distance_count(&self, index: usize) -> Option<u64> {
+        self.distance(index).and_then(super::types::exact_count)
+    }
+
+    #[must_use]
     /// Returns the number of reachable nodes, the source included.
     pub fn reachable_count(&self) -> usize {
         self.distances.iter().flatten().count()
@@ -949,5 +960,52 @@ mod tests {
                 .code(),
             "failed_precondition.engine.graph_negative_weight"
         );
+    }
+
+    /// #3465: over count weights a distance is an exact count up to
+    /// 2^53 − 1, and `distance_count` says so; the first sum that leaves the
+    /// safe range reads as none rather than as a rounded integer.
+    #[test]
+    fn sssp_distances_over_count_weights_are_exact_counts() {
+        const HALF: f64 = 4_503_599_627_370_496.0; // 2^52
+                                                   // a -> b -> c reaches 2^53 - 1 exactly; c -> d lands on 2^53, which
+                                                   // 2^53 + 1 also rounds to, so it is no longer a trustworthy count;
+                                                   // d -> e (81 more) is beyond the range outright.
+        let index = make_index(
+            &[
+                ("a", "b", HALF),
+                ("b", "c", HALF - 1.0),
+                ("c", "d", 1.0),
+                ("d", "e", 81.0),
+                ("a", "f", 3.0),
+                ("f", "g", 0.5),
+            ],
+            &[],
+        );
+        let sssp = index
+            .sssp(&node("a"), GraphDirection::Outgoing)
+            .expect("sssp runs");
+        let count_of =
+            |id: &str| sssp.distance_count(index.node_index(&node(id)).expect("present"));
+        assert_eq!(count_of("a"), Some(0));
+        assert_eq!(count_of("b"), Some(4_503_599_627_370_496));
+        assert_eq!(count_of("c"), Some(9_007_199_254_740_991));
+        assert_eq!(count_of("d"), None, "2^53 is ambiguous, not a count");
+        assert_eq!(count_of("e"), None, "beyond the safe range");
+        assert_eq!(count_of("f"), Some(3));
+        assert_eq!(count_of("g"), None, "a fractional weight breaks the count");
+        assert_eq!(
+            sssp.distance_count(index.node_count() + 1),
+            None,
+            "out of range is none, like distance()"
+        );
+        // The snapshot's edges report the same reading as the edge data did.
+        let a = index.node_index(&node("a")).expect("present");
+        let counts: Vec<Option<u64>> = index
+            .outgoing(a)
+            .iter()
+            .map(super::super::GraphAdjacencyEdge::weight_count)
+            .collect();
+        assert_eq!(counts, [Some(4_503_599_627_370_496), Some(3)]);
     }
 }

@@ -86,6 +86,64 @@ fn seed_graph(graph: &mut strata_engine::GraphService<'_>, name: &GraphName) {
         .expect("self loop");
 }
 
+/// #3465: a count weight survives the stored record exactly and sums to an
+/// exact distance, so a graph weighted in meters needs no parallel
+/// property — through the real storage path in both modes.
+#[test]
+fn count_weights_survive_storage_and_sum_exactly_in_cache_and_durable_modes() {
+    run_database_modes(exercise_count_weights);
+}
+
+fn exercise_count_weights(mut database: Database) {
+    const HALF: u64 = 4_503_599_627_370_496; // 2^52
+    let mut graph = graph_service(&mut database, "default", "default");
+    let name = graph_name("meters");
+    graph.create_graph(name.clone()).expect("graph created");
+    for id in ["a", "b", "c"] {
+        graph
+            .upsert_node(&name, node_id(id), GraphNodeData::default())
+            .expect("node");
+    }
+    // a -> b -> c: the two counts sum to the last exact count, 2^53 - 1.
+    for (src, dst, count) in [("a", "b", HALF), ("b", "c", HALF - 1)] {
+        graph
+            .upsert_edge(
+                &name,
+                node_id(src),
+                edge_type("road"),
+                node_id(dst),
+                GraphEdgeData::from_count(count, None).expect("count in range"),
+            )
+            .expect("edge");
+    }
+
+    // Read back through the stored record: the count, not a rounded float.
+    let stored = graph
+        .get_edge(&name, &node_id("a"), &edge_type("road"), &node_id("b"))
+        .expect("edge read")
+        .expect("edge present");
+    assert_eq!(stored.data().weight_count(), Some(HALF));
+    assert_eq!(
+        stored.data(),
+        &GraphEdgeData::from_count(HALF, None).expect("count in range")
+    );
+
+    let index = graph
+        .adjacency_index(&name, &GraphAnalyticsBudget::default())
+        .expect("index builds");
+    let a = index.node_index(&node_id("a")).expect("a indexed");
+    let c = index.node_index(&node_id("c")).expect("c indexed");
+    assert_eq!(index.outgoing(a)[0].weight_count(), Some(HALF));
+    let sssp = index
+        .sssp(&node_id("a"), GraphDirection::Outgoing)
+        .expect("sssp runs");
+    assert_eq!(
+        sssp.distance_count(c),
+        Some(GraphEdgeData::MAX_COUNT),
+        "2^52 + (2^52 - 1) is exact"
+    );
+}
+
 #[test]
 fn adjacency_snapshot_reflects_visible_state_in_cache_and_durable_modes() {
     run_database_modes(exercise_snapshot_correctness);

@@ -86,6 +86,13 @@ impl GraphAdjacencyEdge {
     pub const fn weight(&self) -> f64 {
         self.weight
     }
+
+    #[must_use]
+    /// Returns the weight as the exact count it carries, when it is one —
+    /// the same reading as [`super::GraphEdgeData::weight_count`] (#3465).
+    pub fn weight_count(&self) -> Option<u64> {
+        super::types::exact_count(self.weight)
+    }
 }
 
 /// A deterministic adjacency snapshot of one graph.
@@ -471,5 +478,26 @@ mod tests {
             .add_edge(&node("a"), &edge_type("links"), &node("ghost"), 1.0)
             .expect_err("unknown endpoint");
         assert_eq!(error.code(), "data_loss.engine.graph_index");
+    }
+
+    /// #3465: a snapshot edge reads its weight as a count by the same rule
+    /// as the edge data it was built from.
+    #[test]
+    fn snapshot_edges_read_count_weights_exactly() {
+        let mut builder = builder_with_nodes(GraphAnalyticsBudget::default());
+        builder
+            .add_edge(&node("a"), &edge_type("m"), &node("b"), 81.0)
+            .expect("edge fits");
+        builder
+            .add_edge(&node("a"), &edge_type("n"), &node("b"), 1.5)
+            .expect("edge fits");
+        let index = builder.finish();
+        let a = index.node_index(&node("a")).expect("a present");
+        let counts: Vec<Option<u64>> = index
+            .outgoing(a)
+            .iter()
+            .map(super::GraphAdjacencyEdge::weight_count)
+            .collect();
+        assert_eq!(counts, [Some(81), None]);
     }
 }
