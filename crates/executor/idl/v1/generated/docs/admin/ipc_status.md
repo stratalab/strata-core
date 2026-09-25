@@ -1,7 +1,7 @@
 ---
 title: "Read IPC status"
 description: "Report this process's multi-process IPC state."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: admin
 ---
 

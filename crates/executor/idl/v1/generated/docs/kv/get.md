@@ -1,7 +1,7 @@
 ---
 title: "Get KV value"
 description: "Read the current or historical value for one KV key."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: kv
 ---
 

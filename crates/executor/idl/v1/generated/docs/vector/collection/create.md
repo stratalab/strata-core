@@ -1,7 +1,7 @@
 ---
 title: "Create vector collection"
 description: "Create a vector collection with a dimension, metric, and optionally the model that produces its vectors."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: vector
 ---
 

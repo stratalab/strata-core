@@ -1,7 +1,7 @@
 ---
 title: "Report inference readiness"
 description: "Report what this binary can do before anything is attempted."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: inference
 ---
 

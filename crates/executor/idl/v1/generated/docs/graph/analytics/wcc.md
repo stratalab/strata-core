@@ -1,7 +1,7 @@
 ---
 title: "Compute graph connected components"
 description: "Compute weakly connected components."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: graph
 ---
 

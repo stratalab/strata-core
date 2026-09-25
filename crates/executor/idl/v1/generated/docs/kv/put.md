@@ -1,7 +1,7 @@
 ---
 title: "Put KV value"
 description: "Store or replace a KV value by key."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: kv
 ---
 

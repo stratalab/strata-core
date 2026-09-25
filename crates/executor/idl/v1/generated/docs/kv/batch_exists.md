@@ -1,7 +1,7 @@
 ---
 title: "Batch check KV existence"
 description: "Check existence for multiple KV keys."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: kv
 ---
 

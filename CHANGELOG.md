@@ -4,6 +4,80 @@ All notable changes to StrataDB are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.5] - 2026-09-25
+
+A graph-hardening release, driven by a city-scale graph application: 22
+gaps found while planning address search, network-distance queries and
+closure impact analysis over a street graph of tens of thousands of nodes.
+The theme is that a graph operation now costs what it touches, not the
+graph — pages seek from their cursor, `graph info` is one point read, a
+batch stages over the rows it names, and a node delete reads its own
+adjacency — and that the shortest-path answer is a route you can drive, not
+just a number. Two operations that had a hidden size ceiling (deleting a
+large graph, importing one in many commits) now finish, or say exactly how
+far they got.
+
+### Added
+
+- **Shortest paths you can follow.** `graph sssp` returns predecessors and
+  a `path_to` that reconstructs the route to any reached node, takes an
+  edge-type filter, and its human table shows the route (`VIA`) beside each
+  distance (#3456, #3471, #3564).
+- **`list_edges`** streams a graph's full edge data behind a cursor (#3457).
+- **Exact integer edge weights.** Weights carry whole-number counts exactly
+  up to 2^53 − 1 (`GraphEdgeData::from_count` / `weight_count`, and
+  `distance_count` on sssp results), so a length in metres survives the
+  round trip (#3465).
+- **`graph info` reports `import_pending`.** A bulk import that spans
+  several commits leaves a durable watermark until its last commit lands,
+  so a cut-short import can be told from a finished one and re-run to
+  completion (#3464).
+- **Version-pinned JSON batch reads.** `json batch_get` takes `as_of` /
+  `as_of_time`, so the documents a version-pinned graph result names are
+  hydrated from that version and never a mix of it and the latest state;
+  the engine gains `batch_get_at_version` / `batch_get_at` (#3485).
+- **`--force` on vector-collection and graph delete**, matching space
+  delete (#3122).
+- **Published limits** for vector, graph, branch and space as pinned
+  constants, so callers can size inputs against the real ceilings (#3214).
+
+### Changed
+
+- **Graph pages cost a page, not the graph.** `list_nodes`, `nodes_by_type`
+  and `neighbors` seek from the cursor through the id-length buckets of the
+  key layout instead of materializing the whole prefix and slicing; a
+  malformed neighbor cursor is refused (`invalid_argument.engine.graph_cursor`)
+  rather than silently sought from (#3458, #3473, #3489).
+- **`graph info` is one point read.** Every node- or edge-changing commit
+  maintains the graph's metadata row with its live counts, and
+  `updated_version` is a per-graph revision token (#3474).
+- **Graph batches stage over what they touch.** `batch_write` reads each
+  node and edge on first use and sees its own earlier operations through an
+  overlay, instead of loading every node and edge of the graph; a node
+  delete reads the node's own adjacency (#3472).
+- **Large graphs delete.** `delete_graph` marks the graph in its first
+  commit — atomic to every reader from that point — then sweeps its rows in
+  commits the storage budget admits, and resumes after an interruption
+  (#3477).
+- **sssp no longer scans every edge per query** to check for negative
+  weights; the adjacency index records it at build (#3460).
+- **Graph read methods take `&self`**, matching `Database::graph(&self)`;
+  service accessors take `BranchName` and `ProductSpace` owned or borrowed
+  (#3459, #3191).
+- **Documented contract gaps** for graph and branch operations, including
+  that branch compare is honest about graphs being compare-only (#3194,
+  #3466, #3177).
+
+### Fixed
+
+- **Hand-copied error lists** for kv, json, graph and arrow are derived
+  from named sets, so a command's documented errors can no longer drift
+  from what it raises (#3273).
+
+### Removed
+
+- **Seven graph error codes** that no code path could raise (#2651).
+
 ## [1.2.4] - 2026-09-23
 
 A storage-footprint release. A graph database that took ~120 MB on disk for

@@ -1,7 +1,7 @@
 ---
 title: "Delete vectors by filter"
 description: "Delete vectors matching a metadata filter."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: vector
 ---
 

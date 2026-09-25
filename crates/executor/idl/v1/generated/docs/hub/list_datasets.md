@@ -1,7 +1,7 @@
 ---
 title: "List hub datasets"
 description: "List datasets from the selected StrataHub."
-source: strata-core@1.2.4
+source: strata-core@1.2.5
 section: hub
 ---
 
