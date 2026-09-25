@@ -54,7 +54,7 @@
   "command": "graph.meta",
   "request": {
     "additionalProperties": false,
-    "description": "Reads graph metadata.",
+    "description": "Reads graph metadata: live node and edge counts and the create and\nlast-update commits. One row read, not a scan — every commit that\nchanges a node or edge rewrites the graph's metadata row, so\n`updated_version` is a per-graph revision token (ontology changes do\nnot move it).",
     "properties": {
       "as_of": {
         "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. Reads the graph state visible at that timeline\nposition. To read as of a real time, use `as_of_time` instead.",

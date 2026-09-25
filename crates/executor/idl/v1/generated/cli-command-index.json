@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "c36bbeeb0e38f2883a669816b90d97f9b26a467880c4e9cb83a7e0e39feb6786",
+    "checksum_sha256": "36eab9c718c70d457d8a01137d8bd4a2b80aff8aaca1ad0af8d23f9922ff11b9",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -3381,7 +3381,7 @@
       "kind": "read.get",
       "title": "Read graph metadata",
       "summary": "Read graph metadata and counts.",
-      "description": "Reads a graph's metadata: live node and edge counts plus the create and last-update commit versions and timestamps. Reading a graph that does not exist returns no data rather than an error. Accepts `as_of` for time travel.\n\nOptional reads distinguish present data from missing data. When version or timestamp facts exist on the executor output, SDK mappings should preserve them.",
+      "description": "Reads a graph's metadata: live node and edge counts plus the create and last-update commit versions and timestamps. This is one row read, not a scan: the graph's metadata row carries its counts and is rewritten by every commit that changes a node or edge, so `updated_version` is a per-graph revision token — unchanged means no node or edge has changed since, whatever else moved on the branch. Ontology changes do not move it. Reading a graph that does not exist returns no data rather than an error. Accepts `as_of` for time travel. A graph whose rows were last written by a release before its metadata row carried counts is counted by scan until its next write.\n\nOptional reads distinguish present data from missing data. When version or timestamp facts exist on the executor output, SDK mappings should preserve them.",
       "docs": "/docs/graph/meta",
       "feature": "core",
       "access": "read",

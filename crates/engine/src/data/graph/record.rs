@@ -1,6 +1,7 @@
 //! Graph core storage envelopes.
 
 use serde::{Deserialize, Serialize};
+use strata_core::{CommitVersion, Timestamp};
 
 use crate::diagnostics::EngineError;
 
@@ -16,18 +17,122 @@ const GRAPH_BINDING_FORMAT_VERSION: u8 = 1;
 const GRAPH_TYPE_INDEX_FORMAT_VERSION: u8 = 1;
 
 /// Stored graph metadata.
+///
+/// #3474: the row carries the graph's live node and edge counts and its
+/// create commit, and every commit that changes a node or edge rewrites it
+/// in the same batch — so the row's own commit is the graph's last change
+/// and `graph_info` is one point read. A row written before counts were
+/// kept decodes with `counts: None` (and `created: None`, meaning the row's
+/// own commit); the graph's next write backfills it from a scan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GraphMetadataRecord {
     graph: GraphName,
+    created: Option<GraphCommitPoint>,
+    counts: Option<GraphCounts>,
 }
 
 impl GraphMetadataRecord {
+    /// A freshly created graph: no nodes, no edges, created by the commit
+    /// that writes this row.
     pub(crate) const fn new(graph: GraphName) -> Self {
-        Self { graph }
+        Self {
+            graph,
+            created: None,
+            counts: Some(GraphCounts::new(0, 0)),
+        }
+    }
+
+    /// A rewritten row: the create commit it must keep and the counts after
+    /// the commit that writes it.
+    pub(crate) const fn with_state(
+        graph: GraphName,
+        created: GraphCommitPoint,
+        counts: GraphCounts,
+    ) -> Self {
+        Self {
+            graph,
+            created: Some(created),
+            counts: Some(counts),
+        }
     }
 
     pub(crate) const fn graph(&self) -> &GraphName {
         &self.graph
+    }
+
+    /// The create commit, when the row has been rewritten since; `None`
+    /// means the row's own commit created the graph.
+    pub(crate) const fn created(&self) -> Option<GraphCommitPoint> {
+        self.created
+    }
+
+    /// The maintained counts; `None` on a row written before #3474.
+    pub(crate) const fn counts(&self) -> Option<GraphCounts> {
+        self.counts
+    }
+}
+
+/// A commit's coordinates, kept on a rewritten metadata row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GraphCommitPoint {
+    version: CommitVersion,
+    timestamp: Timestamp,
+}
+
+impl GraphCommitPoint {
+    pub(crate) const fn new(version: CommitVersion, timestamp: Timestamp) -> Self {
+        Self { version, timestamp }
+    }
+
+    pub(crate) const fn version(self) -> CommitVersion {
+        self.version
+    }
+
+    pub(crate) const fn timestamp(self) -> Timestamp {
+        self.timestamp
+    }
+}
+
+/// Live node and edge counts of a graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GraphCounts {
+    nodes: u64,
+    edges: u64,
+}
+
+impl GraphCounts {
+    pub(crate) const fn new(nodes: u64, edges: u64) -> Self {
+        Self { nodes, edges }
+    }
+
+    pub(crate) const fn nodes(self) -> u64 {
+        self.nodes
+    }
+
+    pub(crate) const fn edges(self) -> u64 {
+        self.edges
+    }
+
+    /// The counts after a commit that adds (or, negative, removes) live
+    /// rows. A count that would go below zero means the row and the rows
+    /// it describes disagree, which is corruption, not a clamp.
+    pub(crate) fn adjusted(self, node_delta: i64, edge_delta: i64) -> Result<Self, EngineError> {
+        let underflow = |what: &str| {
+            EngineError::corruption(
+                "data_loss.engine.graph_metadata",
+                format!("stored graph metadata counts fewer {what} than this commit removes"),
+            )
+        };
+        Ok(Self {
+            nodes: self
+                .nodes
+                .checked_add_signed(node_delta)
+                .ok_or_else(|| underflow("nodes"))?,
+            edges: self
+                .edges
+                .checked_add_signed(edge_delta)
+                .ok_or_else(|| underflow("edges"))?,
+        })
     }
 }
 
@@ -233,6 +338,26 @@ pub(crate) fn decode_graph_type_index_record(
 #[derive(Serialize, Deserialize)]
 struct StoredGraphMetadata {
     graph: String,
+    /// Absent on a row that is still the create commit's own (and on every
+    /// row written before #3474).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created: Option<StoredCommitPoint>,
+    /// Absent on a row written before #3474; such a graph is counted by
+    /// scan until its next write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    counts: Option<StoredGraphCounts>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredCommitPoint {
+    version: u64,
+    timestamp: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredGraphCounts {
+    nodes: u64,
+    edges: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -271,10 +396,33 @@ struct StoredGraphBindingTarget {
 pub(crate) fn encode_graph_metadata_record(record: &GraphMetadataRecord) -> Vec<u8> {
     let stored = StoredGraphMetadata {
         graph: record.graph().as_str().to_owned(),
+        created: record.created().map(|point| StoredCommitPoint {
+            version: point.version().as_u64(),
+            timestamp: point.timestamp().as_micros(),
+        }),
+        counts: record.counts().map(|counts| StoredGraphCounts {
+            nodes: counts.nodes(),
+            edges: counts.edges(),
+        }),
     };
     encode_json_record(
         GRAPH_METADATA_FORMAT_VERSION,
         &stored,
+        "graph metadata cannot be encoded",
+    )
+}
+
+/// The pre-#3474 row body — the graph name alone — so a test can hold the
+/// scan fallback and the backfill on the next write to the maintained row.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn encode_legacy_graph_metadata_record_for_test(graph: &GraphName) -> Vec<u8> {
+    encode_json_record(
+        GRAPH_METADATA_FORMAT_VERSION,
+        &StoredGraphMetadata {
+            graph: graph.as_str().to_owned(),
+            created: None,
+            counts: None,
+        },
         "graph metadata cannot be encoded",
     )
 }
@@ -307,7 +455,18 @@ pub(crate) fn decode_graph_metadata_record(
             "stored graph metadata identity does not match its row key",
         ));
     }
-    Ok(GraphMetadataRecord::new(graph))
+    Ok(GraphMetadataRecord {
+        graph,
+        created: stored.created.map(|point| {
+            GraphCommitPoint::new(
+                CommitVersion::new(point.version),
+                Timestamp::from_micros(point.timestamp),
+            )
+        }),
+        counts: stored
+            .counts
+            .map(|counts| GraphCounts::new(counts.nodes, counts.edges)),
+    })
 }
 
 pub(crate) fn encode_graph_node_record(record: &GraphNodeRecord) -> Vec<u8> {
@@ -752,6 +911,71 @@ mod tests {
             ),
         ] {
             assert_eq!(error.class(), EngineErrorClass::Corruption, "{case}");
+        }
+    }
+
+    /// #3474: a row written before counts were kept still decodes — with no
+    /// counts and no create point — and a maintained row round-trips both.
+    #[test]
+    fn metadata_counts_and_create_point_round_trip_and_legacy_rows_decode() {
+        use super::{GraphCommitPoint, GraphCounts, GraphMetadataRecord};
+        use strata_core::{CommitVersion, Timestamp};
+
+        let graph = GraphName::new("deps").expect("graph");
+        let legacy = decode_graph_metadata_record(&graph, b"\x01{\"graph\":\"deps\"}")
+            .expect("a pre-#3474 row decodes");
+        assert_eq!(legacy.graph(), &graph);
+        assert_eq!(legacy.counts(), None, "counted by scan until rewritten");
+        assert_eq!(legacy.created(), None, "created by its own commit");
+
+        // A new graph's row starts maintained: no rows, created by itself.
+        let fresh = GraphMetadataRecord::new(graph.clone());
+        assert_eq!(fresh.counts(), Some(GraphCounts::new(0, 0)));
+        assert_eq!(fresh.created(), None);
+        assert_eq!(
+            encode_graph_metadata_record(&fresh),
+            b"\x01{\"graph\":\"deps\",\"counts\":{\"nodes\":0,\"edges\":0}}",
+            "absent fields are omitted, so the shape stays readable by older code"
+        );
+
+        let created = GraphCommitPoint::new(CommitVersion::new(7), Timestamp::from_micros(1_000));
+        let maintained =
+            GraphMetadataRecord::with_state(graph.clone(), created, GraphCounts::new(3, 4));
+        let decoded =
+            decode_graph_metadata_record(&graph, &encode_graph_metadata_record(&maintained))
+                .expect("decoded");
+        assert_eq!(decoded, maintained);
+        assert_eq!(decoded.created(), Some(created));
+        assert_eq!(decoded.counts(), Some(GraphCounts::new(3, 4)));
+        assert_eq!(created.version(), CommitVersion::new(7));
+        assert_eq!(created.timestamp(), Timestamp::from_micros(1_000));
+    }
+
+    /// #3474: counts move by what a commit adds or removes; going below zero
+    /// is corruption, never a clamp.
+    #[test]
+    fn metadata_counts_adjust_by_delta_and_refuse_underflow() {
+        use super::GraphCounts;
+
+        let counts = GraphCounts::new(2, 3);
+        assert_eq!(
+            counts.adjusted(1, -3).expect("in range"),
+            GraphCounts::new(3, 0)
+        );
+        assert_eq!(
+            counts.adjusted(0, 0).expect("a replace changes nothing"),
+            counts
+        );
+        assert_eq!(
+            counts.adjusted(-2, 0).expect("down to zero"),
+            GraphCounts::new(0, 3)
+        );
+        for (nodes, edges) in [(-3, 0), (0, -4)] {
+            let error = counts
+                .adjusted(nodes, edges)
+                .expect_err("fewer rows than the commit removes");
+            assert_eq!(error.class(), EngineErrorClass::Corruption);
+            assert_eq!(error.code(), "data_loss.engine.graph_metadata");
         }
     }
 }
