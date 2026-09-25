@@ -93,6 +93,10 @@
         "graph": {
           "type": "string"
         },
+        "import_pending": {
+          "description": "Whether a `graph_bulk_insert` spanning more than one commit began\nand has not finished: its first commit sets this, its last clears\nit, so an interrupted import leaves it set until the same payload\nis run again (#3464).",
+          "type": "boolean"
+        },
         "node_count": {
           "format": "uint64",
           "minimum": 0,
@@ -116,7 +120,8 @@
         "created_version",
         "created_timestamp",
         "updated_version",
-        "updated_timestamp"
+        "updated_timestamp",
+        "import_pending"
       ],
       "type": "object"
     },

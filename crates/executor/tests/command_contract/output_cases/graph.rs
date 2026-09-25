@@ -10,7 +10,7 @@ pub(super) fn graph_outputs() -> Vec<Output> {
 pub(super) fn graph_read_outputs() -> Vec<Output> {
     vec![
         Output::GraphCreateResult {
-            info: GraphInfoData::new("deps".to_owned(), 0, 0, 1, 10, 1, 10),
+            info: GraphInfoData::new("deps".to_owned(), 0, 0, 1, 10, 1, 10, false),
             effect: MutationEffect::created(),
             commit: commit_receipt(1, 10, 1, 0),
         },
@@ -22,6 +22,7 @@ pub(super) fn graph_read_outputs() -> Vec<Output> {
             10,
             4,
             40,
+            true,
         ))),
         Output::GraphInfoResult(None),
         Output::GraphNamePage {

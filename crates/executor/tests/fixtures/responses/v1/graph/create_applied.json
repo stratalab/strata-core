@@ -19,6 +19,7 @@
       "created_version": 3,
       "edge_count": 0,
       "graph": "social",
+      "import_pending": false,
       "node_count": 0,
       "updated_timestamp": 3,
       "updated_version": 3

@@ -322,3 +322,115 @@ fn bulk_insert_clamps_chunk_size_to_800() {
         "801 nodes need a second chunk, so the cap is exactly 800"
     );
 }
+
+#[test]
+fn bulk_replace_retires_the_old_binding_and_type_index_rows_in_cache_and_durable_modes() {
+    run_database_modes(exercise_bulk_replace_indexes);
+}
+
+/// A bulk re-import that changes a node's binding or object type must
+/// retire the derived rows of the old ones, exactly as `upsert_node` does:
+/// the old target must no longer list the node, and the old type must no
+/// longer index it — a stale index row would surface a ghost.
+// Takes `Database` by value on purpose: the `fn(Database)` harness contract
+// hands over ownership so the database is DROPPED — and therefore closed —
+// when the exercise ends (#3126).
+#[allow(clippy::needless_pass_by_value)]
+fn exercise_bulk_replace_indexes(database: Database) {
+    let mut graph = database
+        .graph(branch("default"), space("default"))
+        .expect("graph service opens");
+    let name = graph_name("catalog");
+    graph.create_graph(name.clone()).expect("graph created");
+    let place = strata_engine::GraphTypeName::new("place").expect("type name");
+    let shop = strata_engine::GraphTypeName::new("shop").expect("type name");
+    for kind in [&place, &shop] {
+        graph
+            .define_object_type(
+                &name,
+                strata_engine::GraphObjectTypeDef::new(kind.clone(), std::iter::empty())
+                    .expect("object type"),
+            )
+            .expect("type defined");
+    }
+    let target = |key: &str| {
+        GraphBindingTarget::new(
+            strata_engine::GraphBindingPrimitive::Kv,
+            None,
+            space("docs"),
+            key,
+        )
+        .expect("binding target")
+    };
+    let bound_typed = |key: &str, kind: &strata_engine::GraphTypeName| {
+        GraphNodeData::new(None, Some(GraphEntityBinding::new(target(key))))
+            .with_object_type(kind.clone())
+    };
+    let bound_to = |graph: &strata_engine::GraphService<'_>, key: &str| -> Vec<String> {
+        graph
+            .bindings_for_entity(&target(key), None, 10)
+            .expect("bindings read")
+            .bindings()
+            .iter()
+            .map(|binding| binding.node_id().as_str().to_owned())
+            .collect()
+    };
+    let typed_as = |graph: &strata_engine::GraphService<'_>,
+                    kind: &strata_engine::GraphTypeName|
+     -> Vec<String> {
+        graph
+            .nodes_by_type(&name, kind, None, 10)
+            .expect("typed listing")
+            .nodes()
+            .iter()
+            .map(|node| node.node_id().as_str().to_owned())
+            .collect()
+    };
+
+    graph
+        .bulk_insert(
+            &name,
+            &[(node_id("a"), bound_typed("doc-1", &place))],
+            &[],
+            None,
+        )
+        .expect("first import");
+    assert_eq!(bound_to(&graph, "doc-1"), ["a"]);
+    assert_eq!(typed_as(&graph, &place), ["a"]);
+
+    // Re-import `a` bound elsewhere and typed differently.
+    graph
+        .bulk_insert(
+            &name,
+            &[(node_id("a"), bound_typed("doc-2", &shop))],
+            &[],
+            None,
+        )
+        .expect("re-import with a new binding and type");
+    assert!(
+        bound_to(&graph, "doc-1").is_empty(),
+        "the old binding is retired"
+    );
+    assert_eq!(bound_to(&graph, "doc-2"), ["a"]);
+    assert!(
+        typed_as(&graph, &place).is_empty(),
+        "the old type index row is retired"
+    );
+    assert_eq!(typed_as(&graph, &shop), ["a"]);
+
+    // Re-import `a` with neither: both derived rows go.
+    graph
+        .bulk_insert(
+            &name,
+            &[(node_id("a"), GraphNodeData::default())],
+            &[],
+            None,
+        )
+        .expect("re-import plain");
+    assert!(bound_to(&graph, "doc-2").is_empty());
+    assert!(typed_as(&graph, &shop).is_empty());
+    assert!(graph
+        .get_node(&name, &node_id("a"))
+        .expect("read")
+        .is_some());
+}

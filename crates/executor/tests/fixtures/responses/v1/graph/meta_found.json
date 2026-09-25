@@ -4,6 +4,7 @@
     "created_version": 3,
     "edge_count": 1,
     "graph": "social",
+    "import_pending": false,
     "node_count": 2,
     "updated_timestamp": 6,
     "updated_version": 6

@@ -35,6 +35,12 @@ pub(crate) struct GraphMetadataRecord {
     /// is tombstoned last. A row still carrying the mark after a crash is
     /// a deletion to resume, which `delete_graph` and `create_graph` do.
     deleting: bool,
+    /// #3464: set by the first chunk commit of a `bulk_insert` that spans
+    /// more than one commit and cleared by its last, so a crash between
+    /// them leaves a durable watermark — `graph_info` reports the import
+    /// pending — and a re-run of the same payload (idempotent upserts)
+    /// clears it. The graph stays readable and writable throughout.
+    importing: bool,
 }
 
 impl GraphMetadataRecord {
@@ -46,22 +52,31 @@ impl GraphMetadataRecord {
             created: None,
             counts: Some(GraphCounts::new(0, 0)),
             deleting: false,
+            importing: false,
         }
     }
 
-    /// A rewritten row: the create commit it must keep and the counts after
-    /// the commit that writes it.
+    /// A rewritten row: the create commit it must keep, the counts after
+    /// the commit that writes it, and whether a bulk import is pending
+    /// after it.
     pub(crate) const fn with_state(
         graph: GraphName,
         created: GraphCommitPoint,
         counts: GraphCounts,
+        importing: bool,
     ) -> Self {
         Self {
             graph,
             created: Some(created),
             counts: Some(counts),
             deleting: false,
+            importing,
         }
+    }
+
+    /// Whether a multi-commit bulk import has begun and not yet finished.
+    pub(crate) const fn importing(&self) -> bool {
+        self.importing
     }
 
     /// The same row, marked as a deletion in progress.
@@ -370,6 +385,10 @@ struct StoredGraphMetadata {
     /// (#3477); absent on every other row, so older readers see nothing new.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     deleting: bool,
+    /// Present only between the first and last commit of a multi-commit
+    /// bulk import (#3464); absent everywhere else.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    importing: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -429,6 +448,7 @@ pub(crate) fn encode_graph_metadata_record(record: &GraphMetadataRecord) -> Vec<
             edges: counts.edges(),
         }),
         deleting: record.deleting(),
+        importing: record.importing(),
     };
     encode_json_record(
         GRAPH_METADATA_FORMAT_VERSION,
@@ -448,6 +468,7 @@ pub(crate) fn encode_legacy_graph_metadata_record_for_test(graph: &GraphName) ->
             created: None,
             counts: None,
             deleting: false,
+            importing: false,
         },
         "graph metadata cannot be encoded",
     )
@@ -493,6 +514,7 @@ pub(crate) fn decode_graph_metadata_record(
             .counts
             .map(|counts| GraphCounts::new(counts.nodes, counts.edges)),
         deleting: stored.deleting,
+        importing: stored.importing,
     })
 }
 
@@ -967,7 +989,7 @@ mod tests {
 
         let created = GraphCommitPoint::new(CommitVersion::new(7), Timestamp::from_micros(1_000));
         let maintained =
-            GraphMetadataRecord::with_state(graph.clone(), created, GraphCounts::new(3, 4));
+            GraphMetadataRecord::with_state(graph.clone(), created, GraphCounts::new(3, 4), false);
         let decoded =
             decode_graph_metadata_record(&graph, &encode_graph_metadata_record(&maintained))
                 .expect("decoded");
@@ -1029,5 +1051,36 @@ mod tests {
         let legacy = decode_graph_metadata_record(&graph, b"\x01{\"graph\":\"deps\"}")
             .expect("legacy row decodes");
         assert!(!legacy.deleting());
+    }
+
+    /// #3464: the import watermark round-trips, is written only when set,
+    /// and is absent on every row written before it existed.
+    #[test]
+    fn metadata_import_watermark_round_trips_and_is_omitted_when_clear() {
+        use super::{GraphCommitPoint, GraphCounts, GraphMetadataRecord};
+        use strata_core::{CommitVersion, Timestamp};
+
+        let graph = GraphName::new("deps").expect("graph");
+        let created = GraphCommitPoint::new(CommitVersion::new(2), Timestamp::from_micros(20));
+        let clear =
+            GraphMetadataRecord::with_state(graph.clone(), created, GraphCounts::new(1, 0), false);
+        assert!(!clear.importing());
+        assert!(
+            !String::from_utf8_lossy(&encode_graph_metadata_record(&clear)).contains("importing"),
+            "a clear watermark leaves the row as older readers know it"
+        );
+        let pending =
+            GraphMetadataRecord::with_state(graph.clone(), created, GraphCounts::new(1, 0), true);
+        assert!(pending.importing());
+        let decoded = decode_graph_metadata_record(&graph, &encode_graph_metadata_record(&pending))
+            .expect("decoded");
+        assert_eq!(decoded, pending);
+        assert!(decoded.importing());
+        assert!(!GraphMetadataRecord::new(graph.clone()).importing());
+        assert!(
+            !decode_graph_metadata_record(&graph, b"\x01{\"graph\":\"deps\"}")
+                .expect("legacy row decodes")
+                .importing()
+        );
     }
 }

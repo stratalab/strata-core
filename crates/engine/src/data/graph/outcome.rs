@@ -19,9 +19,11 @@ pub struct GraphInfo {
     created_timestamp: Timestamp,
     updated_version: CommitVersion,
     updated_timestamp: Timestamp,
+    import_pending: bool,
 }
 
 impl GraphInfo {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) const fn new(
         name: GraphName,
         node_count: u64,
@@ -30,6 +32,7 @@ impl GraphInfo {
         created_timestamp: Timestamp,
         updated_version: CommitVersion,
         updated_timestamp: Timestamp,
+        import_pending: bool,
     ) -> Self {
         Self {
             name,
@@ -39,6 +42,7 @@ impl GraphInfo {
             created_timestamp,
             updated_version,
             updated_timestamp,
+            import_pending,
         }
     }
 
@@ -46,6 +50,16 @@ impl GraphInfo {
     /// Returns the graph name.
     pub const fn name(&self) -> &GraphName {
         &self.name
+    }
+
+    #[must_use]
+    /// Whether a `bulk_insert` spanning more than one commit began and has
+    /// not finished (#3464): its first chunk commit sets the watermark and
+    /// its last clears it, so a crash in between leaves it set. The graph
+    /// is readable and writable meanwhile; re-running the same payload —
+    /// every row an upsert — completes the import and clears it.
+    pub const fn import_pending(&self) -> bool {
+        self.import_pending
     }
 
     #[must_use]
@@ -905,6 +919,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn graph_outcomes_expose_engine_facts_without_storage_types() {
         let graph = GraphName::new("deps").expect("graph");
         let node_id = GraphNodeId::new("a").expect("node");
@@ -920,10 +935,12 @@ mod tests {
             commit.timestamp(),
             commit.version(),
             commit.timestamp(),
+            true,
         );
         assert_eq!(info.name(), &graph);
         assert_eq!(info.node_count(), 3);
         assert_eq!(info.edge_count(), 4);
+        assert!(info.import_pending());
         assert_eq!(info.created_version(), commit.version());
         assert_eq!(info.created_timestamp(), commit.timestamp());
         assert_eq!(info.updated_version(), commit.version());

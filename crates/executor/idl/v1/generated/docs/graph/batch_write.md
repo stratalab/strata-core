@@ -31,6 +31,7 @@ node_count       2
 edge_count       1
 created_version  3
 updated_version  4
+import_pending   false
 ```
 
 ### Wire

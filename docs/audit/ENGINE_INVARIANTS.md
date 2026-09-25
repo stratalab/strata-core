@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (15, one retired), SCALE (12), DUR (18) = 87 entries, 86 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (16, one retired), SCALE (12), DUR (18) = 88 entries, 87 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -983,7 +983,9 @@ compare-only in promotion today; the day promote carries graph rows it must merg
 not copy it.
 
 **Audit**: In `data/graph/service.rs`, every call to `commit_batch_maintaining` is paired
-with a `metadata_mutation` whose deltas match the rows the batch adds or removes (a replace
+with a `metadata_mutation` (or `metadata_mutation_marking`, its import-watermark variant
+that delegates to the same read-modify-write, ARCH-016) whose deltas match the rows the
+batch adds or removes (a replace
 is 0; a node delete carries `-incident edges`; bulk and batch use created/deleted flags with
 per-chunk seen-sets for duplicates). The callers still on plain `commit_batch` must be only
 `create_graph`, `delete_graph`, the ontology writers and the testkit legacy seam — any new
@@ -1030,6 +1032,44 @@ single-commit / three-commit boundary), in-crate
 `service::tests::a_marked_graph_is_absent_and_its_deletion_resumes` (absence to every read
 and write, `as_of` before the mark, cross-graph bindings, resume by delete and by create),
 and `metadata_deleting_mark_round_trips_and_is_omitted_when_clear` (`record.rs`).
+
+### ARCH-016: A multi-commit bulk import leaves a durable watermark until its last commit
+
+`bulk_insert` commits one chunk at a time, so an interruption keeps the chunks that landed
+(#3464). What the engine owes the caller is not a rollback — the storage commit budget is
+why the chunks exist — but a way to tell a finished import from one cut short, and a way to
+finish it. An import that spans more than one commit therefore sets the `importing`
+watermark on the graph's metadata row with its first chunk commit and clears it with its
+last (`GraphService::metadata_mutation_marking`, riding the per-chunk metadata rewrite of
+ARCH-014, so it costs no extra commit); a one-commit import never carries it. `graph_info`
+reports it as `import_pending`, at every `as_of`. The graph stays readable and writable
+throughout — an ordinary write during a pending import keeps the mark, because
+`metadata_mutation` passes the stored value through — and every bulk row is an upsert with
+counts taken by point read, so re-running the same payload completes the import without
+doubling anything and clears the mark. The mark is coarse — "a multi-commit import is in
+progress", not "this payload is incomplete" — so whichever bulk import's last chunk lands
+next clears it; finishing an interrupted import means re-running its own payload. A crash
+between chunks thus leaves exactly the documented state and a documented way out. A fork
+mid-import inherits the mark as it stood at the fork, and each branch clears it only by its
+own re-run (COW-003). The regression is a bulk chunk committed without the mark decision, a
+non-bulk writer that clears the mark, or a `graph_info` that reads it from anywhere but the
+row at the requested version.
+
+**Audit**: In `data/graph/service.rs`, both chunk loops of `bulk_insert_limited` call
+`metadata_mutation_marking` with `Some(chunk_index + 1 < total_chunks)` — the only callers
+that pass `Some` — and every other count-updating writer calls `metadata_mutation` (which
+passes `None`, so the stored mark is preserved). The two lifecycle writers rewrite the row
+outside that path and so decide the mark directly: `create_graph` writes a fresh row
+(`GraphMetadataRecord::new`, mark clear) and `delete_graph` a `marked_deleting` one. So a
+fresh graph is never pending, and a delete does not clear a mark it has made moot.
+`graph_info_from_row` takes `import_pending` from the decoded row at the requested version.
+Tests:
+`bulk_resume_tests::an_interrupted_import_stays_pending_until_the_same_payload_is_rerun`
+(in-crate, via `bulk_insert_interrupted_for_test`: pending after a cut, kept across an
+ordinary write, cleared and un-doubled by the re-run, true at the cut's version),
+`tests/engine_graph_bulk_resume.rs` (a one-commit import never pending; a many-commit
+import pending at every inner version and not before or after), and
+`metadata_import_watermark_round_trips_and_is_omitted_when_clear` (`record.rs`).
 
 ---
 

@@ -5,7 +5,7 @@ source: strata-core@1.2.4
 section: graph
 ---
 
-Reads a graph's metadata: live node and edge counts plus the create and last-update commit versions and timestamps. This is one row read, not a scan: the graph's metadata row carries its counts and is rewritten by every commit that changes a node or edge, so `updated_version` is a per-graph revision token — unchanged means no node or edge has changed since, whatever else moved on the branch. Ontology changes do not move it. Reading a graph that does not exist returns no data rather than an error. Accepts `as_of` for time travel. A graph whose rows were last written by a release before its metadata row carried counts is counted by scan until its next write.
+Reads a graph's metadata: live node and edge counts, the create and last-update commit versions and timestamps, and `import_pending` — whether a `bulk_insert` spanning more than one commit began and has not finished (its first commit sets the flag, its last clears it, so an interrupted import leaves it set; re-running the import clears it). This is one row read, not a scan: the graph's metadata row carries its counts and is rewritten by every commit that changes a node or edge, so `updated_version` is a per-graph revision token — unchanged means no node or edge has changed since, whatever else moved on the branch. Ontology changes do not move it. Reading a graph that does not exist returns no data rather than an error. Accepts `as_of` for time travel. A graph whose rows were last written by a release before its metadata row carried counts is counted by scan until its next write.
 
 Optional reads distinguish present data from missing data. When version or timestamp facts exist on the executor output, SDK mappings should preserve them.
 
@@ -28,6 +28,7 @@ node_count       2
 edge_count       0
 created_version  3
 updated_version  5
+import_pending   false
 ```
 
 ### Wire
