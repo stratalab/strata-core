@@ -174,7 +174,7 @@
         "type": "string"
       },
       "weight": {
-        "description": "Optional edge weight. Defaults to 1.0.",
+        "description": "Optional edge weight. Defaults to 1.0. A finite number; a whole\nnumber up to 2^53 − 1 (9007199254740991) is stored exactly, and\nshortest-path distances summed from such weights stay exact up\nto the same bound, so a graph weighted in meters or seconds\nneeds no parallel property.",
         "format": "double",
         "type": [
           "number",

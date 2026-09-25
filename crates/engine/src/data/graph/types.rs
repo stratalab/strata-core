@@ -465,6 +465,14 @@ impl GraphNodeData {
 }
 
 /// Graph edge payload.
+///
+/// The weight is one finite `f64`, on disk and on the wire. That is also an
+/// exact integer type up to [`Self::MAX_COUNT`] (2^53 − 1): every whole
+/// number in that range is an `f64`, and a sum of such counts stays exact
+/// while it stays in the range — so a graph weighted in meters, seconds or
+/// hops gets exact shortest-path distances without carrying a parallel
+/// property (#3465). [`Self::from_count`] enters that contract and
+/// [`Self::weight_count`] reads it back.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GraphEdgeData {
     weight: f64,
@@ -472,7 +480,32 @@ pub struct GraphEdgeData {
     properties: Option<GraphProperties>,
 }
 
+/// The largest count a weight carries exactly: 2^53 − 1, the last integer
+/// `f64` tells apart from its neighbours. 2^53 itself is excluded because
+/// 2^53 + 1 rounds to it, so a sum landing there could not be trusted.
+/// Published as [`GraphEdgeData::MAX_COUNT`].
+pub(crate) const MAX_EXACT_COUNT: u64 = (1 << 53) - 1;
+
+/// Reads a weight or distance back as the count it carries exactly:
+/// `Some` for a whole number in `0..=MAX_EXACT_COUNT`, `None` for anything
+/// fractional, negative or beyond the exact range.
+pub(crate) fn exact_count(value: f64) -> Option<u64> {
+    // Below 2^53, so the bound converts without loss.
+    #[allow(clippy::cast_precision_loss)]
+    let max = MAX_EXACT_COUNT as f64;
+    if !(0.0..=max).contains(&value) || value.fract() != 0.0 {
+        return None;
+    }
+    // In range and whole (checked above): the cast is exact, not a truncation.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let count = value as u64;
+    Some(count)
+}
+
 impl GraphEdgeData {
+    /// The largest count [`Self::from_count`] accepts; see [`MAX_EXACT_COUNT`].
+    pub const MAX_COUNT: u64 = MAX_EXACT_COUNT;
+
     /// Creates graph edge data.
     pub fn new(weight: f64, properties: Option<GraphProperties>) -> Result<Self, EngineError> {
         if !weight.is_finite() {
@@ -481,6 +514,26 @@ impl GraphEdgeData {
                 "graph edge weight must be finite",
             ));
         }
+        Ok(Self { weight, properties })
+    }
+
+    /// Creates graph edge data whose weight is an exact count — meters,
+    /// seconds, hops. A count up to [`Self::MAX_COUNT`] is stored exactly and
+    /// [`Self::weight_count`] reads it back; a larger one is refused with
+    /// `invalid_argument.engine.graph_edge_weight` rather than rounded.
+    pub fn from_count(
+        count: u64,
+        properties: Option<GraphProperties>,
+    ) -> Result<Self, EngineError> {
+        if count > Self::MAX_COUNT {
+            return Err(EngineError::invalid_input(
+                "invalid_argument.engine.graph_edge_weight",
+                "graph edge count exceeds the exact range (2^53 - 1)",
+            ));
+        }
+        // Every integer below 2^53 is an f64 (checked above): exact.
+        #[allow(clippy::cast_precision_loss)]
+        let weight = count as f64;
         Ok(Self { weight, properties })
     }
 
@@ -497,6 +550,14 @@ impl GraphEdgeData {
     /// Returns the edge weight.
     pub const fn weight(&self) -> f64 {
         self.weight
+    }
+
+    #[must_use]
+    /// Returns the weight as the exact count it carries — `Some` for a whole
+    /// number up to [`Self::MAX_COUNT`], `None` for a fractional, negative or
+    /// larger weight. The inverse of [`Self::from_count`].
+    pub fn weight_count(&self) -> Option<u64> {
+        exact_count(self.weight)
     }
 
     #[must_use]
@@ -716,6 +777,56 @@ mod tests {
             let error = GraphEdgeData::new(rejected, None).expect_err("weight rejected");
             assert_eq!(error.class(), EngineErrorClass::InvalidInput);
             assert_eq!(error.code(), "invalid_argument.engine.graph_edge_weight");
+        }
+    }
+
+    /// #3465: a count enters exactly and reads back exactly, up to and
+    /// including 2^53 − 1; one past it is refused rather than rounded.
+    #[test]
+    fn graph_edge_count_round_trips_exactly_up_to_the_safe_bound() {
+        assert_eq!(GraphEdgeData::MAX_COUNT, 9_007_199_254_740_991);
+        for count in [0, 1, 81, 4_294_967_295, GraphEdgeData::MAX_COUNT] {
+            let data = GraphEdgeData::from_count(count, None).expect("count in range");
+            assert_eq!(data.weight_count(), Some(count), "{count}");
+            // The same value written as a float weight reads back the same.
+            #[allow(clippy::cast_precision_loss)]
+            let as_weight = GraphEdgeData::new(count as f64, None).expect("finite");
+            assert_eq!(as_weight, data);
+        }
+        let error = GraphEdgeData::from_count(GraphEdgeData::MAX_COUNT + 1, None)
+            .expect_err("2^53 is not a safe count");
+        assert_eq!(error.class(), EngineErrorClass::InvalidInput);
+        assert_eq!(error.code(), "invalid_argument.engine.graph_edge_weight");
+        // A stored or wire weight that is not a count reads as none.
+        for not_a_count in [1.5, -1.0, -0.5, 9_007_199_254_740_992.0, 1e300] {
+            let data = GraphEdgeData::new(not_a_count, None).expect("finite");
+            assert_eq!(data.weight_count(), None, "{not_a_count}");
+        }
+        // A JSON integer deserializes onto the float field without loss.
+        let stored: GraphEdgeData =
+            serde_json::from_value(json!({"weight": 81})).expect("integer weight parses");
+        assert_eq!(stored.weight_count(), Some(81));
+    }
+
+    /// The one reading shared by weights, adjacency edges and distances.
+    #[test]
+    fn exact_count_truth_table() {
+        for (value, expected) in [
+            (0.0, Some(0)),
+            (-0.0, Some(0)),
+            (1.0, Some(1)),
+            (81.0, Some(81)),
+            (9_007_199_254_740_991.0, Some(9_007_199_254_740_991)),
+            (9_007_199_254_740_992.0, None),
+            (9_007_199_254_740_994.0, None),
+            (0.5, None),
+            (81.000_001, None),
+            (-1.0, None),
+            (f64::NAN, None),
+            (f64::INFINITY, None),
+            (f64::NEG_INFINITY, None),
+        ] {
+            assert_eq!(super::exact_count(value), expected, "{value}");
         }
     }
 
