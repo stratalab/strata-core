@@ -45,6 +45,6 @@ pub(crate) use record::{
     decode_graph_binding_record, decode_graph_edge_record, decode_graph_metadata_record,
     decode_graph_node_record, decode_graph_type_index_record, encode_graph_binding_record,
     encode_graph_edge_record, encode_graph_metadata_record, encode_graph_node_record,
-    encode_graph_type_index_record, GraphBindingRecord, GraphEdgeRecord, GraphMetadataRecord,
-    GraphNodeRecord, GraphTypeIndexRecord,
+    encode_graph_type_index_record, GraphBindingRecord, GraphCommitPoint, GraphCounts,
+    GraphEdgeRecord, GraphMetadataRecord, GraphNodeRecord, GraphTypeIndexRecord,
 };

@@ -1,7 +1,7 @@
 //! Graph core service.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use strata_core::{CommitVersion, Timestamp};
 
@@ -36,13 +36,14 @@ use super::{
     GraphAdjacencyIndex, GraphAdjacencyIndexBuilder, GraphAnalyticsBudget, GraphBatchOpOutcome,
     GraphBatchOperation, GraphBatchWrite, GraphBatchWriteOutcome, GraphBinding, GraphBindingPage,
     GraphBindingPrimitive, GraphBindingRecord, GraphBindingTarget, GraphBulkInsertOutcome,
-    GraphDeleteOutcome, GraphDeletePolicy, GraphDeletePolicyOutcome, GraphDirection, GraphEdge,
-    GraphEdgePage, GraphEdgeRecord, GraphEdgeType, GraphEdgeWriteOutcome, GraphInfo,
-    GraphLinkTypeDef, GraphLinkTypeSummary, GraphName, GraphNamePage, GraphNeighbor,
-    GraphNeighborPage, GraphNode, GraphNodeId, GraphNodePage, GraphNodeRecord, GraphObjectTypeDef,
-    GraphObjectTypeSummary, GraphOntology, GraphOntologyFreezeOutcome, GraphOntologyRecord,
-    GraphOntologySummary, GraphOntologyWriteOutcome, GraphTargetStatus, GraphTypeIndexRecord,
-    GraphTypeName, GraphWriteOutcome,
+    GraphCommitPoint, GraphCounts, GraphDeleteOutcome, GraphDeletePolicy, GraphDeletePolicyOutcome,
+    GraphDirection, GraphEdge, GraphEdgePage, GraphEdgeRecord, GraphEdgeType,
+    GraphEdgeWriteOutcome, GraphInfo, GraphLinkTypeDef, GraphLinkTypeSummary, GraphMetadataRecord,
+    GraphName, GraphNamePage, GraphNeighbor, GraphNeighborPage, GraphNode, GraphNodeId,
+    GraphNodePage, GraphNodeRecord, GraphObjectTypeDef, GraphObjectTypeSummary, GraphOntology,
+    GraphOntologyFreezeOutcome, GraphOntologyRecord, GraphOntologySummary,
+    GraphOntologyWriteOutcome, GraphTargetStatus, GraphTypeIndexRecord, GraphTypeName,
+    GraphWriteOutcome,
 };
 
 type EdgeIdentity = (GraphNodeId, GraphEdgeType, GraphNodeId);
@@ -287,6 +288,46 @@ impl<'a> GraphService<'a> {
         self.graph_info_with_selector(name, ReadSelector::AtTimestamp(timestamp))
     }
 
+    /// Writes the graph the way a release before #3474 left it: the metadata
+    /// row in its old form (the graph name alone — no counts, no create
+    /// point), then one plain node row per id, each in its own later commit
+    /// with no metadata rewrite. A test can then hold the scan fallback —
+    /// counts by scan, `updated` from rows newer than the metadata row — and
+    /// the backfill the graph's next write performs, to the maintained row.
+    /// Returns the metadata commit and the last node commit, when any.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn write_legacy_graph_rows_for_test(
+        &mut self,
+        name: &GraphName,
+        node_ids: &[GraphNodeId],
+    ) -> Result<(CommitOutcome, Option<CommitOutcome>), EngineError> {
+        let record = self.branch_record()?;
+        self.require_graph(&record, name)?;
+        let metadata = self.commit_batch(
+            &record,
+            vec![RowMutation::put(
+                self.metadata_address(&record, name),
+                super::record::encode_legacy_graph_metadata_record_for_test(name),
+            )],
+        )?;
+        let mut last_node = None;
+        for node_id in node_ids {
+            let node = GraphNodeRecord::new(
+                name.clone(),
+                node_id.clone(),
+                super::GraphNodeData::default(),
+            );
+            last_node = Some(self.commit_batch(
+                &record,
+                vec![RowMutation::put(
+                    self.node_address(&record, name, node_id),
+                    encode_graph_node_record(&node),
+                )],
+            )?);
+        }
+        Ok((metadata, last_node))
+    }
+
     fn graph_info_with_selector(
         &self,
         name: &GraphName,
@@ -347,10 +388,14 @@ impl<'a> GraphService<'a> {
         let nodes_affected = verified.len() as u64;
 
         let mut mutations = MutationMap::default();
+        // #3474: every graph whose node or edge rows this commit touches gets
+        // its metadata row rewritten with the change to its live counts.
+        let mut touched: BTreeMap<GraphName, (i64, i64)> = BTreeMap::new();
         match policy {
             GraphDeletePolicy::KeepDangling => {}
             GraphDeletePolicy::Detach => {
                 for (graph, node_id, node) in &verified {
+                    touched.entry(graph.clone()).or_insert((0, 0));
                     let mut data =
                         super::GraphNodeData::new(node.data().properties().cloned(), None);
                     if let Some(object_type) = node.data().object_type() {
@@ -383,23 +428,37 @@ impl<'a> GraphService<'a> {
                         .push(node_id.clone());
                 }
                 for (graph, node_ids) in &by_graph {
+                    let mut removed_edges = 0_i64;
                     for edge in self
                         .edge_record_map(&record, graph, ReadSelector::Latest)?
                         .into_values()
                     {
                         if node_ids.contains(edge.src()) || node_ids.contains(edge.dst()) {
                             self.delete_edge_mutations(&record, &mut mutations, &edge);
+                            removed_edges += 1;
                         }
                     }
+                    touched.insert(
+                        graph.clone(),
+                        (
+                            -i64::try_from(node_ids.len()).unwrap_or(i64::MAX),
+                            -removed_edges,
+                        ),
+                    );
                 }
             }
+        }
+        for (graph, (node_delta, edge_delta)) in &touched {
+            let (metadata_address, metadata_value) =
+                self.metadata_mutation(&record, graph, *node_delta, *edge_delta)?;
+            mutations.put(metadata_address, metadata_value);
         }
 
         let mutations = mutations.into_mutations();
         let commit = if mutations.is_empty() {
             None
         } else {
-            Some(self.commit_batch(&record, mutations)?)
+            Some(self.commit_batch_maintaining(&record, mutations, touched.len())?)
         };
         Ok(GraphDeletePolicyOutcome::new(
             policy,
@@ -580,7 +639,10 @@ impl<'a> GraphService<'a> {
                 encode_graph_binding_record(&binding_record),
             ));
         }
-        let commit = self.commit_batch(&record, mutations)?;
+        let (metadata_address, metadata_value) =
+            self.metadata_mutation(&record, graph, i64::from(created), 0)?;
+        mutations.push(RowMutation::put(metadata_address, metadata_value));
+        let commit = self.commit_batch_maintaining(&record, mutations, 1)?;
         Ok(GraphWriteOutcome::new(
             graph.clone(),
             node_id,
@@ -654,15 +716,20 @@ impl<'a> GraphService<'a> {
         if let Some(object_type) = current.data().object_type() {
             mutations.delete(self.type_index_address(&record, graph, object_type, node_id));
         }
+        let mut removed_edges = 0_i64;
         for edge in self
             .edge_record_map(&record, graph, ReadSelector::Latest)?
             .into_values()
         {
             if edge.src() == node_id || edge.dst() == node_id {
                 self.delete_edge_mutations(&record, &mut mutations, &edge);
+                removed_edges += 1;
             }
         }
-        let commit = self.commit_batch(&record, mutations.into_mutations())?;
+        let (metadata_address, metadata_value) =
+            self.metadata_mutation(&record, graph, -1, -removed_edges)?;
+        mutations.put(metadata_address, metadata_value);
+        let commit = self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?;
         Ok(GraphDeleteOutcome::new(graph.clone(), true, Some(commit)))
     }
 
@@ -814,7 +881,9 @@ impl<'a> GraphService<'a> {
             dst.clone(),
             data,
         );
-        let commit = self.commit_batch(
+        let (metadata_address, metadata_value) =
+            self.metadata_mutation(&record, graph, 0, i64::from(created))?;
+        let commit = self.commit_batch_maintaining(
             &record,
             vec![
                 RowMutation::put(
@@ -825,7 +894,9 @@ impl<'a> GraphService<'a> {
                     self.reverse_edge_address(&record, graph, &dst, &edge_type, &src),
                     encode_graph_edge_record(&edge),
                 ),
+                RowMutation::put(metadata_address, metadata_value),
             ],
+            1,
         )?;
         Ok(GraphEdgeWriteOutcome::new(
             graph.clone(),
@@ -861,6 +932,10 @@ impl<'a> GraphService<'a> {
     ///
     /// Returns per-kind counts and the number of chunk commits. An empty
     /// input commits nothing.
+    // Two chunk loops that mirror `upsert_node` and `upsert_edge` row for
+    // row, plus the per-chunk count accounting (#3474); splitting them would
+    // hide the one-commit-per-chunk shape the outcome reports.
+    #[allow(clippy::too_many_lines)]
     pub fn bulk_insert(
         &mut self,
         graph: &GraphName,
@@ -887,10 +962,17 @@ impl<'a> GraphService<'a> {
         let mut last_commit = None;
         for chunk in nodes.chunks(chunk_size) {
             let mut mutations = MutationMap::default();
+            // #3474: the chunk's commit carries the graph's counts, so a node
+            // is new when it is neither stored nor earlier in this chunk.
+            let mut new_nodes = 0_i64;
+            let mut seen = HashSet::new();
             for (node_id, data) in chunk {
                 // Upsert discipline: drop stale derived rows before the
                 // new node row lands, exactly like `upsert_node`.
                 let current = self.node_record(&record, graph, node_id)?;
+                if current.is_none() && seen.insert(node_id) {
+                    new_nodes += 1;
+                }
                 let new_record = GraphNodeRecord::new(graph.clone(), node_id.clone(), data.clone());
                 if let Some(old) = current.as_ref().and_then(|record| record.data().binding()) {
                     if Some(old) != new_record.data().binding() {
@@ -937,12 +1019,25 @@ impl<'a> GraphService<'a> {
                     );
                 }
             }
-            last_commit = Some(self.commit_batch(&record, mutations.into_mutations())?);
+            let (metadata_address, metadata_value) =
+                self.metadata_mutation(&record, graph, new_nodes, 0)?;
+            mutations.put(metadata_address, metadata_value);
+            last_commit =
+                Some(self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?);
             commits += 1;
         }
         for chunk in edges.chunks(chunk_size) {
             let mut mutations = MutationMap::default();
+            let mut new_edges = 0_i64;
+            let mut seen = HashSet::new();
             for (src, edge_type, dst, data) in chunk {
+                if self
+                    .edge_record(&record, graph, src, edge_type, dst)?
+                    .is_none()
+                    && seen.insert((src, edge_type, dst))
+                {
+                    new_edges += 1;
+                }
                 let edge = GraphEdgeRecord::new(
                     graph.clone(),
                     src.clone(),
@@ -959,7 +1054,11 @@ impl<'a> GraphService<'a> {
                     encode_graph_edge_record(&edge),
                 );
             }
-            last_commit = Some(self.commit_batch(&record, mutations.into_mutations())?);
+            let (metadata_address, metadata_value) =
+                self.metadata_mutation(&record, graph, 0, new_edges)?;
+            mutations.put(metadata_address, metadata_value);
+            last_commit =
+                Some(self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?);
             commits += 1;
         }
 
@@ -1096,7 +1195,9 @@ impl<'a> GraphService<'a> {
         };
         let mut mutations = MutationMap::default();
         self.delete_edge_mutations(&record, &mut mutations, &edge);
-        let commit = self.commit_batch(&record, mutations.into_mutations())?;
+        let (metadata_address, metadata_value) = self.metadata_mutation(&record, graph, 0, -1)?;
+        mutations.put(metadata_address, metadata_value);
+        let commit = self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?;
         Ok(GraphDeleteOutcome::new(graph.clone(), true, Some(commit)))
     }
 
@@ -1551,6 +1652,10 @@ impl<'a> GraphService<'a> {
         let mut edges = self.edge_record_map(&record, graph, ReadSelector::Latest)?;
         let mut mutations = MutationMap::default();
         let mut outcomes = Vec::with_capacity(batch.operations().len());
+        // #3474: what the batch adds or removes among live nodes and edges,
+        // for the graph's metadata row.
+        let mut node_delta = 0_i64;
+        let mut edge_delta = 0_i64;
 
         for (index, operation) in batch.operations().iter().enumerate() {
             match operation {
@@ -1611,6 +1716,7 @@ impl<'a> GraphService<'a> {
                         );
                     }
                     nodes.insert(node_id.clone(), node);
+                    node_delta += i64::from(created);
                     outcomes.push(GraphBatchOpOutcome::created(index, created));
                 }
                 GraphBatchOperation::DeleteNode { node_id } => {
@@ -1639,6 +1745,8 @@ impl<'a> GraphService<'a> {
                             .filter(|edge| edge.src() == node_id || edge.dst() == node_id)
                             .cloned()
                             .collect::<Vec<_>>();
+                        node_delta -= 1;
+                        edge_delta -= i64::try_from(incident.len()).unwrap_or(i64::MAX);
                         for edge in incident {
                             edges.remove(&edge_identity(&edge));
                             self.delete_edge_mutations(&record, &mut mutations, &edge);
@@ -1698,6 +1806,7 @@ impl<'a> GraphService<'a> {
                     );
                     self.put_edge_mutations(&record, &mut mutations, &edge)?;
                     edges.insert(identity, edge);
+                    edge_delta += i64::from(created);
                     outcomes.push(GraphBatchOpOutcome::created(index, created));
                 }
                 GraphBatchOperation::DeleteEdge {
@@ -1708,6 +1817,7 @@ impl<'a> GraphService<'a> {
                     let identity = (src.clone(), edge_type.clone(), dst.clone());
                     let deleted = edges.remove(&identity).is_some();
                     if deleted {
+                        edge_delta -= 1;
                         let edge = GraphEdgeRecord::new(
                             graph.clone(),
                             src.clone(),
@@ -1722,11 +1832,13 @@ impl<'a> GraphService<'a> {
             }
         }
 
-        let mutations = mutations.into_mutations();
         if mutations.is_empty() {
             return Ok(GraphBatchWriteOutcome::new(graph.clone(), outcomes, None));
         }
-        let commit = self.commit_batch(&record, mutations)?;
+        let (metadata_address, metadata_value) =
+            self.metadata_mutation(&record, graph, node_delta, edge_delta)?;
+        mutations.put(metadata_address, metadata_value);
+        let commit = self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?;
         Ok(GraphBatchWriteOutcome::new(
             graph.clone(),
             outcomes,
@@ -2402,9 +2514,68 @@ impl<'a> GraphService<'a> {
                 "stored graph metadata row is missing a value",
             )
         })?;
-        let _ = decode_graph_metadata_record(&graph, value)?;
-        let node_rows = self.node_rows(record, &graph, selector)?;
-        let edge_rows = self.edge_rows(record, &graph, selector)?;
+        let metadata = decode_graph_metadata_record(&graph, value)?;
+        // #3474: a maintained row answers from itself — every node/edge commit
+        // rewrote it with the counts, so its own commit is the graph's last
+        // change. A row written before counts were kept falls back to the
+        // scan, until the graph's next write backfills it.
+        let (node_count, edge_count, updated_version, updated_timestamp) =
+            if let Some(counts) = metadata.counts() {
+                (
+                    counts.nodes(),
+                    counts.edges(),
+                    row.commit_version(),
+                    row.commit_timestamp(),
+                )
+            } else {
+                let scanned = self.scan_graph_state(record, &graph, selector)?;
+                // The newer of the row's own commit and the newest node/edge
+                // row; on a tie they are one commit, so either pair serves.
+                let (updated_version, updated_timestamp) = [
+                    (row.commit_version(), row.commit_timestamp()),
+                    (scanned.updated_version, scanned.updated_timestamp),
+                ]
+                .into_iter()
+                .max_by_key(|(version, _)| *version)
+                .expect("two candidates");
+                (
+                    scanned.node_count,
+                    scanned.edge_count,
+                    updated_version,
+                    updated_timestamp,
+                )
+            };
+        let (created_version, created_timestamp) = metadata
+            .created()
+            .map_or((row.commit_version(), row.commit_timestamp()), |point| {
+                (point.version(), point.timestamp())
+            });
+        Ok(GraphInfo::new(
+            graph,
+            node_count,
+            edge_count,
+            created_version,
+            created_timestamp,
+            updated_version,
+            updated_timestamp,
+        ))
+    }
+
+    /// Counts the live nodes and forward edges of a graph by decoding every
+    /// visible row, and finds the latest commit among them (tombstones
+    /// included — a delete changes the graph). This is the O(N + E) reading
+    /// `graph_info` used before #3474; it remains the fallback for a metadata
+    /// row written before counts were kept, the backfill source on that
+    /// graph's next write, and the oracle the maintained counts are tested
+    /// against.
+    fn scan_graph_state(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        selector: ReadSelector,
+    ) -> Result<ScannedGraphState, EngineError> {
+        let node_rows = self.node_rows(record, graph, selector)?;
+        let edge_rows = self.edge_rows(record, graph, selector)?;
         let mut node_count = 0_u64;
         for row in node_rows.iter().filter(|row| !row.is_tombstone()) {
             let _ = self.node_record_from_row(row)?;
@@ -2415,22 +2586,76 @@ impl<'a> GraphService<'a> {
             let _ = self.edge_record_from_forward_row(row)?;
             edge_count = edge_count.saturating_add(1);
         }
-        let mut updated_version = row.commit_version();
-        let mut updated_timestamp = row.commit_timestamp();
-        for candidate in node_rows.iter().chain(edge_rows.iter()) {
-            if candidate.commit_version() > updated_version {
-                updated_version = candidate.commit_version();
-                updated_timestamp = candidate.commit_timestamp();
-            }
-        }
-        Ok(GraphInfo::new(
-            graph,
+        // The newest row of either kind, tombstones included; a graph with
+        // no rows reports the zero commit and lets the caller's own row win.
+        let (updated_version, updated_timestamp) = node_rows
+            .iter()
+            .chain(edge_rows.iter())
+            .max_by_key(|candidate| candidate.commit_version())
+            .map_or(
+                (CommitVersion::new(0), Timestamp::from_micros(0)),
+                |newest| (newest.commit_version(), newest.commit_timestamp()),
+            );
+        Ok(ScannedGraphState {
             node_count,
             edge_count,
-            row.commit_version(),
-            row.commit_timestamp(),
             updated_version,
             updated_timestamp,
+        })
+    }
+
+    /// #3474: the metadata row every node/edge-changing commit carries, as
+    /// `(address, value)` for the caller's batch. Reads the graph's current
+    /// row, applies this commit's change to the live counts — backfilling
+    /// them by scan for a row written before counts were kept — and keeps
+    /// the create commit, so the rewritten row's own commit becomes the
+    /// graph's last change. Deltas are what the commit adds (positive) or
+    /// removes (negative) among live nodes and forward edges; a replace is 0.
+    ///
+    /// This is a read-modify-write on a row shared by every writer of the
+    /// graph, and its safety is the branch's single-writer discipline (one
+    /// `&mut` service per handle, one writer per branch across processes),
+    /// the same discipline every graph write already leans on for its
+    /// `created` detection and derived-row cleanup. The commit fence is the
+    /// branch generation, which does not move per data commit, so it would
+    /// not catch a stale read; if parallel writers on one branch ever land,
+    /// this row must join the commit's conflict set.
+    fn metadata_mutation(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        node_delta: i64,
+        edge_delta: i64,
+    ) -> Result<(RowAddress, Vec<u8>), EngineError> {
+        let row = self
+            .graph_metadata_row(record, graph, ReadSelector::Latest)?
+            .ok_or_else(|| {
+                EngineError::not_found("not_found.engine.graph", "graph does not exist")
+            })?;
+        let value = row.value().ok_or_else(|| {
+            EngineError::corruption(
+                "data_loss.engine.graph_metadata",
+                "stored graph metadata row is missing a value",
+            )
+        })?;
+        let metadata = decode_graph_metadata_record(graph, value)?;
+        let created = metadata
+            .created()
+            .unwrap_or_else(|| GraphCommitPoint::new(row.commit_version(), row.commit_timestamp()));
+        let counts = if let Some(counts) = metadata.counts() {
+            counts
+        } else {
+            let scanned = self.scan_graph_state(record, graph, ReadSelector::Latest)?;
+            GraphCounts::new(scanned.node_count, scanned.edge_count)
+        };
+        let counts = counts.adjusted(node_delta, edge_delta)?;
+        Ok((
+            self.metadata_address(record, graph),
+            encode_graph_metadata_record(&GraphMetadataRecord::with_state(
+                graph.clone(),
+                created,
+                counts,
+            )),
         ))
     }
 
@@ -2758,6 +2983,21 @@ impl<'a> GraphService<'a> {
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
     ) -> Result<CommitOutcome, EngineError> {
+        self.commit_batch_maintaining(record, mutations, 0)
+    }
+
+    /// Commits a batch that carries `maintained_puts` engine-maintained
+    /// metadata rewrites (#3474) beside the caller's rows. Those rewrites are
+    /// bookkeeping the same way derived reverse-edge rows are, so they are
+    /// left out of the user-facing put count: a node upsert still reports one
+    /// row written. `create_graph`'s metadata row is the user's own and goes
+    /// through [`Self::commit_batch`] unsubtracted.
+    fn commit_batch_maintaining(
+        &self,
+        record: &BranchCatalogRecord,
+        mutations: Vec<RowMutation>,
+        maintained_puts: usize,
+    ) -> Result<CommitOutcome, EngineError> {
         let mut mutations = mutations;
         // #2651: every caller builds at least one mutation before reaching here
         // (an empty public batch returns success earlier), so the old
@@ -2776,7 +3016,8 @@ impl<'a> GraphService<'a> {
             .filter(|mutation| {
                 mutation.is_put() && is_authored_graph_row(mutation.address().row_class())
             })
-            .count();
+            .count()
+            .saturating_sub(maintained_puts);
         let user_delete_count = mutations
             .iter()
             .filter(|mutation| {
@@ -2815,6 +3056,15 @@ const fn is_authored_graph_row(row_class: RowClass) -> bool {
     )
 }
 
+/// What a full scan of a graph's node and edge rows says: the live counts
+/// and the latest commit among every row, tombstones included.
+struct ScannedGraphState {
+    node_count: u64,
+    edge_count: u64,
+    updated_version: CommitVersion,
+    updated_timestamp: Timestamp,
+}
+
 #[derive(Default)]
 struct MutationMap {
     mutations: BTreeMap<MutationKey, RowMutation>,
@@ -2829,6 +3079,10 @@ impl MutationMap {
     fn delete(&mut self, address: RowAddress) {
         self.mutations
             .insert(mutation_key(&address), RowMutation::delete(address));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.mutations.is_empty()
     }
 
     fn into_mutations(self) -> Vec<RowMutation> {
@@ -3132,5 +3386,133 @@ mod tests {
         let error = binding_from_index_row(&space, &row).expect_err("target mismatch rejected");
         assert_eq!(error.class(), EngineErrorClass::Corruption);
         assert_eq!(error.code(), "data_loss.engine.graph_binding_record");
+    }
+
+    /// #3474: a graph left by a release before counts were kept — an old
+    /// metadata row with node rows committed after it — is answered by scan
+    /// until its next write backfills the row, in both modes. In-crate so the
+    /// default-feature mutation lane judges the fallback and backfill paths.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn legacy_graph_rows_fall_back_to_the_scan_and_backfill_on_the_next_write() {
+        use strata_core::CommitVersion;
+
+        use crate::branch::BranchName;
+        use crate::data::graph::{GraphEdgeData, GraphInfo, GraphNodeData, GraphNodeId};
+        use crate::{CacheOpenOptions, Database, DurableLocalOpenOptions};
+
+        fn node(id: &str) -> GraphNodeId {
+            GraphNodeId::new(id).expect("node id")
+        }
+
+        /// The row against the listing, with the commits it must report.
+        fn info_matches_listing(
+            graph: &super::GraphService<'_>,
+            name: &GraphName,
+            created: CommitVersion,
+            updated: CommitVersion,
+        ) -> GraphInfo {
+            let info = graph.graph_info(name).expect("reads").expect("exists");
+            let nodes = graph.list_nodes(name, None, None, 100).expect("nodes");
+            let edges = graph.list_edges(name, None, 100).expect("edges");
+            assert_eq!(
+                info.node_count(),
+                u64::try_from(nodes.nodes().len()).expect("fits")
+            );
+            assert_eq!(
+                info.edge_count(),
+                u64::try_from(edges.edges().len()).expect("fits")
+            );
+            assert_eq!(info.created_version(), created);
+            assert_eq!(info.updated_version(), updated);
+            info
+        }
+
+        fn exercise(database: &Database) {
+            let mut graph = database
+                .graph(
+                    BranchName::new("default").expect("branch"),
+                    ProductSpace::new("default").expect("space"),
+                )
+                .expect("service");
+            let name = GraphName::new("roads").expect("graph");
+            let road = GraphEdgeType::new("road").expect("type");
+            graph.create_graph(name.clone()).expect("created");
+            for id in ["a", "b"] {
+                graph
+                    .upsert_node(&name, node(id), GraphNodeData::default())
+                    .expect("node");
+            }
+            graph
+                .upsert_edge(&name, node("a"), road, node("b"), GraphEdgeData::default())
+                .expect("edge");
+
+            // The old shape: a bare metadata row, then nodes c and d landing
+            // after it with nothing maintained.
+            let (legacy, last_node) = graph
+                .write_legacy_graph_rows_for_test(&name, &[node("c"), node("d")])
+                .expect("legacy rows");
+            let last_node = last_node.expect("two nodes were written");
+            assert!(last_node.version() > legacy.version());
+            let fallback =
+                info_matches_listing(&graph, &name, legacy.version(), last_node.version());
+            assert_eq!((fallback.node_count(), fallback.edge_count()), (4, 1));
+            assert_eq!(
+                fallback.updated_timestamp(),
+                last_node.timestamp(),
+                "the newest row's commit, not the metadata row's"
+            );
+            // At the metadata row's own version the later nodes do not exist
+            // yet, and nothing is newer than the row.
+            let at_legacy = graph
+                .graph_info_at_version(&name, legacy.version())
+                .expect("historical")
+                .expect("existed");
+            assert_eq!((at_legacy.node_count(), at_legacy.edge_count()), (2, 1));
+            assert_eq!(at_legacy.updated_version(), legacy.version());
+            assert_eq!(at_legacy.updated_timestamp(), legacy.timestamp());
+
+            // The next write backfills: counted by scan once, then maintained,
+            // and the create point is the legacy row's commit from here on.
+            let write = graph
+                .upsert_node(&name, node("e"), GraphNodeData::default())
+                .expect("node");
+            let backfilled =
+                info_matches_listing(&graph, &name, legacy.version(), write.commit().version());
+            assert_eq!((backfilled.node_count(), backfilled.edge_count()), (5, 1));
+            let removed = graph.delete_node(&name, &node("a")).expect("delete");
+            let maintained = info_matches_listing(
+                &graph,
+                &name,
+                legacy.version(),
+                removed.commit().expect("commits").version(),
+            );
+            assert_eq!(
+                (maintained.node_count(), maintained.edge_count()),
+                (4, 0),
+                "b, c, d, e remain; a took its edge with it"
+            );
+
+            // History before the backfill still answers by scan.
+            assert_eq!(
+                graph
+                    .graph_info_at_version(&name, last_node.version())
+                    .expect("historical")
+                    .expect("existed"),
+                fallback
+            );
+        }
+
+        exercise(
+            &Database::open_cache(CacheOpenOptions::new())
+                .expect("cache")
+                .into_database(),
+        );
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        exercise(
+            &Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+                .expect("durable")
+                .into_database(),
+        );
     }
 }

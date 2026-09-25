@@ -1746,7 +1746,11 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
     },
-    /// Reads graph metadata.
+    /// Reads graph metadata: live node and edge counts and the create and
+    /// last-update commits. One row read, not a scan — every commit that
+    /// changes a node or edge rewrites the graph's metadata row, so
+    /// `updated_version` is a per-graph revision token (ontology changes do
+    /// not move it).
     GraphGetMeta {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]

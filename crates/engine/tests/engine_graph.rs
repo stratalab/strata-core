@@ -2023,9 +2023,13 @@ fn exercise_graph_cross_branch_binding_rejection(mut database: Database) {
 /// index row; those derived rows must not inflate put/delete counts.
 fn exercise_graph_commit_counts_exclude_derived_rows(mut database: Database) {
     let mut graph = graph_service(&mut database, "default", "default");
-    graph
+    // #3474: create_graph writes one authored row — the metadata row — through
+    // the plain commit path (`commit_batch`, no maintained rewrite to
+    // subtract), so it reports exactly one put.
+    let (_, created) = graph
         .create_graph(graph_name("deps"))
         .expect("graph create succeeds");
+    assert_eq!(created.put_count(), 1);
     for id in ["a", "b"] {
         graph
             .upsert_node(&graph_name("deps"), node(id), node_data(json!({}), None))

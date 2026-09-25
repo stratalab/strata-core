@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (13, one retired), SCALE (12), DUR (18) = 85 entries, 84 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (14, one retired), SCALE (12), DUR (18) = 86 entries, 85 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -960,6 +960,41 @@ branch (`data/graph/analytics.rs::sssp_with`). Tests:
 `sssp_tie_break_keeps_the_first_discovered_path` (`analytics.rs`),
 `subgraph_keeps_self_loops_and_is_deterministic` (`traversal.rs`), and the `historical ==
 latest` comparisons in `tests/engine_graph_analytics.rs`.
+
+### ARCH-014: A graph's metadata row is rewritten by every commit that changes its nodes or edges
+
+A graph's metadata row (`data/graph/record.rs::GraphMetadataRecord`) carries the graph's
+live node and edge counts and its create commit, and every commit that changes a node or
+forward edge — `upsert_node`, `delete_node` (with its incident edges), `upsert_edge`,
+`delete_edge`, each `bulk_insert` chunk, `batch_write`, and a binding cascade or detach —
+puts the rewritten row into the same atomic batch (`GraphService::metadata_mutation`, #3474).
+That makes `graph_info` one point read instead of an O(N + E) decode, and makes the row's
+own commit the graph's `updated_version`: a per-graph revision token that moves exactly when
+a node or edge changes and never when only the ontology does. Because the row is an
+ordinary versioned KV row, an `as_of` read, a fork child and recovery all see the counts as
+of that version with no extra machinery (MVCC-001, COW, ACID-005). The rewrite is engine
+bookkeeping like a reverse-edge row: `commit_batch_maintaining` leaves it out of the
+user-facing put count, so a node upsert still reports one row written. The scan remains the
+oracle: a row written before counts were kept decodes with `counts: None`, is answered by
+scan, and is backfilled by the graph's next write — no migration. A count that would go
+below zero is `data_loss.engine.graph_metadata`, never a clamp. Source rows stay
+authoritative (ARCH-003); the counts are a maintained aggregate of them. Graph is
+compare-only in promotion today; the day promote carries graph rows it must merge this row,
+not copy it.
+
+**Audit**: In `data/graph/service.rs`, every call to `commit_batch_maintaining` is paired
+with a `metadata_mutation` whose deltas match the rows the batch adds or removes (a replace
+is 0; a node delete carries `-incident edges`; bulk and batch use created/deleted flags with
+per-chunk seen-sets for duplicates). The callers still on plain `commit_batch` must be only
+`create_graph`, `delete_graph`, the ontology writers and the testkit legacy seam — any new
+node/edge writer on `commit_batch` is the regression. Tests: `tests/engine_graph_info.rs`
+(every write kind against a full listing, `as_of` replay, recreate, cascade/detach across
+graphs, fork, and the create/update commit timestamps against each write's outcome), the in-crate
+`service::tests::legacy_graph_rows_fall_back_to_the_scan_and_backfill_on_the_next_write`
+(a pre-#3474-shaped graph answered by scan, then backfilled — in-crate so the
+default-feature mutation lane judges the fallback),
+`graph_commit_counts_exclude_derived_rows_in_cache_and_durable_modes` (`tests/engine_graph.rs`),
+and the record round-trip / underflow tests in `data/graph/record.rs`.
 
 ---
 
