@@ -517,9 +517,16 @@ version straight through (#3509). A version exactly AT F is retained and allowed
 (`api/runtime/data.rs`) and the fork path consults
 `require_fork_version_within_retained_floor` in BOTH the `ForkAtVersion` and `ForkAtTimestamp`
 arms (`api/runtime/mod.rs::branch`) — a fork arm that validates only
-`require_retained_version_watermark` / the timeline is the regression. Tests:
+`require_retained_version_watermark` / the timeline is the regression. The engine's
+capability services (KV, JSON, event, vector, graph — single and batch `_at_version` /
+`_at` reads alike, #3485) enforce the floor one layer down, through that same storage
+`read_point` / scan check, surfaced by `map_storage_error` in `persistence/adapter.rs` as
+`history_unavailable.engine.persistence_history`; an engine read that resolves a version or
+timestamp itself instead of passing the `ReadSelector` through is the regression there. Tests:
 `read_at_version_below_retained_history_floor_is_rejected` (`api/tests/read.rs`),
-`api_fork_below_retained_history_floor_is_rejected` (`api/tests/maintenance.rs`).
+`api_fork_below_retained_history_floor_is_rejected` (`api/tests/maintenance.rs`),
+`batch_get_at_outside_the_retained_window_is_a_diagnostic_not_the_latest_state`
+(`tests/engine_json_batch_as_of.rs`).
 
 ### MVCC-010: Paginated reads seek from version-independent key positions and re-seek past tombstones
 

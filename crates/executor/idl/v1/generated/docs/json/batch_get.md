@@ -7,6 +7,8 @@ section: json
 
 Reads several document/path entries and returns positional item results. Each item records whether the value was found and includes version metadata when present.
 
+With `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every entry is read as of that one position, so a batch can hydrate the documents a version-pinned read named — a graph query at a version, say — without mixing in later state. Entries keep their order, a repeated entry is answered again, and a document absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch with `history_unavailable.engine.persistence_history` rather than answering from the latest state; setting both clocks at once is refused.
+
 Itemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.
 
 ## Examples
@@ -39,6 +41,8 @@ $ strata command run --command-json '{"entries":[{"key":"a","path":"$"},{"key":"
 
 | Name | Type | Required | Description |
 |---|---|---|---|
+| `as_of` | `integer` | no | Read every entry as of a position on the logical commit timeline — the `timestamp` from `history` output, not the `version`, and never a calendar date. To read as of a real time, use `as_of_time` instead. |
+| `as_of_time` | `integer` | no | Read every entry as of a real time: a wall-clock instant in microseconds since the Unix epoch (UTC), as reported by `committed_at` on a write ack or on any `history` row. Resolves to the commit at or before that instant, and fails rather than guessing if the instant falls outside the branch's recorded history. Mutually exclusive with `as_of`. |
 | `entries` | `BatchJsonGetEntry[]` | yes | Entries to read. |
 
 Plus the optional scope: `branch` and `space` (default to the session branch and the `"default"` space).

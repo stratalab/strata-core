@@ -1,0 +1,14 @@
+{
+  "type": "json_batch_get",
+  "entries": [
+    {
+      "key": "user:ada",
+      "path": "$.name"
+    },
+    {
+      "key": "user:missing",
+      "path": "$"
+    }
+  ],
+  "as_of": 3
+}

@@ -199,7 +199,12 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         entries: Vec<BatchJsonGetEntry>,
+        as_of: Option<u64>,
+        as_of_time: Option<u64>,
     ) -> Result<Output, ExecutorError> {
+        // #3485: one pinned position for the whole batch, resolved before the
+        // service borrow so both clocks run the identical as-of path (#3112).
+        let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
         let mut service = self.json_service(branch, space)?;
         if entries.is_empty() {
             return Ok(Output::JsonBatchGetResults(json_batch_get_batch_result(
@@ -226,7 +231,10 @@ impl Executor {
             .iter()
             .map(|(_, entry)| entry.clone())
             .collect::<Vec<_>>();
-        let values = service.batch_get(&engine_entries)?;
+        let values = match as_of {
+            Some(as_of) => service.batch_get_at(&engine_entries, as_of)?,
+            None => service.batch_get(&engine_entries)?,
+        };
         for ((index, _), value) in valid_entries.into_iter().zip(values) {
             results[index] = Some(json_batch_get_result(usize_to_u64(index), value));
         }

@@ -641,6 +641,8 @@ fn json_mapping_commands() -> Vec<Command> {
                 BatchJsonGetEntry::new("map-a", "$.name"),
                 BatchJsonGetEntry::new("missing", "$"),
             ],
+            as_of: None,
+            as_of_time: None,
         },
         Command::JsonBatchDelete {
             branch: None,
@@ -729,6 +731,8 @@ fn json_batch_get_reports_missing_documents_as_misses() {
                 BatchJsonGetEntry::new("present", "$"),
                 BatchJsonGetEntry::new("absent", "$"),
             ],
+            as_of: None,
+            as_of_time: None,
         })
         .expect("batch get succeeds");
     let Output::JsonBatchGetResults(results) = output else {
@@ -828,6 +832,8 @@ fn json_invalid_batch_items_are_positional_errors() {
                 BatchJsonGetEntry::new("", "$"),
                 BatchJsonGetEntry::new("valid", "$.name"),
             ],
+            as_of: None,
+            as_of_time: None,
         })
         .expect("batch get returns positional errors");
     let Output::JsonBatchGetResults(results) = output else {
@@ -889,6 +895,8 @@ fn json_batch_commands_validate_branch_before_item_results() {
             branch: Some("missing".to_owned()),
             space: None,
             entries: Vec::new(),
+            as_of: None,
+            as_of_time: None,
         },
         Command::JsonBatchDelete {
             branch: Some("missing".to_owned()),
@@ -1113,6 +1121,8 @@ fn assert_empty_json_batches(executor: &mut Executor) {
                 branch: None,
                 space: None,
                 entries: Vec::new(),
+                as_of: None,
+                as_of_time: None,
             })
             .expect("empty batch get succeeds"),
         Output::JsonBatchGetResults(results) if results.is_empty() && !results.applied()
@@ -1441,6 +1451,8 @@ fn closed_handle_json_commands() -> Vec<Command> {
             branch: None,
             space: None,
             entries: Vec::new(),
+            as_of: None,
+            as_of_time: None,
         },
         Command::JsonBatchDelete {
             branch: None,
@@ -1898,6 +1910,8 @@ fn execute_json_batch_get(
             branch: None,
             space: None,
             entries,
+            as_of: None,
+            as_of_time: None,
         })
         .expect("JSON batch get succeeds")
     {
@@ -2340,4 +2354,186 @@ fn json_scan_page(
             .collect(),
         page.cursor().cloned(),
     )
+}
+
+/// #3485: a JSON batch read pinned to one commit. Both of a commit's clocks
+/// — `(logical timestamp, committed_at)`.
+fn json_set_stamp(executor: &mut Executor, key: &str, value: Value) -> (u64, u64) {
+    let output = executor
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: key.to_owned(),
+            path: "$".to_owned(),
+            value,
+        })
+        .expect("set succeeds");
+    let Output::JsonWriteResult { commit, .. } = output else {
+        panic!("unexpected set output: {output:?}");
+    };
+    (
+        commit.timestamp(),
+        commit
+            .committed_at()
+            .expect("a live commit carries its wall-clock instant"),
+    )
+}
+
+/// Each item of a batch read as `(found, value, version)`.
+type BatchAnswers = Vec<(bool, Option<Value>, Option<u64>)>;
+
+fn json_batch_get_at(
+    executor: &mut Executor,
+    entries: Vec<BatchJsonGetEntry>,
+    as_of: Option<u64>,
+    as_of_time: Option<u64>,
+) -> Result<BatchAnswers, Box<strata_executor::ExecutorError>> {
+    let output = executor.execute(Command::JsonBatchGet {
+        branch: None,
+        space: None,
+        entries,
+        as_of,
+        as_of_time,
+    })?;
+    let Output::JsonBatchGetResults(results) = output else {
+        panic!("unexpected batch get output: {output:?}");
+    };
+    Ok(results
+        .into_iter()
+        .map(|item| {
+            let result = item.result().expect("every read item carries a result");
+            (result.found(), result.value().cloned(), result.version())
+        })
+        .collect())
+}
+
+/// #3485: `as_of` pins every entry of a batch to one commit — the batch at a
+/// version says what that version said, in request order, with a document
+/// removed later still present and a document written later still absent,
+/// while the unpinned batch says the latest.
+#[test]
+fn json_batch_get_as_of_pins_every_entry_to_one_commit() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let (t_a1, _) = json_set_stamp(&mut executor, "addr:a", json!({"street": "W 4th St"}));
+    let (t_b, _) = json_set_stamp(&mut executor, "addr:b", json!({"street": "Bleecker St"}));
+    let (t_a2, _) = json_set_stamp(
+        &mut executor,
+        "addr:a",
+        json!({"street": "West 4th Street"}),
+    );
+    executor
+        .execute(Command::JsonDelete {
+            branch: None,
+            space: None,
+            key: "addr:b".to_owned(),
+            path: "$".to_owned(),
+        })
+        .expect("delete succeeds");
+    json_set_stamp(&mut executor, "addr:c", json!({"street": "Grove St"}));
+
+    let entries = || {
+        vec![
+            BatchJsonGetEntry::new("addr:a", "$.street"),
+            BatchJsonGetEntry::new("addr:b", "$"),
+            BatchJsonGetEntry::new("addr:c", "$"),
+            BatchJsonGetEntry::new("addr:a", "$.street"),
+        ]
+    };
+
+    let at_b = json_batch_get_at(&mut executor, entries(), Some(t_b), None).expect("as_of read");
+    assert_eq!(
+        at_b,
+        vec![
+            (true, Some(json!("W 4th St")), Some(t_a1)),
+            (true, Some(json!({"street": "Bleecker St"})), Some(t_b)),
+            (false, None, None),
+            (true, Some(json!("W 4th St")), Some(t_a1)),
+        ],
+        "at B's commit: A's first spelling, B present, C not yet written"
+    );
+
+    let latest = json_batch_get_at(&mut executor, entries(), None, None).expect("latest read");
+    assert_eq!(
+        latest[0],
+        (true, Some(json!("West 4th Street")), Some(t_a2))
+    );
+    assert_eq!(latest[1], (false, None, None), "B is gone at the latest");
+    assert!(latest[2].0, "C exists at the latest");
+    assert_eq!(latest[3], latest[0], "a duplicate entry is answered again");
+}
+
+/// #3485: `as_of_time` on a batch is exactly `as_of` at the instant's commit,
+/// for every commit — the same contract the single read keeps (#3112).
+#[test]
+fn json_batch_get_as_of_time_matches_as_of_at_each_commit() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let mut stamps = Vec::new();
+    for street in ["one", "two"] {
+        stamps.push(spaced_json(
+            |e| json_set_stamp(e, "drift", json!({"street": street})),
+            &mut executor,
+        ));
+    }
+    stamps.push(spaced_json(
+        |e| json_set_stamp(e, "other", json!({"street": "elsewhere"})),
+        &mut executor,
+    ));
+    for pair in stamps.windows(2) {
+        assert!(
+            pair[1].1 > pair[0].1,
+            "fixture needs strictly increasing wall-clock instants"
+        );
+    }
+    let entries = || {
+        vec![
+            BatchJsonGetEntry::new("drift", "$.street"),
+            BatchJsonGetEntry::new("other", "$.street"),
+        ]
+    };
+    for (index, (timestamp, committed_at)) in stamps.iter().copied().enumerate() {
+        let by_logical = json_batch_get_at(&mut executor, entries(), Some(timestamp), None)
+            .expect("logical as_of batch");
+        let by_wall_clock = json_batch_get_at(&mut executor, entries(), None, Some(committed_at))
+            .expect("wall-clock as_of batch");
+        assert_eq!(by_logical, by_wall_clock, "commit {index}");
+    }
+    let first =
+        json_batch_get_at(&mut executor, entries(), None, Some(stamps[0].1)).expect("first");
+    let last = json_batch_get_at(&mut executor, entries(), None, Some(stamps[2].1)).expect("last");
+    assert_ne!(
+        first, last,
+        "the history is observably different across commits"
+    );
+}
+
+/// #3485: the batch keeps the single read's refusals — both clocks at once
+/// is a conflict, and an instant outside the branch's history is a
+/// diagnostic for the whole batch, never a fallback to the latest state.
+#[test]
+fn json_batch_get_as_of_refusals_match_the_single_read() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let (timestamp, committed_at) = json_set_stamp(&mut executor, "addr:a", json!({"n": 1}));
+    let entries = || vec![BatchJsonGetEntry::new("addr:a", "$")];
+
+    let conflict = json_batch_get_at(
+        &mut executor,
+        entries(),
+        Some(timestamp),
+        Some(committed_at),
+    )
+    .expect_err("both clocks at once is refused");
+    assert_eq!(conflict.class(), ExecutorErrorClass::InvalidInput);
+    assert_eq!(conflict.code(), "invalid_argument.executor.as_of_conflict");
+
+    let after_latest = json_batch_get_at(&mut executor, entries(), Some(u64::MAX), None)
+        .expect_err("a timeline position after the latest commit is a diagnostic");
+    assert_eq!(
+        after_latest.code(),
+        "history_unavailable.engine.persistence_history"
+    );
+}
+
+fn spaced_json<T>(commit: impl FnOnce(&mut Executor) -> T, executor: &mut Executor) -> T {
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    commit(executor)
 }

@@ -145,6 +145,15 @@ commands:
         - requests/v1/json/set.json
       request: requests/v1/json/batch_get.json
       response: responses/v1/json/batch_get_ok.json
+      cases:
+        # #3485: pinned to the first set's commit while a later rename exists,
+        # so the ok response (the first value) only replays if `as_of` is
+        # honored — a batch that ignored it would answer the rename.
+        - setup:
+            - requests/v1/json/set.json
+            - requests/v1/json/set_rename.json
+          request: requests/v1/json/batch_get_as_of.json
+          response: responses/v1/json/batch_get_ok.json
   - id: json.batch_delete
     kind: batch.itemwise_mutation
     title: Batch delete JSON values
