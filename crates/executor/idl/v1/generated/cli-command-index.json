@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "5d54608695642bf3b88a4f09cc5e3115c75940d48a29e3e3d4bf1b07b4c47348",
+    "checksum_sha256": "21130fe7020f31abb0c75c6323d199dfa8e3d3808ef406704660fe1b15dcf6d6",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -2642,7 +2642,7 @@
       "kind": "mutation.put",
       "title": "Bulk insert graph data",
       "summary": "Bulk-load nodes and edges in chunks.",
-      "description": "Ingests a payload of nodes and edges in chunked commits: nodes first, then edges, so edges may reference nodes from the same payload. Node objects use the key `node_id`; edges use `src`, `edge_type`, `dst`, and optional `weight` (default 1.0) and `properties`. `chunk_size` bounds items per commit (default 512, clamped at 800). The acknowledgement reports inserted counts, the number of chunk commits, and the final chunk's commit receipt.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
+      "description": "Ingests a payload of nodes and edges in chunked commits: nodes first, then edges, so edges may reference nodes from the same payload. Node objects use the key `node_id`; edges use `src`, `edge_type`, `dst`, and optional `weight` (default 1.0) and `properties`. `chunk_size` bounds items per commit (default 512, clamped at 800). The acknowledgement reports inserted counts, the number of chunk commits, and the final chunk's commit receipt.\n\nEach chunk is its own commit, so an interruption leaves the chunks that landed. An import that spans more than one commit sets a durable watermark on the graph with its first commit and clears it with its last: `graph meta` reports `import_pending: true` in between, and afterwards if the import was cut short. The watermark says a multi-commit import is in progress, not which payload: it is cleared by whichever `graph bulk_insert`'s last chunk lands next, whatever its chunk size, and ordinary writes leave it as it is. Every row is an upsert, so finishing an interrupted import is re-running its own payload; the graph stays readable and writable throughout.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
       "docs": "/docs/graph/bulk_insert",
       "feature": "core",
       "access": "write",
@@ -3381,7 +3381,7 @@
       "kind": "read.get",
       "title": "Read graph metadata",
       "summary": "Read graph metadata and counts.",
-      "description": "Reads a graph's metadata: live node and edge counts plus the create and last-update commit versions and timestamps. This is one row read, not a scan: the graph's metadata row carries its counts and is rewritten by every commit that changes a node or edge, so `updated_version` is a per-graph revision token — unchanged means no node or edge has changed since, whatever else moved on the branch. Ontology changes do not move it. Reading a graph that does not exist returns no data rather than an error. Accepts `as_of` for time travel. A graph whose rows were last written by a release before its metadata row carried counts is counted by scan until its next write.\n\nOptional reads distinguish present data from missing data. When version or timestamp facts exist on the executor output, SDK mappings should preserve them.",
+      "description": "Reads a graph's metadata: live node and edge counts, the create and last-update commit versions and timestamps, and `import_pending` — whether a `bulk_insert` spanning more than one commit began and has not finished (its first commit sets the flag, its last clears it, so an interrupted import leaves it set; re-running the import clears it). This is one row read, not a scan: the graph's metadata row carries its counts and is rewritten by every commit that changes a node or edge, so `updated_version` is a per-graph revision token — unchanged means no node or edge has changed since, whatever else moved on the branch. Ontology changes do not move it. Reading a graph that does not exist returns no data rather than an error. Accepts `as_of` for time travel. A graph whose rows were last written by a release before its metadata row carried counts is counted by scan until its next write.\n\nOptional reads distinguish present data from missing data. When version or timestamp facts exist on the executor output, SDK mappings should preserve them.",
       "docs": "/docs/graph/meta",
       "feature": "core",
       "access": "read",
@@ -3444,6 +3444,9 @@
           },
           {
             "field": "/data/updated_version"
+          },
+          {
+            "field": "/data/import_pending"
           }
         ]
       },

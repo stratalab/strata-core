@@ -736,7 +736,7 @@
       },
       {
         "in": "strata graph meta g",
-        "out": "graph            g\nnode_count       2\nedge_count       1\ncreated_version  3\nupdated_version  4",
+        "out": "graph            g\nnode_count       2\nedge_count       1\ncreated_version  3\nupdated_version  4\nimport_pending   false",
         "reproducible": true
       }
     ],
@@ -771,7 +771,7 @@
       },
       {
         "in": "strata graph meta g",
-        "out": "graph            g\nnode_count       2\nedge_count       1\ncreated_version  3\nupdated_version  5",
+        "out": "graph            g\nnode_count       2\nedge_count       1\ncreated_version  3\nupdated_version  5\nimport_pending   false",
         "reproducible": true
       }
     ],
@@ -925,7 +925,7 @@
       },
       {
         "in": "strata graph meta social",
-        "out": "graph            social\nnode_count       2\nedge_count       0\ncreated_version  3\nupdated_version  5",
+        "out": "graph            social\nnode_count       2\nedge_count       0\ncreated_version  3\nupdated_version  5\nimport_pending   false",
         "reproducible": true
       }
     ],

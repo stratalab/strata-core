@@ -308,6 +308,7 @@ node_count       2
 edge_count       1
 created_version  3
 updated_version  6
+import_pending   false
 ∎
 ### graph.meta · responses/v1/graph/meta_found.json · raw
 graph	social
@@ -315,6 +316,7 @@ node_count	2
 edge_count	1
 created_version	3
 updated_version	6
+import_pending	false
 ∎
 ### graph.neighbors · edge:has_more=true · human
 NODE_ID  DIRECTION  EDGE_TYPE  SRC    DST    WEIGHT

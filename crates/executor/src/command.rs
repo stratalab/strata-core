@@ -2504,6 +2504,15 @@ pub enum Command {
     ///   written. The items-per-chunk size defaults to 512 and clamps to
     ///   **800** so one chunk fits one storage commit — a larger request is
     ///   reduced, not refused.
+    /// - **Each chunk is a commit; an interruption keeps what landed.** An
+    ///   import spanning more than one commit sets the graph's
+    ///   `import_pending` watermark (`graph_get_meta`) with its first commit
+    ///   and clears it with its last. The watermark says a multi-commit
+    ///   import is in progress, not which payload: whichever bulk insert's
+    ///   last chunk lands next clears it, and ordinary writes leave it as it
+    ///   is. Every row is an upsert, so finishing an interrupted import is
+    ///   re-running its own payload; the graph stays readable and writable
+    ///   meanwhile.
     GraphBulkInsert {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]

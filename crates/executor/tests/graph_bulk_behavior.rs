@@ -20,6 +20,22 @@ fn bulk_node(id: &str) -> GraphBulkNode {
     GraphBulkNode::new(id.to_owned(), None, None, None)
 }
 
+fn graph_meta(executor: &mut Executor, graph: &str) -> Option<strata_executor::GraphInfoData> {
+    match executor
+        .execute(Command::GraphGetMeta {
+            branch: None,
+            space: None,
+            graph: graph.to_owned(),
+            as_of: None,
+            as_of_time: None,
+        })
+        .expect("graph metadata succeeds")
+    {
+        Output::GraphInfoResult(info) => info,
+        output => panic!("unexpected graph metadata output: {output:?}"),
+    }
+}
+
 fn bulk_edge(src: &str, kind: &str, dst: &str, weight: f64) -> GraphBulkEdge {
     GraphBulkEdge::new(
         src.to_owned(),
@@ -77,6 +93,16 @@ fn exercise_bulk_command(executor: &mut Executor) {
     };
     assert_eq!(wcc.component_count(), 1);
 
+    // A completed import leaves no watermark: graph meta reports it not
+    // pending (#3464). This drives the engine info through `graph_info_data`
+    // and reads the wire DTO's `import_pending`, so the not-pending value is
+    // covered under default features.
+    let meta = graph_meta(executor, "bulk").expect("graph exists");
+    assert!(
+        !meta.import_pending(),
+        "a completed bulk import leaves no pending watermark"
+    );
+
     // A dangling endpoint refuses by code, with an explicit chunk size
     // on the wire.
     let error = executor
@@ -90,6 +116,63 @@ fn exercise_bulk_command(executor: &mut Executor) {
         })
         .expect_err("dangling endpoint");
     assert_eq!(error.code(), "invalid_argument.engine.graph_edge_endpoint");
+}
+
+/// #3464: an interrupted multi-commit import surfaces through the wire DTO as
+/// `import_pending`. Reaching a pending state needs the engine interruption
+/// seam (`bulk_insert_interrupted_for_test`, `testkit`-gated), so this test —
+/// like the executor mutation lane — runs under `testkit`. It plants the cut
+/// on a raw engine handle, then reads it back through `graph_info_data` and the
+/// DTO accessor, covering the pending value neither the corpus nor the
+/// completed-import test can produce through the public command surface.
+#[cfg(feature = "testkit")]
+#[test]
+fn graph_meta_reports_import_pending_after_an_interrupted_bulk_import() {
+    use strata_engine::{
+        CacheOpenOptions, Database, GraphEdgeData, GraphEdgeType, GraphName, GraphNodeData,
+        GraphNodeId, ProductSpace,
+    };
+
+    let database = Database::open_cache(CacheOpenOptions::new())
+        .expect("cache opens")
+        .into_database();
+    // Plant on the branch/space the executor's `GraphGetMeta { branch: None,
+    // space: None }` resolves to: the handle's default branch and DEFAULT_SPACE.
+    let branch = database.default_branch().clone();
+    let city = GraphName::new("city").expect("graph name");
+    {
+        let mut graph = database
+            .graph(branch, ProductSpace::new("default").expect("space"))
+            .expect("graph service");
+        graph.create_graph(city.clone()).expect("graph created");
+        let street = GraphEdgeType::new("street").expect("edge type");
+        let node = |index: usize| GraphNodeId::new(format!("n:{index}")).expect("node id");
+        let nodes: Vec<_> = (0..20)
+            .map(|i| (node(i), GraphNodeData::default()))
+            .collect();
+        let edges: Vec<_> = (0..20)
+            .map(|i| {
+                (
+                    node(i),
+                    street.clone(),
+                    node((i + 1) % 20),
+                    GraphEdgeData::default(),
+                )
+            })
+            .collect();
+        // Six chunks at size 8; stop after four, mid-edges — the graph is left
+        // pending, exactly as a crash there would leave it.
+        graph
+            .bulk_insert_interrupted_for_test(&city, &nodes, &edges, Some(8), 4)
+            .expect("interrupted import commits four chunks");
+    }
+
+    let mut executor = Executor::from_database(database);
+    let meta = graph_meta(&mut executor, "city").expect("graph exists");
+    assert!(
+        meta.import_pending(),
+        "an interrupted import surfaces through the wire DTO as pending"
+    );
 }
 
 #[test]

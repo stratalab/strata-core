@@ -108,6 +108,7 @@ impl<'a> GraphService<'a> {
             commit.timestamp(),
             commit.version(),
             commit.timestamp(),
+            false,
         );
         Ok((info, commit))
     }
@@ -1053,10 +1054,22 @@ impl<'a> GraphService<'a> {
     ///
     /// Returns per-kind counts and the number of chunk commits. An empty
     /// input commits nothing.
-    // Two chunk loops that mirror `upsert_node` and `upsert_edge` row for
-    // row, plus the per-chunk count accounting (#3474); splitting them would
-    // hide the one-commit-per-chunk shape the outcome reports.
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// Each chunk is a commit, so an interruption keeps the chunks that
+    /// landed (#3464). An import spanning more than one commit sets the
+    /// graph's import watermark with its first commit and clears it with
+    /// its last — [`GraphInfo::import_pending`] reports it in between and
+    /// after a cut-short import. Every row is an upsert, so re-running the
+    /// same payload completes an interrupted import and clears the
+    /// watermark; the graph stays readable and writable meanwhile.
+    ///
+    /// The watermark tracks "a multi-commit import is in progress", not "this
+    /// payload is complete": whichever `bulk_insert`'s last chunk lands next
+    /// clears it, `chunk_size` notwithstanding, while ordinary writes leave it
+    /// untouched. So to *finish* an interrupted import re-run its own payload —
+    /// a smaller or different import clears the watermark once its own last (or
+    /// only) chunk lands without having filled in the rows the interrupted
+    /// import still owes.
     pub fn bulk_insert(
         &mut self,
         graph: &GraphName,
@@ -1068,6 +1081,47 @@ impl<'a> GraphService<'a> {
             super::GraphEdgeData,
         )],
         chunk_size: Option<usize>,
+    ) -> Result<GraphBulkInsertOutcome, EngineError> {
+        self.bulk_insert_limited(graph, nodes, edges, chunk_size, None)
+    }
+
+    /// [`Self::bulk_insert`] that stops after `max_commits` chunk commits,
+    /// leaving the graph exactly as a crash there would — the chunks that
+    /// landed, the import watermark set — for tests of the resume contract.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn bulk_insert_interrupted_for_test(
+        &mut self,
+        graph: &GraphName,
+        nodes: &[(GraphNodeId, super::GraphNodeData)],
+        edges: &[(
+            GraphNodeId,
+            GraphEdgeType,
+            GraphNodeId,
+            super::GraphEdgeData,
+        )],
+        chunk_size: Option<usize>,
+        max_commits: u64,
+    ) -> Result<GraphBulkInsertOutcome, EngineError> {
+        self.bulk_insert_limited(graph, nodes, edges, chunk_size, Some(max_commits))
+    }
+
+    // Two chunk loops that mirror `upsert_node` and `upsert_edge` row for
+    // row, plus the per-chunk count accounting (#3474) and the import
+    // watermark (#3464); splitting them would hide the one-commit-per-chunk
+    // shape the outcome reports.
+    #[allow(clippy::too_many_lines)]
+    fn bulk_insert_limited(
+        &mut self,
+        graph: &GraphName,
+        nodes: &[(GraphNodeId, super::GraphNodeData)],
+        edges: &[(
+            GraphNodeId,
+            GraphEdgeType,
+            GraphNodeId,
+            super::GraphEdgeData,
+        )],
+        chunk_size: Option<usize>,
+        max_commits: Option<u64>,
     ) -> Result<GraphBulkInsertOutcome, EngineError> {
         let record = self.branch_record()?;
         self.require_graph(&record, graph)?;
@@ -1081,106 +1135,134 @@ impl<'a> GraphService<'a> {
 
         let mut commits = 0u64;
         let mut last_commit = None;
-        for chunk in nodes.chunks(chunk_size) {
-            let mut mutations = MutationMap::default();
-            // #3474: the chunk's commit carries the graph's counts, so a node
-            // is new when it is neither stored nor earlier in this chunk.
-            let mut new_nodes = 0_i64;
-            let mut seen = HashSet::new();
-            for (node_id, data) in chunk {
-                // Upsert discipline: drop stale derived rows before the
-                // new node row lands, exactly like `upsert_node`.
-                let current = self.node_record(&record, graph, node_id)?;
-                if current.is_none() && seen.insert(node_id) {
-                    new_nodes += 1;
+        // #3464: the watermark is set by every chunk but the last, so a
+        // one-commit import never carries it and an interrupted one does.
+        let total_chunks = nodes.chunks(chunk_size).len() + edges.chunks(chunk_size).len();
+        let mut chunk_index = 0_usize;
+        'chunks: {
+            for chunk in nodes.chunks(chunk_size) {
+                // The interruption seam stops *before* the (`commits`+1)-th
+                // chunk, so `max_commits == 0` commits nothing — the state a
+                // crash before the first chunk landed leaves.
+                if max_commits.is_some_and(|max| commits >= max) {
+                    break 'chunks;
                 }
-                let new_record = GraphNodeRecord::new(graph.clone(), node_id.clone(), data.clone());
-                if let Some(old) = current.as_ref().and_then(|record| record.data().binding()) {
-                    if Some(old) != new_record.data().binding() {
-                        mutations.delete(self.binding_address(
-                            &record,
-                            old.target(),
-                            graph,
-                            node_id,
-                        ));
+                let mut mutations = MutationMap::default();
+                // #3474: the chunk's commit carries the graph's counts, so a node
+                // is new when it is neither stored nor earlier in this chunk.
+                let mut new_nodes = 0_i64;
+                let mut seen = HashSet::new();
+                for (node_id, data) in chunk {
+                    // Upsert discipline: drop stale derived rows before the
+                    // new node row lands, exactly like `upsert_node`.
+                    let current = self.node_record(&record, graph, node_id)?;
+                    if current.is_none() && seen.insert(node_id) {
+                        new_nodes += 1;
+                    }
+                    let new_record =
+                        GraphNodeRecord::new(graph.clone(), node_id.clone(), data.clone());
+                    if let Some(old) = current.as_ref().and_then(|record| record.data().binding()) {
+                        if Some(old) != new_record.data().binding() {
+                            mutations.delete(self.binding_address(
+                                &record,
+                                old.target(),
+                                graph,
+                                node_id,
+                            ));
+                        }
+                    }
+                    let old_type = current
+                        .as_ref()
+                        .and_then(|record| record.data().object_type());
+                    let new_type = new_record.data().object_type();
+                    if let Some(old_type) = old_type {
+                        if Some(old_type) != new_type {
+                            mutations
+                                .delete(self.type_index_address(&record, graph, old_type, node_id));
+                        }
+                    }
+                    if let Some(new_type) = new_type {
+                        mutations.put(
+                            self.type_index_address(&record, graph, new_type, node_id),
+                            encode_graph_type_index_record(&GraphTypeIndexRecord::new(
+                                graph.clone(),
+                                new_type.clone(),
+                                node_id.clone(),
+                            )),
+                        );
+                    }
+                    mutations.put(
+                        self.node_address(&record, graph, node_id),
+                        encode_graph_node_record(&new_record),
+                    );
+                    if let Some(binding) = new_record.data().binding() {
+                        mutations.put(
+                            self.binding_address(&record, binding.target(), graph, node_id),
+                            encode_graph_binding_record(&GraphBindingRecord::new(
+                                graph.clone(),
+                                node_id.clone(),
+                                binding.clone(),
+                            )),
+                        );
                     }
                 }
-                let old_type = current
-                    .as_ref()
-                    .and_then(|record| record.data().object_type());
-                let new_type = new_record.data().object_type();
-                if let Some(old_type) = old_type {
-                    if Some(old_type) != new_type {
-                        mutations
-                            .delete(self.type_index_address(&record, graph, old_type, node_id));
+                let (metadata_address, metadata_value) = self.metadata_mutation_marking(
+                    &record,
+                    graph,
+                    new_nodes,
+                    0,
+                    Some(chunk_index + 1 < total_chunks),
+                )?;
+                mutations.put(metadata_address, metadata_value);
+                last_commit =
+                    Some(self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?);
+                commits += 1;
+                chunk_index += 1;
+            }
+            for chunk in edges.chunks(chunk_size) {
+                if max_commits.is_some_and(|max| commits >= max) {
+                    break 'chunks;
+                }
+                let mut mutations = MutationMap::default();
+                let mut new_edges = 0_i64;
+                let mut seen = HashSet::new();
+                for (src, edge_type, dst, data) in chunk {
+                    if self
+                        .edge_record(&record, graph, src, edge_type, dst)?
+                        .is_none()
+                        && seen.insert((src, edge_type, dst))
+                    {
+                        new_edges += 1;
                     }
-                }
-                if let Some(new_type) = new_type {
+                    let edge = GraphEdgeRecord::new(
+                        graph.clone(),
+                        src.clone(),
+                        edge_type.clone(),
+                        dst.clone(),
+                        data.clone(),
+                    );
                     mutations.put(
-                        self.type_index_address(&record, graph, new_type, node_id),
-                        encode_graph_type_index_record(&GraphTypeIndexRecord::new(
-                            graph.clone(),
-                            new_type.clone(),
-                            node_id.clone(),
-                        )),
+                        self.edge_address(&record, graph, src, edge_type, dst),
+                        encode_graph_edge_record(&edge),
+                    );
+                    mutations.put(
+                        self.reverse_edge_address(&record, graph, dst, edge_type, src),
+                        encode_graph_edge_record(&edge),
                     );
                 }
-                mutations.put(
-                    self.node_address(&record, graph, node_id),
-                    encode_graph_node_record(&new_record),
-                );
-                if let Some(binding) = new_record.data().binding() {
-                    mutations.put(
-                        self.binding_address(&record, binding.target(), graph, node_id),
-                        encode_graph_binding_record(&GraphBindingRecord::new(
-                            graph.clone(),
-                            node_id.clone(),
-                            binding.clone(),
-                        )),
-                    );
-                }
+                let (metadata_address, metadata_value) = self.metadata_mutation_marking(
+                    &record,
+                    graph,
+                    0,
+                    new_edges,
+                    Some(chunk_index + 1 < total_chunks),
+                )?;
+                mutations.put(metadata_address, metadata_value);
+                last_commit =
+                    Some(self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?);
+                commits += 1;
+                chunk_index += 1;
             }
-            let (metadata_address, metadata_value) =
-                self.metadata_mutation(&record, graph, new_nodes, 0)?;
-            mutations.put(metadata_address, metadata_value);
-            last_commit =
-                Some(self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?);
-            commits += 1;
-        }
-        for chunk in edges.chunks(chunk_size) {
-            let mut mutations = MutationMap::default();
-            let mut new_edges = 0_i64;
-            let mut seen = HashSet::new();
-            for (src, edge_type, dst, data) in chunk {
-                if self
-                    .edge_record(&record, graph, src, edge_type, dst)?
-                    .is_none()
-                    && seen.insert((src, edge_type, dst))
-                {
-                    new_edges += 1;
-                }
-                let edge = GraphEdgeRecord::new(
-                    graph.clone(),
-                    src.clone(),
-                    edge_type.clone(),
-                    dst.clone(),
-                    data.clone(),
-                );
-                mutations.put(
-                    self.edge_address(&record, graph, src, edge_type, dst),
-                    encode_graph_edge_record(&edge),
-                );
-                mutations.put(
-                    self.reverse_edge_address(&record, graph, dst, edge_type, src),
-                    encode_graph_edge_record(&edge),
-                );
-            }
-            let (metadata_address, metadata_value) =
-                self.metadata_mutation(&record, graph, 0, new_edges)?;
-            mutations.put(metadata_address, metadata_value);
-            last_commit =
-                Some(self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?);
-            commits += 1;
         }
 
         Ok(GraphBulkInsertOutcome::new(
@@ -2730,6 +2812,7 @@ impl<'a> GraphService<'a> {
             created_timestamp,
             updated_version,
             updated_timestamp,
+            metadata.importing(),
         ))
     }
 
@@ -2799,6 +2882,21 @@ impl<'a> GraphService<'a> {
         node_delta: i64,
         edge_delta: i64,
     ) -> Result<(RowAddress, Vec<u8>), EngineError> {
+        self.metadata_mutation_marking(record, graph, node_delta, edge_delta, None)
+    }
+
+    /// [`Self::metadata_mutation`] that also sets the import watermark
+    /// (#3464): `Some(pending)` writes it, `None` keeps whatever the row
+    /// carries — so an ordinary write during a pending import leaves the
+    /// watermark set until the import's last chunk clears it.
+    fn metadata_mutation_marking(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        node_delta: i64,
+        edge_delta: i64,
+        importing: Option<bool>,
+    ) -> Result<(RowAddress, Vec<u8>), EngineError> {
         let row = self
             .graph_metadata_row(record, graph, ReadSelector::Latest)?
             .ok_or_else(|| {
@@ -2821,12 +2919,14 @@ impl<'a> GraphService<'a> {
             GraphCounts::new(scanned.node_count, scanned.edge_count)
         };
         let counts = counts.adjusted(node_delta, edge_delta)?;
+        let importing = importing.unwrap_or_else(|| metadata.importing());
         Ok((
             self.metadata_address(record, graph),
             encode_graph_metadata_record(&GraphMetadataRecord::with_state(
                 graph.clone(),
                 created,
                 counts,
+                importing,
             )),
         ))
     }
@@ -4067,5 +4167,406 @@ mod delete_boundary_tests {
                 .expect("durable")
                 .into_database(),
         );
+    }
+}
+
+/// #3464: the state a crash leaves between the first and last commits of a
+/// bulk import — the chunks that landed, the watermark set — and how it is
+/// left: by re-running the same payload. In-crate so the default-feature
+/// mutation lane judges the watermark's set and clear.
+#[cfg(test)]
+mod bulk_resume_tests {
+    use crate::branch::BranchName;
+    use crate::data::graph::{GraphEdgeData, GraphEdgeType, GraphName, GraphNodeData, GraphNodeId};
+    use crate::data::kv::ProductSpace;
+    use crate::{CacheOpenOptions, Database, DurableLocalOpenOptions};
+
+    fn node(index: usize) -> GraphNodeId {
+        GraphNodeId::new(format!("n:{index}")).expect("node id")
+    }
+
+    fn exercise(database: &Database) {
+        let mut graph = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        let city = GraphName::new("city").expect("graph");
+        graph.create_graph(city.clone()).expect("created");
+        let street = GraphEdgeType::new("street").expect("type");
+        let nodes: Vec<_> = (0..20)
+            .map(|index| (node(index), GraphNodeData::default()))
+            .collect();
+        let edges: Vec<_> = (0..20)
+            .map(|index| {
+                (
+                    node(index),
+                    street.clone(),
+                    node((index + 1) % 20),
+                    GraphEdgeData::default(),
+                )
+            })
+            .collect();
+        // Chunks of 8: three node commits, three edge commits. Stop after
+        // the fourth, mid-edges — nodes complete, a prefix of the streets.
+        let cut = graph
+            .bulk_insert_interrupted_for_test(&city, &nodes, &edges, Some(8), 4)
+            .expect("the first four chunks commit");
+        assert_eq!(cut.commits(), 4);
+        let pending = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(pending.import_pending(), "cut short: the watermark stays");
+        assert_eq!((pending.node_count(), pending.edge_count()), (20, 8));
+        assert_eq!(
+            pending.updated_version(),
+            cut.last_commit().expect("commits").version()
+        );
+
+        // The graph is usable meanwhile, and an ordinary write keeps the mark.
+        let write = graph
+            .upsert_node(&city, node(99), GraphNodeData::default())
+            .expect("a write during a pending import");
+        let still = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(still.import_pending());
+        assert_eq!(still.node_count(), 21);
+        assert_eq!(still.updated_version(), write.commit().version());
+
+        // Re-running the same payload finishes it: every row an upsert, so
+        // nothing doubles, and the last chunk clears the mark.
+        let done = graph
+            .bulk_insert(&city, &nodes, &edges, Some(8))
+            .expect("re-run completes");
+        assert_eq!(done.commits(), 6);
+        let finished = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(
+            !finished.import_pending(),
+            "the re-run cleared the watermark"
+        );
+        assert_eq!((finished.node_count(), finished.edge_count()), (21, 20));
+        assert_eq!(
+            graph
+                .list_edges(&city, None, 100)
+                .expect("edges")
+                .edges()
+                .len(),
+            20
+        );
+
+        // History keeps the truth of each moment.
+        let at_cut = graph
+            .graph_info_at_version(&city, cut.last_commit().expect("commits").version())
+            .expect("historical")
+            .expect("existed");
+        assert!(at_cut.import_pending());
+        assert_eq!((at_cut.node_count(), at_cut.edge_count()), (20, 8));
+    }
+
+    #[test]
+    fn an_interrupted_import_stays_pending_until_the_same_payload_is_rerun() {
+        exercise(
+            &Database::open_cache(CacheOpenOptions::new())
+                .expect("cache")
+                .into_database(),
+        );
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        exercise(
+            &Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+                .expect("durable")
+                .into_database(),
+        );
+    }
+
+    type Edge = (GraphNodeId, GraphEdgeType, GraphNodeId, GraphEdgeData);
+
+    /// A ring of `count` nodes and `count` edges, chunked into `>1` commits at
+    /// `chunk_size` 8 (three node chunks, three edge chunks for `count == 20`).
+    fn ring(count: usize) -> (Vec<(GraphNodeId, GraphNodeData)>, Vec<Edge>) {
+        let street = GraphEdgeType::new("street").expect("type");
+        let nodes = (0..count)
+            .map(|index| (node(index), GraphNodeData::default()))
+            .collect();
+        let edges = (0..count)
+            .map(|index| {
+                (
+                    node(index),
+                    street.clone(),
+                    node((index + 1) % count),
+                    GraphEdgeData::default(),
+                )
+            })
+            .collect();
+        (nodes, edges)
+    }
+
+    fn cache() -> Database {
+        Database::open_cache(CacheOpenOptions::new())
+            .expect("cache")
+            .into_database()
+    }
+
+    /// A cut inside the node loop (before any edge chunk) leaves the graph
+    /// pending with the node prefix landed and no edges — the node loop's own
+    /// interruption guard, which a cut mid-edges never exercises.
+    #[test]
+    fn a_cut_within_the_node_loop_is_pending_with_no_edges_started() {
+        let database = cache();
+        let mut graph = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        let city = GraphName::new("city").expect("graph");
+        graph.create_graph(city.clone()).expect("created");
+        let (nodes, edges) = ring(20);
+        // Chunks of 8: stop after the second node chunk — two of three node
+        // chunks landed, the edge loop never entered.
+        let cut = graph
+            .bulk_insert_interrupted_for_test(&city, &nodes, &edges, Some(8), 2)
+            .expect("first two node chunks commit");
+        assert_eq!(cut.commits(), 2);
+        let pending = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(
+            pending.import_pending(),
+            "cut mid-nodes: the watermark is set"
+        );
+        assert_eq!(
+            (pending.node_count(), pending.edge_count()),
+            (16, 0),
+            "two node chunks of eight, no edges"
+        );
+    }
+
+    /// A cut *at* the last chunk (its `Some(false)` already written) leaves the
+    /// mark clear — an interruption there is indistinguishable from completion.
+    #[test]
+    fn a_cut_at_the_last_chunk_leaves_the_mark_clear() {
+        let database = cache();
+        let mut graph = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        let city = GraphName::new("city").expect("graph");
+        graph.create_graph(city.clone()).expect("created");
+        let (nodes, edges) = ring(20); // six chunks at size 8
+        let cut = graph
+            .bulk_insert_interrupted_for_test(&city, &nodes, &edges, Some(8), 6)
+            .expect("all six chunks commit");
+        assert_eq!(cut.commits(), 6);
+        let info = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(
+            !info.import_pending(),
+            "the last chunk wrote a clear mark before the stop"
+        );
+        assert_eq!((info.node_count(), info.edge_count()), (20, 20));
+    }
+
+    /// `max_commits == 0` commits nothing and marks nothing — the seam stops
+    /// before the first chunk, the state a crash before it lands leaves.
+    #[test]
+    fn a_zero_commit_limit_commits_and_marks_nothing() {
+        let database = cache();
+        let mut graph = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        let city = GraphName::new("city").expect("graph");
+        graph.create_graph(city.clone()).expect("created");
+        let (nodes, edges) = ring(20);
+        let cut = graph
+            .bulk_insert_interrupted_for_test(&city, &nodes, &edges, Some(8), 0)
+            .expect("zero chunks commit");
+        assert_eq!(cut.commits(), 0);
+        assert!(cut.last_commit().is_none());
+        let info = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(
+            !info.import_pending(),
+            "nothing was imported, nothing marked"
+        );
+        assert_eq!((info.node_count(), info.edge_count()), (0, 0));
+    }
+
+    /// Re-running the interrupted payload at a *different* `chunk_size` still
+    /// completes it and clears the mark: the watermark is not tied to a
+    /// chunking, only to some multi-commit import's last chunk landing.
+    #[test]
+    fn a_rerun_at_a_different_chunk_size_completes_and_clears() {
+        let database = cache();
+        let mut graph = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        let city = GraphName::new("city").expect("graph");
+        graph.create_graph(city.clone()).expect("created");
+        let (nodes, edges) = ring(20);
+        graph
+            .bulk_insert_interrupted_for_test(&city, &nodes, &edges, Some(8), 4)
+            .expect("cut mid-edges");
+        assert!(graph
+            .graph_info(&city)
+            .expect("reads")
+            .expect("exists")
+            .import_pending());
+        // Re-run the same payload with a coarser chunk_size (five chunks, not
+        // six). Every row an upsert, so nothing doubles.
+        let done = graph
+            .bulk_insert(&city, &nodes, &edges, Some(5))
+            .expect("re-run completes");
+        assert!(done.commits() > 1);
+        let info = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(!info.import_pending(), "the re-run's last chunk cleared it");
+        assert_eq!((info.node_count(), info.edge_count()), (20, 20));
+    }
+
+    /// An edges-only import spanning chunks marks the graph too — the shared
+    /// `chunk_index`/`total_chunks` spans both loops, so a cut inside the edge
+    /// loop of an all-edges payload is pending with the edge prefix landed.
+    #[test]
+    fn an_edges_only_import_spanning_chunks_is_pending_when_cut() {
+        let database = cache();
+        let mut graph = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        let city = GraphName::new("city").expect("graph");
+        graph.create_graph(city.clone()).expect("created");
+        let (nodes, edges) = ring(20);
+        // Land the endpoints first, as a finished nodes-only import — never
+        // pending (one loop, last chunk clears).
+        let nodes_only = graph
+            .bulk_insert(&city, &nodes, &[], Some(8))
+            .expect("nodes imported");
+        assert!(nodes_only.commits() > 1);
+        assert!(!graph
+            .graph_info(&city)
+            .expect("reads")
+            .expect("exists")
+            .import_pending());
+        // Now an edges-only import (three edge chunks), cut after the first.
+        let cut = graph
+            .bulk_insert_interrupted_for_test(&city, &[], &edges, Some(8), 1)
+            .expect("first edge chunk commits");
+        assert_eq!(cut.commits(), 1);
+        let info = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(
+            info.import_pending(),
+            "an edges-only import spans commits too"
+        );
+        assert_eq!((info.node_count(), info.edge_count()), (20, 8));
+    }
+
+    /// A fork mid-import copies the watermark to the child; the child clears it
+    /// only by its own re-run, and the parent's mark is untouched by that.
+    #[test]
+    fn a_fork_mid_import_leaves_the_child_pending_and_a_child_rerun_clears_only_the_child() {
+        let mut database = cache();
+        let (nodes, edges) = ring(20);
+        let city = GraphName::new("city").expect("graph");
+        {
+            let mut graph = database
+                .graph(
+                    BranchName::new("default").expect("branch"),
+                    ProductSpace::new("default").expect("space"),
+                )
+                .expect("service");
+            graph.create_graph(city.clone()).expect("created");
+            graph
+                .bulk_insert_interrupted_for_test(&city, &nodes, &edges, Some(8), 4)
+                .expect("cut mid-edges");
+        }
+        database
+            .branches()
+            .expect("branch service")
+            .fork_current(
+                &BranchName::new("default").expect("branch"),
+                BranchName::new("child").expect("branch"),
+            )
+            .expect("fork");
+        {
+            let child = database
+                .graph(
+                    BranchName::new("child").expect("branch"),
+                    ProductSpace::new("default").expect("space"),
+                )
+                .expect("service");
+            assert!(
+                child
+                    .graph_info(&city)
+                    .expect("reads")
+                    .expect("exists")
+                    .import_pending(),
+                "the child inherits the pending mark"
+            );
+        }
+        {
+            let mut child = database
+                .graph(
+                    BranchName::new("child").expect("branch"),
+                    ProductSpace::new("default").expect("space"),
+                )
+                .expect("service");
+            child
+                .bulk_insert(&city, &nodes, &edges, Some(8))
+                .expect("child re-run completes");
+            assert!(
+                !child
+                    .graph_info(&city)
+                    .expect("reads")
+                    .expect("exists")
+                    .import_pending(),
+                "the child's re-run cleared its own mark"
+            );
+        }
+        let parent = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        assert!(
+            parent
+                .graph_info(&city)
+                .expect("reads")
+                .expect("exists")
+                .import_pending(),
+            "the parent's mark is untouched by the child's re-run"
+        );
+    }
+
+    /// Deleting a graph with a pending import and recreating it under the same
+    /// name yields a fresh graph — never pending, whatever the old one carried.
+    #[test]
+    fn delete_then_create_after_a_cut_yields_a_fresh_graph_not_pending() {
+        let database = cache();
+        let mut graph = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        let city = GraphName::new("city").expect("graph");
+        graph.create_graph(city.clone()).expect("created");
+        let (nodes, edges) = ring(20);
+        graph
+            .bulk_insert_interrupted_for_test(&city, &nodes, &edges, Some(8), 4)
+            .expect("cut mid-edges");
+        assert!(graph
+            .graph_info(&city)
+            .expect("reads")
+            .expect("exists")
+            .import_pending());
+        graph.delete_graph(&city, true).expect("deleted");
+        graph.create_graph(city.clone()).expect("recreated");
+        let info = graph.graph_info(&city).expect("reads").expect("exists");
+        assert!(!info.import_pending(), "a fresh graph is never pending");
+        assert_eq!((info.node_count(), info.edge_count()), (0, 0));
     }
 }

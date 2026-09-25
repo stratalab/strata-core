@@ -228,6 +228,7 @@ pub(super) fn graph_info_data(info: &EngineGraphInfo) -> GraphInfoData {
         info.created_timestamp().as_micros(),
         info.updated_version().as_u64(),
         info.updated_timestamp().as_micros(),
+        info.import_pending(),
     )
 }
 

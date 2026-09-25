@@ -254,10 +254,16 @@ pub struct GraphInfoData {
     created_timestamp: u64,
     updated_version: u64,
     updated_timestamp: u64,
+    /// Whether a `graph_bulk_insert` spanning more than one commit began
+    /// and has not finished: its first commit sets this, its last clears
+    /// it, so an interrupted import leaves it set until the same payload
+    /// is run again (#3464).
+    import_pending: bool,
 }
 
 impl GraphInfoData {
     /// Creates graph metadata output.
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         graph: String,
         node_count: u64,
@@ -266,6 +272,7 @@ impl GraphInfoData {
         created_timestamp: u64,
         updated_version: u64,
         updated_timestamp: u64,
+        import_pending: bool,
     ) -> Self {
         Self {
             graph,
@@ -275,12 +282,18 @@ impl GraphInfoData {
             created_timestamp,
             updated_version,
             updated_timestamp,
+            import_pending,
         }
     }
 
     /// Returns the graph name.
     pub fn graph(&self) -> &str {
         &self.graph
+    }
+
+    /// Whether a multi-commit bulk import began and has not finished.
+    pub const fn import_pending(&self) -> bool {
+        self.import_pending
     }
 
     /// Returns visible node count.
