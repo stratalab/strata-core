@@ -71,6 +71,8 @@ impl Executor {
             branch: None,
             space: None,
             entries,
+            as_of: None,
+            as_of_time: None,
         })
     }
 

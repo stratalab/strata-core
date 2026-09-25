@@ -565,8 +565,26 @@
   "command": "json.batch_get",
   "request": {
     "additionalProperties": false,
-    "description": "Reads multiple JSON values.\n\n# Guaranteed semantics\n\n- **Positional.** Results are returned in request order, one per entry,\n  each reporting whether it was found.\n- **One snapshot.** Every entry is read from the same consistent\n  version, so a batch cannot straddle a concurrent write.\n- **Limits.** Each entry bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`)\n  and a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`).",
+    "description": "Reads multiple JSON values.\n\n# Guaranteed semantics\n\n- **Positional.** Results are returned in request order, one per entry,\n  each reporting whether it was found.\n- **One snapshot.** Every entry is read from the same consistent\n  version, so a batch cannot straddle a concurrent write.\n- **One pinned version.** With `as_of` or `as_of_time`, every entry is\n  read as of that one position, so a batch can hydrate the documents\n  a version-pinned read named without mixing in later state. An\n  instant outside the branch's history fails the whole batch rather\n  than answering from the latest state.\n- **Limits.** Each entry bears a document id at most **65,535 bytes**\n  (`invalid_argument.engine.json_document_id`)\n  and a path at most **256 segments**\n  (`invalid_argument.engine.json_path_too_long`).",
     "properties": {
+      "as_of": {
+        "description": "Read every entry as of a position on the logical commit timeline\n— the `timestamp` from `history` output, not the `version`, and\nnever a calendar date. To read as of a real time, use\n`as_of_time` instead.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "as_of_time": {
+        "description": "Read every entry as of a real time: a wall-clock instant in\nmicroseconds since the Unix epoch (UTC), as reported by\n`committed_at` on a write ack or on any `history` row. Resolves to\nthe commit at or before that instant, and fails rather than\nguessing if the instant falls outside the branch's recorded\nhistory. Mutually exclusive with `as_of`.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",
         "type": [

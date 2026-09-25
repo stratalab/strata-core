@@ -248,7 +248,15 @@ impl Executor {
                 branch,
                 space,
                 entries,
-            } => self.execute_json_batch_get(branch.as_deref(), space.as_deref(), entries),
+                as_of,
+                as_of_time,
+            } => self.execute_json_batch_get(
+                branch.as_deref(),
+                space.as_deref(),
+                entries,
+                as_of,
+                as_of_time,
+            ),
             Command::JsonBatchDelete {
                 branch,
                 space,

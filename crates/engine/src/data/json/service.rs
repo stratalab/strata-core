@@ -281,11 +281,52 @@ impl<'a> JsonService<'a> {
         &mut self,
         entries: &[JsonGetEntry],
     ) -> Result<Vec<Option<JsonVersionedValue>>, EngineError> {
+        self.batch_get_with_selector(entries, ReadSelector::Latest)
+    }
+
+    /// Reads multiple values with metadata as they were at a commit version
+    /// (#3485).
+    ///
+    /// One pinned version for the whole batch: every entry is answered from
+    /// the state at `version`, so documents hydrated for a version-pinned
+    /// graph result come from that version and never a mix of it and the
+    /// latest state. Answers keep request order, a repeated entry is
+    /// answered again, and an absent document is `None`. Each answer's
+    /// metadata is its row's own commit, as
+    /// [`Self::get_versioned_at`] reports it.
+    pub fn batch_get_at_version(
+        &mut self,
+        entries: &[JsonGetEntry],
+        version: CommitVersion,
+    ) -> Result<Vec<Option<JsonVersionedValue>>, EngineError> {
+        self.batch_get_with_selector(entries, ReadSelector::AtVersion(version))
+    }
+
+    /// Reads multiple values with metadata as they were at a timestamp
+    /// (#3485) — [`Self::batch_get_at_version`] by timestamp. An instant
+    /// outside the branch's retained history fails the whole batch with the
+    /// same diagnostic a single read raises, never falling back to the
+    /// latest state.
+    pub fn batch_get_at(
+        &mut self,
+        entries: &[JsonGetEntry],
+        timestamp: Timestamp,
+    ) -> Result<Vec<Option<JsonVersionedValue>>, EngineError> {
+        self.batch_get_with_selector(entries, ReadSelector::AtTimestamp(timestamp))
+    }
+
+    /// The one batch read: one branch record, one selector, one point read
+    /// per entry in request order.
+    fn batch_get_with_selector(
+        &mut self,
+        entries: &[JsonGetEntry],
+        selector: ReadSelector,
+    ) -> Result<Vec<Option<JsonVersionedValue>>, EngineError> {
         let record = self.branch_record()?;
         let mut results = Vec::with_capacity(entries.len());
         for entry in entries {
             let address = self.row_address(&record, entry.id());
-            let result = match self.persistence.read_row(address, ReadSelector::Latest)? {
+            let result = match self.persistence.read_row(address, selector)? {
                 Some(row) => Self::versioned_value_from_row(entry.id(), entry.path(), &row)?,
                 None => None,
             };

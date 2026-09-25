@@ -794,6 +794,11 @@ pub enum Command {
     ///   each reporting whether it was found.
     /// - **One snapshot.** Every entry is read from the same consistent
     ///   version, so a batch cannot straddle a concurrent write.
+    /// - **One pinned version.** With `as_of` or `as_of_time`, every entry is
+    ///   read as of that one position, so a batch can hydrate the documents
+    ///   a version-pinned read named without mixing in later state. An
+    ///   instant outside the branch's history fails the whole batch rather
+    ///   than answering from the latest state.
     /// - **Limits.** Each entry bears a document id at most **65,535 bytes**
     ///   (`invalid_argument.engine.json_document_id`)
     ///   and a path at most **256 segments**
@@ -807,6 +812,20 @@ pub enum Command {
         space: Option<String>,
         /// Entries to read.
         entries: Vec<BatchJsonGetEntry>,
+        /// Read every entry as of a position on the logical commit timeline
+        /// — the `timestamp` from `history` output, not the `version`, and
+        /// never a calendar date. To read as of a real time, use
+        /// `as_of_time` instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
+        /// Read every entry as of a real time: a wall-clock instant in
+        /// microseconds since the Unix epoch (UTC), as reported by
+        /// `committed_at` on a write ack or on any `history` row. Resolves to
+        /// the commit at or before that instant, and fails rather than
+        /// guessing if the instant falls outside the branch's recorded
+        /// history. Mutually exclusive with `as_of`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of_time: Option<u64>,
     },
     /// Deletes multiple JSON documents or paths.
     ///

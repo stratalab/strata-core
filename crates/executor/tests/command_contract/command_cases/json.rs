@@ -47,6 +47,8 @@ pub(super) fn json_commands() -> Vec<Command> {
             branch: None,
             space: None,
             entries: vec![BatchJsonGetEntry::new("doc-a", "$.name")],
+            as_of: None,
+            as_of_time: None,
         },
         Command::JsonBatchDelete {
             branch: None,
@@ -134,6 +136,8 @@ pub(super) fn json_round_trip_edge_commands() -> Vec<Command> {
             branch: None,
             space: None,
             entries: Vec::new(),
+            as_of: None,
+            as_of_time: None,
         },
         Command::JsonBatchGet {
             branch: None,
@@ -142,6 +146,25 @@ pub(super) fn json_round_trip_edge_commands() -> Vec<Command> {
                 BatchJsonGetEntry::new("", "$"),
                 BatchJsonGetEntry::new("doc-a", "$["),
             ],
+            as_of: None,
+            as_of_time: None,
+        },
+        // #3485: the two as-of clocks must round-trip on the wire the same way
+        // `JsonGet`'s do — a populated `as_of` and a populated `as_of_time`,
+        // each mutually exclusive with the other.
+        Command::JsonBatchGet {
+            branch: Some("feature".to_owned()),
+            space: Some("space-a".to_owned()),
+            entries: vec![BatchJsonGetEntry::new("doc-a", "$.name")],
+            as_of: Some(42),
+            as_of_time: None,
+        },
+        Command::JsonBatchGet {
+            branch: None,
+            space: None,
+            entries: vec![BatchJsonGetEntry::new("doc-a", "$.name")],
+            as_of: None,
+            as_of_time: Some(1_700_000_000_000_000),
         },
         Command::JsonBatchDelete {
             branch: None,
