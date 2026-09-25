@@ -79,15 +79,18 @@ impl<'a> GraphService<'a> {
     ) -> Result<(GraphInfo, CommitOutcome), EngineError> {
         let record = self.branch_record()?;
         let address = self.metadata_address(&record, &name);
-        if self
-            .persistence
-            .read_row(address.clone(), ReadSelector::Latest)?
-            .is_some_and(|row| !row.is_tombstone())
-        {
-            return Err(EngineError::conflict(
-                "already_exists.engine.graph",
-                "graph already exists",
-            ));
+        if let Some(row) = self.stored_graph_metadata_row(&record, &name, ReadSelector::Latest)? {
+            if Self::graph_metadata_from_row(&name, &row)?.deleting() {
+                // #3477: a deletion interrupted before its sweep finished.
+                // Finish it first, so no row of the old graph survives under
+                // the new one's name.
+                self.sweep_deleted_graph(&record, &name)?;
+            } else {
+                return Err(EngineError::conflict(
+                    "already_exists.engine.graph",
+                    "graph already exists",
+                ));
+            }
         }
         let metadata = super::GraphMetadataRecord::new(name.clone());
         let commit = self.commit_batch(
@@ -116,23 +119,27 @@ impl<'a> GraphService<'a> {
         force: bool,
     ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
-        if self
-            .graph_metadata_row(&record, name, ReadSelector::Latest)?
-            .is_none()
-        {
+        let Some(row) = self.stored_graph_metadata_row(&record, name, ReadSelector::Latest)? else {
             return Ok(GraphDeleteOutcome::new(name.clone(), false, None));
+        };
+        let metadata = Self::graph_metadata_from_row(name, &row)?;
+        if metadata.deleting() {
+            // #3477: a deletion interrupted before its sweep finished. The
+            // graph is already gone to every observer; finish the sweep.
+            let last = self.sweep_deleted_graph(&record, name)?;
+            return Ok(GraphDeleteOutcome::new(name.clone(), true, Some(last)));
         }
 
         // #3122: a populated graph refuses deletion without force, matching
         // `space delete` — deleting a graph destroys every node and edge in it,
         // so a mistyped name must not silently wipe data the caller did not
         // name. Nodes are the content (edges require both endpoints).
-        let live_nodes: Vec<_> = self
-            .node_rows(&record, name, ReadSelector::Latest)?
-            .into_iter()
-            .filter(|row| !row.is_tombstone())
-            .collect();
-        if !live_nodes.is_empty() && !force {
+        if !force
+            && self
+                .node_rows(&record, name, ReadSelector::Latest)?
+                .iter()
+                .any(|row| !row.is_tombstone())
+        {
             return Err(EngineError::conflict(
                 "failed_precondition.engine.graph_not_empty",
                 format!(
@@ -142,63 +149,154 @@ impl<'a> GraphService<'a> {
             ));
         }
 
+        let rows = self.graph_row_tombstones(&record, name)?;
+        if rows.len() < Self::DELETE_CHUNK_ROWS {
+            // Small enough for one commit: the graph and its rows go together.
+            let mut mutations = Vec::with_capacity(rows.len() + 1);
+            mutations.push(RowMutation::delete(self.metadata_address(&record, name)));
+            mutations.extend(rows);
+            let commit = self.commit_batch(&record, mutations)?;
+            return Ok(GraphDeleteOutcome::new(name.clone(), true, Some(commit)));
+        }
+        // #3477: too many rows for the storage commit budget. Mark first —
+        // from this commit the graph is absent to every reader and writer —
+        // then sweep the rows in commits the budget admits, and tombstone the
+        // marked row last. An interruption leaves a marked row, which the
+        // next `delete_graph` or `create_graph` of this name finishes.
+        self.commit_batch(
+            &record,
+            vec![RowMutation::put(
+                self.metadata_address(&record, name),
+                encode_graph_metadata_record(&metadata.marked_deleting()),
+            )],
+        )?;
+        let last = self.sweep_deleted_graph_rows(&record, name, rows)?;
+        Ok(GraphDeleteOutcome::new(name.clone(), true, Some(last)))
+    }
+
+    /// Rows tombstoned per sweep commit of a chunked deletion (#3477): half
+    /// the storage layer's default per-commit mutation budget (4096), so a
+    /// chunk fits beside whatever else a commit carries. A graph with fewer
+    /// rows than this deletes in one commit, as it always did.
+    pub(crate) const DELETE_CHUNK_ROWS: usize = 2048;
+
+    /// Every row a graph owns beyond its metadata row, as tombstones, in the
+    /// order a sweep removes them: the index rows another graph's readers
+    /// could surface first (bindings, node types), then edges both ways,
+    /// then nodes, then the ontology. Rows already tombstoned are not seen,
+    /// so the list is exactly what remains — which is what makes a sweep
+    /// resumable.
+    fn graph_row_tombstones(
+        &self,
+        record: &BranchCatalogRecord,
+        name: &GraphName,
+    ) -> Result<Vec<RowMutation>, EngineError> {
         let mut mutations = Vec::new();
-        mutations.push(RowMutation::delete(self.metadata_address(&record, name)));
-        if self
-            .ontology_row(&record, name, ReadSelector::Latest)?
-            .is_some()
-        {
-            mutations.push(RowMutation::delete(self.ontology_address(&record, name)));
-        }
-        for row in live_nodes {
-            mutations.push(RowMutation::delete(RowAddress::new(
+        let tombstone = |class: RowClass, row: &PersistenceReadRow| {
+            RowMutation::delete(RowAddress::new(
                 record.storage_branch_id(),
-                RowClass::GraphNode,
+                class,
                 row.key().to_vec(),
-            )));
-        }
-        for row in self.edge_rows(&record, name, ReadSelector::Latest)? {
-            if !row.is_tombstone() {
-                mutations.push(RowMutation::delete(RowAddress::new(
-                    record.storage_branch_id(),
-                    RowClass::GraphEdge,
-                    row.key().to_vec(),
-                )));
-            }
-        }
-        for row in self.reverse_edge_rows(&record, name, ReadSelector::Latest)? {
-            if !row.is_tombstone() {
-                mutations.push(RowMutation::delete(RowAddress::new(
-                    record.storage_branch_id(),
-                    RowClass::GraphReverseEdge,
-                    row.key().to_vec(),
-                )));
-            }
-        }
-        for row in self.binding_rows_for_space(&record, ReadSelector::Latest)? {
+            ))
+        };
+        for row in self.binding_rows_for_space(record, ReadSelector::Latest)? {
             if row.is_tombstone() {
                 continue;
             }
             let (_, graph, _) = decode_graph_binding_key(&self.space, row.key())?;
             if &graph == name {
-                mutations.push(RowMutation::delete(RowAddress::new(
-                    record.storage_branch_id(),
-                    RowClass::GraphBindingIndex,
-                    row.key().to_vec(),
-                )));
+                mutations.push(tombstone(RowClass::GraphBindingIndex, &row));
             }
         }
-        for row in self.type_index_rows(&record, name, ReadSelector::Latest)? {
+        for row in self.type_index_rows(record, name, ReadSelector::Latest)? {
             if !row.is_tombstone() {
-                mutations.push(RowMutation::delete(RowAddress::new(
-                    record.storage_branch_id(),
-                    RowClass::GraphTypeIndex,
-                    row.key().to_vec(),
-                )));
+                mutations.push(tombstone(RowClass::GraphTypeIndex, &row));
             }
         }
-        let commit = self.commit_batch(&record, mutations)?;
-        Ok(GraphDeleteOutcome::new(name.clone(), true, Some(commit)))
+        for row in self.reverse_edge_rows(record, name, ReadSelector::Latest)? {
+            if !row.is_tombstone() {
+                mutations.push(tombstone(RowClass::GraphReverseEdge, &row));
+            }
+        }
+        for row in self.edge_rows(record, name, ReadSelector::Latest)? {
+            if !row.is_tombstone() {
+                mutations.push(tombstone(RowClass::GraphEdge, &row));
+            }
+        }
+        for row in self.node_rows(record, name, ReadSelector::Latest)? {
+            if !row.is_tombstone() {
+                mutations.push(tombstone(RowClass::GraphNode, &row));
+            }
+        }
+        if self
+            .ontology_row(record, name, ReadSelector::Latest)?
+            .is_some()
+        {
+            mutations.push(RowMutation::delete(self.ontology_address(record, name)));
+        }
+        Ok(mutations)
+    }
+
+    /// Finishes the deletion of a graph whose metadata row carries the mark:
+    /// whatever rows remain, then the row. Returns the final commit.
+    fn sweep_deleted_graph(
+        &self,
+        record: &BranchCatalogRecord,
+        name: &GraphName,
+    ) -> Result<CommitOutcome, EngineError> {
+        let rows = self.graph_row_tombstones(record, name)?;
+        self.sweep_deleted_graph_rows(record, name, rows)
+    }
+
+    /// Tombstones `rows` in commits of at most [`Self::DELETE_CHUNK_ROWS`],
+    /// then tombstones the marked metadata row in a commit of its own, so
+    /// the row outlives every row it describes and a crash at any point
+    /// leaves a resumable deletion, never an orphaned one. The returned
+    /// outcome is the final commit carrying the row counts of the whole
+    /// sweep, so the acknowledgement reads like a single-commit deletion's.
+    fn sweep_deleted_graph_rows(
+        &self,
+        record: &BranchCatalogRecord,
+        name: &GraphName,
+        mut rows: Vec<RowMutation>,
+    ) -> Result<CommitOutcome, EngineError> {
+        let mut deleted = 0_usize;
+        while !rows.is_empty() {
+            let rest = rows.split_off(rows.len().min(Self::DELETE_CHUNK_ROWS));
+            deleted = deleted.saturating_add(self.commit_batch(record, rows)?.delete_count());
+            rows = rest;
+        }
+        let last = self.commit_batch(
+            record,
+            vec![RowMutation::delete(self.metadata_address(record, name))],
+        )?;
+        let deleted = deleted.saturating_add(last.delete_count());
+        Ok(last.with_counts(0, deleted))
+    }
+
+    /// Performs only the first commit of a chunked deletion — the mark — and
+    /// stops, leaving the graph exactly as a crash between the mark and the
+    /// sweep would: absent to observers, its rows still stored, its deletion
+    /// waiting for the next `delete_graph` or `create_graph` of its name.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn begin_graph_delete_for_test(
+        &mut self,
+        name: &GraphName,
+    ) -> Result<CommitOutcome, EngineError> {
+        let record = self.branch_record()?;
+        let row = self
+            .graph_metadata_row(&record, name, ReadSelector::Latest)?
+            .ok_or_else(|| {
+                EngineError::not_found("not_found.engine.graph", "graph does not exist")
+            })?;
+        let metadata = Self::graph_metadata_from_row(name, &row)?;
+        self.commit_batch(
+            &record,
+            vec![RowMutation::put(
+                self.metadata_address(&record, name),
+                encode_graph_metadata_record(&metadata.marked_deleting()),
+            )],
+        )
     }
 
     /// Lists visible graphs.
@@ -251,7 +349,13 @@ impl<'a> GraphService<'a> {
             )?
             .into_iter()
             .filter(|row| !row.is_tombstone())
-            .map(|row| decode_graph_metadata_key(&self.space, row.key()))
+            .map(|row| {
+                let graph = decode_graph_metadata_key(&self.space, row.key())?;
+                // #3477: a graph mid-deletion is absent, here as everywhere.
+                let listed = !Self::graph_metadata_from_row(&graph, &row)?.deleting();
+                Ok(listed.then_some(graph))
+            })
+            .filter_map(Result::transpose)
             .collect::<EngineResult<Vec<_>>>()?;
         graphs.sort();
         if let Some(cursor) = cursor {
@@ -346,6 +450,43 @@ impl<'a> GraphService<'a> {
     /// Decision 6 / conformance test 9). A `None` target branch means "the
     /// node's own branch" and is accepted; an explicit target branch is accepted
     /// only when it equals the node's branch.
+    /// The nodes bound to `target` across the space's graphs: reverse-index
+    /// candidates verified against the authoritative node binding (reverse
+    /// maps are candidate indexes, not truth). #3477: a graph mid-deletion
+    /// contributes none — its rows are the sweep's, not a policy's.
+    fn verified_binding_candidates(
+        &self,
+        record: &BranchCatalogRecord,
+        target: &GraphBindingTarget,
+    ) -> Result<Vec<(GraphName, GraphNodeId, GraphNodeRecord)>, EngineError> {
+        let mut verified = Vec::new();
+        for row in self.persistence.scan_prefix(
+            record.storage_branch_id(),
+            RowClass::GraphBindingIndex,
+            encode_graph_binding_target_prefix(&self.space, target),
+            ReadSelector::Latest,
+            None,
+        )? {
+            if row.is_tombstone() {
+                continue;
+            }
+            let (_, graph, node_id) = decode_graph_binding_key(&self.space, row.key())?;
+            if self
+                .graph_metadata_row(record, &graph, ReadSelector::Latest)?
+                .is_none()
+            {
+                continue;
+            }
+            let Some(node) = self.node_record(record, &graph, &node_id)? else {
+                continue;
+            };
+            if node.data().binding().map(super::GraphEntityBinding::target) == Some(target) {
+                verified.push((graph, node_id, node));
+            }
+        }
+        Ok(verified)
+    }
+
     /// Applies an explicit delete policy to every graph fact bound to
     /// `target`, across all graphs in this space. The typical caller
     /// just deleted (or is about to delete) the bound entity.
@@ -364,27 +505,7 @@ impl<'a> GraphService<'a> {
         let record = self.branch_record()?;
         self.validate_binding_target(target)?;
 
-        // Reverse-index candidates, verified against the authoritative
-        // node binding (reverse maps are candidate indexes, not truth).
-        let mut verified: Vec<(GraphName, GraphNodeId, GraphNodeRecord)> = Vec::new();
-        for row in self.persistence.scan_prefix(
-            record.storage_branch_id(),
-            RowClass::GraphBindingIndex,
-            encode_graph_binding_target_prefix(&self.space, target),
-            ReadSelector::Latest,
-            None,
-        )? {
-            if row.is_tombstone() {
-                continue;
-            }
-            let (_, graph, node_id) = decode_graph_binding_key(&self.space, row.key())?;
-            let Some(node) = self.node_record(&record, &graph, &node_id)? else {
-                continue;
-            };
-            if node.data().binding().map(super::GraphEntityBinding::target) == Some(target) {
-                verified.push((graph, node_id, node));
-            }
-        }
+        let verified = self.verified_binding_candidates(&record, target)?;
         let nodes_affected = verified.len() as u64;
 
         let mut mutations = MutationMap::default();
@@ -1609,7 +1730,7 @@ impl<'a> GraphService<'a> {
         if limit == 0 {
             return Ok(GraphBindingPage::new(Vec::new(), false, None));
         }
-        let mut bindings = self
+        let bindings = self
             .persistence
             .scan_prefix(
                 record.storage_branch_id(),
@@ -1622,6 +1743,26 @@ impl<'a> GraphService<'a> {
             .filter(|row| !row.is_tombstone())
             .map(|row| self.binding_from_row(&row))
             .collect::<EngineResult<Vec<_>>>()?;
+        // #3477: a binding-index row of a graph mid-deletion is a row the
+        // sweep has not reached yet, not a binding a reader may see.
+        let mut present: BTreeMap<GraphName, bool> = BTreeMap::new();
+        let mut kept = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            let graph = binding.graph().clone();
+            let visible = if let Some(visible) = present.get(&graph) {
+                *visible
+            } else {
+                let visible = self
+                    .graph_metadata_row(&record, &graph, selector)?
+                    .is_some();
+                present.insert(graph, visible);
+                visible
+            };
+            if visible {
+                kept.push(binding);
+            }
+        }
+        let mut bindings = kept;
         bindings.sort_by_key(binding_cursor);
         if let Some(cursor) = cursor {
             bindings.retain(|binding| binding_cursor(binding).as_str() > cursor);
@@ -2458,7 +2599,25 @@ impl<'a> GraphService<'a> {
         )
     }
 
+    /// The graph's metadata row as every reader and writer sees it: absent
+    /// when tombstoned, and absent while a deletion is sweeping the graph's
+    /// rows (#3477) — the mark makes a chunked deletion atomic to observers.
     fn graph_metadata_row(
+        &self,
+        record: &BranchCatalogRecord,
+        graph: &GraphName,
+        selector: ReadSelector,
+    ) -> Result<Option<PersistenceReadRow>, EngineError> {
+        let Some(row) = self.stored_graph_metadata_row(record, graph, selector)? else {
+            return Ok(None);
+        };
+        let metadata = Self::graph_metadata_from_row(graph, &row)?;
+        Ok((!metadata.deleting()).then_some(row))
+    }
+
+    /// The graph's metadata row whenever it is not tombstoned — a deletion
+    /// in progress included, which only the deletion paths need to see.
+    fn stored_graph_metadata_row(
         &self,
         record: &BranchCatalogRecord,
         graph: &GraphName,
@@ -2469,6 +2628,19 @@ impl<'a> GraphService<'a> {
             .persistence
             .read_row(address, selector)?
             .filter(|row| !row.is_tombstone()))
+    }
+
+    fn graph_metadata_from_row(
+        graph: &GraphName,
+        row: &PersistenceReadRow,
+    ) -> Result<GraphMetadataRecord, EngineError> {
+        let value = row.value().ok_or_else(|| {
+            EngineError::corruption(
+                "data_loss.engine.graph_metadata",
+                "stored graph metadata row is missing a value",
+            )
+        })?;
+        decode_graph_metadata_record(graph, value)
     }
 
     fn require_graph(
@@ -3503,6 +3675,387 @@ mod tests {
             );
         }
 
+        exercise(
+            &Database::open_cache(CacheOpenOptions::new())
+                .expect("cache")
+                .into_database(),
+        );
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        exercise(
+            &Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+                .expect("durable")
+                .into_database(),
+        );
+    }
+
+    /// #3477: between the mark and the sweep — where a crash would leave a
+    /// large deletion — the graph is absent to every reader and writer, its
+    /// earlier versions still answer, other graphs' bindings do not surface
+    /// it, and both `delete_graph` and `create_graph` finish the sweep so no
+    /// row of it survives. In-crate so the default-feature mutation lane
+    /// judges the resume paths.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn a_marked_graph_is_absent_and_its_deletion_resumes() {
+        use crate::branch::BranchName;
+        use crate::data::graph::{
+            GraphBindingPrimitive, GraphBindingTarget, GraphDeletePolicy, GraphDirection,
+            GraphEdgeData, GraphEntityBinding, GraphNodeData, GraphNodeId,
+        };
+        use crate::{CacheOpenOptions, Database, DurableLocalOpenOptions};
+
+        fn node(id: &str) -> GraphNodeId {
+            GraphNodeId::new(id).expect("node id")
+        }
+
+        fn bound(key: &str) -> GraphNodeData {
+            GraphNodeData::new(
+                None,
+                Some(GraphEntityBinding::new(
+                    GraphBindingTarget::new(
+                        GraphBindingPrimitive::Kv,
+                        None,
+                        ProductSpace::new("docs").expect("space"),
+                        key,
+                    )
+                    .expect("target"),
+                )),
+            )
+        }
+
+        fn exercise(database: &Database) {
+            let mut graph = database
+                .graph(
+                    BranchName::new("default").expect("branch"),
+                    ProductSpace::new("default").expect("space"),
+                )
+                .expect("service");
+            let doomed = GraphName::new("doomed").expect("graph");
+            let other = GraphName::new("other").expect("graph");
+            let road = GraphEdgeType::new("road").expect("type");
+            let target = GraphBindingTarget::new(
+                GraphBindingPrimitive::Kv,
+                None,
+                ProductSpace::new("docs").expect("space"),
+                "doc-1",
+            )
+            .expect("target");
+            for g in [&doomed, &other] {
+                graph.create_graph(g.clone()).expect("created");
+                graph
+                    .upsert_node(g, node("a"), bound("doc-1"))
+                    .expect("node");
+                graph
+                    .upsert_node(g, node("b"), GraphNodeData::default())
+                    .expect("node");
+                graph
+                    .upsert_edge(
+                        g,
+                        node("a"),
+                        road.clone(),
+                        node("b"),
+                        GraphEdgeData::default(),
+                    )
+                    .expect("edge");
+            }
+            let before = graph.graph_info(&doomed).expect("reads").expect("exists");
+
+            let mark = graph
+                .begin_graph_delete_for_test(&doomed)
+                .expect("mark commits");
+
+            // Absent to readers and writers; earlier versions still answer.
+            assert!(graph.graph_info(&doomed).expect("reads").is_none());
+            assert_eq!(
+                graph
+                    .get_node(&doomed, &node("a"))
+                    .expect_err("gone")
+                    .code(),
+                "not_found.engine.graph"
+            );
+            assert_eq!(
+                graph
+                    .neighbors(&doomed, &node("a"), GraphDirection::Both, None, None, 10)
+                    .expect_err("gone")
+                    .code(),
+                "not_found.engine.graph"
+            );
+            assert_eq!(
+                graph
+                    .upsert_node(&doomed, node("c"), GraphNodeData::default())
+                    .expect_err("no writes into a deleting graph")
+                    .code(),
+                "not_found.engine.graph"
+            );
+            let listed: Vec<String> = graph
+                .list_graphs(None, 10)
+                .expect("lists")
+                .graphs()
+                .iter()
+                .map(|g| g.as_str().to_owned())
+                .collect();
+            assert_eq!(listed, ["other"]);
+            assert_eq!(
+                graph
+                    .graph_info_at_version(&doomed, before.updated_version())
+                    .expect("historical")
+                    .expect("existed before the mark"),
+                before
+            );
+            assert!(graph
+                .graph_info_at_version(&doomed, mark.version())
+                .expect("historical")
+                .is_none());
+
+            // Cross-graph reads see only the other graph's binding, and a
+            // policy over the shared target touches only the other graph.
+            let bindings = graph
+                .bindings_for_entity(&target, None, 10)
+                .expect("bindings");
+            let bound_graphs: Vec<&str> = bindings
+                .bindings()
+                .iter()
+                .map(|binding| binding.graph().as_str())
+                .collect();
+            assert_eq!(bound_graphs, ["other"]);
+            let policy = graph
+                .apply_binding_delete_policy(&target, GraphDeletePolicy::Detach)
+                .expect("policy skips the deleting graph");
+            assert!(policy.commit().is_some(), "the other graph's node detached");
+            assert!(graph.graph_info(&other).expect("reads").is_some());
+
+            // `create_graph` finishes the sweep, then creates an empty graph.
+            let (fresh, create) = graph.create_graph(doomed.clone()).expect("recreated");
+            assert_eq!((fresh.node_count(), fresh.edge_count()), (0, 0));
+            assert!(create.version() > mark.version());
+            assert!(graph
+                .list_nodes(&doomed, None, None, 10)
+                .expect("lists")
+                .nodes()
+                .is_empty());
+            assert!(graph
+                .get_node(&doomed, &node("a"))
+                .expect("reads")
+                .is_none());
+            assert!(graph
+                .list_edges(&doomed, None, 10)
+                .expect("lists")
+                .edges()
+                .is_empty());
+
+            // Mark again; this time `delete_graph` finishes it.
+            graph
+                .upsert_node(&doomed, node("z"), GraphNodeData::default())
+                .expect("node");
+            graph
+                .begin_graph_delete_for_test(&doomed)
+                .expect("mark commits");
+            let finished = graph.delete_graph(&doomed, false).expect("resumes");
+            assert!(finished.deleted(), "a marked graph is reported deleted");
+            assert!(finished.commit().is_some());
+            assert!(graph.graph_info(&doomed).expect("reads").is_none());
+            let (again, _) = graph.create_graph(doomed.clone()).expect("recreated");
+            assert_eq!(again.node_count(), 0, "z did not survive");
+            // And deleting the finished graph again is the ordinary no-op.
+            graph.delete_graph(&doomed, false).expect("empty deletes");
+            assert!(!graph
+                .delete_graph(&doomed, false)
+                .expect("missing is fine")
+                .deleted());
+        }
+
+        exercise(
+            &Database::open_cache(CacheOpenOptions::new())
+                .expect("cache")
+                .into_database(),
+        );
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        exercise(
+            &Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+                .expect("durable")
+                .into_database(),
+        );
+    }
+
+    /// #3477: resuming a marked deletion sweeps whatever the mark left and
+    /// tombstones the metadata row last — a graph one row past the chunk
+    /// (the resume spans several commits) and a graph with no rows to sweep
+    /// (the resume is the metadata tombstone alone, so the sweep's empty-row
+    /// loop is skipped yet its final commit still runs). Both resume paths —
+    /// `delete_graph` and `create_graph` — are exercised on a graph larger
+    /// than one chunk. In-crate so the default-feature mutation lane judges
+    /// the resume's chunk arithmetic and the empty-sweep tombstone.
+    #[test]
+    fn a_marked_deletion_resumes_across_chunks_and_when_no_rows_remain() {
+        use crate::branch::BranchName;
+        use crate::data::graph::{GraphNodeData, GraphNodeId};
+        use crate::{CacheOpenOptions, Database, DurableLocalOpenOptions};
+
+        fn node(index: usize) -> GraphNodeId {
+            GraphNodeId::new(format!("n:{index}")).expect("node id")
+        }
+
+        fn typeless_nodes(count: usize) -> Vec<(GraphNodeId, GraphNodeData)> {
+            (0..count)
+                .map(|index| (node(index), GraphNodeData::default()))
+                .collect()
+        }
+
+        fn exercise(database: &Database, count: usize, expected_row_commits: u64) {
+            let mut graph = database
+                .graph(
+                    BranchName::new("default").expect("branch"),
+                    ProductSpace::new("default").expect("space"),
+                )
+                .expect("service");
+
+            // An empty graph, marked, resumes in the single commit that
+            // tombstones its metadata row: the sweep skips its empty row loop
+            // yet still commits the tombstone.
+            let empty = GraphName::new("empty").expect("graph");
+            graph.create_graph(empty.clone()).expect("created");
+            let mark = graph
+                .begin_graph_delete_for_test(&empty)
+                .expect("mark commits");
+            let resumed = graph.delete_graph(&empty, false).expect("resumes");
+            assert!(resumed.deleted(), "a marked graph is reported deleted");
+            let last = resumed.commit().expect("resume commits");
+            assert_eq!(
+                last.version().as_u64() - mark.version().as_u64(),
+                1,
+                "an empty marked graph resumes in one commit: the metadata tombstone"
+            );
+            assert!(graph.graph_info(&empty).expect("reads").is_none());
+
+            // A graph one row past the chunk, marked, resumes in exactly one
+            // commit per chunk plus the metadata tombstone — proof the resume
+            // sweeps everything and tombstones the row last.
+            let big = GraphName::new("big").expect("graph");
+            graph.create_graph(big.clone()).expect("created");
+            graph
+                .bulk_insert(&big, &typeless_nodes(count), &[], Some(512))
+                .expect("nodes imported");
+            let mark = graph
+                .begin_graph_delete_for_test(&big)
+                .expect("mark commits");
+            let resumed = graph.delete_graph(&big, false).expect("resumes");
+            assert!(resumed.deleted());
+            let last = resumed.commit().expect("resume commits");
+            assert_eq!(
+                last.version().as_u64() - mark.version().as_u64(),
+                expected_row_commits + 1,
+                "a {count}-row marked graph resumes in {} commits",
+                expected_row_commits + 1
+            );
+            assert!(graph.graph_info(&big).expect("reads").is_none());
+
+            // `create_graph` resumes a large marked graph before creating an
+            // empty one — no row of the old graph surfaces under the name.
+            let reused = GraphName::new("reused").expect("graph");
+            graph.create_graph(reused.clone()).expect("created");
+            graph
+                .bulk_insert(&reused, &typeless_nodes(count), &[], Some(512))
+                .expect("nodes imported");
+            graph
+                .begin_graph_delete_for_test(&reused)
+                .expect("mark commits");
+            let (fresh, _) = graph.create_graph(reused.clone()).expect("recreated");
+            assert_eq!((fresh.node_count(), fresh.edge_count()), (0, 0));
+            assert!(graph
+                .list_nodes(&reused, None, None, 10)
+                .expect("lists")
+                .nodes()
+                .is_empty());
+        }
+
+        // One row past the chunk is the smallest graph whose sweep needs
+        // more than one row commit; a typeless node is exactly one row, so
+        // the row count equals the node count.
+        let count = super::GraphService::DELETE_CHUNK_ROWS + 1;
+        let expected_row_commits = count.div_ceil(super::GraphService::DELETE_CHUNK_ROWS) as u64;
+        assert!(
+            expected_row_commits >= 2,
+            "the large case must span more than one row commit"
+        );
+
+        exercise(
+            &Database::open_cache(CacheOpenOptions::new())
+                .expect("cache")
+                .into_database(),
+            count,
+            expected_row_commits,
+        );
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        exercise(
+            &Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+                .expect("durable")
+                .into_database(),
+            count,
+            expected_row_commits,
+        );
+    }
+}
+
+/// #3477: the exact commit boundary of a deletion, pinned where the chunk
+/// size is visible — a graph whose rows plus its own row fit one chunk
+/// deletes in the single commit it always did; one more row and it becomes
+/// mark, one sweep chunk, and the row.
+#[cfg(test)]
+mod delete_boundary_tests {
+    use crate::branch::BranchName;
+    use crate::data::graph::{GraphName, GraphNodeData, GraphNodeId};
+    use crate::data::kv::ProductSpace;
+    use crate::{CacheOpenOptions, Database, DurableLocalOpenOptions};
+
+    use super::GraphService;
+
+    fn exercise(database: &Database) {
+        let mut graph = database
+            .graph(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("service");
+        for (label, node_count, commits) in [
+            ("at-the-chunk", GraphService::DELETE_CHUNK_ROWS - 1, 1),
+            ("one-over", GraphService::DELETE_CHUNK_ROWS, 3),
+        ] {
+            let name = GraphName::new(label).expect("graph");
+            graph.create_graph(name.clone()).expect("graph created");
+            let nodes: Vec<_> = (0..node_count)
+                .map(|index| {
+                    (
+                        GraphNodeId::new(format!("n:{index}")).expect("node id"),
+                        GraphNodeData::default(),
+                    )
+                })
+                .collect();
+            graph
+                .bulk_insert(&name, &nodes, &[], None)
+                .expect("nodes imported");
+            let before = graph
+                .graph_info(&name)
+                .expect("info reads")
+                .expect("exists")
+                .updated_version();
+            let outcome = graph.delete_graph(&name, true).expect("deleted");
+            let last = outcome.commit().expect("deletion commits");
+            assert_eq!(
+                last.version().as_u64() - before.as_u64(),
+                commits,
+                "{label}: {node_count} nodes take {commits} commit(s)"
+            );
+            assert_eq!(
+                last.delete_count(),
+                node_count + 1,
+                "{label}: the receipt counts every node and the graph's row"
+            );
+            assert!(graph.graph_info(&name).expect("reads").is_none(), "{label}");
+        }
+    }
+
+    #[test]
+    fn the_single_commit_boundary_is_exact_in_cache_and_durable_modes() {
         exercise(
             &Database::open_cache(CacheOpenOptions::new())
                 .expect("cache")

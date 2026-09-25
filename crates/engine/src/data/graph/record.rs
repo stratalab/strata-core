@@ -29,6 +29,12 @@ pub(crate) struct GraphMetadataRecord {
     graph: GraphName,
     created: Option<GraphCommitPoint>,
     counts: Option<GraphCounts>,
+    /// #3477: set by the first commit of a deletion too large for one
+    /// commit. From that commit on the graph is absent to every read and
+    /// write while its rows are swept in further commits; the row itself
+    /// is tombstoned last. A row still carrying the mark after a crash is
+    /// a deletion to resume, which `delete_graph` and `create_graph` do.
+    deleting: bool,
 }
 
 impl GraphMetadataRecord {
@@ -39,6 +45,7 @@ impl GraphMetadataRecord {
             graph,
             created: None,
             counts: Some(GraphCounts::new(0, 0)),
+            deleting: false,
         }
     }
 
@@ -53,11 +60,24 @@ impl GraphMetadataRecord {
             graph,
             created: Some(created),
             counts: Some(counts),
+            deleting: false,
         }
+    }
+
+    /// The same row, marked as a deletion in progress.
+    pub(crate) const fn marked_deleting(mut self) -> Self {
+        self.deleting = true;
+        self
     }
 
     pub(crate) const fn graph(&self) -> &GraphName {
         &self.graph
+    }
+
+    /// Whether a deletion of this graph has begun and not yet swept its
+    /// rows; such a graph is absent to readers and writers.
+    pub(crate) const fn deleting(&self) -> bool {
+        self.deleting
     }
 
     /// The create commit, when the row has been rewritten since; `None`
@@ -346,6 +366,10 @@ struct StoredGraphMetadata {
     /// scan until its next write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     counts: Option<StoredGraphCounts>,
+    /// Present only while a chunked deletion is sweeping the graph's rows
+    /// (#3477); absent on every other row, so older readers see nothing new.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deleting: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -404,6 +428,7 @@ pub(crate) fn encode_graph_metadata_record(record: &GraphMetadataRecord) -> Vec<
             nodes: counts.nodes(),
             edges: counts.edges(),
         }),
+        deleting: record.deleting(),
     };
     encode_json_record(
         GRAPH_METADATA_FORMAT_VERSION,
@@ -422,6 +447,7 @@ pub(crate) fn encode_legacy_graph_metadata_record_for_test(graph: &GraphName) ->
             graph: graph.as_str().to_owned(),
             created: None,
             counts: None,
+            deleting: false,
         },
         "graph metadata cannot be encoded",
     )
@@ -466,6 +492,7 @@ pub(crate) fn decode_graph_metadata_record(
         counts: stored
             .counts
             .map(|counts| GraphCounts::new(counts.nodes, counts.edges)),
+        deleting: stored.deleting,
     })
 }
 
@@ -977,5 +1004,30 @@ mod tests {
             assert_eq!(error.class(), EngineErrorClass::Corruption);
             assert_eq!(error.code(), "data_loss.engine.graph_metadata");
         }
+    }
+
+    /// #3477: the deleting mark round-trips, is written only when set, and
+    /// is absent on every row written before it existed.
+    #[test]
+    fn metadata_deleting_mark_round_trips_and_is_omitted_when_clear() {
+        use super::GraphMetadataRecord;
+
+        let graph = GraphName::new("deps").expect("graph");
+        let clear = GraphMetadataRecord::new(graph.clone());
+        assert!(!clear.deleting());
+        assert!(
+            !String::from_utf8_lossy(&encode_graph_metadata_record(&clear)).contains("deleting"),
+            "a clear mark leaves the row as older readers know it"
+        );
+        let marked = clear.clone().marked_deleting();
+        assert!(marked.deleting());
+        assert_eq!(marked.counts(), clear.counts(), "the mark keeps the rest");
+        let decoded = decode_graph_metadata_record(&graph, &encode_graph_metadata_record(&marked))
+            .expect("decoded");
+        assert_eq!(decoded, marked);
+        assert!(decoded.deleting());
+        let legacy = decode_graph_metadata_record(&graph, b"\x01{\"graph\":\"deps\"}")
+            .expect("legacy row decodes");
+        assert!(!legacy.deleting());
     }
 }

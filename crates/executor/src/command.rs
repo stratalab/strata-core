@@ -1702,7 +1702,10 @@ pub enum Command {
         /// Graph name.
         graph: String,
     },
-    /// Deletes a graph and its visible graph rows.
+    /// Deletes a graph and its visible graph rows, whatever its size. A
+    /// graph too large for one commit disappears at the first commit and
+    /// has its rows swept in later ones; an interrupted sweep is finished
+    /// by the next delete or create of the same name.
     GraphDelete {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]

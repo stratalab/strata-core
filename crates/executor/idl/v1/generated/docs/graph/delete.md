@@ -7,6 +7,8 @@ section: graph
 
 Deletes a named graph and every visible node, edge, binding, and ontology row it owns. Deleting a graph that does not exist is not an error: the acknowledgement reports `deleted: false` with a `not_found` effect. Earlier states remain readable through time travel on other commands.
 
+A graph too large for one commit is deleted in several: it disappears at the first — every read and write of it refuses `not_found.engine.graph` from then on — its rows are swept in later commits, and the acknowledged commit is the last, with row counts that cover the whole deletion. If the sweep is interrupted, the next `graph delete` (or `graph create` of the same name) finishes it before doing anything else, so no row of the old graph ever surfaces under the new one.
+
 Successful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.
 
 ## Examples
