@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "36eab9c718c70d457d8a01137d8bd4a2b80aff8aaca1ad0af8d23f9922ff11b9",
+    "checksum_sha256": "5d54608695642bf3b88a4f09cc5e3115c75940d48a29e3e3d4bf1b07b4c47348",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -2901,7 +2901,7 @@
       "kind": "mutation.delete",
       "title": "Delete graph",
       "summary": "Delete a graph and its visible data.",
-      "description": "Deletes a named graph and every visible node, edge, binding, and ontology row it owns. Deleting a graph that does not exist is not an error: the acknowledgement reports `deleted: false` with a `not_found` effect. Earlier states remain readable through time travel on other commands.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
+      "description": "Deletes a named graph and every visible node, edge, binding, and ontology row it owns. Deleting a graph that does not exist is not an error: the acknowledgement reports `deleted: false` with a `not_found` effect. Earlier states remain readable through time travel on other commands.\n\nA graph too large for one commit is deleted in several: it disappears at the first — every read and write of it refuses `not_found.engine.graph` from then on — its rows are swept in later commits, and the acknowledged commit is the last, with row counts that cover the whole deletion. If the sweep is interrupted, the next `graph delete` (or `graph create` of the same name) finishes it before doing anything else, so no row of the old graph ever surfaces under the new one.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
       "docs": "/docs/graph/delete",
       "feature": "core",
       "access": "write",

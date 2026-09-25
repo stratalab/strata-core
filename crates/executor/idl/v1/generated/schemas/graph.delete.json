@@ -134,7 +134,7 @@
   "command": "graph.delete",
   "request": {
     "additionalProperties": false,
-    "description": "Deletes a graph and its visible graph rows.",
+    "description": "Deletes a graph and its visible graph rows, whatever its size. A\ngraph too large for one commit disappears at the first commit and\nhas its rows swept in later ones; an interrupted sweep is finished\nby the next delete or create of the same name.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

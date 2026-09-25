@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (14, one retired), SCALE (12), DUR (18) = 86 entries, 85 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (15, one retired), SCALE (12), DUR (18) = 87 entries, 86 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -995,6 +995,41 @@ graphs, fork, and the create/update commit timestamps against each write's outco
 default-feature mutation lane judges the fallback),
 `graph_commit_counts_exclude_derived_rows_in_cache_and_durable_modes` (`tests/engine_graph.rs`),
 and the record round-trip / underflow tests in `data/graph/record.rs`.
+
+### ARCH-015: A graph deletion is visibly atomic at its first commit and physically resumable
+
+A graph is deleted through the public API whatever its size (#3477). A graph whose rows fit
+the sweep chunk (`GraphService::DELETE_CHUNK_ROWS`, half the storage commit budget) goes in
+the single commit it always did. A larger one goes in three or more: the first rewrites the
+metadata row with the `deleting` mark, and from that commit the graph is absent to every
+reader and writer — `graph_metadata_row` (the choke point behind `require_graph`,
+`graph_info`, every service method), `list_graphs`, `bindings_for_entity` and the binding
+delete policy all treat a marked row as no graph; the sweep then tombstones the rows in
+commits of at most the chunk, index rows first; the marked row is tombstoned last, in a
+commit of its own. So a crash at any point leaves a marked row and some rows, never an
+orphaned graph: the next `delete_graph` of the name reports it deleted and finishes the
+sweep, and `create_graph` of the name finishes the sweep before creating, so no row of the
+old graph surfaces under the new one. `as_of` reads before the mark see the graph as it
+was (MVCC-001); a fork mid-sweep inherits the marked row and resumes independently. Two
+surfaces read rows by physical presence and still count a mid-sweep graph until its rows
+are gone: `space usage` and `branch compare` (#3575 decides each). The regression is a
+data-plane read path that resolves the metadata row without going through
+`graph_metadata_row` (and so sees a marked graph), or a writer that re-creates the name
+without sweeping.
+
+**Audit**: In `data/graph/service.rs`, `graph_metadata_row` filters `deleting` rows and is
+the only metadata read used by readers and writers (`require_graph`, `graph_info`,
+`metadata_mutation`, the binding paths, the test seam); `stored_graph_metadata_row` (which
+does not filter) is called only by `graph_metadata_row` itself, `create_graph` and
+`delete_graph`. Verify
+`list_graphs_with_selector` and `bindings_for_entity_with_selector` filter marked graphs,
+`apply_binding_delete_policy` skips candidates in a marked graph, and
+`sweep_deleted_graph_rows` commits the metadata tombstone after the last chunk. Tests:
+`tests/engine_graph_delete.rs` (the issue's 3,000-node ring in both modes; the exact
+single-commit / three-commit boundary), in-crate
+`service::tests::a_marked_graph_is_absent_and_its_deletion_resumes` (absence to every read
+and write, `as_of` before the mark, cross-graph bindings, resume by delete and by create),
+and `metadata_deleting_mark_round_trips_and_is_omitted_when_clear` (`record.rs`).
 
 ---
 
