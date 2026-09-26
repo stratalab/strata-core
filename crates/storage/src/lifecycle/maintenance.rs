@@ -6,11 +6,12 @@
 )]
 
 use super::{
-    LifecycleAdmissionEffect, LifecycleError, LifecycleMaintenanceSchedulingPolicy,
-    LifecycleOperationAdmission, LifecycleOperationKind, LifecycleResult, LifecycleStateMachine,
-    LifecycleStats, LifecycleStoragePressure, LifecycleStoragePressureSeverity, MaintenanceOutcome,
-    MaintenanceOutcomeStatus, MaintenanceTaskKind, RecoveryDegradationClass, RecoveryFault,
-    RecoveryFaultKind, RecoveryHealth,
+    classify_reclaim, classify_reclaim_follow_up, LifecycleAdmissionEffect, LifecycleError,
+    LifecycleMaintenanceSchedulingPolicy, LifecycleOperationAdmission, LifecycleOperationKind,
+    LifecycleResult, LifecycleStateMachine, LifecycleStats, LifecycleStoragePressure,
+    LifecycleStoragePressureSeverity, MaintenanceOutcome, MaintenanceOutcomeStatus,
+    MaintenanceTaskKind, ReclaimLedger, RecoveryDegradationClass, RecoveryFault, RecoveryFaultKind,
+    RecoveryHealth,
 };
 use crate::branch::state::materialization::BranchMaterializationHandle;
 use crate::observability::perf_trace;
@@ -240,6 +241,10 @@ pub(crate) struct LifecycleMaintenanceExecutor {
     /// legacy single-lane behavior; the durable runtime raises this to run non-conflicting
     /// compactions concurrently. Every other lane is always effectively `1`.
     rewrite_lane_cap: usize,
+    /// The last outcome of every reclaim family, fed by `record_outcome` — the one
+    /// point every task completion passes through (foreground runs, off-lock stage
+    /// completions, close drains).
+    reclaim_ledger: ReclaimLedger,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1194,7 +1199,28 @@ impl LifecycleMaintenanceExecutor {
             recent_failures: [None; MAINTENANCE_FAILURE_RECORD_CAPACITY],
             failure_sequence: 0,
             rewrite_lane_cap: 1,
+            reclaim_ledger: ReclaimLedger::default(),
         })
+    }
+
+    /// The per-runtime reclaim ledger (space-reclamation contract §3.5).
+    pub(crate) const fn reclaim_ledger(&self) -> &ReclaimLedger {
+        &self.reclaim_ledger
+    }
+
+    /// Record a reclaim pass that ran OUTSIDE the task queue: the inline
+    /// `Retain`/`SnapshotPruning`/`Reclaim` verbs and an explicit checkpoint
+    /// whose follow-up truncated the WAL. Task completions record through
+    /// `record_outcome`; these two entry points are the only ways an event
+    /// reaches the ledger, and both record the outcome's own family (if any)
+    /// plus its WAL-truncation follow-up (if any).
+    pub(crate) fn record_reclaim(&mut self, outcome: &MaintenanceOutcome) {
+        for (family, event) in classify_reclaim(outcome)
+            .into_iter()
+            .chain(classify_reclaim_follow_up(outcome))
+        {
+            self.reclaim_ledger.record(family, event);
+        }
     }
 
     /// Set the max number of concurrent Rewrite-lane tasks (compaction/materialization). `1`
@@ -1653,6 +1679,7 @@ impl LifecycleMaintenanceExecutor {
     }
 
     fn record_outcome(&mut self, outcome: &MaintenanceOutcome, draining: bool) {
+        self.record_reclaim(outcome);
         match outcome.status() {
             MaintenanceOutcomeStatus::Completed => {
                 self.stats.completed = self.stats.completed.saturating_add(1);

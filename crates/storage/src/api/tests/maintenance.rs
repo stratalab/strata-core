@@ -1,4 +1,8 @@
 use super::*;
+// The ledger's typed facts are asserted only by the durable (localfs) tests;
+// the cache-runtime test needs no reclaim type.
+#[cfg(feature = "localfs")]
+use crate::lifecycle::{MaintenanceDeferralReason, ReclaimFamily, ReclaimOutcome};
 
 fn open_runtime() -> StorageRuntime<'static> {
     StorageRuntime::open_ephemeral()
@@ -1832,6 +1836,16 @@ fn api_snapshot_pruning_preserves_required_snapshot() {
         assert_eq!(outcome.affected_objects(), 1);
         assert_eq!(outcome.bytes_reclaimed(), 0);
         assert_eq!(outcome.state_changes(), 0);
+        // A prune that protected the only snapshot reclaimed nothing, and the
+        // ledger says exactly that for the snapshot family.
+        let prune = runtime
+            .reclaim_ledger_for_test()
+            .expect("durable runtime has a reclaim ledger")
+            .last(ReclaimFamily::SnapshotPrune)
+            .expect("snapshot prune recorded");
+        assert_eq!(prune.outcome(), ReclaimOutcome::Nothing, "{prune:?}");
+        assert_eq!(prune.objects_affected(), 1);
+        assert_eq!(prune.deferral(), None);
     }
     #[cfg(not(feature = "localfs"))]
     {
@@ -1840,7 +1854,18 @@ fn api_snapshot_pruning_preserves_required_snapshot() {
             outcome.reason(),
             Some("cache runtime does not support durable snapshot pruning maintenance")
         );
+        assert_eq!(runtime.reclaim_ledger_for_test(), None);
     }
+}
+
+#[test]
+fn api_cache_runtime_has_no_reclaim_ledger() {
+    // A cache runtime owns no durable objects to reclaim, so it exposes no
+    // ledger (space-reclamation contract §3.5). Unlike the assertion inside
+    // `api_snapshot_pruning_preserves_required_snapshot`, this holds regardless
+    // of the `localfs` feature, so it runs in the primary workspace CI lane.
+    let runtime = open_manual_runtime();
+    assert_eq!(runtime.reclaim_ledger_for_test(), None);
 }
 
 #[test]
@@ -2100,6 +2125,48 @@ fn api_compaction_gc_reclaims_superseded_table_objects() {
         .as_bytes()
         .to_vec();
     assert_eq!(value, b"two");
+
+    // The reclaim ledger recorded every family the chain ran, from the one
+    // executor completion hook: the mark found candidates, the sweep staged
+    // bytes, the purge deleted objects.
+    let ledger = runtime
+        .reclaim_ledger_for_test()
+        .expect("durable runtime has a reclaim ledger");
+    let mark = ledger
+        .last(ReclaimFamily::TableObjectMark)
+        .expect("mark recorded");
+    assert!(
+        mark.objects_affected() >= 1,
+        "mark saw candidates: {mark:?}"
+    );
+    let sweep = ledger
+        .last(ReclaimFamily::TableObjectSweep)
+        .expect("sweep recorded");
+    assert_eq!(sweep.outcome(), ReclaimOutcome::Reclaimed, "{sweep:?}");
+    assert!(sweep.bytes_reclaimed() > 0, "{sweep:?}");
+    assert!(sweep.objects_affected() >= before.len(), "{sweep:?}");
+    let purge = ledger
+        .last(ReclaimFamily::QuarantinePurge)
+        .expect("purge recorded");
+    assert_eq!(purge.outcome(), ReclaimOutcome::Reclaimed, "{purge:?}");
+    assert!(purge.state_changes() >= before.len(), "{purge:?}");
+    assert!(ledger.totals().bytes_reclaimed() >= sweep.bytes_reclaimed());
+    assert!(ledger.totals().reclaimed_passes() >= 2);
+
+    // The ledger is per runtime: a second database in the same process has
+    // run nothing and reports the empty ledger.
+    let other_root = temp_dir_for_api_test("maintenance-gc-end-to-end-other");
+    let other_backend = crate::testkit::leak_static(StorageBackend::local_fs(other_root));
+    let other = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        other_backend,
+    )
+    .expect("open second durable runtime")
+    .into_runtime();
+    assert_eq!(
+        other.reclaim_ledger_for_test(),
+        Some(crate::lifecycle::ReclaimLedger::default())
+    );
 }
 
 /// COW invariant: a fork child's inherited references keep shared parent objects alive through
@@ -2251,6 +2318,25 @@ fn api_background_gc_reclaims_superseded_table_objects_off_lock() {
         Some(b"two".to_vec()),
         "reads must stay correct after off-lock reclaim",
     );
+    // The off-lock sweep (`finish_quarantine_sweep`) reports the bytes it
+    // staged, like the inline runner: the ledger's byte total exceeds what the
+    // purge alone reported, so the sweep contributed bytes even if a later
+    // empty sweep pass overwrote its slot.
+    let ledger = runtime
+        .reclaim_ledger_for_test()
+        .expect("durable runtime has a reclaim ledger");
+    assert!(
+        ledger.last(ReclaimFamily::TableObjectSweep).is_some(),
+        "{ledger:?}"
+    );
+    let purge = ledger
+        .last(ReclaimFamily::QuarantinePurge)
+        .expect("purge recorded");
+    assert_eq!(purge.outcome(), ReclaimOutcome::Reclaimed, "{purge:?}");
+    assert!(
+        ledger.totals().bytes_reclaimed() > purge.bytes_reclaimed(),
+        "the off-lock sweep must report staged bytes: {ledger:?}"
+    );
     runtime.close().expect("close durable runtime");
 }
 
@@ -2360,6 +2446,18 @@ fn api_gc_sweep_defers_while_retired_read_view_is_held() {
              the sweep",
         );
     }
+    // The ledger records the deferral with its typed reason, never prose.
+    let deferred = runtime
+        .reclaim_ledger_for_test()
+        .expect("durable runtime has a reclaim ledger")
+        .last(ReclaimFamily::TableObjectSweep)
+        .expect("deferred sweep recorded");
+    assert_eq!(deferred.outcome(), ReclaimOutcome::Deferred, "{deferred:?}");
+    assert_eq!(
+        deferred.deferral(),
+        Some(MaintenanceDeferralReason::ReaderPinned),
+        "{deferred:?}"
+    );
 
     // Reader done: the next cycle reclaims.
     drop(held_view);
@@ -2374,6 +2472,15 @@ fn api_gc_sweep_defers_while_retired_read_view_is_held() {
             "superseded object {superseded} must be reclaimed once the retired view is dropped",
         );
     }
+    let ledger = runtime
+        .reclaim_ledger_for_test()
+        .expect("durable runtime has a reclaim ledger");
+    let sweep = ledger
+        .last(ReclaimFamily::TableObjectSweep)
+        .expect("sweep recorded");
+    assert_eq!(sweep.outcome(), ReclaimOutcome::Reclaimed, "{sweep:?}");
+    assert_eq!(sweep.deferral(), None);
+    assert_eq!(ledger.totals().deferred_passes(), 1, "{ledger:?}");
 }
 
 /// Reopen reconcile: stale objects left by a prior session (here: a planted orphan simulating a

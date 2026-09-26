@@ -77,10 +77,11 @@ use crate::lifecycle::{
     LifecyclePurgeOutcome, LifecycleQuarantineOutcome, LifecycleQuarantineRepairOutcome,
     LifecycleQuarantineRequest, LifecycleResult, LifecycleStats, LifecycleStoragePressure,
     LifecycleStoragePressureSeverity, LifecycleWalGrowthOutcome, MaintenanceCheckpointOptions,
-    MaintenanceEnqueueOutcome, MaintenanceExecutorStatus, MaintenanceOutcome,
-    MaintenanceOutcomeStatus, MaintenanceTask, MaintenanceTaskId, MaintenanceTaskKind,
-    MaintenanceTaskRequest, MaintenanceTaskRunner, MaintenanceTaskScope, PreparedDurableCompaction,
-    PreparedDurableMaterialization, RecoveryDegradationClass, RecoveryHealth,
+    MaintenanceDeferralReason, MaintenanceEnqueueOutcome, MaintenanceExecutorStatus,
+    MaintenanceOutcome, MaintenanceOutcomeStatus, MaintenanceTask, MaintenanceTaskId,
+    MaintenanceTaskKind, MaintenanceTaskRequest, MaintenanceTaskRunner, MaintenanceTaskScope,
+    PreparedDurableCompaction, PreparedDurableMaterialization, RecoveryDegradationClass,
+    RecoveryHealth,
 };
 use crate::service::{
     QuarantineService, TableManifestService, TableManifestWrite, TableObjectReaderService,
@@ -1103,6 +1104,10 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         )?;
         // A checkpoint advances the manifest snapshot watermark.
         self.invalidate_retention_watermark_cache();
+        // Explicit (non-queued) checkpoint: its follow-up WAL truncation, if
+        // any, reaches the reclaim ledger through the inline entry point.
+        self.maintenance
+            .record_reclaim(&outcome.maintenance_outcome());
         Ok(outcome)
     }
 
@@ -1297,11 +1302,22 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             }) {
                 let _ = self.enqueue_maintenance(MaintenanceTaskRequest::quarantine());
             }
+            // Inline verb: not a queued task, so record the mark into the
+            // reclaim ledger here (branch scope = the table-object mark).
+            self.maintenance.record_reclaim(
+                &outcome
+                    .retention()
+                    .maintenance_outcome()
+                    .with_task_scope(MaintenanceTaskScope::Branch(branch_id)),
+            );
             return Ok(outcome.retention().clone());
         }
         if recovery_health_prevents_listing(request, &health) {
             let proof = retention_proof_from_assembly(request, &self.services, &health);
-            return retention_outcome_for_scope(request, proof, &[]);
+            let outcome = retention_outcome_for_scope(request, proof, &[])?;
+            self.maintenance
+                .record_reclaim(&outcome.maintenance_outcome());
+            return Ok(outcome);
         }
         let manifest = self
             .services
@@ -1315,7 +1331,10 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             .map_err(snapshot_error)?;
         let snapshot_count = snapshots.len();
         let proof = build_retention_proof(request, manifest.as_ref(), &health, snapshot_count);
-        retention_outcome_for_scope(request, proof, &snapshots)
+        let outcome = retention_outcome_for_scope(request, proof, &snapshots)?;
+        self.maintenance
+            .record_reclaim(&outcome.maintenance_outcome());
+        Ok(outcome)
     }
 
     #[allow(
@@ -1332,7 +1351,10 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             let proof = retention_proof_from_assembly(request, &self.services, &health);
             let pruning =
                 LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())?;
-            return prune_snapshots_with_proof(self.services.snapshot(), &pruning);
+            let outcome = prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
+            self.maintenance
+                .record_reclaim(&outcome.maintenance_outcome());
+            return Ok(outcome);
         }
         let manifest = self
             .services
@@ -1348,7 +1370,11 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         let proof = build_retention_proof(request, manifest.as_ref(), &health, snapshot_count);
         let pruning =
             LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())?;
-        prune_snapshots_with_proof(self.services.snapshot(), &pruning)
+        // Inline verb: not a queued task, so record the prune here.
+        let outcome = prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
+        self.maintenance
+            .record_reclaim(&outcome.maintenance_outcome());
+        Ok(outcome)
     }
 
     #[allow(
@@ -1413,6 +1439,12 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     )]
     pub(crate) fn maintenance_status(&self) -> MaintenanceExecutorStatus {
         self.maintenance.status()
+    }
+
+    /// The per-runtime reclaim ledger (space-reclamation contract §3.5): the
+    /// last outcome of every reclaim family this runtime has run.
+    pub(crate) const fn reclaim_ledger(&self) -> &crate::lifecycle::ReclaimLedger {
+        self.maintenance.reclaim_ledger()
     }
 
     pub(crate) fn recent_maintenance_failures(
@@ -2055,7 +2087,8 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                         crate::lifecycle::MaintenanceTaskKind::WalTruncation,
                         MaintenanceOutcomeStatus::Deferred,
                     )
-                    .with_reason("WAL truncation has no retention proof");
+                    .with_reason("WAL truncation has no retention proof")
+                    .with_deferral_reason(MaintenanceDeferralReason::IncompleteProof);
                     let outcome = self.maintenance.finish_started(task, outcome, false)?;
                     return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
                 }
@@ -4038,6 +4071,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             retired_readers_alive,
             pinned_objects,
             quarantined_objects: 0,
+            staged_bytes: 0,
             remaining_candidates: 0,
             sweep_health: None,
         };
@@ -4146,6 +4180,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 MaintenanceOutcomeStatus::Deferred,
             )
             .with_reason("table-object sweep deferred: retired read view still held")
+            .with_deferral_reason(MaintenanceDeferralReason::ReaderPinned)
             .with_stats(LifecycleStats::new(0, 0, 1, 1, 0));
             let outcome = self.maintenance.finish_started(task, outcome, false)?;
             self.record_optional_maintenance_health(&Ok(Some(outcome.clone())));
@@ -4199,11 +4234,13 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             return Ok(outcome);
         }
         crate::observability::perf_trace::record_table_object_sweep_run();
+        let staged_count = staged.staged_names.len();
         let mut outcome = MaintenanceOutcome::new(
             MaintenanceTaskKind::Quarantine,
             MaintenanceOutcomeStatus::Completed,
         )
         .with_affected_object_names(staged.staged_names)
+        .with_effects(staged_count, staged.staged_bytes, false)
         .with_state_changes(staged.quarantined_objects)
         .with_stats(LifecycleStats::new(0, staged.faults, 1, 0, 0));
         if let Some(health) = staged.sweep_health {
@@ -4794,7 +4831,8 @@ impl MaintenanceTaskRunner for DurableWalTruncationMaintenanceRunner<'_, '_> {
                 crate::lifecycle::MaintenanceTaskKind::WalTruncation,
                 MaintenanceOutcomeStatus::Deferred,
             )
-            .with_reason("WAL truncation has no retention proof"));
+            .with_reason("WAL truncation has no retention proof")
+            .with_deferral_reason(MaintenanceDeferralReason::IncompleteProof));
         };
         // Reclaim rotation (#3494): a fully-covered active segment is sealed
         // first, so the delete pass below — which protects the active id —
@@ -4993,6 +5031,8 @@ pub(crate) struct SweepStaged {
     task: MaintenanceTask,
     staged_names: Vec<String>,
     quarantined_objects: usize,
+    /// Bytes of the source objects this pass staged into quarantine.
+    staged_bytes: u64,
     faults: usize,
     remaining_candidates: usize,
     sweep_health: Option<RecoveryHealth>,
@@ -5206,6 +5246,7 @@ impl SweepStageInputs {
     pub(crate) fn stage(self) -> SweepStaged {
         let mut staged_names = Vec::new();
         let mut quarantined_objects = 0usize;
+        let mut staged_bytes = 0u64;
         let mut faults = 0usize;
         let mut sweep_health = None;
         let mut request_error = None;
@@ -5255,6 +5296,7 @@ impl SweepStageInputs {
                         quarantine_outcome.byte_count(),
                     );
                     quarantined_objects += 1;
+                    staged_bytes = staged_bytes.saturating_add(quarantine_outcome.byte_count());
                     staged_names.push(object.to_string());
                 }
                 // Idempotent replays after a partial earlier pass: the object is already staged
@@ -5274,6 +5316,7 @@ impl SweepStageInputs {
             task: self.task,
             staged_names,
             quarantined_objects,
+            staged_bytes,
             faults,
             remaining_candidates: self.remaining_candidates,
             sweep_health,
@@ -5628,6 +5671,8 @@ struct DurableTableObjectSweepRunner<'a, 'b> {
     pinned_objects: Vec<crate::object::ObjectName>,
     /// Out: objects staged into quarantine this pass (drives the follow-up Purge enqueue).
     quarantined_objects: usize,
+    /// Out: bytes of the source objects staged this pass (the reclaim ledger's bytes).
+    staged_bytes: u64,
     /// Out: candidates left unprocessed (cap) or deferred (interlocks) — drives re-enqueue.
     remaining_candidates: usize,
     /// Out: worst recovery health reported by the quarantine service this pass.
@@ -5672,6 +5717,7 @@ impl MaintenanceTaskRunner for DurableTableObjectSweepRunner<'_, '_> {
                 MaintenanceOutcomeStatus::Deferred,
             )
             .with_reason("table-object sweep deferred: retired read view still held")
+            .with_deferral_reason(MaintenanceDeferralReason::ReaderPinned)
             .with_stats(LifecycleStats::new(0, 0, 1, 1, 0)));
         }
 
@@ -5702,6 +5748,9 @@ impl MaintenanceTaskRunner for DurableTableObjectSweepRunner<'_, '_> {
                         quarantine_outcome.byte_count(),
                     );
                     self.quarantined_objects += 1;
+                    self.staged_bytes = self
+                        .staged_bytes
+                        .saturating_add(quarantine_outcome.byte_count());
                     staged_names.push(object.to_string());
                 }
                 // Idempotent replays after a partial earlier pass: the object is already staged
@@ -5722,11 +5771,13 @@ impl MaintenanceTaskRunner for DurableTableObjectSweepRunner<'_, '_> {
             .saturating_sub(TABLE_OBJECT_SWEEP_MAX_OBJECTS.min(candidates.len()));
 
         crate::observability::perf_trace::record_table_object_sweep_run();
+        let staged_count = staged_names.len();
         let mut outcome = MaintenanceOutcome::new(
             MaintenanceTaskKind::Quarantine,
             MaintenanceOutcomeStatus::Completed,
         )
         .with_affected_object_names(staged_names)
+        .with_effects(staged_count, self.staged_bytes, false)
         .with_state_changes(self.quarantined_objects)
         .with_stats(LifecycleStats::new(0, faults, 1, 0, 0));
         if let Some(health) = self.sweep_health.clone() {
