@@ -133,6 +133,11 @@ pub(crate) struct LifecycleDurableLocalRuntime<'a, S = CommitManualTimestampSour
     /// C3a: an in-flight pass is suspended (saturated shards or a deferral)
     /// awaiting the next trigger; the kept cursor resumes it.
     pub(super) cache_preheat_paused: bool,
+    /// Space-reclamation contract §3.1 (slice 4): `Active` from an
+    /// `OpenedExisting` open until the first commit applies, during which a
+    /// background drain admits only the reclaim tier. A plain field: both the
+    /// drain step chooser and the commit apply hold the runtime lock.
+    pub(super) reclaim_only_scope: crate::lifecycle::ReclaimOnlyScope,
     /// C3a: blocks covered so far by the pass in flight
     /// (admitted + present + rejects), accumulated across chunks; published
     /// as the coverage-numerator gauge when the pass completes.
@@ -335,6 +340,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             cache_preheat_cursor: None,
             cache_preheat_rearm: false,
             cache_preheat_paused: false,
+            reclaim_only_scope: crate::lifecycle::ReclaimOnlyScope::Inactive,
             cache_preheat_pass_blocks: 0,
             #[cfg(test)]
             cache_preheat_chunk_bytes_for_test: None,
@@ -355,6 +361,11 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         };
         // BS2.3: seed a published snapshot for every recovered branch before any read observes it.
         runtime.republish_all_branch_snapshots();
+        // Space-reclamation contract §3.1: a reopened database starts in the
+        // reclaim-only scope (background drains admit only the reclaim tier
+        // until the first commit applies); a created one has no backlog.
+        runtime.reclaim_only_scope =
+            crate::lifecycle::reclaim_only_scope_after_open(runtime.open_outcome.disposition());
         // Table-object GC reconcile on REOPEN only: one coalescing mark covers the whole prior
         // session's backlog (the mark lists the global inventory against every current manifest),
         // so stale objects from crashes or pre-GC sessions are reclaimed instead of persisting
@@ -2701,7 +2712,16 @@ where
         self.schedule_post_commit_maintenance_best_effort(branch_id);
     }
 
+    /// Space-reclamation contract §3.1: whether background drains are still
+    /// confined to the reclaim tier (no commit has applied since open).
+    pub(crate) const fn reclaim_only_scope(&self) -> crate::lifecycle::ReclaimOnlyScope {
+        self.reclaim_only_scope
+    }
+
     fn mirror_visible_and_evaluate_wal_growth(&mut self) {
+        // The session has written: the reclaim-only scope ends here (both the
+        // solo and the grouped commit paths converge on this advance).
+        self.reclaim_only_scope = crate::lifecycle::ReclaimOnlyScope::Inactive;
         self.visible_commit_version
             .store(self.visible.visible_version().as_u64(), Ordering::Release);
         let wal_growth_start = perf_trace::start_timer();
