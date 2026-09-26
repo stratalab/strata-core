@@ -447,7 +447,8 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
                 MaintenanceTaskKind::WalTruncation,
                 MaintenanceOutcomeStatus::Deferred,
             )
-            .with_reason("WAL truncation has no retention proof"));
+            .with_reason("WAL truncation has no retention proof")
+            .with_deferral_reason(crate::lifecycle::MaintenanceDeferralReason::IncompleteProof));
         };
         Ok(truncate_wal(self.services.wal(), request)?.maintenance_outcome())
     }
