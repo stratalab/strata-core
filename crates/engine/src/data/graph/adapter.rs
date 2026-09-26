@@ -14,6 +14,7 @@
 //! consistency, and branch-relative bindings, and rebuilding the derived rows)
 //! needs machinery beyond the generic three-way and lands in a later slice.
 
+use super::GraphName;
 use crate::branch::adapter::{
     CapabilityBranchAdapter, ComparableEntity, DerivedDisposition, EntitySummary,
 };
@@ -69,6 +70,14 @@ fn interpret(
 pub(crate) struct GraphMetadataBranchAdapter;
 
 impl CapabilityBranchAdapter for GraphMetadataBranchAdapter {
+    fn graph_of(
+        &self,
+        space: &ProductSpace,
+        row: &PersistenceReadRow,
+    ) -> Result<Option<GraphName>, EngineError> {
+        decode_graph_metadata_key(space, row.key()).map(Some)
+    }
+
     fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
         // Compare-only: graph rows are never promoted, so no promotion
         // outcome reports one.
@@ -110,6 +119,14 @@ impl CapabilityBranchAdapter for GraphMetadataBranchAdapter {
 pub(crate) struct GraphNodeBranchAdapter;
 
 impl CapabilityBranchAdapter for GraphNodeBranchAdapter {
+    fn graph_of(
+        &self,
+        space: &ProductSpace,
+        row: &PersistenceReadRow,
+    ) -> Result<Option<GraphName>, EngineError> {
+        decode_graph_node_key(space, row.key()).map(|(graph, _)| Some(graph))
+    }
+
     fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
         // Compare-only: graph rows are never promoted, so no promotion
         // outcome reports one.
@@ -151,6 +168,14 @@ impl CapabilityBranchAdapter for GraphNodeBranchAdapter {
 pub(crate) struct GraphEdgeBranchAdapter;
 
 impl CapabilityBranchAdapter for GraphEdgeBranchAdapter {
+    fn graph_of(
+        &self,
+        space: &ProductSpace,
+        row: &PersistenceReadRow,
+    ) -> Result<Option<GraphName>, EngineError> {
+        decode_graph_edge_key(space, row.key()).map(|(graph, _, _, _)| Some(graph))
+    }
+
     fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
         // Compare-only: graph rows are never promoted, so no promotion
         // outcome reports one.
@@ -194,6 +219,14 @@ impl CapabilityBranchAdapter for GraphEdgeBranchAdapter {
 pub(crate) struct GraphOntologyBranchAdapter;
 
 impl CapabilityBranchAdapter for GraphOntologyBranchAdapter {
+    fn graph_of(
+        &self,
+        space: &ProductSpace,
+        row: &PersistenceReadRow,
+    ) -> Result<Option<GraphName>, EngineError> {
+        decode_graph_ontology_key(space, row.key()).map(Some)
+    }
+
     fn authored_value(&self, stored: &[u8]) -> Result<Vec<u8>, EngineError> {
         // Compare-only: graph rows are never promoted, so no promotion
         // outcome reports one.

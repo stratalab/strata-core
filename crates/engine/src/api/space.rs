@@ -9,10 +9,10 @@ use crate::control::{space as control_space, ControlPlane};
 use crate::data::kv::ProductSpace;
 use crate::diagnostics::EngineError;
 use crate::persistence::{
-    encode_event_space_prefix, encode_graph_edge_space_prefix, encode_graph_metadata_prefix,
-    encode_graph_node_space_prefix, encode_json_space_prefix, encode_kv_space_prefix,
-    encode_vector_collection_prefix, encode_vector_space_prefix, CommitPlan, ReadSelector,
-    RowClass, StoragePersistence,
+    encode_event_space_prefix, encode_graph_edge_prefix, encode_graph_edge_space_prefix,
+    encode_graph_metadata_prefix, encode_graph_node_prefix, encode_graph_node_space_prefix,
+    encode_json_space_prefix, encode_kv_space_prefix, encode_vector_collection_prefix,
+    encode_vector_space_prefix, CommitPlan, ReadSelector, RowClass, StoragePersistence,
 };
 
 /// Outcome returned after creating a product space.
@@ -436,11 +436,63 @@ impl<'a> SpaceService<'a> {
             })
     }
 
+    /// Usage is what an observer can reach (#3575): a space whose deletion
+    /// is under way reports zeros, and a graph whose deletion is under way
+    /// contributes neither its metadata row nor its nodes and edges, so a
+    /// space or graph mid-sweep counts exactly as a deleted one.
     fn usage_for_record(
         &mut self,
         record: &BranchCatalogRecord,
         space: &ProductSpace,
     ) -> Result<SpaceUsageSummary, EngineError> {
+        if control_space::pending_deletion(self.persistence, record, space)? {
+            return Ok(SpaceUsageSummary::new(
+                space.clone(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ));
+        }
+        let marked = crate::data::graph::marked_graphs(
+            self.persistence,
+            record,
+            space,
+            ReadSelector::Latest,
+        )?;
+        let graphs = self
+            .visible_count(
+                record,
+                RowClass::GraphMetadata,
+                encode_graph_metadata_prefix(space),
+            )?
+            .saturating_sub(u64::try_from(marked.len()).unwrap_or(u64::MAX));
+        let mut nodes = self.visible_count(
+            record,
+            RowClass::GraphNode,
+            encode_graph_node_space_prefix(space),
+        )?;
+        let mut edges = self.visible_count(
+            record,
+            RowClass::GraphEdge,
+            encode_graph_edge_space_prefix(space),
+        )?;
+        for graph in &marked {
+            nodes = nodes.saturating_sub(self.visible_count(
+                record,
+                RowClass::GraphNode,
+                encode_graph_node_prefix(space, graph),
+            )?);
+            edges = edges.saturating_sub(self.visible_count(
+                record,
+                RowClass::GraphEdge,
+                encode_graph_edge_prefix(space, graph),
+            )?);
+        }
         Ok(SpaceUsageSummary::new(
             space.clone(),
             self.visible_count(record, RowClass::Kv, encode_kv_space_prefix(space))?,
@@ -452,21 +504,9 @@ impl<'a> SpaceService<'a> {
             )?,
             self.visible_count(record, RowClass::Vector, encode_vector_space_prefix(space))?,
             self.visible_count(record, RowClass::Event, encode_event_space_prefix(space))?,
-            self.visible_count(
-                record,
-                RowClass::GraphMetadata,
-                encode_graph_metadata_prefix(space),
-            )?,
-            self.visible_count(
-                record,
-                RowClass::GraphNode,
-                encode_graph_node_space_prefix(space),
-            )?,
-            self.visible_count(
-                record,
-                RowClass::GraphEdge,
-                encode_graph_edge_space_prefix(space),
-            )?,
+            graphs,
+            nodes,
+            edges,
         ))
     }
 
@@ -916,5 +956,110 @@ mod tests {
             1,
             "another space's manifest is not"
         );
+    }
+    /// #3575: usage reports what an observer can reach. A graph mid-deletion
+    /// (marked, rows not yet swept) contributes nothing — not its metadata
+    /// row, not its nodes or edges — and a space mid-deletion reports zeros.
+    #[test]
+    fn usage_hides_a_graph_and_a_space_mid_deletion() {
+        use crate::{
+            GraphEdgeData, GraphEdgeType, GraphName, GraphNodeData, GraphNodeId,
+            GraphObjectTypeDef, GraphTypeName,
+        };
+
+        let mut database = Database::open_cache(CacheOpenOptions::new())
+            .expect("cache opens")
+            .into_database();
+        let target = populate(&mut database, "mixed", 5);
+        let road = GraphEdgeType::new("road").expect("type");
+        let node = |id: &str| GraphNodeId::new(id).expect("node");
+        {
+            let mut graph = database
+                .graph(branch("default"), target.clone())
+                .expect("graph service");
+            for (name, nodes) in [("doomed", 3), ("kept", 2)] {
+                let graph_name = GraphName::new(name).expect("graph");
+                graph.create_graph(graph_name.clone()).expect("created");
+                for index in 0..nodes {
+                    graph
+                        .upsert_node(
+                            &graph_name,
+                            node(&format!("n{index}")),
+                            GraphNodeData::default(),
+                        )
+                        .expect("node");
+                }
+                for index in 1..nodes {
+                    graph
+                        .upsert_edge(
+                            &graph_name,
+                            node(&format!("n{}", index - 1)),
+                            road.clone(),
+                            node(&format!("n{index}")),
+                            GraphEdgeData::default(),
+                        )
+                        .expect("edge");
+                }
+            }
+            graph
+                .define_object_type(
+                    &GraphName::new("doomed").expect("graph"),
+                    GraphObjectTypeDef::new(GraphTypeName::new("Place").expect("type"), [])
+                        .expect("type def"),
+                )
+                .expect("ontology row");
+        }
+        let counts = |database: &mut Database| {
+            let usage = database
+                .spaces(branch("default"))
+                .expect("space service")
+                .usage(&target)
+                .expect("usage reads");
+            (
+                usage.kv_count(),
+                usage.graph_count(),
+                usage.graph_node_count(),
+                usage.graph_edge_count(),
+            )
+        };
+        assert_eq!(counts(&mut database), (5, 2, 5, 3), "everything whole");
+
+        database
+            .graph(branch("default"), target.clone())
+            .expect("graph service")
+            .begin_graph_delete_for_test(&GraphName::new("doomed").expect("graph"))
+            .expect("graph mark commits");
+        assert_eq!(
+            counts(&mut database),
+            (5, 1, 2, 1),
+            "a marked graph and its rows are not usage"
+        );
+        database
+            .graph(branch("default"), target.clone())
+            .expect("graph service")
+            .delete_graph(&GraphName::new("doomed").expect("graph"), true)
+            .expect("the sweep finishes");
+        assert_eq!(
+            counts(&mut database),
+            (5, 1, 2, 1),
+            "and the same once swept"
+        );
+
+        database
+            .spaces(branch("default"))
+            .expect("space service")
+            .begin_space_delete_for_test(&target)
+            .expect("space mark commits");
+        assert_eq!(
+            counts(&mut database),
+            (0, 0, 0, 0),
+            "a marked space is no usage at all"
+        );
+        database
+            .spaces(branch("default"))
+            .expect("space service")
+            .delete(&target, false)
+            .expect("the sweep finishes");
+        assert_eq!(counts(&mut database), (0, 0, 0, 0));
     }
 }

@@ -1,7 +1,7 @@
 //! Graph core service.
 
 use std::cmp::Ordering;
-use std::collections::{btree_map, BTreeMap, HashSet};
+use std::collections::{btree_map, BTreeMap, BTreeSet, HashSet};
 
 use strata_core::{CommitVersion, Timestamp};
 
@@ -3485,6 +3485,36 @@ fn missing_edge_endpoint() -> EngineError {
         "invalid_argument.engine.graph_edge_endpoint",
         "graph edge endpoints must exist before an edge can be written",
     )
+}
+
+/// The graphs of `space` whose metadata row carries the deleting mark at
+/// `selector` (#3477): gone to every graph reader, their rows still being
+/// swept. Surfaces that count or compare rows by physical presence — space
+/// usage, branch compare — use this to leave those rows out (#3575), so a
+/// graph mid-deletion looks exactly as a deleted one does.
+pub(crate) fn marked_graphs(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    space: &ProductSpace,
+    selector: ReadSelector,
+) -> Result<BTreeSet<GraphName>, EngineError> {
+    let rows = persistence.scan_prefix(
+        record.storage_branch_id(),
+        RowClass::GraphMetadata,
+        encode_graph_metadata_prefix(space),
+        selector,
+        None,
+    )?;
+    let mut marked = BTreeSet::new();
+    for row in rows.iter().filter(|row| !row.is_tombstone()) {
+        let name = decode_graph_metadata_key(space, row.key())?;
+        // The same decode-or-corrupt path every metadata reader uses, so a
+        // valueless row is `data_loss.engine.graph_metadata` here too (#3477).
+        if GraphService::graph_metadata_from_row(&name, row)?.deleting() {
+            marked.insert(name);
+        }
+    }
+    Ok(marked)
 }
 
 fn edge_identity(edge: &GraphEdgeRecord) -> EdgeIdentity {
