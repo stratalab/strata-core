@@ -633,26 +633,32 @@ fn open_durable_with_owned_backend_handle<'runtime>(
     let background_config = options.background_maintenance();
     let (runtime, summary, recovery_report, config) = assemble_durable_runtime(options, backend)?;
     let mode_policy = runtime.open_plan().lifecycle_policy();
-    Ok(StorageOpenOutcome::new(
-        StorageRuntime {
-            inner: StorageRuntimeInner::DurableOwned(Box::new(
-                RuntimeSlot::new_with_background_arc_drain(
-                    runtime,
-                    config,
-                    background_config,
-                    executor_mode,
-                    mode_policy,
-                    drain_durable_background_round,
-                ),
-            )),
-            open_summary: Some(summary),
-            last_recovery: Some(recovery_report),
-            last_close: None,
-            last_allocated_timestamp_micros: AtomicU64::new(0),
-            _marker: PhantomData,
-        },
-        summary,
-    ))
+    let runtime = StorageRuntime {
+        inner: StorageRuntimeInner::DurableOwned(Box::new(
+            RuntimeSlot::new_with_background_arc_drain(
+                runtime,
+                config,
+                background_config,
+                executor_mode,
+                mode_policy,
+                drain_durable_background_round,
+            ),
+        )),
+        open_summary: Some(summary),
+        last_recovery: Some(recovery_report),
+        last_close: None,
+        last_allocated_timestamp_micros: AtomicU64::new(0),
+        _marker: PhantomData,
+    };
+    // Space-reclamation contract §3.1 (slice 4): a reopened database carries
+    // the prior session's reclaim backlog (bootstrap queued the mark), and a
+    // quiescent worker only ever woke on commits — so arm ONE low-tier wake
+    // here. Arm, never inline: the drain runs on the worker (or, under the
+    // inline executor, on the next progress wait), never inside `open`.
+    if summary.disposition() == StorageOpenDisposition::OpenedExisting {
+        runtime.notify_background_drain_for_current_runtime(BackgroundTaskPriority::Low);
+    }
+    Ok(StorageOpenOutcome::new(runtime, summary))
 }
 
 #[cfg(feature = "localfs")]
@@ -3474,6 +3480,20 @@ impl<'a> StorageRuntime<'a> {
         match &mut self.inner {
             StorageRuntimeInner::DurableOwned(slot) => slot.lock().clear_block_cache_for_test(),
             StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => {}
+        }
+    }
+
+    /// Space-reclamation contract §3.1 (slice 4): the durable runtime's
+    /// reclaim-only scope; `None` for cache or closed runtimes.
+    #[cfg(test)]
+    #[cfg_attr(
+        not(feature = "localfs"),
+        allow(dead_code, reason = "consumers are gated on localfs")
+    )]
+    pub(crate) fn reclaim_only_scope_for_test(&self) -> Option<crate::lifecycle::ReclaimOnlyScope> {
+        match &self.inner {
+            StorageRuntimeInner::DurableOwned(slot) => Some(slot.lock().reclaim_only_scope()),
+            StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => None,
         }
     }
 

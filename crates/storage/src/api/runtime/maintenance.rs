@@ -636,6 +636,22 @@ fn start_next_background_step(
     runtime: &mut LifecycleDurableLocalRuntime<'static, ApiTimestampSource>,
     flush_watermark_exhausted: bool,
 ) -> StorageApiResult<Option<DurableBackgroundMaintenanceStep<'static>>> {
+    // Space-reclamation contract §3.1 (slice 4): until the session's first
+    // commit applies, a drain admits only the reclaim tier — the upper ladder
+    // has nothing a read-only session should start, and the open-time wake
+    // must never turn into a flush or checkpoint. The empty-poll short-circuit
+    // is preserved so an idle reclaim-only runtime pays nothing.
+    if !crate::lifecycle::drain_scope_admits_upper_tier(runtime.reclaim_only_scope()) {
+        if !runtime.has_pending_low_tier_maintenance() {
+            return Ok(None);
+        }
+        let low_tier_start = perf_trace::start_timer();
+        let low_tier = run_next_background_durable_maintenance(runtime);
+        perf_trace::record_lifecycle_background_task_low_tier(perf_trace::timer_elapsed(
+            low_tier_start,
+        ));
+        return low_tier;
+    }
     match runtime.start_next_background_flush_maintenance() {
         Ok(Some(step)) => Ok(Some(step)),
         Ok(None) => match runtime.start_next_background_checkpoint_maintenance() {

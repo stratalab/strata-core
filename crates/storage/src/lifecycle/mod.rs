@@ -25,6 +25,7 @@ mod health;
 mod maintenance;
 mod outcome;
 mod quarantine;
+mod reclaim_scope;
 mod recovery;
 mod result;
 mod retained_history_extension;
@@ -215,6 +216,9 @@ pub(crate) use quarantine::{
     LifecyclePurgeProof, LifecyclePurgeStatus, LifecycleQuarantineOutcome,
     LifecycleQuarantineProof, LifecycleQuarantineProofStatus, LifecycleQuarantineRepairOutcome,
     LifecycleQuarantineRequest, LifecycleQuarantineStatus,
+};
+pub(crate) use reclaim_scope::{
+    drain_scope_admits_upper_tier, reclaim_only_scope_after_open, ReclaimOnlyScope,
 };
 #[allow(
     unused_imports,

@@ -2413,19 +2413,28 @@ fn api_reopen_reconciles_stale_table_objects() {
     }
 
     let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
-    let mut runtime = StorageRuntime::open_with_backend(
+    let runtime = StorageRuntime::open_with_backend(
         StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
         backend,
     )
     .expect("reopen durable runtime")
     .into_runtime();
-    drain_maintenance_to_idle(&mut runtime);
-
-    let after = table_data_object_files(&root);
-    assert!(
-        !after.contains(&orphan_path),
-        "the planted orphan must be reclaimed by the post-recovery reconcile",
-    );
+    // Space-reclamation contract §3.1 (slice 4): the open-time wake runs the
+    // post-recovery mark → sweep → purge on the worker, so the reconcile needs
+    // no call at all — a foreground drain here would race the worker for the
+    // same chain. Wait for the worker instead.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        runtime.wait_background_idle_for_test();
+        if !table_data_object_files(&root).contains(&orphan_path) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the planted orphan must be reclaimed by the post-recovery reconcile",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let value = runtime
         .read_point(&PointReadRequest::new(
             branch(),
@@ -2605,4 +2614,299 @@ fn zstd_flush_shrinks_on_disk_tables_versus_uncompressed() {
          footprint ({plain_bytes} B) for a highly compressible payload — the \
          compression codec is not reaching the table builder"
     );
+}
+
+/// Space-reclamation contract §3.1 (slice 4): leave a prior session's reclaim
+/// debt on disk. Two flushed L0 objects are superseded by a compaction whose
+/// mark → sweep → purge chain never runs (the close cancels the queued mark,
+/// the contract slice 3 rewrites), and one unflushed tail row is committed so
+/// a later flush would be observable as a new table object. Returns the root,
+/// the backend, the superseded objects, and the full on-disk set at close.
+#[cfg(feature = "localfs")]
+fn plant_reclaim_debt_and_close(
+    name: &str,
+) -> (
+    std::path::PathBuf,
+    &'static StorageBackend,
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let root = temp_dir_for_api_test(name);
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    // No worker: every maintenance step below is driven by hand, so the
+    // chain stops exactly where this helper stops it.
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    runtime.commit(&put_batch(b"gc-a", b"one")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime.commit(&put_batch(b"gc-a", b"two")).expect("commit");
+    runtime.commit(&put_batch(b"gc-b", b"x")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    let superseded = table_data_object_files(&root);
+    assert!(superseded.len() >= 2, "two flushes: {superseded:?}");
+
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    // The compaction request runs the compaction itself; its publish queues the
+    // reclaim mark, which nothing below runs (the close cancels it).
+    let compacted = runtime.maintenance(&compact).expect("compact");
+    assert_eq!(compacted.task(), MaintenanceTask::Compact);
+    let at_close = table_data_object_files(&root);
+    assert!(
+        superseded.iter().all(|object| at_close.contains(object)),
+        "the superseded objects are still on disk: {at_close:?}"
+    );
+    assert!(
+        at_close.len() > superseded.len(),
+        "the compaction output object exists"
+    );
+    runtime
+        .commit(&put_batch(b"tail", b"unflushed"))
+        .expect("commit the unflushed tail row");
+    runtime.close().expect("close");
+    assert_eq!(
+        table_data_object_files(&root),
+        at_close,
+        "a close reclaims nothing before slice 3"
+    );
+    (root, backend, superseded, at_close)
+}
+
+#[cfg(feature = "localfs")]
+fn read_value(runtime: &StorageRuntime<'static>, key: &[u8]) -> Option<Vec<u8>> {
+    runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(key),
+            ReadBound::Latest,
+        ))
+        .expect("read")
+        .row()
+        .and_then(|row| row.value().map(|value| value.as_bytes().to_vec()))
+}
+
+/// The open-time wake alone — no commit, no explicit maintenance — drives the
+/// reopened session's mark → sweep → purge on the real worker, and nothing
+/// else runs: the on-disk set shrinks by exactly the superseded objects.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_open_existing_wakes_the_worker_and_reclaims_prior_debt() {
+    let (root, backend, superseded, at_close) =
+        plant_reclaim_debt_and_close("maintenance-open-wake-reclaims");
+    let expected: std::collections::BTreeSet<String> =
+        at_close.difference(&superseded).cloned().collect();
+    let mut runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        backend,
+    )
+    .expect("reopen durable runtime")
+    .into_runtime();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        runtime.wait_background_idle_for_test();
+        let now = table_data_object_files(&root);
+        if superseded.iter().all(|object| !now.contains(object)) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the open-time wake did not reclaim the prior session's debt: {now:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        table_data_object_files(&root),
+        expected,
+        "only the superseded objects went; a read-only session flushes nothing"
+    );
+    assert_eq!(
+        runtime.reclaim_only_scope_for_test(),
+        Some(crate::lifecycle::ReclaimOnlyScope::Active),
+        "reclaim does not end the reclaim-only scope"
+    );
+    assert_eq!(read_value(&runtime, b"gc-a"), Some(b"two".to_vec()));
+    assert_eq!(read_value(&runtime, b"tail"), Some(b"unflushed".to_vec()));
+    runtime.close().expect("close");
+}
+
+/// The same reclaim under the deterministic inline executor: a read-only
+/// session reclaims on its first progress wait, with no commit ever issued.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_read_only_reopen_reclaims_deterministically() {
+    let (root, backend, superseded, at_close) =
+        plant_reclaim_debt_and_close("maintenance-open-wake-inline");
+    let expected: std::collections::BTreeSet<String> =
+        at_close.difference(&superseded).cloned().collect();
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    assert_eq!(read_value(&runtime, b"gc-a"), Some(b"two".to_vec()));
+    runtime.wait_background_idle_for_test();
+    assert_eq!(table_data_object_files(&root), expected);
+    assert_eq!(
+        runtime.reclaim_only_scope_for_test(),
+        Some(crate::lifecycle::ReclaimOnlyScope::Active)
+    );
+    runtime.close().expect("close");
+}
+
+/// DUR-018: `open` itself reclaims nothing. Without a worker the wake is a
+/// no-op, so the debt is intact right after open — and still reclaimable by an
+/// explicit foreground drain, proving bootstrap queued the real mark.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_open_reclaims_nothing_inline_without_a_worker() {
+    let (root, backend, superseded, at_close) =
+        plant_reclaim_debt_and_close("maintenance-open-wake-no-worker");
+    let expected: std::collections::BTreeSet<String> =
+        at_close.difference(&superseded).cloned().collect();
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    assert_eq!(
+        table_data_object_files(&root),
+        at_close,
+        "open must not reclaim on the caller's thread"
+    );
+    assert_eq!(
+        runtime.reclaim_only_scope_for_test(),
+        Some(crate::lifecycle::ReclaimOnlyScope::Active)
+    );
+    drain_maintenance_to_idle(&mut runtime);
+    assert_eq!(table_data_object_files(&root), expected);
+    runtime.close().expect("close");
+}
+
+/// A created database has no backlog: it starts outside the reclaim-only
+/// scope and its wake-less open leaves the queue empty. A reopened one stays
+/// in the scope through reclaim and leaves it only on its first commit.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_created_open_starts_inactive_and_a_reopen_stays_active_until_the_first_commit() {
+    let root = temp_dir_for_api_test("maintenance-open-wake-scope");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root));
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("create durable runtime")
+        .into_runtime();
+    assert_eq!(
+        runtime.reclaim_only_scope_for_test(),
+        Some(crate::lifecycle::ReclaimOnlyScope::Inactive)
+    );
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0,
+        "a created open queues nothing"
+    );
+    runtime.commit(&put_batch(b"seed", b"v")).expect("commit");
+    runtime.close().expect("close");
+
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    assert_eq!(
+        runtime.reclaim_only_scope_for_test(),
+        Some(crate::lifecycle::ReclaimOnlyScope::Active)
+    );
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime.reclaim_only_scope_for_test(),
+        Some(crate::lifecycle::ReclaimOnlyScope::Active),
+        "reclaim maintenance does not end the scope"
+    );
+    runtime
+        .commit(&put_batch(b"first-write", b"v"))
+        .expect("commit");
+    assert_eq!(
+        runtime.reclaim_only_scope_for_test(),
+        Some(crate::lifecycle::ReclaimOnlyScope::Inactive),
+        "the first applied commit ends the scope"
+    );
+    runtime.close().expect("close");
+}
+
+/// While the scope is active a background drain admits the reclaim tier and
+/// refuses the upper tier: a queued flush stays queued (no new table object)
+/// until the first commit, after which it runs.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_upper_tier_waits_for_the_first_commit_in_a_reclaim_only_session() {
+    let (root, backend, superseded, at_close) =
+        plant_reclaim_debt_and_close("maintenance-open-wake-upper-tier");
+    let expected: std::collections::BTreeSet<String> =
+        at_close.difference(&superseded).cloned().collect();
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    // The replayed tail row sits in the active memtable; rotating it freezes a
+    // table for a flush to write, so a flush becomes observable on disk.
+    runtime
+        .rotate_default_branch_for_test()
+        .expect("rotate the replayed tail");
+    // A BACKGROUND flush task (the public `maintenance` verb runs its request
+    // in the foreground — explicit caller intent, which the scope never
+    // gates), then a low-tier wake like the one `open` arms.
+    runtime
+        .enqueue_lifecycle_maintenance_for_test(crate::lifecycle::MaintenanceTaskRequest::flush(
+            branch(),
+        ))
+        .expect("enqueue background flush");
+    runtime.submit_stale_background_wake_for_test();
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        table_data_object_files(&root),
+        expected,
+        "reclaim ran, the flush did not"
+    );
+    assert!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks()
+            >= 1,
+        "the refused flush stays queued"
+    );
+
+    runtime
+        .commit(&put_batch(b"first-write", b"v"))
+        .expect("commit");
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime.reclaim_only_scope_for_test(),
+        Some(crate::lifecycle::ReclaimOnlyScope::Inactive)
+    );
+    let after_commit = table_data_object_files(&root);
+    assert!(
+        after_commit.len() > expected.len(),
+        "the flush ran once the session wrote: {after_commit:?}"
+    );
+    assert_eq!(read_value(&runtime, b"tail"), Some(b"unflushed".to_vec()));
+    runtime.close().expect("close");
 }
