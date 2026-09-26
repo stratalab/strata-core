@@ -416,3 +416,100 @@ fn aggressive_reclaim_preserves_pre_fork_as_of_across_reopens() {
         "the fork head still reads its own write",
     );
 }
+
+/// Space-reclamation contract §3.4 (slice 5, #3592): pruning superseded
+/// snapshot objects never changes an as-of read — reads resolve from the
+/// recovered rows, never from snapshot objects — and the reclaim survives a
+/// reopen (which reconciles rather than re-grows the family).
+#[test]
+fn as_of_reads_survive_snapshot_pruning_across_reopens() {
+    fn open_pruning(
+        root: std::path::PathBuf,
+    ) -> (&'static StorageBackend, StorageRuntime<'static>) {
+        let backend: &'static StorageBackend = Box::leak(Box::new(StorageBackend::local_fs(root)));
+        let runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+                .with_maintenance_scheduling_policy(
+                    StorageMaintenanceSchedulingPolicy::DeterministicInline,
+                )
+                // The byte threshold fires on every commit (the commit-count
+                // trigger alone fires only when the count EXCEEDS its bound).
+                .with_wal_growth_policy(StorageWalGrowthPolicy::Thresholds {
+                    max_retained_wal_bytes: 1,
+                    max_retained_wal_segments: 1,
+                    max_commits_since_checkpoint: 1,
+                }),
+            backend,
+        )
+        .expect("open pruning runtime")
+        .into_runtime();
+        (backend, runtime)
+    }
+    fn snapshot_object_count(backend: &StorageBackend) -> usize {
+        crate::service::SnapshotService::new(backend.as_backend())
+            .list_snapshots()
+            .expect("list snapshots")
+            .len()
+    }
+    fn attested_snapshot_id(backend: &StorageBackend) -> Option<u64> {
+        crate::service::DatabaseManifestService::new(backend.as_backend())
+            .load_required()
+            .expect("database manifest")
+            .snapshot_id()
+    }
+    fn assert_history(runtime: &StorageRuntime<'static>) {
+        assert_eq!(
+            read_at(
+                runtime,
+                default_branch(),
+                ReadBound::AtTimestamp(Timestamp::from_micros(10))
+            ),
+            Some(b"paris".to_vec()),
+        );
+        assert_eq!(
+            read_at(
+                runtime,
+                default_branch(),
+                ReadBound::AtTimestamp(Timestamp::from_micros(20))
+            ),
+            Some(b"london".to_vec()),
+        );
+        assert_eq!(
+            read_at(runtime, default_branch(), ReadBound::Latest),
+            Some(b"tokyo".to_vec()),
+        );
+    }
+
+    let root = temp_dir_for_api_test("snapshot-prune-as-of-reopen");
+    {
+        let (backend, mut runtime) = open_pruning(root.clone());
+        // Every commit checkpoints; every completed checkpoint chains a prune.
+        for (value, ts) in [(b"paris" as &[u8], 10), (b"london", 20), (b"tokyo", 30)] {
+            put(&mut runtime, default_branch(), value, ts);
+            runtime
+                .drain_maintenance()
+                .expect("drain checkpoint and prune");
+        }
+        let attested = attested_snapshot_id(backend).expect("a checkpoint was published");
+        assert!(
+            attested >= 3,
+            "every commit checkpointed: at least three snapshots were published, got {attested}"
+        );
+        assert_eq!(
+            snapshot_object_count(backend),
+            1,
+            "three checkpoints, one surviving snapshot object"
+        );
+        assert_history(&runtime);
+        runtime.close().expect("close");
+    }
+
+    let (backend, mut runtime) = open_pruning(root);
+    runtime
+        .drain_maintenance()
+        .expect("drain the open reconcile");
+
+    assert!(attested_snapshot_id(backend).is_some_and(|id| id >= 3));
+    assert_eq!(snapshot_object_count(backend), 1);
+    assert_history(&runtime);
+}

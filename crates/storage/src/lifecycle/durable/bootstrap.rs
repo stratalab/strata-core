@@ -288,6 +288,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             .open_plan
             .lifecycle_config()
             .max_maintenance_queue_depth();
+        let attested_snapshot_present = self.assembly_facts().manifest_snapshot_id().is_some();
         let next_checkpoint_snapshot_id = self
             .assembly_facts()
             .manifest_snapshot_id()
@@ -389,6 +390,23 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
                     runtime.initial_branch_id,
                 ),
             );
+            // Space-reclamation contract §3.4 (slice 5): reconcile the snapshot
+            // family to the attested id — the superseded objects a prior session
+            // never pruned and any crash orphan the manifest never attested. An
+            // object above the attested id can only be a crash orphan: a
+            // checkpoint writes its snapshot and re-points the manifest in one
+            // step under the runtime lock, and this prune runs under the same
+            // lock, so it never sees a publish in flight. Only with an attested
+            // id: without one the proof-driven prune can prove nothing dead and
+            // would only defer with telemetry debt. Best-effort for the same
+            // reason as the mark above.
+            if attested_snapshot_present {
+                let _ = runtime.enqueue_maintenance(
+                    crate::lifecycle::MaintenanceTaskRequest::snapshot_pruning_with_mode(
+                        crate::service::SnapshotPruneMode::ReconcileToAttested,
+                    ),
+                );
+            }
             // C2: a reopen starts with a cold block cache and may never see a
             // publish (read-only workloads) — arm the preheat here so the
             // fill happens as soon as recovery-driven maintenance quiesces.

@@ -5113,6 +5113,178 @@ fn background_checkpoint_publishes_empty_delta_over_durable_base() {
     );
 }
 
+/// Space-reclamation contract §3.4 (slice 5, #3592): the background
+/// checkpoint arm chains the superseded-snapshot prune exactly like the
+/// explicit verb and the sync runner do — on `Completed` only.
+#[test]
+fn background_checkpoint_completion_queues_a_superseded_snapshot_prune() {
+    use crate::service::SnapshotService;
+
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x91);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    let pending_prunes =
+        |runtime: &LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>| {
+            runtime
+                .pending_maintenance_kinds_for_test()
+                .iter()
+                .filter(|kind| **kind == MaintenanceTaskKind::SnapshotPruning)
+                .count()
+        };
+    let snapshot_count = || {
+        SnapshotService::new(backend)
+            .list_snapshots()
+            .expect("list snapshots")
+            .len()
+    };
+
+    for key in [
+        b"background-prune-a" as &'static [u8],
+        b"background-prune-b",
+    ] {
+        runtime
+            .execute_durable_commit(durable_put_batch(branch, key, b"value"), generation_guard())
+            .expect("durable commit");
+        runtime
+            .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+            .expect("enqueue checkpoint");
+        let step = runtime
+            .start_next_background_checkpoint_maintenance()
+            .expect("start background checkpoint")
+            .expect("background checkpoint step");
+        let DurableBackgroundMaintenanceStep::Build(pending) = step else {
+            panic!("expected a checkpoint build step, got a completed outcome");
+        };
+        let built = (*pending).build().expect("build checkpoint");
+        let outcome = match runtime
+            .begin_publish_phase(built)
+            .expect("begin publish phase")
+        {
+            PreparedPublishStep::Done(result) => result.expect("publish done"),
+            PreparedPublishStep::OffLock(prepared) => {
+                let (prepared, write_result) = prepared.persist_off_lock();
+                runtime
+                    .finish_publish_phase(prepared, write_result)
+                    .expect("finish publish phase")
+            }
+        };
+        assert_eq!(outcome.status(), MaintenanceOutcomeStatus::Completed);
+        assert_eq!(
+            pending_prunes(&runtime),
+            1,
+            "a completed background checkpoint queues one prune"
+        );
+    }
+    assert_eq!(
+        snapshot_count(),
+        2,
+        "nothing runs until the retention lane serves the prune"
+    );
+
+    let prune = loop {
+        let outcome = runtime
+            .run_next_retention_maintenance()
+            .expect("retention lane")
+            .expect("a queued prune");
+        if outcome.task_kind() == MaintenanceTaskKind::SnapshotPruning {
+            break outcome;
+        }
+    };
+
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(prune.state_changes(), 1);
+    assert_eq!(snapshot_count(), 1, "only the live snapshot survives");
+    assert_eq!(pending_prunes(&runtime), 0);
+}
+
+/// Slice 5 (#3592), the other side of the background arm: a background
+/// checkpoint that does not complete (nothing to publish) queues no prune.
+#[test]
+fn background_checkpoint_that_does_not_complete_queues_no_snapshot_prune() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x92);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+
+    let outcome = match runtime
+        .start_next_background_checkpoint_maintenance()
+        .expect("start background checkpoint")
+        .expect("background checkpoint step")
+    {
+        DurableBackgroundMaintenanceStep::Completed(outcome) => *outcome,
+        DurableBackgroundMaintenanceStep::Build(pending) => {
+            let built = (*pending).build().expect("build checkpoint");
+            match runtime
+                .begin_publish_phase(built)
+                .expect("begin publish phase")
+            {
+                PreparedPublishStep::Done(result) => result.expect("publish done"),
+                PreparedPublishStep::OffLock(prepared) => {
+                    let (prepared, write_result) = prepared.persist_off_lock();
+                    runtime
+                        .finish_publish_phase(prepared, write_result)
+                        .expect("finish publish phase")
+                }
+            }
+        }
+        _ => panic!("expected a checkpoint step"),
+    };
+
+    assert_ne!(outcome.status(), MaintenanceOutcomeStatus::Completed);
+    assert!(!runtime
+        .pending_maintenance_kinds_for_test()
+        .contains(&MaintenanceTaskKind::SnapshotPruning));
+}
+
+/// Slice 5 (#3592): a checkpoint leased before close and published after
+/// close was requested completes, and its chained prune is simply refused
+/// (ordinary enqueues are not admitted while closing) — no panic, no debt.
+#[test]
+fn background_checkpoint_published_during_close_completes_without_queuing_a_prune() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x93);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_put_batch(branch, b"closing-prune", b"value"),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+    let step = runtime
+        .start_next_background_checkpoint_maintenance()
+        .expect("start background checkpoint")
+        .expect("background checkpoint step");
+    let DurableBackgroundMaintenanceStep::Build(pending) = step else {
+        panic!("expected a checkpoint build step");
+    };
+    let built = (*pending).build().expect("build checkpoint");
+    runtime
+        .force_close_requested_for_test()
+        .expect("close requested");
+
+    let outcome = match runtime
+        .begin_publish_phase(built)
+        .expect("begin publish phase")
+    {
+        PreparedPublishStep::Done(result) => result.expect("publish done"),
+        PreparedPublishStep::OffLock(_) => panic!("checkpoint publishes run to completion"),
+    };
+
+    assert_eq!(outcome.status(), MaintenanceOutcomeStatus::Completed);
+    assert!(!runtime
+        .pending_maintenance_kinds_for_test()
+        .contains(&MaintenanceTaskKind::SnapshotPruning));
+    assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
+}
+
 #[test]
 fn durable_assembly_refuses_a_missing_manifest_when_durable_objects_exist() {
     // #3015 promoted contract: an existing store whose database manifest is
@@ -5201,4 +5373,153 @@ fn durable_assembly_refuses_a_missing_manifest_for_every_post_manifest_family() 
             "{object:?}: {error:?}"
         );
     }
+}
+
+/// Slice 5 (#3592): a close-drained snapshot prune runs through the close
+/// runner's snapshot arm and deletes the superseded object during close.
+#[test]
+fn durable_close_drains_a_drain_before_close_snapshot_prune_and_deletes_the_superseded_snapshot() {
+    use crate::service::SnapshotService;
+
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x94);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    for key in [b"close-prune-a" as &'static [u8], b"close-prune-b"] {
+        runtime
+            .execute_durable_commit(durable_put_batch(branch, key, b"value"), generation_guard())
+            .expect("durable commit");
+        runtime
+            .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+            .expect("enqueue checkpoint");
+        let checkpoint = runtime
+            .run_next_checkpoint_maintenance()
+            .expect("run checkpoint")
+            .expect("checkpoint outcome");
+        assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+    }
+    let snapshot_ids = |backend: &DurableTestBackend| -> Vec<u64> {
+        SnapshotService::new(backend)
+            .list_snapshots()
+            .expect("list snapshots")
+            .iter()
+            .map(crate::service::SnapshotObject::snapshot_id)
+            .collect()
+    };
+    let before = snapshot_ids(backend);
+    assert_eq!(before.len(), 2, "two snapshots before close");
+    let superseded = ObjectLayout::snapshot(before[0]).expect("superseded object");
+    runtime
+        .enqueue_maintenance(
+            MaintenanceTaskRequest::new(
+                MaintenanceTaskKind::SnapshotPruning,
+                MaintenanceTaskPriority::Low,
+                MaintenanceTaskScope::Retention,
+                MaintenanceTaskPolicy::drain_before_close(),
+            )
+            .expect("drain-before-close snapshot prune"),
+        )
+        .expect("enqueue prune");
+    let operations_before_close = backend.operations().len();
+
+    let close = runtime.close().expect("close drains the prune");
+
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    let deleted: Vec<_> = backend.operations()[operations_before_close..]
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::DeleteObject(object) => Some(object.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deleted,
+        vec![superseded],
+        "close deleted exactly the superseded snapshot"
+    );
+    assert_eq!(snapshot_ids(backend), vec![before[1]]);
+}
+
+/// Slice 5 (#3592): a close-drained global retention task runs through the
+/// close runner's global arm, whose snapshot family is the same prune.
+#[test]
+fn durable_close_drains_a_drain_before_close_global_retention_task_and_prunes_snapshots() {
+    use crate::service::SnapshotService;
+
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x95);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    for key in [b"close-global-a" as &'static [u8], b"close-global-b"] {
+        runtime
+            .execute_durable_commit(durable_put_batch(branch, key, b"value"), generation_guard())
+            .expect("durable commit");
+        runtime
+            .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+            .expect("enqueue checkpoint");
+        let checkpoint = runtime
+            .run_next_checkpoint_maintenance()
+            .expect("run checkpoint")
+            .expect("checkpoint outcome");
+        assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+    }
+    let snapshot_ids = |backend: &DurableTestBackend| -> Vec<u64> {
+        SnapshotService::new(backend)
+            .list_snapshots()
+            .expect("list snapshots")
+            .iter()
+            .map(crate::service::SnapshotObject::snapshot_id)
+            .collect()
+    };
+    // Serve the checkpoints' own chained prune now, so the close-time global
+    // task is the only thing left that can prune the object planted below.
+    while let Some(outcome) = runtime
+        .run_next_retention_maintenance()
+        .expect("retention lane")
+    {
+        if outcome.task_kind() == MaintenanceTaskKind::SnapshotPruning {
+            break;
+        }
+    }
+    let live = snapshot_ids(backend);
+    assert_eq!(live.len(), 1, "the chained prune left the live snapshot");
+    let live_object = ObjectLayout::snapshot(live[0]).expect("live object");
+    let superseded = ObjectLayout::snapshot(live[0] - 1).expect("superseded object");
+    let live_bytes = backend
+        .read_object(&live_object)
+        .expect("live snapshot bytes");
+    backend
+        .write_object(&superseded, &live_bytes)
+        .expect("plant a superseded snapshot object");
+    let before = snapshot_ids(backend);
+    assert_eq!(before.len(), 2, "two snapshots before close");
+    runtime
+        .enqueue_maintenance(
+            MaintenanceTaskRequest::new(
+                MaintenanceTaskKind::Retention,
+                MaintenanceTaskPriority::Low,
+                MaintenanceTaskScope::Retention,
+                MaintenanceTaskPolicy::drain_before_close(),
+            )
+            .expect("drain-before-close global retention"),
+        )
+        .expect("enqueue retention");
+    let operations_before_close = backend.operations().len();
+
+    let close = runtime.close().expect("close drains the retention task");
+
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    let deleted: Vec<_> = backend.operations()[operations_before_close..]
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::DeleteObject(object) => Some(object.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deleted,
+        vec![superseded],
+        "close deleted exactly the superseded snapshot"
+    );
+    assert_eq!(snapshot_ids(backend), vec![before[1]]);
 }

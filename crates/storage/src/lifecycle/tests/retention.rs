@@ -9,21 +9,25 @@ use crate::layout::ObjectLayout;
 #[cfg(feature = "perf-trace")]
 use crate::lifecycle::retention::reject_implicit_snapshot_floor_advancement;
 use crate::lifecycle::retention::{
-    retention_outcome_for_delegated_families, retention_outcome_for_scope,
+    retention_outcome_for_delegated_families, retention_outcome_for_scope, snapshot_mode_decision,
     table_quarantine_candidate,
 };
 use crate::object::{ObjectName, ObjectPrefix};
-use crate::service::SnapshotService;
+use crate::service::{
+    reconcilable_orphan, superseded_snapshot, SnapshotPruneMode, SnapshotService,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
-use strata_core::{BranchId, CommitVersion};
+use strata_core::{BranchId, CommitVersion, Timestamp};
 
 use super::checkpoint::shared::{
-    branch_id as durable_branch_id, durable_batch, generation_guard, open_runtime,
-    CheckpointTestBackend,
+    branch_id as durable_branch_id, durable_batch, generation_guard, open_runtime, physical_key,
+    CheckpointBackendEvent, CheckpointTestBackend,
 };
+use crate::commit::CommitManualTimestampSource;
+use crate::lifecycle::durable::LifecycleDurableLocalRuntime;
 
 const DATABASE_ID: [u8; 16] = [0x4d; 16];
 
@@ -1267,7 +1271,18 @@ fn global_retention_task_prunes_snapshots_through_durable_maintenance() {
             .expect("run checkpoint")
             .expect("checkpoint");
         assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+        // Slice 5: a completed checkpoint chains its own superseded prune;
+        // serve it so the explicit retention task below is what prunes.
+        drain_snapshot_prune(&mut runtime);
     }
+    assert_eq!(backend.snapshot_objects().len(), 1);
+    assert_eq!(backend.delete_calls(), 1);
+    // A superseded snapshot object the chain never saw (a prior session's).
+    let live_bytes = backend
+        .object_snapshot()
+        .remove(&snapshot_object(2))
+        .expect("live snapshot bytes");
+    backend.replace_object_bytes(&snapshot_object(1), live_bytes);
     assert_eq!(backend.snapshot_objects().len(), 2);
 
     let enqueue = runtime
@@ -1282,7 +1297,7 @@ fn global_retention_task_prunes_snapshots_through_durable_maintenance() {
     assert_eq!(maintenance.task_kind(), MaintenanceTaskKind::Retention);
     assert_eq!(maintenance.status(), MaintenanceOutcomeStatus::Completed);
     assert_eq!(maintenance.state_changes(), 1);
-    assert_eq!(backend.delete_calls(), 1);
+    assert_eq!(backend.delete_calls(), 2);
     assert_eq!(backend.snapshot_objects().len(), 1);
 }
 
@@ -1990,4 +2005,1097 @@ fn proof_deferral_reason_truth_table() {
     for (status, expected) in cases {
         assert_eq!(proof_deferral_reason(status), expected, "{status:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Space-reclamation contract §3.4 (slice 5, #3592): proof-driven prune modes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn superseded_snapshot_truth_table() {
+    for (snapshot_id, live_snapshot_id, expected) in [
+        (1, 3, true),
+        (2, 3, true),
+        (3, 3, false),
+        (4, 3, false),
+        (u64::MAX, 3, false),
+        (1, 1, false),
+    ] {
+        assert_eq!(
+            superseded_snapshot(snapshot_id, live_snapshot_id),
+            expected,
+            "snapshot {snapshot_id} against live {live_snapshot_id}"
+        );
+    }
+}
+
+#[test]
+fn reconcilable_orphan_truth_table() {
+    for (snapshot_id, attested_snapshot_id, expected) in [
+        (1, 3, true),
+        (2, 3, true),
+        (3, 3, false),
+        (4, 3, true),
+        (u64::MAX, 3, true),
+        (1, 1, false),
+    ] {
+        assert_eq!(
+            reconcilable_orphan(snapshot_id, attested_snapshot_id),
+            expected,
+            "snapshot {snapshot_id} against attested {attested_snapshot_id}"
+        );
+    }
+}
+
+type ModeDecisionRow = (
+    &'static str,
+    u64,
+    Option<u64>,
+    bool,
+    (RetentionDecision, LifecycleRetentionDecisionReason),
+);
+
+fn assert_mode_decisions<const N: usize>(mode: SnapshotPruneMode, rows: [ModeDecisionRow; N]) {
+    for (case, snapshot_id, live_snapshot_id, newest_retained, expected) in rows {
+        assert_eq!(
+            snapshot_mode_decision(mode, snapshot_id, live_snapshot_id, newest_retained),
+            expected,
+            "{mode:?}: {case}"
+        );
+    }
+}
+
+#[test]
+fn snapshot_mode_decision_truth_table_newest_window() {
+    use LifecycleRetentionDecisionReason as Reason;
+    use RetentionDecision::{PruneCandidate, Retain};
+
+    assert_mode_decisions(
+        SnapshotPruneMode::RetainNewest,
+        [
+            (
+                "keeps the window",
+                1,
+                Some(3),
+                true,
+                (Retain, Reason::NewestSnapshotWindow),
+            ),
+            (
+                "prunes outside it",
+                1,
+                Some(3),
+                false,
+                (PruneCandidate, Reason::SnapshotPruneCandidate),
+            ),
+            (
+                "needs no live id",
+                1,
+                None,
+                false,
+                (PruneCandidate, Reason::SnapshotPruneCandidate),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn snapshot_mode_decision_truth_table_superseded() {
+    use LifecycleRetentionDecisionReason as Reason;
+    use RetentionDecision::{PruneCandidate, Retain};
+
+    assert_mode_decisions(
+        SnapshotPruneMode::Superseded,
+        [
+            (
+                "below live",
+                2,
+                Some(3),
+                false,
+                (PruneCandidate, Reason::SupersededSnapshot),
+            ),
+            (
+                "ignores the newest window",
+                2,
+                Some(3),
+                true,
+                (PruneCandidate, Reason::SupersededSnapshot),
+            ),
+            (
+                "at live",
+                3,
+                Some(3),
+                false,
+                (Retain, Reason::AboveLiveSnapshot),
+            ),
+            (
+                "above live",
+                5,
+                Some(3),
+                false,
+                (Retain, Reason::AboveLiveSnapshot),
+            ),
+            (
+                "without a live id",
+                1,
+                None,
+                false,
+                (Retain, Reason::ProofIncomplete),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn snapshot_mode_decision_truth_table_reconcile_to_attested() {
+    use LifecycleRetentionDecisionReason as Reason;
+    use RetentionDecision::{PruneCandidate, Retain};
+
+    assert_mode_decisions(
+        SnapshotPruneMode::ReconcileToAttested,
+        [
+            (
+                "below attested",
+                2,
+                Some(3),
+                false,
+                (PruneCandidate, Reason::NonAttestedSnapshot),
+            ),
+            (
+                "above attested, newest window ignored",
+                5,
+                Some(3),
+                true,
+                (PruneCandidate, Reason::NonAttestedSnapshot),
+            ),
+            (
+                "at attested",
+                3,
+                Some(3),
+                false,
+                (Retain, Reason::LiveManifestSnapshot),
+            ),
+            (
+                "without an attested id",
+                1,
+                None,
+                false,
+                (Retain, Reason::ProofIncomplete),
+            ),
+        ],
+    );
+}
+
+fn proof_driven_pruning(
+    backend: &RetentionBackend,
+    live_snapshot_id: u64,
+    mode: SnapshotPruneMode,
+    retain_newest: usize,
+) -> LifecycleSnapshotPruningOutcome {
+    let request =
+        LifecycleRetentionRequest::snapshot_pruning(retain_newest).with_snapshot_prune_mode(mode);
+    let proof = build_retention_proof(
+        &request,
+        Some(&manifest(live_snapshot_id, 7)),
+        &RecoveryHealth::Healthy,
+        backend.remaining_snapshot_ids().len(),
+    );
+    let pruning =
+        LifecycleSnapshotPruningRequest::for_request(proof, &request).expect("pruning request");
+    prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome")
+}
+
+#[test]
+fn superseded_prune_deletes_below_the_live_id_and_protects_at_or_above_it() {
+    let backend: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3, 5]));
+
+    let outcome = proof_driven_pruning(backend, 3, SnapshotPruneMode::Superseded, 1);
+
+    assert!(outcome.completed());
+    assert_eq!(snapshot_ids(outcome.deleted()), [1, 2]);
+    assert_eq!(snapshot_ids(outcome.protected()), [3, 5]);
+    assert!(outcome.failed().is_empty());
+    assert_eq!(backend.remaining_snapshot_ids(), [3, 5]);
+    assert_eq!(backend.delete_calls(), 2);
+}
+
+#[test]
+fn superseded_prune_ignores_the_newest_window_the_explicit_verb_honors() {
+    let proof_driven: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3]));
+    let explicit: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3]));
+
+    let superseded = proof_driven_pruning(proof_driven, 3, SnapshotPruneMode::Superseded, 10);
+    let newest_window = snapshot_pruning(explicit, 3, 10);
+
+    assert_eq!(snapshot_ids(superseded.deleted()), [1, 2]);
+    assert_eq!(proof_driven.remaining_snapshot_ids(), [3]);
+    assert!(newest_window.deleted().is_empty());
+    assert_eq!(explicit.remaining_snapshot_ids(), [1, 2, 3]);
+}
+
+#[test]
+fn reconcile_prune_deletes_every_snapshot_but_the_attested_one() {
+    let backend: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3, 5]));
+
+    let outcome = proof_driven_pruning(backend, 3, SnapshotPruneMode::ReconcileToAttested, 1);
+
+    assert!(outcome.completed());
+    assert_eq!(snapshot_ids(outcome.deleted()), [1, 2, 5]);
+    assert_eq!(snapshot_ids(outcome.protected()), [3]);
+    assert_eq!(backend.remaining_snapshot_ids(), [3]);
+    assert_eq!(backend.delete_calls(), 3);
+}
+
+#[test]
+fn proof_driven_prunes_defer_on_an_incomplete_proof_before_backend_access() {
+    for mode in [
+        SnapshotPruneMode::Superseded,
+        SnapshotPruneMode::ReconcileToAttested,
+    ] {
+        let backend: &'static RetentionBackend =
+            crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3]));
+        let request = LifecycleRetentionRequest::snapshot_pruning(1).with_snapshot_prune_mode(mode);
+        // No manifest snapshot facts: the proof is incomplete.
+        let proof = build_retention_proof(&request, None, &RecoveryHealth::Healthy, 3);
+        let pruning =
+            LifecycleSnapshotPruningRequest::for_request(proof, &request).expect("pruning request");
+
+        let outcome =
+            prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+
+        assert!(outcome.deferred_incomplete_proof(), "{mode:?}");
+        assert_eq!(backend.list_calls(), 0, "{mode:?}");
+        assert_eq!(backend.delete_calls(), 0, "{mode:?}");
+        assert_eq!(backend.remaining_snapshot_ids(), [1, 2, 3], "{mode:?}");
+    }
+}
+
+#[test]
+fn proof_driven_prunes_are_blocked_by_lossy_recovery() {
+    for (mode, health) in [
+        (SnapshotPruneMode::Superseded, data_loss_health()),
+        (SnapshotPruneMode::ReconcileToAttested, data_loss_health()),
+        (SnapshotPruneMode::Superseded, policy_downgrade_health()),
+        (
+            SnapshotPruneMode::ReconcileToAttested,
+            policy_downgrade_health(),
+        ),
+    ] {
+        let backend: &'static RetentionBackend =
+            crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3]));
+        let request = LifecycleRetentionRequest::snapshot_pruning(1).with_snapshot_prune_mode(mode);
+        let proof = build_retention_proof(&request, Some(&manifest(3, 7)), &health, 3);
+        let pruning =
+            LifecycleSnapshotPruningRequest::for_request(proof, &request).expect("pruning request");
+
+        let outcome =
+            prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+
+        assert!(outcome.blocked_by_recovery_health(), "{mode:?} {health:?}");
+        assert_eq!(backend.list_calls(), 0, "{mode:?} {health:?}");
+        assert_eq!(backend.delete_calls(), 0, "{mode:?} {health:?}");
+        assert_eq!(backend.remaining_snapshot_ids(), [1, 2, 3], "{mode:?}");
+    }
+}
+
+#[test]
+fn pruning_request_for_request_carries_the_mode_and_matches_the_newest_window_verb() {
+    let proof = complete_retention_proof(3, 7);
+    let newest_window = LifecycleRetentionRequest::snapshot_pruning(2);
+    let superseded = LifecycleRetentionRequest::snapshot_pruning(2)
+        .with_snapshot_prune_mode(SnapshotPruneMode::Superseded);
+
+    let from_request = LifecycleSnapshotPruningRequest::for_request(proof.clone(), &newest_window)
+        .expect("newest-window request");
+    let explicit = LifecycleSnapshotPruningRequest::new(proof.clone(), 2).expect("explicit verb");
+    let proof_driven = LifecycleSnapshotPruningRequest::for_request(proof, &superseded)
+        .expect("superseded request");
+
+    assert_eq!(from_request, explicit);
+    assert_eq!(
+        from_request.snapshot_prune_mode(),
+        SnapshotPruneMode::RetainNewest
+    );
+    assert_eq!(
+        proof_driven.snapshot_prune_mode(),
+        SnapshotPruneMode::Superseded
+    );
+    assert_eq!(proof_driven.live_snapshot_id(), Some(3));
+    assert_eq!(proof_driven.effective_retain_newest(), 2);
+}
+
+#[test]
+fn maintenance_task_carries_the_snapshot_prune_mode_into_the_retention_request() {
+    for (request, expected_mode) in [
+        (
+            MaintenanceTaskRequest::snapshot_pruning(3),
+            SnapshotPruneMode::RetainNewest,
+        ),
+        (
+            MaintenanceTaskRequest::snapshot_pruning_with_mode(SnapshotPruneMode::Superseded),
+            SnapshotPruneMode::Superseded,
+        ),
+        (
+            MaintenanceTaskRequest::snapshot_pruning_with_mode(
+                SnapshotPruneMode::ReconcileToAttested,
+            ),
+            SnapshotPruneMode::ReconcileToAttested,
+        ),
+    ] {
+        let task = MaintenanceTask::new_for_test(1, request).expect("task");
+        let retention = retention_request_from_maintenance_task(&task).expect("retention request");
+
+        assert_eq!(retention.scope(), LifecycleRetentionScope::SnapshotObjects);
+        assert_eq!(retention.snapshot_prune_mode(), expected_mode);
+        assert_eq!(
+            task.retention_options()
+                .expect("retention options")
+                .snapshot_prune_mode(),
+            expected_mode
+        );
+    }
+}
+
+#[test]
+fn proof_driven_prunes_coalesce_by_mode_and_never_into_the_explicit_verb() {
+    let mut executor = LifecycleMaintenanceExecutor::new(8).expect("executor");
+    let state = open_state();
+
+    let newest_window = executor
+        .enqueue(state, MaintenanceTaskRequest::snapshot_pruning(1))
+        .expect("newest window");
+    let superseded = executor
+        .enqueue(
+            state,
+            MaintenanceTaskRequest::snapshot_pruning_with_mode(SnapshotPruneMode::Superseded),
+        )
+        .expect("superseded");
+    let reconcile = executor
+        .enqueue(
+            state,
+            MaintenanceTaskRequest::snapshot_pruning_with_mode(
+                SnapshotPruneMode::ReconcileToAttested,
+            ),
+        )
+        .expect("reconcile");
+    let superseded_again = executor
+        .enqueue(
+            state,
+            MaintenanceTaskRequest::snapshot_pruning_with_mode(SnapshotPruneMode::Superseded),
+        )
+        .expect("superseded again");
+
+    assert!(newest_window.was_enqueued());
+    assert!(superseded.was_enqueued());
+    assert!(reconcile.was_enqueued());
+    assert!(superseded_again.was_coalesced());
+    assert_eq!(executor.status().pending_tasks(), 3);
+}
+
+#[test]
+fn retention_decisions_follow_the_prune_mode() {
+    use LifecycleRetentionDecisionReason as Reason;
+
+    let backend: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3, 5]));
+    let snapshots = SnapshotService::new(backend)
+        .list_snapshots()
+        .expect("snapshots");
+
+    for (mode, pruned, retained, expected_reasons) in [
+        (
+            SnapshotPruneMode::Superseded,
+            2,
+            2,
+            vec![
+                (Reason::SupersededSnapshot, 2),
+                (Reason::LiveManifestSnapshot, 1),
+                (Reason::AboveLiveSnapshot, 1),
+            ],
+        ),
+        (
+            SnapshotPruneMode::ReconcileToAttested,
+            3,
+            1,
+            vec![
+                (Reason::NonAttestedSnapshot, 3),
+                (Reason::LiveManifestSnapshot, 1),
+            ],
+        ),
+        (
+            SnapshotPruneMode::RetainNewest,
+            2,
+            2,
+            vec![
+                (Reason::SnapshotPruneCandidate, 2),
+                (Reason::LiveManifestSnapshot, 1),
+                (Reason::NewestSnapshotWindow, 1),
+            ],
+        ),
+    ] {
+        let request = LifecycleRetentionRequest::snapshot_pruning(1).with_snapshot_prune_mode(mode);
+        let proof = build_retention_proof(
+            &request,
+            Some(&manifest(3, 7)),
+            &RecoveryHealth::Healthy,
+            snapshots.len(),
+        );
+
+        let outcome =
+            retention_outcome_for_scope(&request, proof, &snapshots).expect("retention outcome");
+
+        assert_eq!(
+            outcome.status(),
+            LifecycleRetentionStatus::Completed,
+            "{mode:?}"
+        );
+        assert_eq!(outcome.objects_pruned(), pruned, "{mode:?}");
+        assert_eq!(outcome.objects_retained(), retained, "{mode:?}");
+        for (reason, count) in expected_reasons {
+            assert_eq!(
+                outcome
+                    .decisions()
+                    .iter()
+                    .filter(|decision| decision.reason() == reason)
+                    .count(),
+                count,
+                "{mode:?} {reason:?}"
+            );
+        }
+        // The decision path and the deleter agree: nothing was deleted here.
+        assert_eq!(backend.delete_calls(), 0);
+
+        // The Global scope carries the same mode into its snapshot decisions
+        // (its WAL and quarantine families stay delegated).
+        let global = LifecycleRetentionRequest::global(1).with_snapshot_prune_mode(mode);
+        let proof = build_retention_proof(
+            &global,
+            Some(&manifest(3, 7)),
+            &RecoveryHealth::Healthy,
+            snapshots.len(),
+        );
+        let outcome =
+            retention_outcome_for_scope(&global, proof, &snapshots).expect("global outcome");
+        assert_eq!(outcome.objects_pruned(), pruned, "global {mode:?}");
+        assert_eq!(
+            outcome
+                .decisions()
+                .iter()
+                .filter(|decision| decision.family() == LifecycleRetentionObjectFamily::Snapshot)
+                .count(),
+            snapshots.len(),
+            "global {mode:?}"
+        );
+    }
+}
+
+// --- checkpoint chaining and the open reconcile, through the durable runtime ---
+
+fn checkpoint_through_sync_runner(
+    runtime: &mut LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+    snapshot_id: u64,
+) -> MaintenanceOutcome {
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint_with_options(
+            MaintenanceCheckpointOptions::new(Some(snapshot_id), false),
+        ))
+        .expect("enqueue checkpoint");
+    runtime
+        .run_next_checkpoint_maintenance()
+        .expect("run checkpoint")
+        .expect("checkpoint outcome")
+}
+
+fn pending_snapshot_prunes(
+    runtime: &LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+) -> usize {
+    runtime
+        .pending_maintenance_kinds_for_test()
+        .iter()
+        .filter(|kind| **kind == MaintenanceTaskKind::SnapshotPruning)
+        .count()
+}
+
+/// The retention lane serves marks and prunes in queue order; run it until
+/// the queued snapshot prune has completed and return that outcome.
+fn drain_snapshot_prune(
+    runtime: &mut LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+) -> MaintenanceOutcome {
+    while let Some(outcome) = runtime
+        .run_next_retention_maintenance()
+        .expect("retention lane")
+    {
+        if outcome.task_kind() == MaintenanceTaskKind::SnapshotPruning {
+            return outcome;
+        }
+    }
+    panic!("no snapshot prune was queued");
+}
+
+fn snapshot_object(snapshot_id: u64) -> ObjectName {
+    ObjectLayout::snapshot(snapshot_id).expect("snapshot object")
+}
+
+fn sorted_snapshot_objects<const N: usize>(ids: [u64; N]) -> Vec<ObjectName> {
+    let mut objects = ids.map(snapshot_object).to_vec();
+    objects.sort();
+    objects
+}
+
+fn manifest_replacements_so_far(backend: &CheckpointTestBackend) -> usize {
+    backend
+        .events()
+        .iter()
+        .filter(|event| matches!(event, CheckpointBackendEvent::DatabaseRecordReplace))
+        .count()
+}
+
+fn attested_snapshot_id(backend: &CheckpointTestBackend) -> Option<u64> {
+    crate::service::DatabaseManifestService::new(backend)
+        .load_required()
+        .expect("database manifest")
+        .snapshot_id()
+}
+
+#[test]
+fn completed_checkpoints_chain_a_superseded_prune_that_leaves_one_snapshot() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xa1);
+    let mut runtime = open_runtime(branch, backend);
+    assert_eq!(
+        pending_snapshot_prunes(&runtime),
+        0,
+        "a created store owes no prune"
+    );
+
+    for (snapshot_id, key) in [
+        (1, b"chain-a" as &'static [u8]),
+        (2, b"chain-b" as &'static [u8]),
+        (3, b"chain-c" as &'static [u8]),
+    ] {
+        runtime
+            .execute_durable_commit(durable_batch(branch, key, b"value"), generation_guard())
+            .expect("commit");
+        let checkpoint = checkpoint_through_sync_runner(&mut runtime, snapshot_id);
+        assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+        assert_eq!(
+            pending_snapshot_prunes(&runtime),
+            1,
+            "a completed checkpoint queues exactly one prune"
+        );
+
+        let prune = drain_snapshot_prune(&mut runtime);
+
+        assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+        assert_eq!(
+            prune.state_changes(),
+            usize::from(snapshot_id > 1),
+            "the prune deletes the one superseded snapshot"
+        );
+        assert_eq!(
+            backend.snapshot_objects(),
+            vec![snapshot_object(snapshot_id)]
+        );
+        assert_eq!(attested_snapshot_id(backend), Some(snapshot_id));
+        assert_eq!(pending_snapshot_prunes(&runtime), 0);
+    }
+}
+
+#[test]
+fn superseded_prune_protects_the_live_snapshot_and_any_id_at_or_above_it() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xa2);
+    let mut runtime = open_runtime(branch, backend);
+    for (snapshot_id, key) in [
+        (1, b"above-a" as &'static [u8]),
+        (2, b"above-b" as &'static [u8]),
+    ] {
+        runtime
+            .execute_durable_commit(durable_batch(branch, key, b"value"), generation_guard())
+            .expect("commit");
+        let checkpoint = checkpoint_through_sync_runner(&mut runtime, snapshot_id);
+        assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+    }
+    // Two completed checkpoints, one coalesced prune still queued.
+    assert_eq!(pending_snapshot_prunes(&runtime), 1);
+    // A snapshot object above the live id: a publish whose manifest re-point
+    // has not landed. Its bytes are the live snapshot's so it lists as one.
+    let live_bytes = backend
+        .object_snapshot()
+        .remove(&snapshot_object(2))
+        .expect("live snapshot bytes");
+    backend.replace_object_bytes(&snapshot_object(5), live_bytes);
+    assert_eq!(
+        backend.snapshot_objects(),
+        sorted_snapshot_objects([1, 2, 5])
+    );
+
+    let prune = drain_snapshot_prune(&mut runtime);
+
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(prune.state_changes(), 1);
+    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([2, 5]));
+    assert_eq!(attested_snapshot_id(backend), Some(2));
+}
+
+#[test]
+fn explicit_checkpoint_verb_queues_a_prune_only_when_it_completes() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xa3);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"verb-key", b"value"),
+            generation_guard(),
+        )
+        .expect("commit");
+    let request =
+        LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(41)).expect("request");
+
+    let outcome = runtime.checkpoint(&request).expect("checkpoint");
+
+    assert_eq!(outcome.status(), LifecycleCheckpointStatus::Completed);
+    assert_eq!(pending_snapshot_prunes(&runtime), 1);
+    let prune = drain_snapshot_prune(&mut runtime);
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(1)]);
+}
+
+#[test]
+fn uncertain_or_failed_checkpoints_queue_no_prune() {
+    for (case, uncertain) in [
+        ("uncertain manifest re-point", true),
+        ("failed manifest re-point", false),
+    ] {
+        let backend: &'static CheckpointTestBackend =
+            crate::testkit::leak_static(CheckpointTestBackend::new());
+        let branch = durable_branch_id(0xa4);
+        let mut runtime = open_runtime(branch, backend);
+        runtime
+            .execute_durable_commit(
+                durable_batch(branch, b"no-prune-key", b"value"),
+                generation_guard(),
+            )
+            .expect("commit");
+        // The checkpoint replaces the manifest twice (active-WAL-segment
+        // persist, then the re-point); fault the re-point.
+        let re_point = manifest_replacements_so_far(backend) + 2;
+        if uncertain {
+            backend.uncertain_manifest_replacement_on_call(re_point);
+        } else {
+            backend.fail_manifest_replacement_on_call(re_point);
+        }
+        let request = LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(42))
+            .expect("request");
+
+        let outcome = runtime.checkpoint(&request).expect(case);
+
+        let expected = if uncertain {
+            LifecycleCheckpointStatus::SnapshotVisibilityUncertain
+        } else {
+            LifecycleCheckpointStatus::SnapshotPublishedManifestNotUpdated
+        };
+        assert_eq!(outcome.status(), expected, "{case}");
+        assert_eq!(pending_snapshot_prunes(&runtime), 0, "{case}");
+    }
+
+    // The same refusal through the sync runner.
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xa5);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"no-prune-runner-key", b"value"),
+            generation_guard(),
+        )
+        .expect("commit");
+    backend.fail_manifest_replacement_on_call(manifest_replacements_so_far(backend) + 2);
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint_with_options(
+            MaintenanceCheckpointOptions::new(Some(1), false),
+        ))
+        .expect("enqueue checkpoint");
+
+    let outcome = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("run checkpoint")
+        .expect("checkpoint outcome");
+
+    assert_eq!(outcome.status(), MaintenanceOutcomeStatus::Failed);
+    assert_eq!(attested_snapshot_id(backend), None);
+    assert_eq!(pending_snapshot_prunes(&runtime), 0);
+}
+
+#[test]
+fn reopen_reconciles_the_snapshot_family_to_the_attested_id() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xa6);
+    let mut runtime = open_runtime(branch, backend);
+    for (snapshot_id, key) in [
+        (1, b"reopen-a" as &'static [u8]),
+        (2, b"reopen-b" as &'static [u8]),
+    ] {
+        runtime
+            .execute_durable_commit(durable_batch(branch, key, b"value"), generation_guard())
+            .expect("commit");
+        let checkpoint = checkpoint_through_sync_runner(&mut runtime, snapshot_id);
+        assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+    }
+    // The session ends with its prune undrained, and a crash orphan above the
+    // attested id (a publish the manifest never attested) is left behind.
+    let live_bytes = backend
+        .object_snapshot()
+        .remove(&snapshot_object(2))
+        .expect("live snapshot bytes");
+    backend.replace_object_bytes(&snapshot_object(5), live_bytes);
+    assert_eq!(
+        backend.snapshot_objects(),
+        sorted_snapshot_objects([1, 2, 5])
+    );
+    drop(runtime);
+
+    let mut reopened = open_runtime(branch, backend);
+
+    assert_eq!(
+        pending_snapshot_prunes(&reopened),
+        1,
+        "a reopen queues one reconcile"
+    );
+    assert_eq!(
+        backend.snapshot_objects(),
+        sorted_snapshot_objects([1, 2, 5]),
+        "open reclaims nothing inline"
+    );
+    let prune = drain_snapshot_prune(&mut reopened);
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(prune.state_changes(), 2);
+    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(2)]);
+    assert_eq!(attested_snapshot_id(backend), Some(2));
+    assert_eq!(pending_snapshot_prunes(&reopened), 0);
+}
+
+#[test]
+fn a_snapshot_published_without_its_manifest_repoint_is_reconciled_at_the_next_open() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xa7);
+    let first_key = physical_key(branch, b"orphan-newest-a");
+    let second_key = physical_key(branch, b"orphan-newest-b");
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"orphan-newest-a", b"value-a"),
+            generation_guard(),
+        )
+        .expect("first commit");
+    let first = checkpoint_through_sync_runner(&mut runtime, 1);
+    assert_eq!(first.status(), MaintenanceOutcomeStatus::Completed);
+    drain_snapshot_prune(&mut runtime);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"orphan-newest-b", b"value-b"),
+            generation_guard(),
+        )
+        .expect("second commit");
+    // The second checkpoint replaces the manifest twice: the active-WAL-segment
+    // persist first, then the snapshot re-point. Fail the re-point, so the
+    // snapshot object is published but never attested.
+    backend.fail_manifest_replacement_on_call(manifest_replacements_so_far(backend) + 2);
+    let request =
+        LifecycleCheckpointRequest::new(branch, 2, Timestamp::from_micros(43)).expect("request");
+
+    let outcome = runtime.checkpoint(&request).expect("partial checkpoint");
+
+    assert_eq!(
+        outcome.status(),
+        LifecycleCheckpointStatus::SnapshotPublishedManifestNotUpdated
+    );
+    assert_eq!(
+        pending_snapshot_prunes(&runtime),
+        0,
+        "no prune without a completed checkpoint"
+    );
+    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 2]));
+    assert_eq!(attested_snapshot_id(backend), Some(1));
+    drop(runtime);
+
+    let mut reopened = open_runtime(branch, backend);
+    let prune = drain_snapshot_prune(&mut reopened);
+
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(prune.state_changes(), 1);
+    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(1)]);
+    assert_eq!(attested_snapshot_id(backend), Some(1));
+    let view = reopened.read_view().expect("view");
+    for (key, value) in [(&first_key, b"value-a" as &[u8]), (&second_key, b"value-b")] {
+        assert_eq!(
+            view.latest(key)
+                .expect("read")
+                .expect("visible")
+                .row()
+                .value(),
+            value,
+            "the orphan snapshot's rows are recovered from the WAL"
+        );
+    }
+}
+
+#[test]
+fn a_failed_snapshot_delete_keeps_the_live_snapshot_and_leaves_the_rest_for_the_next_prune() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xa8);
+    let mut runtime = open_runtime(branch, backend);
+    for (snapshot_id, key) in [
+        (1, b"fault-a" as &'static [u8]),
+        (2, b"fault-b" as &'static [u8]),
+        (3, b"fault-c" as &'static [u8]),
+    ] {
+        runtime
+            .execute_durable_commit(durable_batch(branch, key, b"value"), generation_guard())
+            .expect("commit");
+        let checkpoint = checkpoint_through_sync_runner(&mut runtime, snapshot_id);
+        assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+    }
+    assert_eq!(
+        backend.snapshot_objects(),
+        sorted_snapshot_objects([1, 2, 3])
+    );
+    // The prune lists ascending: the first delete (snapshot 1) fails.
+    backend.fail_delete_on_call(backend.delete_calls() + 1);
+
+    let prune = drain_snapshot_prune(&mut runtime);
+
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(prune.state_changes(), 1);
+    assert!(
+        prune.recovery_health().is_some(),
+        "the failed delete is health debt"
+    );
+    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 3]));
+    assert_eq!(attested_snapshot_id(backend), Some(3));
+
+    // The next prune finishes the job.
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::snapshot_pruning_with_mode(
+            SnapshotPruneMode::Superseded,
+        ))
+        .expect("enqueue prune");
+    let retry = drain_snapshot_prune(&mut runtime);
+
+    assert_eq!(retry.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(retry.state_changes(), 1);
+    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(3)]);
+}
+
+#[test]
+fn reopen_of_a_never_checkpointed_store_queues_no_reconcile() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xa9);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"never-checkpointed", b"value"),
+            generation_guard(),
+        )
+        .expect("commit");
+    assert_eq!(attested_snapshot_id(backend), None);
+    drop(runtime);
+
+    let mut reopened = open_runtime(branch, backend);
+
+    // Nothing is attested, so nothing can be proven dead: no prune is queued
+    // (a deferred prune would only leave telemetry debt behind).
+    assert_eq!(pending_snapshot_prunes(&reopened), 0);
+    while let Some(outcome) = reopened
+        .run_next_retention_maintenance()
+        .expect("retention lane")
+    {
+        assert_ne!(outcome.task_kind(), MaintenanceTaskKind::SnapshotPruning);
+    }
+    assert!(backend.snapshot_objects().is_empty());
+}
+
+/// A crash between the snapshot publish and the manifest re-point leaves an
+/// orphan at attested+1 — exactly the id the next open allocates (#3612).
+/// Until the reconcile removes it, a runtime-allocated checkpoint collides;
+/// after it, the same allocation completes.
+#[test]
+fn reopen_reconcile_unblocks_the_snapshot_id_a_crash_orphan_occupies() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xaa);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"occupied-a", b"value-a"),
+            generation_guard(),
+        )
+        .expect("first commit");
+    let first = checkpoint_through_sync_runner(&mut runtime, 1);
+    assert_eq!(first.status(), MaintenanceOutcomeStatus::Completed);
+    drain_snapshot_prune(&mut runtime);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"occupied-b", b"value-b"),
+            generation_guard(),
+        )
+        .expect("second commit");
+    backend.fail_manifest_replacement_on_call(manifest_replacements_so_far(backend) + 2);
+    let request =
+        LifecycleCheckpointRequest::new(branch, 2, Timestamp::from_micros(44)).expect("request");
+    let outcome = runtime.checkpoint(&request).expect("partial checkpoint");
+    assert_eq!(
+        outcome.status(),
+        LifecycleCheckpointStatus::SnapshotPublishedManifestNotUpdated
+    );
+    drop(runtime);
+
+    let mut reopened = open_runtime(branch, backend);
+    reopened
+        .execute_durable_commit(
+            durable_batch(branch, b"occupied-c", b"value-c"),
+            generation_guard(),
+        )
+        .expect("third commit");
+    // Before the reconcile: the runtime allocates attested+1 = 2, the orphan's id.
+    reopened
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint_with_options(
+            MaintenanceCheckpointOptions::new(None, false),
+        ))
+        .expect("enqueue checkpoint");
+    let blocked = reopened.run_next_checkpoint_maintenance();
+    match &blocked {
+        Ok(Some(outcome)) => assert_ne!(
+            outcome.status(),
+            MaintenanceOutcomeStatus::Completed,
+            "the orphan occupies the allocated id"
+        ),
+        Ok(None) => panic!("the checkpoint was not attempted"),
+        Err(_) => {}
+    }
+    assert_eq!(attested_snapshot_id(backend), Some(1));
+    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 2]));
+
+    let prune = drain_snapshot_prune(&mut reopened);
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(1)]);
+
+    // After the reconcile: the same runtime allocation completes and attests 2.
+    reopened
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint_with_options(
+            MaintenanceCheckpointOptions::new(None, false),
+        ))
+        .expect("enqueue checkpoint");
+    let completed = reopened
+        .run_next_checkpoint_maintenance()
+        .expect("run checkpoint")
+        .expect("checkpoint outcome");
+    assert_eq!(completed.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(attested_snapshot_id(backend), Some(2));
+    drain_snapshot_prune(&mut reopened);
+    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(2)]);
+}
+
+/// The reopen reconcile can never run against a family whose attested object
+/// is gone: recovery refuses the store first (`corruption.lifecycle.
+/// recovery_corruption`), so the remaining objects — the superseded one and
+/// a crash orphan — are left exactly as found for the operator.
+#[test]
+fn reopen_with_the_attested_snapshot_missing_is_refused_before_any_prune() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xab);
+    let mut runtime = open_runtime(branch, backend);
+    for (snapshot_id, key) in [
+        (1, b"missing-a" as &'static [u8]),
+        (2, b"missing-b" as &'static [u8]),
+    ] {
+        runtime
+            .execute_durable_commit(durable_batch(branch, key, b"value"), generation_guard())
+            .expect("commit");
+        let checkpoint = checkpoint_through_sync_runner(&mut runtime, snapshot_id);
+        assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+    }
+    let live_bytes = backend
+        .object_snapshot()
+        .remove(&snapshot_object(2))
+        .expect("live snapshot bytes");
+    backend.replace_object_bytes(&snapshot_object(5), live_bytes);
+    drop(runtime);
+    backend
+        .delete_object(&snapshot_object(2))
+        .expect("delete attested snapshot");
+    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 5]));
+    let deletes_before = backend.delete_calls();
+
+    let mut shell = super::checkpoint::shared::assemble_shell(branch, backend).expect("shell");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let error = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect_err("a missing attested snapshot refuses recovery");
+
+    assert_eq!(error.code(), "corruption.lifecycle.recovery_corruption");
+    assert_eq!(backend.delete_calls(), deletes_before);
+    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 5]));
+}
+
+/// Slice 5 (#3592): under data-loss recovery health the prune never lists
+/// the family — it defers as a snapshot-prune outcome carrying the health,
+/// and every object stays put for the operator.
+#[test]
+fn superseded_prune_defers_under_data_loss_health_without_listing() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = durable_branch_id(0xac);
+    let mut runtime = open_runtime(branch, backend);
+    for (snapshot_id, key) in [
+        (1, b"data-loss-a" as &'static [u8]),
+        (2, b"data-loss-b" as &'static [u8]),
+    ] {
+        runtime
+            .execute_durable_commit(durable_batch(branch, key, b"value"), generation_guard())
+            .expect("commit");
+        let checkpoint = checkpoint_through_sync_runner(&mut runtime, snapshot_id);
+        assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+    }
+    assert_eq!(pending_snapshot_prunes(&runtime), 1);
+    runtime.record_recovery_health_for_test(&data_loss_health());
+    let listings_before = backend
+        .events()
+        .iter()
+        .filter(|event| matches!(event, CheckpointBackendEvent::ObjectList))
+        .count();
+    let deletes_before = backend.delete_calls();
+
+    let prune = drain_snapshot_prune(&mut runtime);
+
+    assert_eq!(prune.task_kind(), MaintenanceTaskKind::SnapshotPruning);
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Deferred);
+    assert!(
+        prune.recovery_health().is_some(),
+        "the deferral carries the health"
+    );
+    assert_eq!(prune.state_changes(), 0);
+    assert_eq!(
+        backend
+            .events()
+            .iter()
+            .filter(|event| matches!(event, CheckpointBackendEvent::ObjectList))
+            .count(),
+        listings_before,
+        "a blocked prune never lists the snapshot family"
+    );
+    assert_eq!(backend.delete_calls(), deletes_before);
+    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 2]));
 }
