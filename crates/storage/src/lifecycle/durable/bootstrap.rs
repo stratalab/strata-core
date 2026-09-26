@@ -133,6 +133,14 @@ pub(crate) struct LifecycleDurableLocalRuntime<'a, S = CommitManualTimestampSour
     /// C3a: an in-flight pass is suspended (saturated shards or a deferral)
     /// awaiting the next trigger; the kept cursor resumes it.
     pub(super) cache_preheat_paused: bool,
+    /// The delta payload a checkpoint may publish in one snapshot
+    /// (space-reclamation contract §3.3). Production runtimes carry the
+    /// format ceiling; tests lower it to exercise the flush-first deferral.
+    pub(super) checkpoint_delta_cap_bytes: usize,
+    /// The visible version at which a delta-cap deferral last chained a flush
+    /// and a retried checkpoint — the retry runs once per visible version so a
+    /// delta no flush can shrink never spins the queue.
+    pub(super) checkpoint_delta_cap_retry: Option<CommitVersion>,
     /// C3a: blocks covered so far by the pass in flight
     /// (admitted + present + rejects), accumulated across chunks; published
     /// as the coverage-numerator gauge when the pass completes.
@@ -335,6 +343,8 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             cache_preheat_cursor: None,
             cache_preheat_rearm: false,
             cache_preheat_paused: false,
+            checkpoint_delta_cap_bytes: crate::format::MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES,
+            checkpoint_delta_cap_retry: None,
             cache_preheat_pass_blocks: 0,
             #[cfg(test)]
             cache_preheat_chunk_bytes_for_test: None,

@@ -55,6 +55,7 @@ pub(crate) use segment_metadata::{
 pub(crate) use snapshot::{
     decode_snapshot_container, encode_snapshot_container, visit_snapshot_container_sections,
     SnapshotContainer, SnapshotHeader, SnapshotSection, SnapshotSectionRef,
+    MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES,
 };
 pub(crate) use snapshot_rows::{
     decode_snapshot_row_payload, encode_snapshot_row_section, SNAPSHOT_ROW_SECTION_KIND,

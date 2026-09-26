@@ -560,3 +560,11 @@ fn refresh_container_crc_helper_tracks_current_layout() {
         .expect("snapshot header")
     );
 }
+
+/// The materialized payload ceiling is a frozen V1 format limit (spec §12):
+/// recovery's decode envelope and the checkpoint delta cap both derive from
+/// it, so its value is pinned here rather than restated anywhere else.
+#[test]
+fn materialized_snapshot_payload_ceiling_is_sixty_four_mebibytes() {
+    assert_eq!(super::MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES, 67_108_864);
+}

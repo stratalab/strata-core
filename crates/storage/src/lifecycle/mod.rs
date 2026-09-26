@@ -103,14 +103,14 @@ pub(crate) use capability::{
     reason = "checkpoint maintenance exports define the local surface for later slices"
 )]
 pub(crate) use checkpoint::{
-    checkpoint_durable_branch, checkpoint_durable_rows_with_budget,
+    checkpoint_delta_cap_decision, checkpoint_durable_branch, checkpoint_durable_rows_with_budget,
     checkpoint_request_from_maintenance_task, persist_flush_watermark,
-    persist_flush_watermark_with_table_manifest_proof, truncate_wal, validate_wal_retention_proof,
-    wal_truncation_request_from_maintenance_task, LifecycleCheckpointOutcome,
-    LifecycleCheckpointRequest, LifecycleCheckpointStatus, LifecycleFlushWatermarkOutcome,
-    LifecycleFlushWatermarkProof, LifecycleTableManifestBranchCoverage,
-    LifecycleTableManifestCoverageFamilies, LifecycleTableManifestFlushCoverageProof,
-    LifecycleWalTruncationOutcome,
+    persist_flush_watermark_with_table_manifest_proof, should_retry_checkpoint_after_delta_cap,
+    truncate_wal, validate_wal_retention_proof, wal_truncation_request_from_maintenance_task,
+    DeltaCapDecision, LifecycleCheckpointOutcome, LifecycleCheckpointRequest,
+    LifecycleCheckpointStatus, LifecycleFlushWatermarkOutcome, LifecycleFlushWatermarkProof,
+    LifecycleTableManifestBranchCoverage, LifecycleTableManifestCoverageFamilies,
+    LifecycleTableManifestFlushCoverageProof, LifecycleWalTruncationOutcome,
 };
 #[allow(
     unused_imports,

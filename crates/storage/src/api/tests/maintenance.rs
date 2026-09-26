@@ -2606,3 +2606,67 @@ fn zstd_flush_shrinks_on_disk_tables_versus_uncompressed() {
          compression codec is not reaching the table builder"
     );
 }
+
+/// The BACKGROUND checkpoint path (off-lock build, under-lock publish) takes
+/// the same delta-cap deferral: the publish step chains a flush and a retried
+/// checkpoint, and the worker completes the retry with a bounded delta — the
+/// snapshot the runtime could not publish in one go still lands.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_background_checkpoint_over_cap_flushes_first_then_completes() {
+    let root = temp_dir_for_api_test("maintenance-checkpoint-delta-cap-background");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root));
+    let runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        backend,
+    )
+    .expect("open durable runtime")
+    .into_runtime();
+    runtime.set_checkpoint_delta_cap_for_test(2048);
+    for index in 0u8..3 {
+        runtime
+            .commit(&background_put_batch(
+                format!("delta-cap-{index}").as_bytes(),
+                vec![index; 1024],
+            ))
+            .expect("commit");
+    }
+    let before = runtime
+        .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+        .expect("diagnostics before");
+    assert_eq!(before.checkpoint().snapshot_id(), None);
+
+    runtime
+        .enqueue_maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Checkpoint,
+            MaintenanceScope::Global,
+        ))
+        .expect("enqueue background checkpoint");
+    runtime.wait_background_idle_for_test();
+
+    let after = runtime
+        .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+        .expect("diagnostics after");
+    assert!(
+        after.checkpoint().snapshot_id().is_some(),
+        "the chained flush + retried checkpoint must publish: {:?}",
+        after.checkpoint()
+    );
+    // The publish alone does not prove the delta-cap path ran: a 3 KiB delta
+    // fits the real 64 MiB ceiling, so an unwired cap would publish it in one
+    // pass. Two facts only the deferral produces: the checkpoint deferred at
+    // least once, and the chained flush drained the memtable into a durable
+    // owned table (a plain checkpoint snapshots the delta without flushing).
+    let status = runtime.maintenance_status().expect("maintenance status");
+    assert!(
+        status.deferred() >= 1,
+        "the over-cap checkpoint must defer before the retry: {status:?}"
+    );
+    let layout = runtime
+        .branch_source_layout_for_test(branch())
+        .expect("source layout after");
+    assert!(
+        layout.owned_total_tables() >= 1,
+        "the chained flush must have created a durable table: {layout:?}"
+    );
+}

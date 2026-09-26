@@ -15,7 +15,7 @@ use crate::lifecycle::checkpoint::{
     persist_flush_watermark, persist_flush_watermark_with_table_manifest_proof,
     recovery_health_epoch, truncate_wal, wal_truncation_request_from_maintenance_task,
     CheckpointStructuralDeferral, LifecycleCheckpointOutcome, LifecycleCheckpointRequest,
-    LifecycleFlushWatermarkOutcome, LifecycleFlushWatermarkProof,
+    LifecycleCheckpointStatus, LifecycleFlushWatermarkOutcome, LifecycleFlushWatermarkProof,
     LifecycleTableManifestFlushCoverageProof, LifecycleWalTruncationOutcome,
 };
 use crate::lifecycle::compaction::{
@@ -67,9 +67,10 @@ use crate::lifecycle::{
     quarantine_object as quarantine_lifecycle_object, repair_branch_from_maintenance_task,
     repair_branch_quarantine as repair_branch_lifecycle_quarantine,
     repair_quarantine_family as repair_lifecycle_quarantine_family,
-    require_maintenance_enqueue_budget, require_rotate_budget, telemetry_health_debt,
-    wal_retention_watermark, DurableMaterializationBegin, DurableMaterializationBuild,
-    FlushFrozenOutcome, FlushFrozenRequest, LifecycleCachePreheatPolicy, LifecycleCodecId,
+    require_maintenance_enqueue_budget, require_rotate_budget,
+    should_retry_checkpoint_after_delta_cap, telemetry_health_debt, wal_retention_watermark,
+    DurableMaterializationBegin, DurableMaterializationBuild, FlushFrozenOutcome,
+    FlushFrozenRequest, LifecycleCachePreheatPolicy, LifecycleCodecId,
     LifecycleCompactionDrainOutcome, LifecycleCompactionDrainRequest, LifecycleCompactionIoPolicy,
     LifecycleCompactionOutcome, LifecycleCompactionRequest, LifecycleError, LifecycleLowerLayer,
     LifecycleMaintenanceSchedulingPolicy, LifecycleMaterializationOutcome,
@@ -1124,7 +1125,8 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             self.next_checkpoint_snapshot_id,
             created_at,
         )?
-        .with_wal_truncation_after_checkpoint(truncate_wal_after_checkpoint);
+        .with_wal_truncation_after_checkpoint(truncate_wal_after_checkpoint)
+        .with_delta_cap_bytes(self.checkpoint_delta_cap_bytes)?;
         let outcome = self.checkpoint(&request)?;
         if let Some(snapshot_id) = outcome.snapshot_id() {
             self.next_checkpoint_snapshot_id =
@@ -1134,7 +1136,68 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                         reason: "checkpoint snapshot id overflow",
                     })?;
         }
+        if outcome.status() == LifecycleCheckpointStatus::DeferredDeltaExceedsCap {
+            // The explicit verb reports the deferral; the background chain
+            // flushes and completes the checkpoint it could not publish.
+            self.chain_flush_and_checkpoint_after_delta_cap(
+                self.visible.visible_version(),
+                MaintenanceCheckpointOptions::new(None, truncate_wal_after_checkpoint),
+            );
+        }
         Ok(outcome)
+    }
+
+    /// After a checkpoint deferred for exceeding the delta cap: enqueue a flush
+    /// of the seeded branch (rotating and draining its memtables so the retry
+    /// deltas over a bounded tail) and a retried checkpoint carrying the same
+    /// options, once per visible version.
+    ///
+    /// Seeded-branch scope is deliberate: the completable checkpoint path is
+    /// seeded-branch-only here. A non-seeded branch that holds a durable base or
+    /// unmaterialized inherited layers defers the checkpoint *structurally*
+    /// before it ever measures a delta (`checkpoint_structural_deferral`), and a
+    /// global flush would give such a branch a durable base — latching the
+    /// `NonSeededBranchBase` structural deferral instead of resolving anything.
+    /// Mirrors the WAL-growth burst backstop, which flushes the seeded branch
+    /// for the same reason. The per-branch orphan-recovery slice that lifts
+    /// that structural deferral switches this chain to a global flush so a
+    /// non-seeded branch's bloat shrinks the delta too (space-reclamation
+    /// contract §3.3, slice 12).
+    pub(crate) fn chain_flush_and_checkpoint_after_delta_cap(
+        &mut self,
+        visible_version: CommitVersion,
+        options: MaintenanceCheckpointOptions,
+    ) {
+        if !should_retry_checkpoint_after_delta_cap(
+            self.checkpoint_delta_cap_retry,
+            visible_version,
+        ) {
+            return;
+        }
+        // Best-effort, like the WAL-growth burst: a full queue only defers the
+        // retry to the periodic growth backstop. The guard arms only when the
+        // retried checkpoint actually queued, so a rejected enqueue does not
+        // block the next attempt at this version.
+        let _ = self.enqueue_maintenance(MaintenanceTaskRequest::flush(self.initial_branch_id));
+        if self
+            .enqueue_maintenance(MaintenanceTaskRequest::checkpoint_with_options(options))
+            .is_ok()
+        {
+            self.checkpoint_delta_cap_retry = Some(visible_version);
+        }
+    }
+
+    /// Lower the checkpoint delta cap so tests exercise the flush-first
+    /// deferral without materializing a 64 MiB delta.
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_delta_cap_for_test(&mut self, cap_bytes: usize) {
+        self.checkpoint_delta_cap_bytes = cap_bytes;
+    }
+
+    /// The visible version the delta-cap retry guard is armed at, if any.
+    #[cfg(test)]
+    pub(crate) fn checkpoint_delta_cap_retry_for_test(&self) -> Option<CommitVersion> {
+        self.checkpoint_delta_cap_retry
     }
 
     #[allow(
@@ -1868,6 +1931,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             self.allocator.timestamp_guard().last_allocated(),
             self.recovered_checkpoint_timestamp_max,
         );
+        let delta_cap_bytes = self.checkpoint_delta_cap_bytes;
         let mut runner = DurableCheckpointMaintenanceRunner {
             branch_catalog,
             initial_branch_id,
@@ -1879,13 +1943,19 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             budget,
             manifest_debt,
             table_catalog,
+            delta_cap_bytes,
+            delta_cap_deferral: None,
         };
         let outcome = maintenance.run_next_matching(state, &mut runner, |task| {
             task.kind() == MaintenanceTaskKind::Checkpoint
         });
+        let delta_cap_deferral = runner.delta_cap_deferral;
         // A completed checkpoint advanced the manifest snapshot watermark.
         if matches!(outcome, Ok(Some(_))) {
             self.invalidate_retention_watermark_cache();
+        }
+        if let Some((visible_version, options)) = delta_cap_deferral {
+            self.chain_flush_and_checkpoint_after_delta_cap(visible_version, options);
         }
         outcome
     }
@@ -1930,6 +2000,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
             }
         };
+        let request = request.with_delta_cap_bytes(self.checkpoint_delta_cap_bytes)?;
         let visible_version = self.visible.visible_version();
         let mut branches = Vec::new();
         for descriptor in self.branch_catalog.list_branches(false) {
@@ -2152,6 +2223,15 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                         // watermark (and possibly the flush boundary); drop the
                         // cached value so the next commit re-reads it.
                         self.invalidate_retention_watermark_cache();
+                        if outcome.status() == LifecycleCheckpointStatus::DeferredDeltaExceedsCap {
+                            let options = task
+                                .checkpoint_options()
+                                .unwrap_or(MaintenanceCheckpointOptions::new(None, false));
+                            self.chain_flush_and_checkpoint_after_delta_cap(
+                                visible_version,
+                                options,
+                            );
+                        }
                         self.maintenance
                             .finish_started(task, outcome.maintenance_outcome(), false)
                     }
@@ -4707,6 +4787,12 @@ struct DurableCheckpointMaintenanceRunner<'a, 'b> {
     budget: &'a crate::lifecycle::StorageBudgetLedger,
     manifest_debt: bool,
     table_catalog: &'a crate::lifecycle::LifecycleDurableTableCatalog,
+    /// The delta cap every request built by this runner carries.
+    delta_cap_bytes: usize,
+    /// Out: the checkpoint deferred for exceeding the delta cap at this
+    /// visible version with these options — the caller chains the flush and
+    /// the retry (the runner holds no queue handle while it runs).
+    delta_cap_deferral: Option<(CommitVersion, MaintenanceCheckpointOptions)>,
 }
 
 impl MaintenanceTaskRunner for DurableCheckpointMaintenanceRunner<'_, '_> {
@@ -4732,7 +4818,8 @@ impl MaintenanceTaskRunner for DurableCheckpointMaintenanceRunner<'_, '_> {
             self.services.manifest(),
             self.created_at,
             Some(*self.next_snapshot_id),
-        )?;
+        )?
+        .with_delta_cap_bytes(self.delta_cap_bytes)?;
         let table_catalog = self.table_catalog;
         let table_is_durable = |identity: &crate::table::TableIdentity| {
             table_catalog.object_for_identity(identity).is_some()
@@ -4754,6 +4841,13 @@ impl MaintenanceTaskRunner for DurableCheckpointMaintenanceRunner<'_, '_> {
                     .ok_or(LifecycleError::CheckpointPublicationFailed {
                         reason: "checkpoint snapshot id overflow",
                     })?;
+        }
+        if outcome.status() == LifecycleCheckpointStatus::DeferredDeltaExceedsCap {
+            self.delta_cap_deferral = Some((
+                self.visible.visible_version(),
+                task.checkpoint_options()
+                    .unwrap_or(MaintenanceCheckpointOptions::new(None, false)),
+            ));
         }
         Ok(outcome.maintenance_outcome())
     }
