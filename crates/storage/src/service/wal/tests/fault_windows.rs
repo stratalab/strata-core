@@ -406,6 +406,111 @@ fn delete_failure_records_failed_segment_without_hiding_other_results() {
     assert!(backend.object_metadata(&segment_three).is_ok());
 }
 
+/// #3603: a covered segment listed at the start of the delete pass can be gone
+/// by the time it is read — another covered-segment pass (the off-lock
+/// retention clone, or a worker detached at close) deleted it. The pass must
+/// report it as already missing and keep going, never fail on the read.
+#[test]
+fn covered_segment_vanishing_before_its_read_is_reported_already_missing() {
+    let backend = FaultWindowBackend::new();
+    let segment_one = ObjectLayout::wal_segment(1).expect("segment one");
+    let segment_two = ObjectLayout::wal_segment(2).expect("segment two");
+    let segment_three = ObjectLayout::wal_segment(3).expect("segment three");
+    backend
+        .write_object(
+            &segment_one,
+            &segment_bytes(1, &[record(1, b"covered one".to_vec())]),
+        )
+        .expect("seed segment one");
+    backend
+        .write_object(
+            &segment_two,
+            &segment_bytes(2, &[record(2, b"covered two".to_vec())]),
+        )
+        .expect("seed segment two");
+    backend
+        .write_object(&segment_three, &segment_bytes(3, &[]))
+        .expect("seed active segment");
+    let service = WalService::open(
+        &backend,
+        database_id(),
+        3,
+        DurabilityPolicy::Standard,
+        WalServiceConfig::default(),
+    )
+    .expect("open WAL");
+    // The first read of the pass is segment one's: it "vanishes" under us.
+    backend.fail_next_read(BackendErrorKind::NotFound);
+
+    let report = service
+        .delete_covered_segments(WalRetentionProof::snapshot_watermark(CommitVersion::new(2)))
+        .expect("a vanished covered segment never fails the pass");
+
+    assert_eq!(report.failed_segments(), &[]);
+    assert_eq!(report.deleted_segments(), &[1, 2]);
+    assert_eq!(report.protected_segments(), &[3]);
+    // The pass skipped what it could not read rather than deleting blind: the
+    // object the double merely pretended was gone is still there.
+    assert!(backend.object_metadata(&segment_one).is_ok());
+    assert_eq!(
+        backend
+            .object_metadata(&segment_two)
+            .expect_err("segment two should be deleted")
+            .kind(),
+        BackendErrorKind::NotFound
+    );
+    assert!(backend.object_metadata(&segment_three).is_ok());
+}
+
+/// Only a vanished segment is tolerated: any other read failure still fails
+/// the pass before it deletes anything, exactly as before #3603.
+#[test]
+fn covered_segment_read_failure_other_than_not_found_fails_the_pass() {
+    let backend = FaultWindowBackend::new();
+    let segment_one = ObjectLayout::wal_segment(1).expect("segment one");
+    let segment_two = ObjectLayout::wal_segment(2).expect("segment two");
+    let segment_three = ObjectLayout::wal_segment(3).expect("segment three");
+    backend
+        .write_object(
+            &segment_one,
+            &segment_bytes(1, &[record(1, b"covered one".to_vec())]),
+        )
+        .expect("seed segment one");
+    backend
+        .write_object(
+            &segment_two,
+            &segment_bytes(2, &[record(2, b"covered two".to_vec())]),
+        )
+        .expect("seed segment two");
+    backend
+        .write_object(&segment_three, &segment_bytes(3, &[]))
+        .expect("seed active segment");
+    let service = WalService::open(
+        &backend,
+        database_id(),
+        3,
+        DurabilityPolicy::Standard,
+        WalServiceConfig::default(),
+    )
+    .expect("open WAL");
+    backend.fail_next_read(BackendErrorKind::Interrupted);
+
+    let error = service
+        .delete_covered_segments(WalRetentionProof::snapshot_watermark(CommitVersion::new(2)))
+        .expect_err("a read failure other than NotFound fails the pass");
+
+    assert_backend_error(
+        error,
+        WalOperation::Read,
+        &segment_one,
+        BackendErrorKind::Interrupted,
+    );
+    // The pass stopped at the failed read: nothing after it was deleted.
+    assert!(backend.object_metadata(&segment_one).is_ok());
+    assert!(backend.object_metadata(&segment_two).is_ok());
+    assert!(backend.object_metadata(&segment_three).is_ok());
+}
+
 #[test]
 fn visible_partial_append_error_reopens_as_latest_tail() {
     let backend = FaultWindowBackend::new();
