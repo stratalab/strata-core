@@ -23,7 +23,9 @@ use crate::branch::catalog::BranchCatalogRecord;
 use crate::branch::preview::{
     adapter_for, authored_value_of, base_registered_spaces, changed, normalized, three_way,
 };
-use crate::control::space::{registered_spaces, registration_and_deletion_mutations};
+use crate::control::space::{
+    pending_deletions_among, registered_spaces, registration_and_deletion_mutations,
+};
 use crate::data::kv::ProductSpace;
 use crate::data::vector::plan_collection_promotion;
 use crate::diagnostics::EngineError;
@@ -42,6 +44,11 @@ pub(crate) struct PromotionPlan {
     pub(crate) applied: Vec<PromotedEntity>,
     pub(crate) deleted: Vec<PromotedEntity>,
     pub(crate) conflicts: Vec<PreviewConflict>,
+    /// Source spaces the target holds a crash-interrupted deletion for
+    /// (#3574). Re-registering one means finishing its owed sweep first, and
+    /// a sweep is commits of its own — so the plan only names them, and
+    /// `promote` sweeps once it has decided to commit.
+    pub(crate) pending_space_sweeps: Vec<ProductSpace>,
 }
 
 /// Plans promoting `source` into `target` under `strategy`, without mutating
@@ -136,6 +143,68 @@ pub(crate) fn plan_promotion(
         )?;
     }
 
+    let SpaceReconciliation {
+        source_spaces,
+        deleted_spaces,
+        pending_space_sweeps,
+    } = plan_space_reconciliation(
+        persistence,
+        source,
+        target,
+        &retained_spaces,
+        &mut mutations,
+    )?;
+
+    // Carry vector collection configs so promoted vectors are usable on the
+    // target rather than orphaned behind a missing collection config (contract
+    // Vector minimum). An incompatible dimension/metric surfaces as a structural
+    // conflict that refuses the promotion under every strategy (see the service).
+    let (collection_mutations, collection_conflicts) = plan_collection_promotion(
+        persistence,
+        source,
+        target,
+        &source_spaces,
+        &deleted_spaces,
+        strategy_result,
+    )?;
+    mutations.extend(collection_mutations);
+    conflicts.extend(collection_conflicts);
+
+    Ok(PromotionPlan {
+        branch_point,
+        mutations,
+        applied,
+        deleted,
+        conflicts,
+        pending_space_sweeps,
+    })
+}
+
+/// What the space leg of a promotion plan learned (see
+/// `plan_space_reconciliation`).
+struct SpaceReconciliation {
+    /// The source's registered spaces.
+    source_spaces: Vec<ProductSpace>,
+    /// Spaces the source deleted since the base that the target may drop.
+    deleted_spaces: Vec<ProductSpace>,
+    /// Source spaces whose target catalog row carries a crash-interrupted
+    /// deletion (#3574); `promote` sweeps them only once it has decided to
+    /// commit.
+    pending_space_sweeps: Vec<ProductSpace>,
+}
+
+/// Reconciles the target's space registrations toward the source and names the
+/// pending sweeps: returns the source's registered spaces and the spaces the
+/// source deleted (the collection plan needs both), plus the source spaces
+/// whose target catalog row carries a crash-interrupted deletion (#3574),
+/// which `promote` sweeps only once it has decided to commit.
+fn plan_space_reconciliation(
+    persistence: &mut StoragePersistence,
+    source: &BranchCatalogRecord,
+    target: &BranchCatalogRecord,
+    retained_spaces: &BTreeSet<ProductSpace>,
+    mutations: &mut Vec<RowMutation>,
+) -> Result<SpaceReconciliation, EngineError> {
     // Carry source-only spaces so promoted rows land in a space the target's
     // catalog registers, rather than orphaned outside it — a visible data change
     // must carry the branch-control metadata that explains it (contract Binding
@@ -170,28 +239,11 @@ pub(crate) fn plan_promotion(
         &source_spaces,
         &deleted_spaces,
     )?);
-
-    // Carry vector collection configs so promoted vectors are usable on the
-    // target rather than orphaned behind a missing collection config (contract
-    // Vector minimum). An incompatible dimension/metric surfaces as a structural
-    // conflict that refuses the promotion under every strategy (see the service).
-    let (collection_mutations, collection_conflicts) = plan_collection_promotion(
-        persistence,
-        source,
-        target,
-        &source_spaces,
-        &deleted_spaces,
-        strategy_result,
-    )?;
-    mutations.extend(collection_mutations);
-    conflicts.extend(collection_conflicts);
-
-    Ok(PromotionPlan {
-        branch_point,
-        mutations,
-        applied,
-        deleted,
-        conflicts,
+    let pending_space_sweeps = pending_deletions_among(persistence, target, &source_spaces)?;
+    Ok(SpaceReconciliation {
+        source_spaces,
+        deleted_spaces,
+        pending_space_sweeps,
     })
 }
 

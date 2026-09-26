@@ -51,7 +51,6 @@ commands:
     errors+:
       - invalid_argument.engine.space_delete_default
       - failed_precondition.engine.space_not_empty
-      - invalid_argument.engine.space_delete_too_large
     display:
       receipt: "{verb} space {/data/space} ({/data/deleted_rows|plural:row})"
       noun: space

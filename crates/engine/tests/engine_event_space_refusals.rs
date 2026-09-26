@@ -38,11 +38,12 @@ fn deleting_the_default_space_is_rejected() {
     assert_eq!(error.code(), "invalid_argument.engine.space_delete_default");
 }
 
-/// A force-delete of a space holding more than the atomic mutation limit
-/// (10,000) is refused rather than attempting an unbounded delete. The rows
-/// are written in one batch so the setup is a single commit.
+/// #3574: a force-delete of a space holding more rows than one commit
+/// admits is no longer refused; it sweeps the rows in commits the budget
+/// allows. The rows are written in bounded batches under the per-commit cap
+/// (4096) — the exact shape that used to make the space undeletable.
 #[test]
-fn deleting_an_oversized_space_is_rejected() {
+fn deleting_an_oversized_space_succeeds_in_chunks() {
     use strata_engine::{KvKey, KvValue};
 
     let mut database = open_cache_database().expect("cache open");
@@ -53,8 +54,7 @@ fn deleting_an_oversized_space_is_rejected() {
         .create(target.clone())
         .expect("space create");
 
-    // Just over the 10,000 atomic space-delete limit, written in batches under
-    // the per-commit mutation cap (4096).
+    // Just over the old 10,000 atomic space-delete limit.
     for chunk in 0..3u32 {
         let entries = (0..3_400u32).map(|i| {
             let n = chunk * 3_400 + i;
@@ -70,13 +70,24 @@ fn deleting_an_oversized_space_is_rejected() {
             .expect("bulk put");
     }
 
-    let error = database
+    let outcome = database
         .spaces(branch("default"))
         .expect("space service")
         .delete(&target, true)
-        .expect_err("oversized force-delete must reject");
+        .expect("an oversized force-delete sweeps in chunks");
+    assert!(outcome.deleted());
+    assert_eq!(outcome.deleted_rows(), 10_200);
+    assert!(!database
+        .spaces(branch("default"))
+        .expect("space service")
+        .exists(&target)
+        .expect("exists reads"));
     assert_eq!(
-        error.code(),
-        "invalid_argument.engine.space_delete_too_large"
+        database
+            .kv(branch("default"), target)
+            .expect("kv service")
+            .count(None)
+            .expect("count"),
+        0
     );
 }

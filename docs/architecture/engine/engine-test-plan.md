@@ -296,7 +296,7 @@ Required new tests:
 - **`SpaceService::usage`** (all 8 counts) — method entirely untested.
 - **`SpaceService::list`, `config_value` allowlist** (`target/created/durable`),
   empty config key → `invalid_argument.engine.config_key`.
-- **`space_delete_too_large`** (>10,000 mutations) boundary.
+- Chunked space deletion (#3574): the one-commit / three-commit boundary at the sweep chunk, and resume after an interrupted sweep.
 - **Durable close asserts `durable_synced()==true`** (only `durable()` is asserted).
 - **Drop-without-close**: characterize durability on a dropped handle (there is no
   `Drop` impl) — a potential data-loss surprise; pin the behavior.

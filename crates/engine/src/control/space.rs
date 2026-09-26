@@ -3,17 +3,31 @@
 use strata_core::BranchId;
 
 use crate::branch::catalog::BranchCatalogRecord;
+use crate::commit::CommitOutcome;
 use crate::data::kv::ProductSpace;
 use crate::diagnostics::{EngineError, EngineErrorClass};
 use crate::persistence::{
-    reserved_space_key, space_catalog_key, space_index_key, CommitPlan, ReadSelector, RowAddress,
-    RowClass, RowMutation, StoragePersistence,
+    decode_vector_index_manifest_key, encode_event_meta_space_prefix, encode_event_space_prefix,
+    encode_event_type_index_space_prefix, encode_graph_binding_space_prefix,
+    encode_graph_edge_space_prefix, encode_graph_metadata_prefix, encode_graph_node_space_prefix,
+    encode_graph_ontology_space_prefix, encode_graph_reverse_edge_space_prefix,
+    encode_graph_type_index_space_prefix, encode_json_index_entry_space_prefix,
+    encode_json_index_meta_prefix, encode_json_space_prefix, encode_kv_space_prefix,
+    encode_vector_collection_prefix, encode_vector_space_prefix, reserved_space_key,
+    space_catalog_key, space_index_key, vector_index_manifest_prefix, CommitPlan, ReadSelector,
+    RowAddress, RowClass, RowMutation, StoragePersistence,
 };
 
 use super::records::{
-    decode_reserved_system_space, decode_space_index, decode_space_record,
+    decode_reserved_system_space, decode_space_catalog_record, decode_space_index,
     encode_reserved_system_space, encode_space_index, encode_space_record,
+    encode_space_record_deleting,
 };
+
+/// Rows tombstoned per sweep commit of a chunked deletion (#3477 graphs,
+/// #3574 spaces): half the storage layer's default per-commit mutation
+/// budget (4096), so a chunk fits beside whatever else a commit carries.
+pub(crate) const DELETE_CHUNK_ROWS: usize = 2048;
 
 pub(crate) const DEFAULT_SPACE: &str = "default";
 pub(crate) const SYSTEM_SPACE: &str = "_system_";
@@ -44,6 +58,10 @@ pub(crate) fn registration_mutations(
         validate_space_catalog_row(persistence, record, space)?;
         return Ok(Vec::new());
     }
+    // #3574: a name whose last deletion was interrupted still owns rows
+    // behind a marked catalog row. Finish that sweep before registering, so
+    // no row of the old space surfaces under the new one.
+    finish_pending_deletion(persistence, record, space)?;
 
     spaces.push(space.clone());
     spaces.sort();
@@ -157,11 +175,13 @@ pub(crate) fn space_exists(
         .any(|existing| existing == space))
 }
 
-pub(crate) fn deletion_mutations(
-    persistence: &mut StoragePersistence,
+/// The space index without `space`, every listed row validated first, or
+/// `None` when `space` is not registered. Refuses to drop the default space.
+pub(crate) fn index_without(
+    persistence: &StoragePersistence,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
-) -> Result<Option<Vec<RowMutation>>, EngineError> {
+) -> Result<Option<Vec<ProductSpace>>, EngineError> {
     let mut spaces = read_required_space_index(persistence, record)?;
     for existing in &spaces {
         validate_space_catalog_row(persistence, record, existing)?;
@@ -179,13 +199,209 @@ pub(crate) fn deletion_mutations(
             "space deletion would remove the default space",
         ));
     }
-    Ok(Some(vec![
+    Ok(Some(spaces))
+}
+
+/// The two catalog mutations that unregister `space`: the index rewritten
+/// as `remaining`, and its catalog row either tombstoned (a deletion that
+/// fits one commit) or, with `marked`, rewritten with the deleting mark
+/// (#3574) so the rows can be swept afterwards and the row tombstoned last.
+pub(crate) fn unregister_mutations(
+    record: &BranchCatalogRecord,
+    space: &ProductSpace,
+    remaining: &[ProductSpace],
+    marked: bool,
+) -> Result<Vec<RowMutation>, EngineError> {
+    let catalog = space_address(record, space_catalog_key(space.as_str()));
+    let catalog_row = if marked {
+        RowMutation::put(catalog, encode_space_record_deleting(space))
+    } else {
+        RowMutation::delete(catalog)
+    };
+    Ok(vec![
         RowMutation::put(
             space_address(record, space_index_key()),
-            encode_space_index(&spaces)?,
+            encode_space_index(remaining)?,
         ),
-        RowMutation::delete(space_address(record, space_catalog_key(space.as_str()))),
-    ]))
+        catalog_row,
+    ])
+}
+
+/// Every data row `space` owns, as tombstones, in the order a sweep removes
+/// them (#3574): the rows another capability's readers gate on first (graph
+/// metadata, vector collections), then the rest. Rows already tombstoned
+/// are not seen, so the list is exactly what remains — which is what makes
+/// a sweep resumable.
+pub(crate) fn space_row_tombstones(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    space: &ProductSpace,
+) -> Result<Vec<RowMutation>, EngineError> {
+    let branch_id = record.storage_branch_id();
+    let mut mutations = Vec::new();
+    for (row_class, prefix) in data_delete_prefixes(space) {
+        let rows =
+            persistence.scan_prefix(branch_id, row_class, prefix, ReadSelector::Latest, None)?;
+        for row in rows.into_iter().filter(|row| !row.is_tombstone()) {
+            mutations.push(RowMutation::delete(RowAddress::new(
+                branch_id,
+                row_class,
+                row.key().to_vec(),
+            )));
+        }
+    }
+    let rows = persistence.scan_prefix(
+        branch_id,
+        RowClass::SpaceControl,
+        vector_index_manifest_prefix(),
+        ReadSelector::Latest,
+        None,
+    )?;
+    for row in rows.into_iter().filter(|row| !row.is_tombstone()) {
+        let Ok((manifest_space, _collection)) = decode_vector_index_manifest_key(row.key()) else {
+            continue;
+        };
+        if &manifest_space == space {
+            mutations.push(RowMutation::delete(RowAddress::new(
+                branch_id,
+                RowClass::SpaceControl,
+                row.key().to_vec(),
+            )));
+        }
+    }
+    Ok(mutations)
+}
+
+fn data_delete_prefixes(space: &ProductSpace) -> Vec<(RowClass, Vec<u8>)> {
+    vec![
+        (RowClass::GraphMetadata, encode_graph_metadata_prefix(space)),
+        (
+            RowClass::VectorCollection,
+            encode_vector_collection_prefix(space),
+        ),
+        (RowClass::Kv, encode_kv_space_prefix(space)),
+        (RowClass::Json, encode_json_space_prefix(space)),
+        (RowClass::JsonIndex, encode_json_index_meta_prefix(space)),
+        (
+            RowClass::JsonIndex,
+            encode_json_index_entry_space_prefix(space),
+        ),
+        (RowClass::Vector, encode_vector_space_prefix(space)),
+        (RowClass::Event, encode_event_space_prefix(space)),
+        (
+            RowClass::EventMetadata,
+            encode_event_meta_space_prefix(space),
+        ),
+        (
+            RowClass::EventIndex,
+            encode_event_type_index_space_prefix(space),
+        ),
+        (RowClass::GraphNode, encode_graph_node_space_prefix(space)),
+        (RowClass::GraphEdge, encode_graph_edge_space_prefix(space)),
+        (
+            RowClass::GraphReverseEdge,
+            encode_graph_reverse_edge_space_prefix(space),
+        ),
+        (
+            RowClass::GraphBindingIndex,
+            encode_graph_binding_space_prefix(space),
+        ),
+        (
+            RowClass::GraphOntology,
+            encode_graph_ontology_space_prefix(space),
+        ),
+        (
+            RowClass::GraphTypeIndex,
+            encode_graph_type_index_space_prefix(space),
+        ),
+    ]
+}
+
+/// Tombstones `rows` in commits of at most [`DELETE_CHUNK_ROWS`], then the
+/// marked catalog row in a commit of its own, so the row outlives every row
+/// it describes and a crash at any point leaves a resumable deletion, never
+/// an orphaned one. The returned outcome is the final commit carrying the
+/// data-row count of the whole sweep, so the acknowledgement reads like a
+/// single-commit deletion's.
+pub(crate) fn sweep_space_rows(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    space: &ProductSpace,
+    mut rows: Vec<RowMutation>,
+) -> Result<CommitOutcome, EngineError> {
+    let deleted = rows.len();
+    while !rows.is_empty() {
+        let rest = rows.split_off(rows.len().min(DELETE_CHUNK_ROWS));
+        commit_rows(persistence, record, rows)?;
+        rows = rest;
+    }
+    let last = commit_rows(
+        persistence,
+        record,
+        vec![RowMutation::delete(space_address(
+            record,
+            space_catalog_key(space.as_str()),
+        ))],
+    )?;
+    Ok(last.with_counts(0, deleted))
+}
+
+/// Finishes the deletion of a space whose catalog row carries the mark
+/// (#3574): whatever rows remain, then the row. `None` when no deletion is
+/// pending — the row is absent, or registered and unmarked.
+pub(crate) fn finish_pending_deletion(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    space: &ProductSpace,
+) -> Result<Option<CommitOutcome>, EngineError> {
+    if !pending_deletion(persistence, record, space)? {
+        return Ok(None);
+    }
+    let rows = space_row_tombstones(persistence, record, space)?;
+    Ok(Some(sweep_space_rows(persistence, record, space, rows)?))
+}
+
+/// The spaces among `candidates` whose catalog row on `record` carries the
+/// deleting mark (#3574): names an interrupted deletion still owns rows
+/// under. Read-only — a promotion plans with this and sweeps only once it
+/// has decided to commit, so a refused promotion or a preview writes nothing.
+pub(crate) fn pending_deletions_among(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    candidates: &[ProductSpace],
+) -> Result<Vec<ProductSpace>, EngineError> {
+    let mut pending = Vec::new();
+    for space in candidates {
+        if pending_deletion(persistence, record, space)? {
+            pending.push(space.clone());
+        }
+    }
+    Ok(pending)
+}
+
+/// Whether `space`'s catalog row carries the deleting mark.
+fn pending_deletion(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    space: &ProductSpace,
+) -> Result<bool, EngineError> {
+    let address = space_address(record, space_catalog_key(space.as_str()));
+    match persistence.read(address, ReadSelector::Latest)? {
+        Some(bytes) => Ok(decode_space_catalog_record(&bytes)?.deleting()),
+        None => Ok(false),
+    }
+}
+
+fn commit_rows(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    mutations: Vec<RowMutation>,
+) -> Result<CommitOutcome, EngineError> {
+    persistence.commit(&CommitPlan::new(
+        record.storage_branch_id(),
+        mutations,
+        Some(record.generation()),
+    ))
 }
 
 pub(crate) fn validate_required_space_rows(
@@ -269,11 +485,17 @@ fn validate_space_catalog_row(
         persistence,
         &space_address(record, space_catalog_key(space.as_str())),
     )?;
-    let decoded = decode_space_record(&bytes)?;
-    if &decoded != space {
+    let decoded = decode_space_catalog_record(&bytes)?;
+    if decoded.space() != space {
         return Err(EngineError::corruption(
             "data_loss.engine.space_catalog",
             "space catalog row name does not match its index entry",
+        ));
+    }
+    if decoded.deleting() {
+        return Err(EngineError::corruption(
+            "data_loss.engine.space_catalog",
+            "space catalog row is marked deleting but still listed in the index",
         ));
     }
     Ok(())

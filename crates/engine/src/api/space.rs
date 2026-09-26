@@ -9,17 +9,11 @@ use crate::control::{space as control_space, ControlPlane};
 use crate::data::kv::ProductSpace;
 use crate::diagnostics::EngineError;
 use crate::persistence::{
-    decode_vector_index_manifest_key, encode_event_meta_space_prefix, encode_event_space_prefix,
-    encode_event_type_index_space_prefix, encode_graph_binding_space_prefix,
-    encode_graph_edge_space_prefix, encode_graph_metadata_prefix, encode_graph_node_space_prefix,
-    encode_graph_ontology_space_prefix, encode_graph_reverse_edge_space_prefix,
-    encode_graph_type_index_space_prefix, encode_json_index_entry_space_prefix,
-    encode_json_index_meta_prefix, encode_json_space_prefix, encode_kv_space_prefix,
-    encode_vector_collection_prefix, encode_vector_space_prefix, vector_index_manifest_prefix,
-    CommitPlan, ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
+    encode_event_space_prefix, encode_graph_edge_space_prefix, encode_graph_metadata_prefix,
+    encode_graph_node_space_prefix, encode_json_space_prefix, encode_kv_space_prefix,
+    encode_vector_collection_prefix, encode_vector_space_prefix, CommitPlan, ReadSelector,
+    RowClass, StoragePersistence,
 };
-
-const SPACE_DELETE_MUTATION_LIMIT: usize = 10_000;
 
 /// Outcome returned after creating a product space.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -306,7 +300,16 @@ impl<'a> SpaceService<'a> {
         self.usage_for_record(&record, space)
     }
 
-    /// Deletes a product space catalog entry and, when forced, its visible data rows.
+    /// Deletes a product space catalog entry and, when forced, its visible
+    /// data rows.
+    ///
+    /// A space whose rows fit one commit goes in the single commit it always
+    /// did. A larger one is unregistered by its first commit — absent to
+    /// `list`, `exists` and every writer from then on — and its rows are
+    /// then swept in commits the storage budget admits, the marked catalog
+    /// row last (#3574, the sibling of `delete_graph`'s #3477). A deletion
+    /// interrupted mid-sweep is finished by the next `delete` or `create` of
+    /// the name, or by the first write that would register it.
     pub fn delete(
         &mut self,
         space: &ProductSpace,
@@ -320,20 +323,30 @@ impl<'a> SpaceService<'a> {
         }
 
         let record = self.branch_record()?;
-        let Some(catalog_mutations) =
-            control_space::deletion_mutations(self.persistence, &record, space)?
+        let Some(remaining) = control_space::index_without(self.persistence, &record, space)?
         else {
-            return Ok(SpaceDeleteOutcome::new(
-                space.clone(),
-                false,
-                force,
-                0,
-                None,
-            ));
+            // Not registered. #3574: an interrupted deletion leaves a marked
+            // row and its rows behind; the space is already gone to every
+            // observer, so finish the sweep and report it deleted.
+            let outcome =
+                match control_space::finish_pending_deletion(self.persistence, &record, space)? {
+                    Some(last) => {
+                        let deleted_rows = u64::try_from(last.delete_count()).unwrap_or(u64::MAX);
+                        SpaceDeleteOutcome::new(
+                            space.clone(),
+                            true,
+                            force,
+                            deleted_rows,
+                            Some(last),
+                        )
+                    }
+                    None => SpaceDeleteOutcome::new(space.clone(), false, force, 0, None),
+                };
+            return Ok(outcome);
         };
 
-        let data_mutations = self.delete_mutations_for_space(&record, space)?;
-        let deleted_rows = u64::try_from(data_mutations.len()).unwrap_or(u64::MAX);
+        let rows = control_space::space_row_tombstones(self.persistence, &record, space)?;
+        let deleted_rows = u64::try_from(rows.len()).unwrap_or(u64::MAX);
         if deleted_rows > 0 && !force {
             return Err(EngineError::conflict(
                 "failed_precondition.engine.space_not_empty",
@@ -344,40 +357,69 @@ impl<'a> SpaceService<'a> {
             ));
         }
 
-        let mutation_count = data_mutations
-            .len()
-            .checked_add(catalog_mutations.len())
-            .ok_or_else(|| {
-                EngineError::invalid_input(
-                    "invalid_argument.engine.space_delete_too_large",
-                    "space delete mutation count overflowed",
-                )
-            })?;
-        if mutation_count > SPACE_DELETE_MUTATION_LIMIT {
-            return Err(EngineError::invalid_input(
-                "invalid_argument.engine.space_delete_too_large",
-                format!(
-                    "space delete would require {mutation_count} mutations; maximum is {SPACE_DELETE_MUTATION_LIMIT}"
-                ),
+        if rows.len() < control_space::DELETE_CHUNK_ROWS {
+            // Small enough for one commit: the catalog and the rows go together.
+            let mut mutations = rows;
+            mutations.extend(control_space::unregister_mutations(
+                &record, space, &remaining, false,
+            )?);
+            let commit = self
+                .persistence
+                .commit(&CommitPlan::new(
+                    record.storage_branch_id(),
+                    mutations,
+                    Some(record.generation()),
+                ))?
+                .with_counts(0, usize::try_from(deleted_rows).unwrap_or(usize::MAX));
+            return Ok(SpaceDeleteOutcome::new(
+                space.clone(),
+                true,
+                force,
+                deleted_rows,
+                Some(commit),
             ));
         }
-
-        let mut mutations = data_mutations;
-        mutations.extend(catalog_mutations);
-        let commit = self
-            .persistence
-            .commit(&CommitPlan::new(
-                record.storage_branch_id(),
-                mutations,
-                Some(record.generation()),
-            ))?
-            .with_counts(0, usize::try_from(deleted_rows).unwrap_or(usize::MAX));
+        // #3574: too many rows for the storage commit budget. Mark first —
+        // from this commit the space is unregistered — then sweep the rows
+        // in commits the budget admits, and tombstone the marked row last.
+        // An interruption leaves a marked row, which the next `delete`,
+        // `create` or registering write of this name finishes.
+        self.persistence.commit(&CommitPlan::new(
+            record.storage_branch_id(),
+            control_space::unregister_mutations(&record, space, &remaining, true)?,
+            Some(record.generation()),
+        ))?;
+        let last = control_space::sweep_space_rows(self.persistence, &record, space, rows)?;
         Ok(SpaceDeleteOutcome::new(
             space.clone(),
             true,
             force,
             deleted_rows,
-            Some(commit),
+            Some(last),
+        ))
+    }
+
+    /// Performs only the first commit of a chunked deletion — the mark — and
+    /// stops, leaving the space exactly as a crash between the mark and the
+    /// sweep would: unregistered, its rows still stored, its deletion waiting
+    /// for the next `delete`, `create` or registering write of its name.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn begin_space_delete_for_test(
+        &mut self,
+        space: &ProductSpace,
+    ) -> Result<CommitOutcome, EngineError> {
+        let record = self.branch_record()?;
+        let remaining = control_space::index_without(self.persistence, &record, space)?
+            .ok_or_else(|| {
+                EngineError::invalid_input(
+                    "invalid_argument.engine.space_catalog",
+                    "space is not registered",
+                )
+            })?;
+        self.persistence.commit(&CommitPlan::new(
+            record.storage_branch_id(),
+            control_space::unregister_mutations(&record, space, &remaining, true)?,
+            Some(record.generation()),
         ))
     }
 
@@ -448,94 +490,431 @@ impl<'a> SpaceService<'a> {
             .count();
         Ok(u64::try_from(count).unwrap_or(u64::MAX))
     }
-
-    fn delete_mutations_for_space(
-        &mut self,
-        record: &BranchCatalogRecord,
-        space: &ProductSpace,
-    ) -> Result<Vec<RowMutation>, EngineError> {
-        let mut mutations = Vec::new();
-        for (row_class, prefix) in data_delete_prefixes(space) {
-            let rows = self.persistence.scan_prefix(
-                record.storage_branch_id(),
-                row_class,
-                prefix,
-                ReadSelector::Latest,
-                None,
-            )?;
-            for row in rows.into_iter().filter(|row| !row.is_tombstone()) {
-                mutations.push(RowMutation::delete(RowAddress::new(
-                    record.storage_branch_id(),
-                    row_class,
-                    row.key().to_vec(),
-                )));
-            }
-        }
-        let rows = self.persistence.scan_prefix(
-            record.storage_branch_id(),
-            RowClass::SpaceControl,
-            vector_index_manifest_prefix(),
-            ReadSelector::Latest,
-            None,
-        )?;
-        for row in rows.into_iter().filter(|row| !row.is_tombstone()) {
-            let Ok((manifest_space, _collection)) = decode_vector_index_manifest_key(row.key())
-            else {
-                continue;
-            };
-            if &manifest_space == space {
-                mutations.push(RowMutation::delete(RowAddress::new(
-                    record.storage_branch_id(),
-                    RowClass::SpaceControl,
-                    row.key().to_vec(),
-                )));
-            }
-        }
-        Ok(mutations)
-    }
 }
 
-fn data_delete_prefixes(space: &ProductSpace) -> Vec<(RowClass, Vec<u8>)> {
-    vec![
-        (RowClass::Kv, encode_kv_space_prefix(space)),
-        (RowClass::Json, encode_json_space_prefix(space)),
-        (RowClass::JsonIndex, encode_json_index_meta_prefix(space)),
-        (
-            RowClass::JsonIndex,
-            encode_json_index_entry_space_prefix(space),
-        ),
-        (
-            RowClass::VectorCollection,
-            encode_vector_collection_prefix(space),
-        ),
-        (RowClass::Vector, encode_vector_space_prefix(space)),
-        (RowClass::Event, encode_event_space_prefix(space)),
-        (
-            RowClass::EventMetadata,
-            encode_event_meta_space_prefix(space),
-        ),
-        (
-            RowClass::EventIndex,
-            encode_event_type_index_space_prefix(space),
-        ),
-        (RowClass::GraphMetadata, encode_graph_metadata_prefix(space)),
-        (RowClass::GraphNode, encode_graph_node_space_prefix(space)),
-        (RowClass::GraphEdge, encode_graph_edge_space_prefix(space)),
-        (
-            RowClass::GraphReverseEdge,
-            encode_graph_reverse_edge_space_prefix(space),
-        ),
-        (
-            RowClass::GraphBindingIndex,
-            encode_graph_binding_space_prefix(space),
-        ),
-        (
-            RowClass::GraphOntology,
-            encode_graph_ontology_space_prefix(space),
-        ),
-        (
-            RowClass::GraphTypeIndex,
-            encode_graph_type_index_space_prefix(space),
-        ),
-    ]
+#[cfg(test)]
+mod tests {
+    use crate::branch::BranchName;
+    use crate::data::kv::{KvKey, KvValue, ProductSpace};
+    use crate::{CacheOpenOptions, Database, DurableLocalOpenOptions};
+
+    fn key(index: usize) -> KvKey {
+        KvKey::new(format!("k{index:05}")).expect("key")
+    }
+
+    fn branch(name: &str) -> BranchName {
+        BranchName::new(name).expect("branch")
+    }
+
+    fn space(name: &str) -> ProductSpace {
+        ProductSpace::new(name).expect("space")
+    }
+
+    /// Registers `name` on the default branch and fills it with `count` keys
+    /// in commits under the storage budget — more than one chunk's worth.
+    fn populate(database: &mut Database, name: &str, count: usize) -> ProductSpace {
+        let target = space(name);
+        database
+            .spaces(branch("default"))
+            .expect("space service")
+            .create(target.clone())
+            .expect("space created");
+        for start in (0..count).step_by(1_000) {
+            database
+                .kv(branch("default"), target.clone())
+                .expect("kv service")
+                .put_batch(
+                    (start..(start + 1_000).min(count))
+                        .map(|index| (key(index), KvValue::new(b"v".to_vec()))),
+                )
+                .expect("bounded put");
+        }
+        target
+    }
+
+    fn registered(database: &mut Database, branch_name: &str, target: &ProductSpace) -> bool {
+        database
+            .spaces(branch(branch_name))
+            .expect("space service")
+            .exists(target)
+            .expect("exists reads")
+    }
+
+    fn kv_count(database: &mut Database, branch_name: &str, target: &ProductSpace) -> u64 {
+        database
+            .kv(branch(branch_name), target.clone())
+            .expect("kv service")
+            .count(None)
+            .expect("count reads")
+    }
+
+    /// #3574: the mark alone unregisters a space, and every path that could
+    /// re-register or re-delete the name finishes the interrupted sweep
+    /// first — `delete`, `create`, a registering write — on the branch that
+    /// carries the mark and, after a fork, independently on each branch.
+    fn exercise(mut database: Database) {
+        // Resume by delete: no force needed for a space already gone to every
+        // observer; the rows it swept are reported; nothing remains.
+        let by_delete = populate(&mut database, "by-delete", 3_000);
+        let mark = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .begin_space_delete_for_test(&by_delete)
+            .expect("mark commits");
+        assert!(!registered(&mut database, "default", &by_delete));
+        let listed = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .list()
+            .expect("list reads");
+        assert!(!listed.contains(&by_delete));
+        assert!(
+            listed.contains(&space("default")),
+            "the default space survives the mark"
+        );
+        let outcome = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .delete(&by_delete, false)
+            .expect("a marked space's deletion resumes");
+        assert!(outcome.deleted());
+        assert_eq!(outcome.deleted_rows(), 3_000);
+        assert!(outcome.version().expect("commits") > mark.version());
+        assert_eq!(kv_count(&mut database, "default", &by_delete), 0);
+        let again = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .delete(&by_delete, true)
+            .expect("nothing pending is not an error");
+        assert!(!again.deleted());
+        assert!(again.commit().is_none());
+
+        // Resume by create: the old rows are swept before the name is reborn.
+        let by_create = populate(&mut database, "by-create", 2_500);
+        database
+            .spaces(branch("default"))
+            .expect("space service")
+            .begin_space_delete_for_test(&by_create)
+            .expect("mark commits");
+        let created = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .create(by_create.clone())
+            .expect("create resumes the sweep");
+        assert!(created.created());
+        assert!(registered(&mut database, "default", &by_create));
+        assert_eq!(kv_count(&mut database, "default", &by_create), 0);
+
+        // Resume by a registering write: the write lands in a clean space.
+        let by_write = populate(&mut database, "by-write", 2_500);
+        database
+            .spaces(branch("default"))
+            .expect("space service")
+            .begin_space_delete_for_test(&by_write)
+            .expect("mark commits");
+        database
+            .kv(branch("default"), by_write.clone())
+            .expect("kv service")
+            .put(key(1), KvValue::new(b"new".to_vec()))
+            .expect("a registering write resumes the sweep");
+        assert!(registered(&mut database, "default", &by_write));
+        assert_eq!(kv_count(&mut database, "default", &by_write), 1);
+        let mut kv = database
+            .kv(branch("default"), by_write.clone())
+            .expect("kv service");
+        assert_eq!(
+            kv.get(&key(1)).expect("get").expect("present").as_bytes(),
+            b"new"
+        );
+        assert!(kv.get(&key(2)).expect("get").is_none());
+
+        // COW-003: a fork mid-sweep inherits the mark; each branch finishes
+        // its own copy, and neither finishes the other's.
+        let forked = populate(&mut database, "forked", 2_500);
+        database
+            .spaces(branch("default"))
+            .expect("space service")
+            .begin_space_delete_for_test(&forked)
+            .expect("mark commits");
+        database
+            .branches()
+            .expect("branch service")
+            .fork_current(&branch("default"), branch("child"))
+            .expect("fork succeeds");
+        assert!(!registered(&mut database, "child", &forked));
+        let child_outcome = database
+            .spaces(branch("child"))
+            .expect("space service")
+            .delete(&forked, false)
+            .expect("the child resumes its copy");
+        assert!(child_outcome.deleted());
+        assert_eq!(child_outcome.deleted_rows(), 2_500);
+        assert_eq!(kv_count(&mut database, "child", &forked), 0);
+        let parent_outcome = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .delete(&forked, false)
+            .expect("the parent resumes its own copy");
+        assert!(parent_outcome.deleted());
+        assert_eq!(parent_outcome.deleted_rows(), 2_500);
+        assert_eq!(kv_count(&mut database, "default", &forked), 0);
+    }
+
+    /// A promotion re-registering a space the target holds a crash-interrupted
+    /// deletion for finishes that sweep only once it has decided to commit: a
+    /// preview and a refused promotion leave the sweep owed in full (rule 20),
+    /// and a committed one leaves the target's space holding exactly what the
+    /// source promoted.
+    fn exercise_promotion(mut database: Database) {
+        use crate::api::branch::PromotionStrategy;
+
+        let shared = populate(&mut database, "shared", 2_500);
+        database
+            .branches()
+            .expect("branch service")
+            .fork_current(&branch("default"), branch("child"))
+            .expect("fork succeeds");
+        database
+            .spaces(branch("default"))
+            .expect("space service")
+            .begin_space_delete_for_test(&shared)
+            .expect("mark commits on the target");
+        database
+            .kv(branch("child"), shared.clone())
+            .expect("kv service")
+            .put(key(90_000), KvValue::new(b"from-child".to_vec()))
+            .expect("child writes into its copy");
+        // An unrelated conflict: both sides wrote the same default-space key
+        // after the fork.
+        for (branch_name, value) in [("default", b"p".as_slice()), ("child", b"c".as_slice())] {
+            database
+                .kv(branch(branch_name), space("default"))
+                .expect("kv service")
+                .put(key(1), KvValue::new(value.to_vec()))
+                .expect("conflicting write");
+        }
+
+        // A preview writes nothing.
+        database
+            .branches()
+            .expect("branch service")
+            .preview(
+                &branch("child"),
+                &branch("default"),
+                PromotionStrategy::Strict,
+            )
+            .expect("preview succeeds");
+        // A refused promotion writes nothing.
+        let refused = database
+            .branches()
+            .expect("branch service")
+            .promote(
+                &branch("child"),
+                &branch("default"),
+                PromotionStrategy::Strict,
+            )
+            .expect_err("a strict promotion with a conflict is refused");
+        assert_eq!(refused.code(), "conflict.engine.promotion");
+        assert!(!registered(&mut database, "default", &shared));
+        // Every row of the interrupted deletion is still owed on the target.
+        let owed = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .delete(&shared, false)
+            .expect("the owed sweep is still there to finish");
+        assert!(owed.deleted());
+        assert_eq!(
+            owed.deleted_rows(),
+            2_500,
+            "neither preview nor refusal swept"
+        );
+
+        // Re-arm the mark and promote under SourceWins: the sweep runs, then
+        // the promotion re-registers the space with the source's rows only.
+        let shared = populate(&mut database, "shared", 2_500);
+        database
+            .spaces(branch("default"))
+            .expect("space service")
+            .begin_space_delete_for_test(&shared)
+            .expect("mark commits on the target");
+        let outcome = database
+            .branches()
+            .expect("branch service")
+            .promote(
+                &branch("child"),
+                &branch("default"),
+                PromotionStrategy::SourceWins,
+            )
+            .expect("promotion commits");
+        assert!(outcome.target_version().is_some());
+        assert!(registered(&mut database, "default", &shared));
+        let mut kv = database
+            .kv(branch("default"), shared.clone())
+            .expect("kv service");
+        assert_eq!(
+            kv.get(&key(90_000))
+                .expect("get")
+                .expect("promoted")
+                .as_bytes(),
+            b"from-child"
+        );
+        assert!(
+            kv.get(&key(0)).expect("get").is_none(),
+            "a row of the deleted incarnation does not resurface"
+        );
+        let after = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .delete(&shared, true)
+            .expect("delete succeeds");
+        assert_eq!(after.deleted_rows(), 1, "only the promoted row was there");
+    }
+
+    #[test]
+    fn a_promotion_finishes_a_pending_space_deletion_only_when_it_commits() {
+        exercise_promotion(
+            Database::open_cache(CacheOpenOptions::new())
+                .expect("cache opens")
+                .into_database(),
+        );
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        exercise_promotion(
+            Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+                .expect("durable opens")
+                .into_database(),
+        );
+    }
+
+    /// The mark is durable: a database closed between the mark and the sweep
+    /// reopens with the space unregistered and its deletion owed, and the
+    /// next delete finishes it.
+    #[test]
+    fn a_reopened_database_finishes_an_interrupted_space_deletion() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let target = {
+            let mut database = Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+                .expect("durable opens")
+                .into_database();
+            let target = populate(&mut database, "interrupted", 3_000);
+            database
+                .spaces(branch("default"))
+                .expect("space service")
+                .begin_space_delete_for_test(&target)
+                .expect("mark commits");
+            database.close().expect("close succeeds");
+            target
+        };
+        let mut reopened = Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+            .expect("reopen succeeds")
+            .into_database();
+        assert!(!registered(&mut reopened, "default", &target));
+        let outcome = reopened
+            .spaces(branch("default"))
+            .expect("space service")
+            .delete(&target, false)
+            .expect("the reopened database finishes the sweep");
+        assert!(outcome.deleted());
+        assert_eq!(outcome.deleted_rows(), 3_000);
+        assert_eq!(kv_count(&mut reopened, "default", &target), 0);
+    }
+
+    #[test]
+    fn a_marked_space_is_unregistered_and_its_deletion_resumes() {
+        exercise(
+            Database::open_cache(CacheOpenOptions::new())
+                .expect("cache opens")
+                .into_database(),
+        );
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        exercise(
+            Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
+                .expect("durable opens")
+                .into_database(),
+        );
+    }
+    /// The vector index manifests a space's collections own live under the
+    /// space-control class, keyed by space rather than under the space's own
+    /// prefixes; a force-delete sweeps them with the rest and counts them.
+    #[test]
+    fn a_force_delete_sweeps_the_space_vector_index_manifests() {
+        use crate::persistence::{
+            decode_vector_index_manifest_key, vector_index_manifest_prefix, ReadSelector, RowClass,
+        };
+        use crate::{VectorCollectionName, VectorConfig, VectorDistanceMetric};
+
+        let mut database = Database::open_cache(CacheOpenOptions::new())
+            .expect("cache opens")
+            .into_database();
+        // Two spaces with a manifest each: the deleted one loses its own, the
+        // other keeps its own.
+        let tenant = space("tenant");
+        let other = space("other");
+        let docs = VectorCollectionName::new("docs").expect("collection name");
+        for owner in [&tenant, &other] {
+            database
+                .spaces(branch("default"))
+                .expect("space service")
+                .create(owner.clone())
+                .expect("space created");
+            database
+                .vector(branch("default"), owner.clone())
+                .expect("vector service")
+                .create_collection(
+                    docs.clone(),
+                    VectorConfig::new(2, VectorDistanceMetric::Cosine).expect("config"),
+                )
+                .expect("collection created");
+            database
+                .vector(branch("default"), owner.clone())
+                .expect("vector service")
+                .seed_empty_index_manifest_for_test(&docs)
+                .expect("manifest seeded");
+        }
+
+        let live_manifests = |database: &mut Database, owner: &ProductSpace| -> usize {
+            let spaces = database.spaces(branch("default")).expect("space service");
+            let record = spaces.branch_record().expect("branch record");
+            spaces
+                .persistence
+                .scan_prefix(
+                    record.storage_branch_id(),
+                    RowClass::SpaceControl,
+                    vector_index_manifest_prefix(),
+                    ReadSelector::Latest,
+                    None,
+                )
+                .expect("manifest scan")
+                .into_iter()
+                .filter(|row| !row.is_tombstone())
+                .filter(|row| {
+                    decode_vector_index_manifest_key(row.key())
+                        .is_ok_and(|(manifest_owner, _)| &manifest_owner == owner)
+                })
+                .count()
+        };
+        assert_eq!(live_manifests(&mut database, &tenant), 1);
+        assert_eq!(live_manifests(&mut database, &other), 1);
+
+        let outcome = database
+            .spaces(branch("default"))
+            .expect("space service")
+            .delete(&tenant, true)
+            .expect("forced delete succeeds");
+        assert!(outcome.deleted());
+        assert_eq!(
+            outcome.deleted_rows(),
+            2,
+            "the collection row and its manifest"
+        );
+        assert_eq!(
+            live_manifests(&mut database, &tenant),
+            0,
+            "the manifest was swept"
+        );
+        assert_eq!(
+            live_manifests(&mut database, &other),
+            1,
+            "another space's manifest is not"
+        );
+    }
 }

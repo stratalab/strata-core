@@ -250,13 +250,42 @@ pub(crate) fn decode_space_index(bytes: &[u8]) -> Result<Vec<ProductSpace>, Engi
     Ok(spaces)
 }
 
+/// A product-space catalog row: the space, and whether a deletion has
+/// marked it (#3574). An unmarked row is the bare name — byte-identical to
+/// every row written before the mark existed — and the mark is one trailing
+/// byte, so an older row decodes as unmarked.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SpaceCatalogRecord {
+    space: ProductSpace,
+    deleting: bool,
+}
+
+impl SpaceCatalogRecord {
+    pub(crate) const fn space(&self) -> &ProductSpace {
+        &self.space
+    }
+
+    /// Whether a chunked deletion has marked the space: unregistered, its
+    /// rows still being swept.
+    pub(crate) const fn deleting(&self) -> bool {
+        self.deleting
+    }
+}
+
 pub(crate) fn encode_space_record(space: &ProductSpace) -> Vec<u8> {
     let mut out = versioned_payload(SPACE_MAGIC);
     write_name(&mut out, space.as_str());
     out
 }
 
-pub(crate) fn decode_space_record(bytes: &[u8]) -> Result<ProductSpace, EngineError> {
+/// The catalog row of a space whose deletion is under way (#3574).
+pub(crate) fn encode_space_record_deleting(space: &ProductSpace) -> Vec<u8> {
+    let mut out = encode_space_record(space);
+    out.push(1);
+    out
+}
+
+pub(crate) fn decode_space_catalog_record(bytes: &[u8]) -> Result<SpaceCatalogRecord, EngineError> {
     let mut cursor = Cursor::new(expect_payload(bytes, SPACE_MAGIC)?);
     let name = cursor.name("space record")?;
     let space = ProductSpace::new(name).map_err(|_| {
@@ -265,8 +294,23 @@ pub(crate) fn decode_space_record(bytes: &[u8]) -> Result<ProductSpace, EngineEr
             "space record contains an invalid product space",
         )
     })?;
+    // #3574: a row written before the deletion mark existed ends here.
+    let deleting = if cursor.is_empty() {
+        false
+    } else {
+        match cursor.u8("space record deleting flag")? {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(EngineError::corruption(
+                    "data_loss.engine.space_catalog",
+                    "space record has an invalid deleting flag",
+                ))
+            }
+        }
+    };
     cursor.finish("space record")?;
-    Ok(space)
+    Ok(SpaceCatalogRecord { space, deleting })
 }
 
 pub(crate) fn encode_reserved_system_space() -> Vec<u8> {
@@ -652,13 +696,14 @@ mod tests {
     use super::{
         decode_branch_index, decode_branch_record, decode_capability_registry,
         decode_database_identity, decode_local_instance_identity, decode_migration_registry,
-        decode_pending_branch_record, decode_reserved_system_space, decode_space_index,
-        decode_space_record, decode_storage_registry, encode_branch_index, encode_branch_record,
+        decode_pending_branch_record, decode_reserved_system_space, decode_space_catalog_record,
+        decode_space_index, decode_storage_registry, encode_branch_index, encode_branch_record,
         encode_capability_registry, encode_database_identity, encode_local_instance_identity,
         encode_migration_registry, encode_pending_branch_record, encode_reserved_system_space,
-        encode_space_index, encode_space_record, encode_storage_registry, DatabaseIdentityRecord,
-        CAPABILITY_MAGIC, CORE_CONTROL_STORAGE_SPACE_IDS, IDENTITY_MAGIC, MIGRATION_MAGIC,
-        PENDING_MAGIC, REGISTRY_MAGIC,
+        encode_space_index, encode_space_record, encode_space_record_deleting,
+        encode_storage_registry, DatabaseIdentityRecord, CAPABILITY_MAGIC,
+        CORE_CONTROL_STORAGE_SPACE_IDS, IDENTITY_MAGIC, MIGRATION_MAGIC, PENDING_MAGIC,
+        REGISTRY_MAGIC,
     };
     use crate::branch::catalog::{BranchCatalogRecord, BranchMergeRecord, BranchOperationKind};
     use crate::branch::BranchName;
@@ -940,9 +985,38 @@ mod tests {
     #[test]
     fn space_record_round_trips() {
         let space = ProductSpace::new("default").expect("valid space");
-        let decoded =
-            decode_space_record(&encode_space_record(&space)).expect("space record decodes");
-        assert_eq!(decoded, space);
+        let decoded = decode_space_catalog_record(&encode_space_record(&space))
+            .expect("space record decodes");
+        assert_eq!(decoded.space(), &space);
+        assert!(!decoded.deleting());
+    }
+
+    /// #3574: the deleting mark is one trailing byte. An unmarked row is the
+    /// bare name — the bytes every row written before the mark existed has —
+    /// so an older row decodes as unmarked; a marked row decodes as marked;
+    /// and any other trailing byte is corruption, not a silent guess.
+    #[test]
+    fn space_record_deleting_mark_round_trips_and_is_omitted_when_clear() {
+        let space = ProductSpace::new("tenant").expect("valid space");
+        let clear = encode_space_record(&space);
+        let marked = encode_space_record_deleting(&space);
+        assert_eq!(&marked[..clear.len()], &clear[..]);
+        assert_eq!(&marked[clear.len()..], &[1]);
+        let decoded = decode_space_catalog_record(&marked).expect("marked row decodes");
+        assert_eq!(decoded.space(), &space);
+        assert!(decoded.deleting());
+
+        let mut explicit_clear = clear.clone();
+        explicit_clear.push(0);
+        assert!(!decode_space_catalog_record(&explicit_clear)
+            .expect("an explicit clear flag decodes")
+            .deleting());
+
+        let mut invalid = clear;
+        invalid.push(2);
+        let error = decode_space_catalog_record(&invalid).expect_err("an unknown flag is refused");
+        assert_eq!(error.class(), EngineErrorClass::Corruption);
+        assert_eq!(error.code(), "data_loss.engine.space_catalog");
     }
 
     #[test]
