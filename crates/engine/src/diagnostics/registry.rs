@@ -89,7 +89,6 @@ const INVALID_INPUT_CODES: &[&str] = &[
     "invalid_argument.engine.product_space_reserved",
     "invalid_argument.engine.space_catalog",
     "invalid_argument.engine.space_delete_default",
-    "invalid_argument.engine.space_delete_too_large",
     "invalid_argument.engine.vector_artifact",
     "invalid_argument.engine.vector_artifact_budget",
     "invalid_argument.engine.vector_batch",

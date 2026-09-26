@@ -446,9 +446,6 @@ the public registry when adding, renaming, or removing a public error code.
 <a id="invalid_argument.engine.space_delete_default"></a>
 - `invalid_argument.engine.space_delete_default`
 
-<a id="invalid_argument.engine.space_delete_too_large"></a>
-- `invalid_argument.engine.space_delete_too_large`
-
 <a id="invalid_argument.engine.vector_artifact"></a>
 - `invalid_argument.engine.vector_artifact`
 

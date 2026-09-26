@@ -57,7 +57,6 @@ errors:
   - history_unavailable.engine.persistence_history
   - invalid_argument.engine.product_space_reserved
   - invalid_argument.engine.space_delete_default
-  - invalid_argument.engine.space_delete_too_large
   - failed_precondition.engine.embedding_model_mismatch
   - failed_precondition.engine.embedding_model_missing
   - failed_precondition.engine.space_not_empty

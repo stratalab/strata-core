@@ -7,6 +7,8 @@ section: space
 
 Drops the product space from the branch catalog. The `default` space refuses deletion with `invalid_argument.engine.space_delete_default`. A space that still contains visible data refuses deletion with `failed_precondition.engine.space_not_empty` unless `force: true` is set, which tombstones the visible rows first and reports the count. Deleting a space that does not exist succeeds with `deleted: false`.
 
+A space of any size deletes. One whose rows fit a single commit goes in that commit; a larger one is unregistered by its first commit — gone from `space list` and `space exists`, and a write of the name finishes the sweep and lands in a fresh, empty space rather than the one being deleted — and its rows are then swept in commits the storage budget admits, the catalog row last. A deletion interrupted mid-sweep is finished by the next `space delete` or `space create` of the name, or by the first write that would register it; the interrupted delete never leaves a half-registered space. Reads pinned before the deletion still see the space as it was.
+
 Successful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.
 
 ## Examples
@@ -52,7 +54,6 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.product_space_reserved`](https://stratadb.org/e/invalid_argument.engine.product_space_reserved)
 - [`invalid_argument.engine.space_delete_default`](https://stratadb.org/e/invalid_argument.engine.space_delete_default)
 - [`failed_precondition.engine.space_not_empty`](https://stratadb.org/e/failed_precondition.engine.space_not_empty)
-- [`invalid_argument.engine.space_delete_too_large`](https://stratadb.org/e/invalid_argument.engine.space_delete_too_large)
 
 ## Invocation
 

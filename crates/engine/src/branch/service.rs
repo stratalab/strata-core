@@ -342,6 +342,22 @@ impl<'a> BranchService<'a> {
             ));
         }
 
+        // #3574: a source space the target holds a crash-interrupted deletion
+        // for is re-registered by this promotion, so its owed sweep finishes
+        // here — after the refusal decision, so a refused promotion writes
+        // nothing (rule 20), and before the promotion's own commit, so the
+        // fresh catalog row lands after the old row's tombstone. The sweep is
+        // commits of its own and cannot ride the atomic promotion commit; a
+        // failure between them leaves a space already gone to every observer
+        // with fewer rows to sweep, never a half-promoted target.
+        for space in &plan.pending_space_sweeps {
+            crate::control::space::finish_pending_deletion(
+                self.persistence,
+                &target_record,
+                space,
+            )?;
+        }
+
         let (target_version, target_timestamp) = if plan.mutations.is_empty() {
             (None, None)
         } else {

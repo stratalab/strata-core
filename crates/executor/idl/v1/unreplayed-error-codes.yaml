@@ -60,7 +60,7 @@
 # now declares both (it is the only raiser of the first) and replays each from
 # an error case: a negative edge in the setup, and a blank edge type in the
 # request's new `edge_types` filter.
-budget: 109
+budget: 108
 unreplayed:
   - already_exists.engine.json_index
   - failed_precondition.engine.graph_ontology_edge_type
@@ -126,7 +126,6 @@ unreplayed:
   - invalid_argument.engine.kv_batch_duplicate_key
   - invalid_argument.engine.product_space
   - invalid_argument.engine.product_space_reserved
-  - invalid_argument.engine.space_delete_too_large
   - invalid_argument.engine.vector_batch
   - invalid_argument.engine.vector_collection
   - invalid_argument.engine.vector_embedding

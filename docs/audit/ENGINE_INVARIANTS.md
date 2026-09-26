@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (16, one retired), SCALE (13), DUR (18) = 89 entries, 88 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (17, one retired), SCALE (13), DUR (18) = 90 entries, 89 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -1039,6 +1039,57 @@ single-commit / three-commit boundary), in-crate
 `service::tests::a_marked_graph_is_absent_and_its_deletion_resumes` (absence to every read
 and write, `as_of` before the mark, cross-graph bindings, resume by delete and by create),
 and `metadata_deleting_mark_round_trips_and_is_omitted_when_clear` (`record.rs`).
+
+### ARCH-017: A space deletion is unregistered at its first commit and physically resumable
+
+A product space is deleted through the public API whatever its size (#3574), the sibling
+of ARCH-015 for graphs. A space with fewer rows than the shared sweep chunk
+(`control::space::DELETE_CHUNK_ROWS`, half the storage commit budget) goes in the single
+commit it always did: the index rewritten without it, its catalog row tombstoned, and its
+rows. A larger one goes in three or more: the first rewrites the index without the space
+and rewrites its catalog row with the `deleting` mark (`records::SpaceCatalogRecord`, one
+trailing byte an older row simply lacks), and from that commit the space is unregistered —
+`list`, `exists`, promotion's space reconciliation and every writer's registration path
+see no space; the sweep then tombstones the rows in commits of at most the chunk, the rows
+other capabilities' readers gate on first (graph metadata, vector collections); the marked
+row is tombstoned last, in a commit of its own. So a crash at any point leaves a marked row
+and some rows, never a half-registered space: the next `delete` of the name reports it
+deleted and finishes the sweep without needing `force`; `create` and the first capability
+write that would register the name finish the sweep before registering, and a promotion
+that re-registers it finishes the sweep in `BranchService::promote` only after its refusal
+decision and before its own atomic commit — so a refused promotion and a preview write
+nothing (rule 20), and the plan merely names the pending sweeps
+(`PromotionPlan::pending_space_sweeps`). All four go through
+`control::space::finish_pending_deletion`, the one path, so no row of the old space
+surfaces under the new one. `as_of` reads before the mark see the
+space as it was (MVCC-001); a fork mid-sweep inherits the marked row and each branch
+resumes independently (COW-003). One window is documented rather than closed: capability
+reads have no registration choke point the way graph reads have `graph_metadata_row`, so
+a data read of a mid-sweep space can still return a row the sweep has not yet reached,
+until the chunk that removes it — the same window `space usage` and `branch compare`
+have for a mid-sweep graph (#3575). The regression is a registering path that skips
+`finish_pending_deletion`, a sweep that tombstones the catalog row before the last chunk,
+or a catalog row listed in the index while marked (`validate_space_catalog_row` treats that
+as corruption).
+
+**Audit**: In `control/space.rs`, `registration_mutations` calls `finish_pending_deletion`
+for the space it would add before building the index rewrite, while
+`registration_and_deletion_mutations` (promotion planning) stays read-only and
+`plan_promotion` records `pending_deletions_among` the source spaces for `promote` to sweep
+after the refusal guard and before `commit_promotion_with_lineage`; `sweep_space_rows`
+commits the catalog tombstone only after the last chunk; `validate_space_catalog_row` refuses a marked row
+that the index lists. In `api/space.rs`, `delete` takes the single-commit path only below
+`DELETE_CHUNK_ROWS`, otherwise commits `unregister_mutations(.., marked = true)` before
+`sweep_space_rows`, and resumes a marked unregistered name through
+`finish_pending_deletion`. Tests: `tests/engine_space_delete.rs` (the issue's shape in
+both modes; the exact one-commit / three-commit boundary; a read pinned before the mark),
+`tests/engine_event_space_refusals.rs::deleting_an_oversized_space_succeeds_in_chunks`
+(the former refusal), in-crate
+`api::space::tests::a_marked_space_is_unregistered_and_its_deletion_resumes` (resume by
+delete, by create, by a registering write, after a durable reopen, and independently on
+each side of a fork; a promotion sweeps only when it commits — a refused one and a preview
+leave the sweep owed), and
+`records::tests::space_record_deleting_mark_round_trips_and_is_omitted_when_clear`.
 
 ### ARCH-016: A multi-commit bulk import leaves a durable watermark until its last commit
 

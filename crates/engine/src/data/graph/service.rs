@@ -175,11 +175,12 @@ impl<'a> GraphService<'a> {
         Ok(GraphDeleteOutcome::new(name.clone(), true, Some(last)))
     }
 
-    /// Rows tombstoned per sweep commit of a chunked deletion (#3477): half
-    /// the storage layer's default per-commit mutation budget (4096), so a
-    /// chunk fits beside whatever else a commit carries. A graph with fewer
-    /// rows than this deletes in one commit, as it always did.
-    pub(crate) const DELETE_CHUNK_ROWS: usize = 2048;
+    /// Rows tombstoned per sweep commit of a chunked deletion (#3477): the
+    /// chunk shared with space deletion (#3574), half the storage layer's
+    /// default per-commit mutation budget (4096), so a chunk fits beside
+    /// whatever else a commit carries. A graph with fewer rows than this
+    /// deletes in one commit, as it always did.
+    pub(crate) const DELETE_CHUNK_ROWS: usize = crate::control::space::DELETE_CHUNK_ROWS;
 
     /// Every row a graph owns beyond its metadata row, as tombstones, in the
     /// order a sweep removes them: the index rows another graph's readers
