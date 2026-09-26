@@ -1399,15 +1399,6 @@ pub(crate) fn unsupported_quarantine_maintenance(kind: MaintenanceTaskKind) -> M
         .with_stats(LifecycleStats::new(0, 0, 1, 1, 0))
 }
 
-pub(crate) fn quarantine_task_without_request() -> MaintenanceOutcome {
-    MaintenanceOutcome::new(
-        MaintenanceTaskKind::Quarantine,
-        MaintenanceOutcomeStatus::Deferred,
-    )
-    .with_reason("quarantine task requires an explicit quarantine request")
-    .with_stats(LifecycleStats::new(0, 0, 1, 1, 0))
-}
-
 fn validate_purge_request(
     database_id: [u8; 16],
     proof: &LifecyclePurgeProof,

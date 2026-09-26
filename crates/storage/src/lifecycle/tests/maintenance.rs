@@ -1763,3 +1763,140 @@ fn rewrite_conflict_is_same_branch_adjacent_level() {
         "materialization conflicts with any same-branch rewrite"
     );
 }
+
+/// Space-reclamation contract §3.1 (slice 3): the reclaim set drains before
+/// close; everything else is canceled at close.
+#[test]
+fn close_policy_for_kind_truth_table() {
+    for (kind, expected) in [
+        (
+            MaintenanceTaskKind::Retention,
+            MaintenanceClosePolicy::DrainBeforeClose,
+        ),
+        (
+            MaintenanceTaskKind::SnapshotPruning,
+            MaintenanceClosePolicy::DrainBeforeClose,
+        ),
+        (
+            MaintenanceTaskKind::Quarantine,
+            MaintenanceClosePolicy::DrainBeforeClose,
+        ),
+        (
+            MaintenanceTaskKind::Purge,
+            MaintenanceClosePolicy::DrainBeforeClose,
+        ),
+        (MaintenanceTaskKind::Flush, MaintenanceClosePolicy::Ordinary),
+        (
+            MaintenanceTaskKind::Checkpoint,
+            MaintenanceClosePolicy::Ordinary,
+        ),
+        (
+            MaintenanceTaskKind::FlushWatermark,
+            MaintenanceClosePolicy::Ordinary,
+        ),
+        (
+            MaintenanceTaskKind::WalTruncation,
+            MaintenanceClosePolicy::Ordinary,
+        ),
+        (
+            MaintenanceTaskKind::Compaction,
+            MaintenanceClosePolicy::Ordinary,
+        ),
+        (
+            MaintenanceTaskKind::Materialization,
+            MaintenanceClosePolicy::Ordinary,
+        ),
+        (
+            MaintenanceTaskKind::Repair,
+            MaintenanceClosePolicy::Ordinary,
+        ),
+        (
+            MaintenanceTaskKind::HealthCollection,
+            MaintenanceClosePolicy::Ordinary,
+        ),
+        (
+            MaintenanceTaskKind::CachePreheat,
+            MaintenanceClosePolicy::Ordinary,
+        ),
+    ] {
+        assert_eq!(close_policy_for_kind(kind), expected, "{kind:?}");
+    }
+}
+
+/// Every production request constructor carries exactly the close policy its
+/// kind is assigned, and coalesces: no constructor can drift from the single
+/// source without failing here.
+#[test]
+fn every_production_request_carries_the_close_policy_for_its_kind() {
+    let branch = strata_core::BranchId::from_bytes([0x5c; strata_core::BranchId::BYTE_LEN]);
+    let requests = [
+        MaintenanceTaskRequest::health_collection(),
+        MaintenanceTaskRequest::flush(branch),
+        MaintenanceTaskRequest::checkpoint(),
+        MaintenanceTaskRequest::checkpoint_with_options(MaintenanceCheckpointOptions::new(
+            None, true,
+        )),
+        MaintenanceTaskRequest::wal_truncation(),
+        MaintenanceTaskRequest::table_manifest_flush_watermark(CommitVersion::new(1)),
+        MaintenanceTaskRequest::snapshot_pruning(1),
+        MaintenanceTaskRequest::retention(1),
+        MaintenanceTaskRequest::table_object_retention(branch),
+        MaintenanceTaskRequest::quarantine(),
+        MaintenanceTaskRequest::cache_preheat(),
+        MaintenanceTaskRequest::purge_quarantine(branch),
+        MaintenanceTaskRequest::repair_quarantine(branch),
+        MaintenanceTaskRequest::repair_quarantine_family(),
+        MaintenanceTaskRequest::compaction(branch, 0),
+        MaintenanceTaskRequest::materialization(branch),
+    ];
+    let mut drain_before_close = 0usize;
+    for request in requests {
+        assert_eq!(
+            request.policy().close_policy(),
+            close_policy_for_kind(request.kind()),
+            "{:?}",
+            request.kind()
+        );
+        assert!(request.policy().coalesces(), "{:?}", request.kind());
+        if request.policy().close_policy() == MaintenanceClosePolicy::DrainBeforeClose {
+            drain_before_close += 1;
+        }
+    }
+    // The four reclaim kinds behind five constructors.
+    assert_eq!(drain_before_close, 5);
+}
+
+/// The close-time enqueue admits a drain-before-close request while the
+/// runtime is Closing (where ordinary enqueue is refused) and refuses
+/// anything the close would only cancel.
+#[test]
+fn close_time_enqueue_admits_only_drain_before_close_tasks_in_closing_state() {
+    let closing = closing_state();
+    let branch = strata_core::BranchId::from_bytes([0x5d; strata_core::BranchId::BYTE_LEN]);
+    let mut executor = LifecycleMaintenanceExecutor::new(4).expect("executor");
+
+    assert!(
+        executor
+            .enqueue(closing, MaintenanceTaskRequest::quarantine())
+            .is_err(),
+        "ordinary enqueue is not admitted while closing"
+    );
+    let enqueued = executor
+        .enqueue_for_close(closing, MaintenanceTaskRequest::quarantine())
+        .expect("a drain-before-close request is admitted at close");
+    assert_eq!(enqueued.pending_tasks(), 1);
+    // Coalesces like an ordinary enqueue.
+    executor
+        .enqueue_for_close(closing, MaintenanceTaskRequest::quarantine())
+        .expect("coalesced");
+    assert_eq!(executor.status().pending_tasks(), 1);
+
+    assert!(
+        matches!(
+            executor.enqueue_for_close(closing, MaintenanceTaskRequest::flush(branch)),
+            Err(LifecycleError::MaintenanceTaskFailed { .. })
+        ),
+        "an ordinary-policy task is refused at close"
+    );
+    assert_eq!(executor.status().pending_tasks(), 1);
+}

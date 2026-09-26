@@ -676,7 +676,10 @@ fn durable_close_syncs_log_releases_writer_guard_and_is_idempotent() {
     assert!(close.durable_synced());
     assert!(close.guards_released());
     assert_eq!(close.stats().close_attempts(), 1);
-    assert_eq!(close.stats().maintenance_tasks(), 0);
+    // Space-reclamation contract §3.1 (slice 3): the close-time reclaim sweep is
+    // the one task even a debt-free close drains (it lists the table-object
+    // inventory and finds nothing); every close count below carries it.
+    assert_eq!(close.stats().maintenance_tasks(), 1);
     assert!(!backend.lock_is_held());
     assert!(runtime.services().writer_guard().is_none());
     assert!(backend
@@ -869,9 +872,25 @@ fn durable_close_does_not_truncate_wal_prune_snapshots_or_purge_quarantine_impli
     assert!(!close_operations
         .iter()
         .any(|operation| matches!(operation, Operation::DeleteObject(_))));
-    assert!(!close_operations
+    // Space-reclamation contract §3.1 (slice 3): the one listing a clean close
+    // performs is the reclaim mark's table-object inventory; the WAL, snapshot
+    // and quarantine families are never listed, truncated, pruned or purged
+    // implicitly (a debt-free close costs exactly that listing).
+    let table_prefix = ObjectLayout::table_prefix().expect("table prefix");
+    let listed: Vec<_> = close_operations
         .iter()
-        .any(|operation| matches!(operation, Operation::ListPrefix(_))));
+        .filter_map(|operation| match operation {
+            Operation::ListPrefix(prefix) => Some(prefix.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !listed.is_empty()
+            && listed
+                .iter()
+                .all(|prefix| prefix.as_str().starts_with(table_prefix.as_str())),
+        "close listed {listed:?}"
+    );
     // The only close-time publish is the #2690 durable commit watermark
     // attesting the synced log; close never rewrites checkpoints, manifests,
     // snapshots, or quarantine state.
@@ -1120,7 +1139,7 @@ fn durable_close_force_syncs_manifest_when_health_changed() {
         .expect("manifest still present after close");
 
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
-    assert_eq!(close.stats().maintenance_tasks(), 0);
+    assert_eq!(close.stats().maintenance_tasks(), 1);
     let publish_count = close_operations
         .iter()
         .filter(|op| matches!(op, Operation::Publish(_, PublishMode::Replace)))
@@ -1726,7 +1745,7 @@ fn durable_close_drain_flush_publishes_table_manifest() {
     let close = runtime.close().expect("close drains flush");
 
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
-    assert_eq!(close.stats().maintenance_tasks(), 1);
+    assert_eq!(close.stats().maintenance_tasks(), 2);
     assert_eq!(runtime.branch_state().frozen_table_count(), 0);
     assert_eq!(runtime.branch_state().owned_levels()[0].len(), 1);
     let manifest = TableManifestService::new(backend)
@@ -2246,7 +2265,7 @@ fn durable_close_with_pending_retention_drain_runs_required_task() {
     let close = runtime.close().expect("close drains retention");
 
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
-    assert_eq!(close.stats().maintenance_tasks(), 1);
+    assert_eq!(close.stats().maintenance_tasks(), 2);
 }
 
 #[test]
@@ -2266,7 +2285,7 @@ fn durable_close_with_pending_quarantine_drain_preserves_reclaim_facts() {
     let close = runtime.close().expect("close drains quarantine");
 
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
-    assert_eq!(close.stats().maintenance_tasks(), 1);
+    assert_eq!(close.stats().maintenance_tasks(), 2);
 }
 
 #[test]
@@ -2282,7 +2301,7 @@ fn durable_close_with_ordinary_compaction_task_does_not_start_compaction() {
     let close = runtime.close().expect("durable close");
 
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
-    assert_eq!(close.stats().maintenance_tasks(), 1);
+    assert_eq!(close.stats().maintenance_tasks(), 2);
     assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
 }
 
@@ -2423,7 +2442,7 @@ fn close_acquires_commit_quiesce_after_maintenance_drain() {
     let close = runtime.close().expect("close");
     let close_operations = backend.operations()[operations_before_close..].to_vec();
 
-    assert_eq!(close.stats().maintenance_tasks(), 1);
+    assert_eq!(close.stats().maintenance_tasks(), 2);
     assert!(close.commits_quiesced());
     assert_eq!(runtime.state(), LifecycleState::Closed);
 
@@ -2789,8 +2808,8 @@ fn durable_close_drains_stale_active_maintenance_before_closing() {
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
     assert_eq!(runtime.state(), LifecycleState::Closed);
     assert_eq!(runtime.maintenance_status().active_task(), None);
-    assert_eq!(runtime.maintenance_status().stats().drained(), 1);
-    assert_eq!(close.stats().maintenance_tasks(), 1);
+    assert_eq!(runtime.maintenance_status().stats().drained(), 2);
+    assert_eq!(close.stats().maintenance_tasks(), 2);
     assert!(!backend.lock_is_held());
 }
 
@@ -2828,7 +2847,7 @@ fn durable_close_preserves_drain_required_checkpoint_when_quiesce_is_unavailable
     drop(guard);
     let close = runtime.close().expect("retry drains checkpoint and closes");
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
-    assert_eq!(close.stats().maintenance_tasks(), 1);
+    assert_eq!(close.stats().maintenance_tasks(), 2);
     assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
     assert_eq!(runtime.state(), LifecycleState::Closed);
     assert!(!backend.lock_is_held());

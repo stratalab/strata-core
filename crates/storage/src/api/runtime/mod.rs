@@ -127,8 +127,8 @@ use maintenance::{
 };
 use open_close::{
     background_executor_mode, background_shutdown_panic_error, durable_backend_handle_for_open,
-    lifecycle_plan, map_close_summary, map_open_summary, record_background_close_maintenance_facts,
-    with_background_close_facts,
+    lifecycle_plan, map_close_reclaim_budget, map_close_summary, map_open_summary,
+    record_background_close_maintenance_facts, with_background_close_facts,
 };
 
 const DEFAULT_DATABASE_ID: [u8; 16] = [0x53; 16];
@@ -194,9 +194,27 @@ impl CommitTimestampSource for ApiTimestampSource {
     }
 }
 
+/// How much wall-clock time a clean close may spend reclaiming the session's
+/// table-object debt (the mark → sweep → purge chain) before handing the
+/// remainder to the next open (space-reclamation contract §3.1, slice 3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ReclaimBudget {
+    /// Skip close-time reclaim entirely; the next open reconciles.
+    Disabled,
+    /// Run reclaim rounds while this budget has not elapsed.
+    Bounded(Duration),
+}
+
+impl ReclaimBudget {
+    /// The default close budget.
+    pub const DEFAULT: Self = Self::Bounded(Duration::from_millis(500));
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StorageCloseOptions {
     background_shutdown_timeout: Duration,
+    reclaim_budget: ReclaimBudget,
 }
 
 impl StorageCloseOptions {
@@ -204,6 +222,7 @@ impl StorageCloseOptions {
     pub const fn graceful() -> Self {
         Self {
             background_shutdown_timeout: DEFAULT_BACKGROUND_CLOSE_SHUTDOWN_TIMEOUT,
+            reclaim_budget: ReclaimBudget::DEFAULT,
         }
     }
 
@@ -216,8 +235,20 @@ impl StorageCloseOptions {
         self
     }
 
+    /// Bound (or disable) the close-time reclaim drive; `graceful()` uses
+    /// `ReclaimBudget::DEFAULT`.
+    #[must_use]
+    pub const fn with_reclaim_budget(mut self, reclaim_budget: ReclaimBudget) -> Self {
+        self.reclaim_budget = reclaim_budget;
+        self
+    }
+
     const fn background_shutdown_timeout(self) -> Duration {
         self.background_shutdown_timeout
+    }
+
+    const fn reclaim_budget(self) -> ReclaimBudget {
+        self.reclaim_budget
     }
 }
 
@@ -833,7 +864,9 @@ impl<'a> StorageRuntime<'a> {
                 }
                 let mut runtime = runtime.lock();
                 let maintenance_before_close = runtime.maintenance_status().stats();
-                let close = runtime.close().map_err(map_lifecycle_error)?;
+                let close = runtime
+                    .close_with_reclaim_budget(map_close_reclaim_budget(options.reclaim_budget()))
+                    .map_err(map_lifecycle_error)?;
                 let maintenance_after_close = runtime.maintenance_status().stats();
                 record_background_close_maintenance_facts(
                     maintenance_before_close,

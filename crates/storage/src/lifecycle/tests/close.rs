@@ -420,3 +420,30 @@ impl fmt::Display for CloseSourceError {
 }
 
 impl Error for CloseSourceError {}
+
+/// Space-reclamation contract §3.1 (slice 3): the drive's continue predicate.
+#[test]
+fn close_reclaim_should_continue_truth_table() {
+    use std::time::Duration;
+    let budget = Duration::from_millis(500);
+    for (elapsed, debt_remaining, sweep_deferred, expected) in [
+        (Duration::ZERO, true, false, true),
+        (Duration::from_millis(499), true, false, true),
+        (Duration::from_millis(500), true, false, false),
+        (Duration::from_millis(501), true, false, false),
+        (Duration::ZERO, false, false, false),
+        (Duration::ZERO, true, true, false),
+        (Duration::ZERO, false, true, false),
+        (Duration::from_millis(501), false, true, false),
+    ] {
+        assert_eq!(
+            close_reclaim_should_continue(elapsed, budget, debt_remaining, sweep_deferred),
+            expected,
+            "elapsed={elapsed:?} debt_remaining={debt_remaining} sweep_deferred={sweep_deferred}"
+        );
+    }
+    assert!(
+        !close_reclaim_should_continue(Duration::ZERO, Duration::ZERO, true, false),
+        "a zero budget runs no round"
+    );
+}
