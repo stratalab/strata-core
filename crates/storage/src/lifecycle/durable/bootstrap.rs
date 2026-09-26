@@ -141,6 +141,11 @@ pub(crate) struct LifecycleDurableLocalRuntime<'a, S = CommitManualTimestampSour
     /// and a retried checkpoint — the retry runs once per visible version so a
     /// delta no flush can shrink never spins the queue.
     pub(super) checkpoint_delta_cap_retry: Option<CommitVersion>,
+    /// Space-reclamation contract §3.1 (slice 4): `Active` from an
+    /// `OpenedExisting` open until the first commit applies, during which a
+    /// background drain admits only the reclaim tier. A plain field: both the
+    /// drain step chooser and the commit apply hold the runtime lock.
+    pub(super) reclaim_only_scope: crate::lifecycle::ReclaimOnlyScope,
     /// C3a: blocks covered so far by the pass in flight
     /// (admitted + present + rejects), accumulated across chunks; published
     /// as the coverage-numerator gauge when the pass completes.
@@ -345,6 +350,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             cache_preheat_paused: false,
             checkpoint_delta_cap_bytes: crate::format::MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES,
             checkpoint_delta_cap_retry: None,
+            reclaim_only_scope: crate::lifecycle::ReclaimOnlyScope::Inactive,
             cache_preheat_pass_blocks: 0,
             #[cfg(test)]
             cache_preheat_chunk_bytes_for_test: None,
@@ -365,6 +371,11 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         };
         // BS2.3: seed a published snapshot for every recovered branch before any read observes it.
         runtime.republish_all_branch_snapshots();
+        // Space-reclamation contract §3.1: a reopened database starts in the
+        // reclaim-only scope (background drains admit only the reclaim tier
+        // until the first commit applies); a created one has no backlog.
+        runtime.reclaim_only_scope =
+            crate::lifecycle::reclaim_only_scope_after_open(runtime.open_outcome.disposition());
         // Table-object GC reconcile on REOPEN only: one coalescing mark covers the whole prior
         // session's backlog (the mark lists the global inventory against every current manifest),
         // so stale objects from crashes or pre-GC sessions are reclaimed instead of persisting
@@ -2709,6 +2720,12 @@ where
     fn finish_durable_commit_post_publish(&mut self, branch_id: BranchId) {
         self.mirror_visible_and_evaluate_wal_growth();
         self.schedule_post_commit_maintenance_best_effort(branch_id);
+    }
+
+    /// Space-reclamation contract §3.1: whether background drains are still
+    /// confined to the reclaim tier (no commit has applied since open).
+    pub(crate) const fn reclaim_only_scope(&self) -> crate::lifecycle::ReclaimOnlyScope {
+        self.reclaim_only_scope
     }
 
     fn mirror_visible_and_evaluate_wal_growth(&mut self) {
