@@ -25,6 +25,7 @@ mod health;
 mod maintenance;
 mod outcome;
 mod quarantine;
+mod reclaim_ledger;
 mod recovery;
 mod result;
 mod retained_history_extension;
@@ -200,9 +201,9 @@ pub(crate) use maintenance::{
     reason = "lifecycle scaffold exports define the local surface for later slices"
 )]
 pub(crate) use outcome::{
-    CloseOutcome, CloseOutcomeEffects, CloseOutcomeStatus, MaintenanceOutcome,
-    MaintenanceOutcomeReasonClass, MaintenanceOutcomeStatus, StorageOpenDisposition,
-    StorageOpenOutcome,
+    CloseOutcome, CloseOutcomeEffects, CloseOutcomeStatus, MaintenanceDeferralReason,
+    MaintenanceOutcome, MaintenanceOutcomeReasonClass, MaintenanceOutcomeStatus,
+    StorageOpenDisposition, StorageOpenOutcome, WalTruncationFollowUp,
 };
 #[allow(
     unused_imports,
@@ -215,6 +216,14 @@ pub(crate) use quarantine::{
     LifecyclePurgeProof, LifecyclePurgeStatus, LifecycleQuarantineOutcome,
     LifecycleQuarantineProof, LifecycleQuarantineProofStatus, LifecycleQuarantineRepairOutcome,
     LifecycleQuarantineRequest, LifecycleQuarantineStatus,
+};
+#[allow(
+    unused_imports,
+    reason = "reclaim ledger exports define the local surface the footprint diagnostics slice consumes"
+)]
+pub(crate) use reclaim_ledger::{
+    classify_reclaim, classify_reclaim_follow_up, ReclaimEvent, ReclaimFamily, ReclaimLedger,
+    ReclaimOutcome, ReclaimTotals,
 };
 #[allow(
     unused_imports,

@@ -967,6 +967,16 @@ impl<'a> StorageRuntime<'a> {
         }
     }
 
+    /// The durable runtime's reclaim ledger (space-reclamation contract §3.5);
+    /// `None` for a cache runtime, which owns no durable objects to reclaim.
+    #[cfg(test)]
+    pub(crate) fn reclaim_ledger_for_test(&self) -> Option<crate::lifecycle::ReclaimLedger> {
+        match &self.inner {
+            StorageRuntimeInner::DurableOwned(slot) => Some(*slot.lock().reclaim_ledger()),
+            StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => None,
+        }
+    }
+
     pub fn maintenance_status(&self) -> StorageApiResult<MaintenanceQueueSummary> {
         match &self.inner {
             StorageRuntimeInner::Cache(slot) => {

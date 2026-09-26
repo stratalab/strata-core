@@ -50,10 +50,38 @@ pub(crate) struct MaintenanceOutcome {
     retryable: bool,
     reason: Option<&'static str>,
     reason_class: Option<MaintenanceOutcomeReasonClass>,
+    deferral: Option<MaintenanceDeferralReason>,
     source_error: Option<LifecycleError>,
     state_changes: usize,
     checkpoint_required: bool,
     stats: LifecycleStats,
+    wal_truncation_follow_up: Option<WalTruncationFollowUp>,
+}
+
+/// A WAL truncation that ran as a checkpoint's follow-up rather than as its
+/// own task, carried on the checkpoint's outcome so the reclaim ledger sees
+/// it (space-reclamation contract §3.5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WalTruncationFollowUp {
+    completed: bool,
+    deleted_segments: usize,
+}
+
+impl WalTruncationFollowUp {
+    pub(crate) const fn new(completed: bool, deleted_segments: usize) -> Self {
+        Self {
+            completed,
+            deleted_segments,
+        }
+    }
+
+    pub(crate) const fn completed(self) -> bool {
+        self.completed
+    }
+
+    pub(crate) const fn deleted_segments(self) -> usize {
+        self.deleted_segments
+    }
 }
 
 #[non_exhaustive]
@@ -63,6 +91,28 @@ pub(crate) enum MaintenanceOutcomeStatus {
     Deferred,
     Failed,
     Canceled,
+}
+
+/// Why a reclaim pass deferred, as a typed fact beside the human `reason`
+/// text. Runners set it from their own typed status so the reclaim ledger
+/// never classifies from prose (CLAUDE.md rule 39).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaintenanceDeferralReason {
+    /// A retired read view still names objects the sweep would delete.
+    ReaderPinned,
+    /// A live manifest or in-flight publication still references the object.
+    Referenced,
+    /// The retention, purge or truncation proof was not complete.
+    IncompleteProof,
+    /// The proof was built against state that has since changed.
+    StaleProof,
+    /// Recovery health forbids listing or mutating durable objects.
+    RecoveryHealth,
+    /// A concurrent sweep advanced the quarantine inventory past the proof.
+    InventoryAdvanced,
+    /// The generic retention path does not serve the requested scope.
+    UnsupportedScope,
 }
 
 #[non_exhaustive]
@@ -267,11 +317,34 @@ impl MaintenanceOutcome {
             retryable: false,
             reason: None,
             reason_class: None,
+            deferral: None,
             source_error: None,
             state_changes: 0,
             checkpoint_required: false,
             stats: LifecycleStats::new(0, 0, 0, 0, 0),
+            wal_truncation_follow_up: None,
         }
+    }
+
+    pub(crate) const fn with_deferral_reason(mut self, reason: MaintenanceDeferralReason) -> Self {
+        self.deferral = Some(reason);
+        self
+    }
+
+    pub(crate) const fn deferral_reason(&self) -> Option<MaintenanceDeferralReason> {
+        self.deferral
+    }
+
+    pub(crate) const fn with_wal_truncation_follow_up(
+        mut self,
+        follow_up: WalTruncationFollowUp,
+    ) -> Self {
+        self.wal_truncation_follow_up = Some(follow_up);
+        self
+    }
+
+    pub(crate) const fn wal_truncation_follow_up(&self) -> Option<WalTruncationFollowUp> {
+        self.wal_truncation_follow_up
     }
 
     pub(crate) fn with_recovery_health(mut self, health: RecoveryHealth) -> Self {

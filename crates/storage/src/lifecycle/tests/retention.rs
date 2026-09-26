@@ -1943,3 +1943,51 @@ impl Backend for RetentionBackend {
             .ok_or_else(|| BackendError::new(BackendErrorKind::NotFound, "object not found"))
     }
 }
+
+/// Every retention status maps to exactly the typed deferral the reclaim
+/// ledger reports; both completed statuses carry none (space-reclamation
+/// contract §3.5; rule 39: typed reasons, never prose).
+#[test]
+fn retention_deferral_reason_truth_table() {
+    use crate::lifecycle::retention::{retention_deferral_reason, LifecycleRetentionStatus};
+    let cases = [
+        (
+            LifecycleRetentionStatus::DeferredIncompleteProof,
+            Some(MaintenanceDeferralReason::IncompleteProof),
+        ),
+        (
+            LifecycleRetentionStatus::DeferredUnsupportedScope,
+            Some(MaintenanceDeferralReason::UnsupportedScope),
+        ),
+        (
+            LifecycleRetentionStatus::BlockedByRecoveryHealth,
+            Some(MaintenanceDeferralReason::RecoveryHealth),
+        ),
+        (LifecycleRetentionStatus::Completed, None),
+        (LifecycleRetentionStatus::CompletedWithHealthDebt, None),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(retention_deferral_reason(status), expected, "{status:?}");
+    }
+}
+
+/// A retention proof status maps to the typed deferral of a snapshot prune;
+/// a complete proof carries none.
+#[test]
+fn proof_deferral_reason_truth_table() {
+    use crate::lifecycle::retention::{proof_deferral_reason, LifecycleRetentionProofStatus};
+    let cases = [
+        (
+            LifecycleRetentionProofStatus::Incomplete,
+            Some(MaintenanceDeferralReason::IncompleteProof),
+        ),
+        (
+            LifecycleRetentionProofStatus::BlockedByRecoveryHealth,
+            Some(MaintenanceDeferralReason::RecoveryHealth),
+        ),
+        (LifecycleRetentionProofStatus::Complete, None),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(proof_deferral_reason(status), expected, "{status:?}");
+    }
+}

@@ -7,9 +7,9 @@
 
 use super::{
     telemetry_health_debt, LifecycleCodecId, LifecycleError, LifecycleLowerLayer, LifecycleResult,
-    LifecycleStats, MaintenanceOutcome, MaintenanceOutcomeStatus, MaintenanceTask,
-    MaintenanceTaskKind, RecoveryDegradationClass, RecoveryFault, RecoveryFaultKind,
-    RecoveryHealth, RetentionDecision,
+    LifecycleStats, MaintenanceDeferralReason, MaintenanceOutcome, MaintenanceOutcomeStatus,
+    MaintenanceTask, MaintenanceTaskKind, RecoveryDegradationClass, RecoveryFault,
+    RecoveryFaultKind, RecoveryHealth, RetentionDecision,
 };
 use crate::format::quarantine::QuarantineEntry;
 use crate::layout::{ObjectFamily, ObjectLayout};
@@ -144,6 +144,59 @@ pub(crate) enum LifecyclePurgeStatus {
     /// WITHOUT health debt.
     InventoryAdvanced,
     InventoryRewriteFailed,
+}
+
+/// The typed deferral a sweep status carries into its maintenance outcome;
+/// `None` for statuses that complete or fail.
+pub(crate) const fn quarantine_deferral_reason(
+    status: LifecycleQuarantineStatus,
+) -> Option<MaintenanceDeferralReason> {
+    match status {
+        LifecycleQuarantineStatus::DeferredReferenced => {
+            Some(MaintenanceDeferralReason::Referenced)
+        }
+        LifecycleQuarantineStatus::DeferredIncompleteProof => {
+            Some(MaintenanceDeferralReason::IncompleteProof)
+        }
+        LifecycleQuarantineStatus::BlockedByRecoveryHealth => {
+            Some(MaintenanceDeferralReason::RecoveryHealth)
+        }
+        LifecycleQuarantineStatus::QuarantinedSourceDeleted
+        | LifecycleQuarantineStatus::AlreadyQuarantined
+        | LifecycleQuarantineStatus::SourceDeleteRetried
+        | LifecycleQuarantineStatus::SourceAlreadyMissingAfterPublish
+        | LifecycleQuarantineStatus::QuarantinedSourceDeleteFailed
+        | LifecycleQuarantineStatus::InventoryPublishFailed
+        | LifecycleQuarantineStatus::InventoryPublishUncertain
+        | LifecycleQuarantineStatus::QuarantinePublishFailed
+        | LifecycleQuarantineStatus::QuarantinePublishUncertain
+        | LifecycleQuarantineStatus::InventoryMismatch
+        | LifecycleQuarantineStatus::ServiceRejected
+        | LifecycleQuarantineStatus::ServiceTransient => None,
+    }
+}
+
+/// The typed deferral a purge status carries into its maintenance outcome;
+/// `None` for statuses that complete or fail.
+pub(crate) const fn purge_deferral_reason(
+    status: LifecyclePurgeStatus,
+) -> Option<MaintenanceDeferralReason> {
+    match status {
+        LifecyclePurgeStatus::DeferredIncompleteProof => {
+            Some(MaintenanceDeferralReason::IncompleteProof)
+        }
+        LifecyclePurgeStatus::BlockedByRecoveryHealth => {
+            Some(MaintenanceDeferralReason::RecoveryHealth)
+        }
+        LifecyclePurgeStatus::StaleProof => Some(MaintenanceDeferralReason::StaleProof),
+        LifecyclePurgeStatus::InventoryAdvanced => {
+            Some(MaintenanceDeferralReason::InventoryAdvanced)
+        }
+        LifecyclePurgeStatus::Completed
+        | LifecyclePurgeStatus::CompletedNoop
+        | LifecyclePurgeStatus::CompletedWithHealthDebt
+        | LifecyclePurgeStatus::InventoryRewriteFailed => None,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -544,6 +597,9 @@ impl LifecycleQuarantineOutcome {
         if let Some(reason) = self.reason() {
             outcome = outcome.with_reason(reason);
         }
+        if let Some(deferral) = quarantine_deferral_reason(self.status) {
+            outcome = outcome.with_deferral_reason(deferral);
+        }
         if let Some(health) = self.recovery_health.clone() {
             outcome = outcome.with_recovery_health(health);
         }
@@ -900,6 +956,9 @@ impl LifecyclePurgeOutcome {
             ));
         if let Some(reason) = self.reason() {
             outcome = outcome.with_reason(reason);
+        }
+        if let Some(deferral) = purge_deferral_reason(self.status) {
+            outcome = outcome.with_deferral_reason(deferral);
         }
         if let Some(health) = self.recovery_health.clone() {
             outcome = outcome.with_recovery_health(health);

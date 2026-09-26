@@ -991,6 +991,22 @@ fn automatic_checkpoint_does_not_truncate_wal_without_retention_proof() {
         .events()
         .iter()
         .any(|event| matches!(event, CheckpointBackendEvent::ObjectDelete)));
+    // The executor-level completion hook recorded the deferral with its typed
+    // reason in the reclaim ledger.
+    let truncation = runtime
+        .reclaim_ledger()
+        .last(crate::lifecycle::ReclaimFamily::WalTruncation)
+        .expect("WAL truncation recorded");
+    assert_eq!(
+        truncation.outcome(),
+        crate::lifecycle::ReclaimOutcome::Deferred,
+        "{truncation:?}"
+    );
+    assert_eq!(
+        truncation.deferral(),
+        Some(crate::lifecycle::MaintenanceDeferralReason::IncompleteProof),
+        "{truncation:?}"
+    );
 }
 
 #[test]
@@ -1031,6 +1047,23 @@ fn automatic_checkpoint_truncates_wal_only_after_checkpoint_or_table_manifest_pr
     );
 
     assert!(backend.delete_calls() > 0);
+    // A truncation that deleted covered segments is a reclaimed pass in the
+    // ledger: the segments it removed are its durable state changes.
+    let truncation = runtime
+        .reclaim_ledger()
+        .last(crate::lifecycle::ReclaimFamily::WalTruncation)
+        .expect("WAL truncation recorded");
+    assert_eq!(
+        truncation.outcome(),
+        crate::lifecycle::ReclaimOutcome::Reclaimed,
+        "{truncation:?}"
+    );
+    assert!(truncation.state_changes() > 0, "{truncation:?}");
+    assert!(
+        runtime.reclaim_ledger().totals().reclaimed_passes() >= 1,
+        "{:?}",
+        runtime.reclaim_ledger()
+    );
 }
 
 fn durable_sized_batch(branch: BranchId, user_key: Vec<u8>, value: Vec<u8>) -> CommitBatch {

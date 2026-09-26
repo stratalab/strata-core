@@ -7,9 +7,9 @@
 
 use super::{
     telemetry_health_debt, LifecycleError, LifecycleLowerLayer, LifecycleResult, LifecycleStats,
-    MaintenanceOutcome, MaintenanceOutcomeStatus, MaintenanceRetentionOptions, MaintenanceTask,
-    MaintenanceTaskKind, RecoveryDegradationClass, RecoveryFault, RecoveryFaultKind,
-    RecoveryHealth, RetentionDecision,
+    MaintenanceDeferralReason, MaintenanceOutcome, MaintenanceOutcomeStatus,
+    MaintenanceRetentionOptions, MaintenanceTask, MaintenanceTaskKind, RecoveryDegradationClass,
+    RecoveryFault, RecoveryFaultKind, RecoveryHealth, RetentionDecision,
 };
 use crate::format::DatabaseManifest;
 use crate::object::ObjectName;
@@ -52,6 +52,43 @@ pub(crate) enum LifecycleRetentionProofStatus {
     Complete,
     Incomplete,
     BlockedByRecoveryHealth,
+}
+
+/// The typed deferral a retention proof status carries into a maintenance
+/// outcome; `None` when the proof is complete.
+pub(crate) const fn proof_deferral_reason(
+    status: LifecycleRetentionProofStatus,
+) -> Option<MaintenanceDeferralReason> {
+    match status {
+        LifecycleRetentionProofStatus::Incomplete => {
+            Some(MaintenanceDeferralReason::IncompleteProof)
+        }
+        LifecycleRetentionProofStatus::BlockedByRecoveryHealth => {
+            Some(MaintenanceDeferralReason::RecoveryHealth)
+        }
+        LifecycleRetentionProofStatus::Complete => None,
+    }
+}
+
+/// The typed deferral a retention status carries into its maintenance
+/// outcome; `None` for the completed statuses.
+pub(crate) const fn retention_deferral_reason(
+    status: LifecycleRetentionStatus,
+) -> Option<MaintenanceDeferralReason> {
+    match status {
+        LifecycleRetentionStatus::DeferredIncompleteProof => {
+            Some(MaintenanceDeferralReason::IncompleteProof)
+        }
+        LifecycleRetentionStatus::DeferredUnsupportedScope => {
+            Some(MaintenanceDeferralReason::UnsupportedScope)
+        }
+        LifecycleRetentionStatus::BlockedByRecoveryHealth => {
+            Some(MaintenanceDeferralReason::RecoveryHealth)
+        }
+        LifecycleRetentionStatus::Completed | LifecycleRetentionStatus::CompletedWithHealthDebt => {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -426,6 +463,9 @@ impl LifecycleRetentionOutcome {
         if let Some(health) = self.recovery_health.clone() {
             outcome = outcome.with_recovery_health(health);
         }
+        if let Some(deferral) = retention_deferral_reason(self.status) {
+            outcome = outcome.with_deferral_reason(deferral);
+        }
         match self.status {
             LifecycleRetentionStatus::DeferredIncompleteProof => {
                 outcome.with_reason("retention proof is incomplete")
@@ -612,6 +652,9 @@ impl LifecycleSnapshotPruningOutcome {
             ));
         if let Some(health) = self.recovery_health.clone() {
             outcome = outcome.with_recovery_health(health);
+        }
+        if let Some(deferral) = proof_deferral_reason(self.proof_status) {
+            outcome = outcome.with_deferral_reason(deferral);
         }
         match self.proof_status {
             LifecycleRetentionProofStatus::Incomplete => {

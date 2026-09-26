@@ -1284,3 +1284,78 @@ fn purge_with_advanced_inventory_token_defers_without_health_debt() {
     );
     assert_eq!(maintenance.bytes_reclaimed(), 0);
 }
+
+/// Every sweep status maps to exactly the typed deferral the reclaim ledger
+/// reports, and completed or failed statuses map to none (space-reclamation
+/// contract §3.5; rule 39: typed reasons, never prose).
+#[test]
+fn quarantine_deferral_reason_truth_table() {
+    use crate::lifecycle::quarantine::quarantine_deferral_reason;
+    let cases = [
+        (
+            LifecycleQuarantineStatus::DeferredReferenced,
+            Some(MaintenanceDeferralReason::Referenced),
+        ),
+        (
+            LifecycleQuarantineStatus::DeferredIncompleteProof,
+            Some(MaintenanceDeferralReason::IncompleteProof),
+        ),
+        (
+            LifecycleQuarantineStatus::BlockedByRecoveryHealth,
+            Some(MaintenanceDeferralReason::RecoveryHealth),
+        ),
+        (LifecycleQuarantineStatus::QuarantinedSourceDeleted, None),
+        (LifecycleQuarantineStatus::AlreadyQuarantined, None),
+        (LifecycleQuarantineStatus::SourceDeleteRetried, None),
+        (
+            LifecycleQuarantineStatus::SourceAlreadyMissingAfterPublish,
+            None,
+        ),
+        (
+            LifecycleQuarantineStatus::QuarantinedSourceDeleteFailed,
+            None,
+        ),
+        (LifecycleQuarantineStatus::InventoryPublishFailed, None),
+        (LifecycleQuarantineStatus::InventoryPublishUncertain, None),
+        (LifecycleQuarantineStatus::QuarantinePublishFailed, None),
+        (LifecycleQuarantineStatus::QuarantinePublishUncertain, None),
+        (LifecycleQuarantineStatus::InventoryMismatch, None),
+        (LifecycleQuarantineStatus::ServiceRejected, None),
+        (LifecycleQuarantineStatus::ServiceTransient, None),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(quarantine_deferral_reason(status), expected, "{status:?}");
+    }
+}
+
+/// Every purge status maps to exactly the typed deferral the reclaim ledger
+/// reports; the completed statuses and the rewrite failure carry none.
+#[test]
+fn purge_deferral_reason_truth_table() {
+    use crate::lifecycle::quarantine::purge_deferral_reason;
+    let cases = [
+        (
+            LifecyclePurgeStatus::DeferredIncompleteProof,
+            Some(MaintenanceDeferralReason::IncompleteProof),
+        ),
+        (
+            LifecyclePurgeStatus::BlockedByRecoveryHealth,
+            Some(MaintenanceDeferralReason::RecoveryHealth),
+        ),
+        (
+            LifecyclePurgeStatus::StaleProof,
+            Some(MaintenanceDeferralReason::StaleProof),
+        ),
+        (
+            LifecyclePurgeStatus::InventoryAdvanced,
+            Some(MaintenanceDeferralReason::InventoryAdvanced),
+        ),
+        (LifecyclePurgeStatus::Completed, None),
+        (LifecyclePurgeStatus::CompletedNoop, None),
+        (LifecyclePurgeStatus::CompletedWithHealthDebt, None),
+        (LifecyclePurgeStatus::InventoryRewriteFailed, None),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(purge_deferral_reason(status), expected, "{status:?}");
+    }
+}

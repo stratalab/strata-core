@@ -468,6 +468,42 @@ fn checkpoint_with_truncation_recovery_round_trip_after_delete() {
         .with_wal_truncation_after_checkpoint(true);
 
     let outcome = runtime.checkpoint(&request).expect("checkpoint");
+    // Call-site coverage for the checkpoint follow-up WAL-truncation ledger hook
+    // (space-reclamation contract §3.5): the truncation rode on the checkpoint
+    // outcome rather than a standalone WalTruncation task, and still reached the
+    // WAL-truncation family, with the segments it deleted recorded as the pass's
+    // durable state changes. The unit `a_checkpoint_follow_up_truncation_is_a_
+    // wal_truncation_event` classifies a synthetic outcome; this pins the wiring
+    // from a real `checkpoint(...)` through `record_reclaim` into the ledger.
+    let deleted_segments = outcome
+        .wal_truncation()
+        .expect("truncation outcome")
+        .deleted_segments();
+    let truncation = runtime
+        .reclaim_ledger()
+        .last(crate::lifecycle::ReclaimFamily::WalTruncation)
+        .expect("checkpoint follow-up truncation recorded");
+    assert_eq!(
+        truncation.outcome(),
+        crate::lifecycle::ReclaimOutcome::Reclaimed,
+        "{truncation:?}"
+    );
+    assert_eq!(truncation.deferral(), None, "{truncation:?}");
+    assert_eq!(
+        truncation.state_changes(),
+        deleted_segments,
+        "{truncation:?}"
+    );
+    assert_eq!(
+        truncation.objects_affected(),
+        deleted_segments,
+        "{truncation:?}"
+    );
+    assert!(
+        runtime.reclaim_ledger().totals().reclaimed_passes() >= 1,
+        "{:?}",
+        runtime.reclaim_ledger()
+    );
     drop(runtime);
     let reopened = open_runtime_with_wal_segment_size(branch, backend, 1024);
     let visible = reopened

@@ -4,7 +4,7 @@ use super::{
     require_generated_artifact_budget, telemetry_health_debt, LifecycleDurableLocalServices,
     LifecycleError, LifecycleLowerLayer, LifecycleResult, LifecycleStats, MaintenanceOutcome,
     MaintenanceOutcomeStatus, MaintenanceTask, MaintenanceTaskKind, MaintenanceTaskScope,
-    RecoveryDegradationClass, RecoveryHealth, StorageBudgetLedger,
+    RecoveryDegradationClass, RecoveryHealth, StorageBudgetLedger, WalTruncationFollowUp,
 };
 use crate::branch::read::{for_each_reader_row, BranchInheritedLayer, BranchOwnedTable};
 use crate::branch::state::BranchLocalState;
@@ -436,6 +436,12 @@ impl LifecycleCheckpointOutcome {
             .with_stats(LifecycleStats::new(0, 0, 1, 0, 0));
         if let Some(object) = &self.snapshot_object {
             outcome = outcome.with_affected_object_names(vec![object.as_str().to_owned()]);
+        }
+        if let Some(truncation) = self.wal_truncation() {
+            outcome = outcome.with_wal_truncation_follow_up(WalTruncationFollowUp::new(
+                truncation.completed_cleanly(),
+                truncation.deleted_segments(),
+            ));
         }
         if let Some(reason) = self.status_reason() {
             outcome = outcome.with_reason(reason);
@@ -1519,8 +1525,11 @@ impl LifecycleWalTruncationOutcome {
         } else {
             MaintenanceOutcomeStatus::Failed
         };
+        // Deleted segments are the durable state this pass changed; the reclaim
+        // ledger classifies a pass by that, not by the (unknown here) byte count.
         let mut outcome = MaintenanceOutcome::new(MaintenanceTaskKind::WalTruncation, status)
             .with_effects(self.deleted_segments, 0, self.failed_segments > 0)
+            .with_state_changes(self.deleted_segments)
             .with_stats(LifecycleStats::new(0, 0, 1, 0, 0));
         if let Some(health) = self.recovery_health.clone() {
             outcome = outcome.with_recovery_health(health);
