@@ -1,4 +1,7 @@
 use super::*;
+// The ledger's typed facts are asserted only by the durable (localfs) tests;
+// the cache-runtime test needs no reclaim type.
+#[cfg(feature = "localfs")]
 use crate::lifecycle::{MaintenanceDeferralReason, ReclaimFamily, ReclaimOutcome};
 
 fn open_runtime() -> StorageRuntime<'static> {

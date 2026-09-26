@@ -523,20 +523,29 @@ mod tests {
             objects_affected: 0,
             state_changes: 0,
         };
+        // The empty ledger reports zero everywhere (a constant-returning
+        // accessor would be caught here and by the counts below).
+        let empty = ledger.totals();
+        assert_eq!(empty.events(), 0);
+        assert_eq!(empty.bytes_reclaimed(), 0);
+        assert_eq!(empty.reclaimed_passes(), 0);
+        assert_eq!(empty.deferred_passes(), 0);
+
         ledger.record(ReclaimFamily::TableObjectSweep, reclaimed);
         ledger.record(ReclaimFamily::TableObjectSweep, deferred);
         ledger.record(ReclaimFamily::QuarantinePurge, reclaimed);
         ledger.record(ReclaimFamily::WalTruncation, nothing);
+        ledger.record(ReclaimFamily::SnapshotPrune, deferred);
 
         assert_eq!(ledger.last(ReclaimFamily::TableObjectSweep), Some(deferred));
         assert_eq!(ledger.last(ReclaimFamily::QuarantinePurge), Some(reclaimed));
         assert_eq!(ledger.last(ReclaimFamily::WalTruncation), Some(nothing));
+        assert_eq!(ledger.last(ReclaimFamily::SnapshotPrune), Some(deferred));
         assert_eq!(ledger.last(ReclaimFamily::TableObjectMark), None);
-        assert_eq!(ledger.last(ReclaimFamily::SnapshotPrune), None);
         let totals = ledger.totals();
-        assert_eq!(totals.events(), 4);
+        assert_eq!(totals.events(), 5);
         assert_eq!(totals.bytes_reclaimed(), 20);
         assert_eq!(totals.reclaimed_passes(), 2);
-        assert_eq!(totals.deferred_passes(), 1);
+        assert_eq!(totals.deferred_passes(), 2);
     }
 }
