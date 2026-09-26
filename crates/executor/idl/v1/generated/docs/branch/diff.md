@@ -13,8 +13,9 @@ capability and space: entries `added` on `branch_b`, `removed` relative to
 Every data primitive is compared — key-value, JSON documents, vectors, event
 streams, and graphs. Graph changes are reported per row class: nodes, edges, and
 ontology appear as separate capabilities in the result. Derived rows (search and
-vector indexes, graph reverse maps) are omitted. A missing branch is rejected
-with `not_found.engine.branch`.
+vector indexes, graph reverse maps) are omitted. A graph or space whose deletion is
+still being swept on a branch compares as absent on that branch, exactly as a deleted
+one does. A missing branch is rejected with `not_found.engine.branch`.
 
 Status commands return a scalar or compact status payload and do not mutate database state.
 

@@ -18,6 +18,7 @@
 
 use strata_core::{BranchId, CommitVersion};
 
+use crate::data::graph::GraphName;
 use crate::data::kv::ProductSpace;
 use crate::diagnostics::EngineError;
 use crate::persistence::{PersistenceReadRow, RowAddress, RowClass, RowMutation};
@@ -126,6 +127,18 @@ pub(crate) trait CapabilityBranchAdapter {
     /// The storage-key prefix that scopes this capability's rows to one space,
     /// so a branch workflow can enumerate them with a prefix scan.
     fn space_prefix(&self, space: &ProductSpace) -> Vec<u8>;
+
+    /// The graph a row belongs to, for capabilities whose rows live inside a
+    /// graph (#3575): a branch workflow leaves out the rows of a graph whose
+    /// deletion is under way, so it diffs as a deleted one. `None` for every
+    /// capability outside graphs.
+    fn graph_of(
+        &self,
+        _space: &ProductSpace,
+        _row: &PersistenceReadRow,
+    ) -> Result<Option<GraphName>, EngineError> {
+        Ok(None)
+    }
 
     /// Decode one persisted row into a comparable entity, rejecting malformed
     /// capability bytes with a structured diagnostic. The `space` is the space
@@ -355,5 +368,17 @@ mod tests {
             FakeAdapter.derived_disposition(),
             DerivedDisposition::Authored
         );
+    }
+    /// #3575: a capability outside graphs names no graph, so a graph mark can
+    /// never hide its rows — the default is the contract every non-graph
+    /// adapter inherits.
+    #[test]
+    fn the_default_graph_of_names_no_graph() {
+        let space = ProductSpace::new("default").expect("space");
+        let row = PersistenceReadRow::for_test(b"k".to_vec(), Some(b"v".to_vec()), false);
+        assert!(FakeAdapter
+            .graph_of(&space, &row)
+            .expect("the default never fails")
+            .is_none());
     }
 }

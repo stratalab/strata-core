@@ -30,6 +30,7 @@ pub use outcome::{
     GraphEdgeWriteOutcome, GraphInfo, GraphNamePage, GraphNeighbor, GraphNeighborPage, GraphNode,
     GraphNodePage, GraphTargetStatus, GraphWriteOutcome,
 };
+pub(crate) use service::marked_graphs;
 pub use service::GraphService;
 pub use traversal::{GraphBfsOptions, GraphBfsResult, GraphSubgraphResult, GraphTraversalEdge};
 pub use types::{

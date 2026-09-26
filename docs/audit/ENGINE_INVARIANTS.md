@@ -1019,12 +1019,16 @@ commit of its own. So a crash at any point leaves a marked row and some rows, ne
 orphaned graph: the next `delete_graph` of the name reports it deleted and finishes the
 sweep, and `create_graph` of the name finishes the sweep before creating, so no row of the
 old graph surfaces under the new one. `as_of` reads before the mark see the graph as it
-was (MVCC-001); a fork mid-sweep inherits the marked row and resumes independently. Two
-surfaces read rows by physical presence and still count a mid-sweep graph until its rows
-are gone: `space usage` and `branch compare` (#3575 decides each). The regression is a
+was (MVCC-001); a fork mid-sweep inherits the marked row and resumes independently. The
+two surfaces that read rows by physical presence — `space usage` and `branch compare` —
+leave a marked graph and its unswept rows out (#3575): usage subtracts them through
+`data::graph::marked_graphs` at the version it reads, and compare skips them through the
+adapters' `graph_of` hook at the comparison's selector, so a graph mid-sweep counts and
+diffs exactly as a deleted one. The regression is a
 data-plane read path that resolves the metadata row without going through
-`graph_metadata_row` (and so sees a marked graph), or a writer that re-creates the name
-without sweeping.
+`graph_metadata_row` (and so sees a marked graph), a writer that re-creates the name
+without sweeping, or a new surface that counts or compares graph rows by physical presence
+without consulting `marked_graphs`.
 
 **Audit**: In `data/graph/service.rs`, `graph_metadata_row` filters `deleting` rows and is
 the only metadata read used by readers and writers (`require_graph`, `graph_info`,
@@ -1038,7 +1042,10 @@ does not filter) is called only by `graph_metadata_row` itself, `create_graph` a
 single-commit / three-commit boundary), in-crate
 `service::tests::a_marked_graph_is_absent_and_its_deletion_resumes` (absence to every read
 and write, `as_of` before the mark, cross-graph bindings, resume by delete and by create),
-and `metadata_deleting_mark_round_trips_and_is_omitted_when_clear` (`record.rs`).
+and `metadata_deleting_mark_round_trips_and_is_omitted_when_clear` (`record.rs`);
+`api::space::tests::usage_hides_a_graph_and_a_space_mid_deletion` and
+`branch::compare::tests::a_graph_or_space_mid_deletion_compares_as_absent` for the two
+presence-reading surfaces (#3575).
 
 ### ARCH-017: A space deletion is unregistered at its first commit and physically resumable
 
@@ -1063,11 +1070,15 @@ nothing (rule 20), and the plan merely names the pending sweeps
 `control::space::finish_pending_deletion`, the one path, so no row of the old space
 surfaces under the new one. `as_of` reads before the mark see the
 space as it was (MVCC-001); a fork mid-sweep inherits the marked row and each branch
-resumes independently (COW-003). One window is documented rather than closed: capability
-reads have no registration choke point the way graph reads have `graph_metadata_row`, so
-a data read of a mid-sweep space can still return a row the sweep has not yet reached,
-until the chunk that removes it — the same window `space usage` and `branch compare`
-have for a mid-sweep graph (#3575). The regression is a registering path that skips
+resumes independently (COW-003). `space usage` reports a marked space as zeros and
+`branch compare` treats every row of a marked space as absent on that branch, both at the
+version they read (`control::space::pending_deletion_at`, #3575), so a space mid-sweep
+counts and diffs exactly as a deleted one. One window is documented rather than closed:
+capability reads have no registration choke point the way graph reads have
+`graph_metadata_row`, so a data read of a mid-sweep space can still return a row the sweep
+has not yet reached, until the chunk that removes it (#3585). The regression is a new
+surface that counts or compares a space's rows by physical presence without consulting
+`pending_deletion_at`, a registering path that skips
 `finish_pending_deletion`, a sweep that tombstones the catalog row before the last chunk,
 or a catalog row listed in the index while marked (`validate_space_catalog_row` treats that
 as corruption).

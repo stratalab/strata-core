@@ -380,13 +380,26 @@ pub(crate) fn pending_deletions_among(
 }
 
 /// Whether `space`'s catalog row carries the deleting mark.
-fn pending_deletion(
+pub(crate) fn pending_deletion(
     persistence: &StoragePersistence,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
 ) -> Result<bool, EngineError> {
+    pending_deletion_at(persistence, record, space, ReadSelector::Latest)
+}
+
+/// Whether `space`'s catalog row carried the deleting mark at `selector` —
+/// a space mid-deletion is gone to every observer from its mark (#3574),
+/// and surfaces that read rows by physical presence ask this to leave its
+/// rows out (#3575) at the version they read.
+pub(crate) fn pending_deletion_at(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    space: &ProductSpace,
+    selector: ReadSelector,
+) -> Result<bool, EngineError> {
     let address = space_address(record, space_catalog_key(space.as_str()));
-    match persistence.read(address, ReadSelector::Latest)? {
+    match persistence.read(address, selector)? {
         Some(bytes) => Ok(decode_space_catalog_record(&bytes)?.deleting()),
         None => Ok(false),
     }
