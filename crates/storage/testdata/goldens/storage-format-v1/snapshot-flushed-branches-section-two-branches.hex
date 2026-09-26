@@ -1,0 +1,10 @@
+# format: snapshot_section carrying a durable-base branch-set payload
+# section_kind: 4 (space-reclamation contract §3.2, slice 11)
+# section_data_len: 36 = u32 branch_count + 2 x 16-byte branch ids
+# branch_count: 2
+# branch 1: ordinary branch id 00..0f
+# branch 2: a5 x 16 (strictly ascending by byte order after branch 1)
+# hex:
+04 24 00 00 00 00 00 00 00 02 00 00 00 00 01 02
+03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f a5 a5 a5
+a5 a5 a5 a5 a5 a5 a5 a5 a5 a5 a5 a5 a5

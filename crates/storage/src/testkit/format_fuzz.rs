@@ -16,6 +16,8 @@ pub enum FormatDecoder {
     RetainedHistoryExtensionPayload,
     SegmentMetadata,
     SnapshotEnvelope,
+    /// The checkpoint's durable-base branch set section payload (kind 4).
+    SnapshotFlushedBranchesPayload,
     SnapshotRowPayload,
     SnapshotTimelinePayload,
     StorageRow,
@@ -56,6 +58,9 @@ pub fn decode_format_bytes(decoder: FormatDecoder, bytes: &[u8]) -> FormatDecode
         }
         FormatDecoder::SegmentMetadata => fuzzing::decode_segment_metadata(bytes),
         FormatDecoder::SnapshotEnvelope => fuzzing::decode_snapshot_envelope(bytes),
+        FormatDecoder::SnapshotFlushedBranchesPayload => {
+            fuzzing::decode_snapshot_flushed_branches_payload(bytes)
+        }
         FormatDecoder::SnapshotRowPayload => fuzzing::decode_snapshot_row_payload(bytes),
         FormatDecoder::SnapshotTimelinePayload => fuzzing::decode_snapshot_timeline_payload(bytes),
         FormatDecoder::StorageRow => fuzzing::decode_storage_row(bytes),

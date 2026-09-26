@@ -24,8 +24,8 @@ use std::convert::Infallible;
 
 use super::{
     branch_catalog_manifest, key, manifest, pending_releases_manifest, quarantine,
-    retained_history_extension, segment_metadata, snapshot, snapshot_rows, snapshot_timeline,
-    storage_row, table, table_manifest, wal, watermark,
+    retained_history_extension, segment_metadata, snapshot, snapshot_flushed_branches,
+    snapshot_rows, snapshot_timeline, storage_row, table, table_manifest, wal, watermark,
 };
 
 /// The round-trip fidelity oracle (TCP4.6b). `decoded` came from arbitrary
@@ -141,6 +141,20 @@ pub(crate) fn decode_snapshot_row_payload(bytes: &[u8]) -> bool {
                     .map(|section| section.payload().to_vec())
             },
             snapshot_rows::decode_snapshot_row_payload,
+        ),
+        Err(_) => false,
+    }
+}
+
+pub(crate) fn decode_snapshot_flushed_branches_payload(bytes: &[u8]) -> bool {
+    match snapshot_flushed_branches::decode_snapshot_flushed_branches_payload(bytes) {
+        Ok(branches) => roundtrip(
+            &branches,
+            |branches| {
+                snapshot_flushed_branches::encode_snapshot_flushed_branches_section(branches)
+                    .map(|section| section.payload().to_vec())
+            },
+            snapshot_flushed_branches::decode_snapshot_flushed_branches_payload,
         ),
         Err(_) => false,
     }

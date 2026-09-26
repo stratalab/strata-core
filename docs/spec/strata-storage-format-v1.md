@@ -634,7 +634,10 @@ section_data           section_data_len bytes
 Current storage-owned section types:
 
 ```text
-StorageRows     0x01
+StorageRows            0x01
+RetainedTimelineLegacy 0x02   (decoded, never written)
+RetainedTimeline       0x03
+DurableBaseBranches    0x04
 ```
 
 The old primitive section tags from development builds are historical evidence
@@ -674,6 +677,17 @@ V1 direction:
     revision, for the same reason WAL record version `2` may not be (section 10
     requirement 9): reuse aliases old bytes into a current layout instead of
     failing closed.
+13. The durable-base branch-set section uses `section_kind = 0x04`. Its payload
+    is `branch_count u32 LE` followed by `branch_count` 16-byte branch ids in
+    strictly ascending byte order (no duplicates); disorder, truncation,
+    trailing bytes, and a count above the decoder's ceiling MUST fail decode.
+    A checkpoint writes the section on EVERY snapshot, listing the branches
+    whose delta sits on a durable table-manifest base (a durably catalogued
+    owned table) at collection time. Presence is the signal: a snapshot
+    without the section predates it and recovery treats base membership as
+    unknown; a present section is authoritative, an EMPTY set meaning the
+    snapshot carries every branch in full. Recovery MUST fail closed on more
+    than one such section in a snapshot.
 
 ## 14. Snapshot Row Payloads
 
@@ -1242,6 +1256,8 @@ Required golden vector categories:
 - pending releases manifest, empty
 - pending releases manifest, single branch entry
 - pending releases manifest, multiple branch entries
+- snapshot retained-timeline section, one group (current and legacy kinds)
+- snapshot durable-base branch-set section, two branches
 
 Golden vectors must include:
 
