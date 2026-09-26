@@ -390,6 +390,16 @@ impl StorageRuntime<'static> {
         }
     }
 
+    /// Lower the checkpoint delta cap so the flush-first deferral is
+    /// constructible on tiny fixtures (space-reclamation contract §3.3).
+    #[cfg(test)]
+    #[allow(dead_code, reason = "consumer is gated on localfs")]
+    pub(crate) fn set_checkpoint_delta_cap_for_test(&self, cap_bytes: usize) {
+        if let StorageRuntimeInner::DurableOwned(slot) = &self.inner {
+            slot.lock().set_checkpoint_delta_cap_for_test(cap_bytes);
+        }
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn wait_background_idle_until_for_test(
