@@ -27,6 +27,7 @@ fn format_golden_harness_has_storage_format_directory() {
         "segment-metadata-sidecar.hex",
         "wal-commit-watermark.hex",
         "snapshot-container-single-section.hex",
+        "snapshot-flushed-branches-section-two-branches.hex",
         "snapshot-header-identity.hex",
         "snapshot-section-empty.hex",
         "snapshot-watermark-empty.hex",
@@ -211,6 +212,10 @@ fn format_fuzz_targets_cover_storage_owned_manifest_and_extension_codecs() {
         (
             "format_snapshot_row_payload",
             "FormatDecoder::SnapshotRowPayload",
+        ),
+        (
+            "format_snapshot_flushed_branches_payload",
+            "FormatDecoder::SnapshotFlushedBranchesPayload",
         ),
     ] {
         let target_path = format!("fuzz_targets/{target}.rs");

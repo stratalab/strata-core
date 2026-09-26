@@ -975,6 +975,9 @@ fn recovery_loads_checkpoint_installs_rows_and_packages_only_wal_tail() {
     );
     assert_eq!(outcome.checkpoint().section_count(), 1);
     assert_eq!(outcome.checkpoint().row_count(), 1);
+    // A hand-written rows-only snapshot predates the durable-base branch-set
+    // section: membership is unknown, never an empty set.
+    assert_eq!(outcome.checkpoint().durable_base_branches(), None);
     assert!(outcome.checkpoint().install_outcome().is_some());
     assert_eq!(outcome.wal().replay_start(), CommitVersion::new(3));
     assert_eq!(
@@ -4403,4 +4406,52 @@ fn strict_open_still_refuses_a_checkpoint_attested_store_with_no_wal() {
         panic!("strict assembly must refuse the gutted store");
     };
     assert_eq!(error.code(), "corruption.lifecycle.recovery_corruption");
+}
+
+/// Space-reclamation contract §3.2: how recovery reads the durable-base
+/// branch-set section — absent is "unknown", one section is authoritative
+/// (even when empty), a malformed or duplicated section fails closed.
+#[test]
+fn durable_base_branch_set_decode_truth_table() {
+    use crate::format::{encode_snapshot_flushed_branches_section, SnapshotSection};
+    use crate::lifecycle::recovery::decode_durable_base_branches;
+
+    let member = branch_id(0x5b);
+    let rows = crate::format::encode_snapshot_row_section(&[]).expect("row section");
+    let recorded = encode_snapshot_flushed_branches_section(&[member]).expect("set section");
+    let empty = encode_snapshot_flushed_branches_section(&[]).expect("empty set section");
+
+    assert_eq!(
+        decode_durable_base_branches(std::slice::from_ref(&rows)).expect("absent"),
+        None,
+        "a pre-extension snapshot has no set"
+    );
+    assert_eq!(
+        decode_durable_base_branches(&[rows.clone(), recorded.clone()]).expect("recorded"),
+        Some(vec![member])
+    );
+    assert_eq!(
+        decode_durable_base_branches(&[rows.clone(), empty]).expect("empty"),
+        Some(Vec::new()),
+        "an empty set is a fact, not an absence"
+    );
+    let malformed = SnapshotSection::new(
+        crate::format::SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND,
+        vec![0xff; 3],
+    )
+    .expect("section");
+    assert!(
+        matches!(
+            decode_durable_base_branches(&[rows.clone(), malformed]),
+            Err(LifecycleError::RecoveryCorruption { .. })
+        ),
+        "a malformed set fails closed"
+    );
+    assert!(
+        matches!(
+            decode_durable_base_branches(&[rows, recorded.clone(), recorded]),
+            Err(LifecycleError::RecoveryFailed { .. })
+        ),
+        "two sets fail closed"
+    );
 }

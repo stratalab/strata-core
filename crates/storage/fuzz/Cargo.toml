@@ -261,6 +261,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "format_snapshot_flushed_branches_payload"
+path = "fuzz_targets/format_snapshot_flushed_branches_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "format_wal_segment_header"
 path = "fuzz_targets/format_wal_segment_header.rs"
 test = false

@@ -17,8 +17,9 @@ use crate::branch::state::snapshot::{
 };
 use crate::branch::state::BranchLocalState;
 use crate::format::{
-    decode_snapshot_row_payload, decode_snapshot_timeline_payload, encode_snapshot_row_section,
-    FormatError, SnapshotContainer, SnapshotSection, SNAPSHOT_ROW_SECTION_KIND,
+    decode_snapshot_flushed_branches_payload, decode_snapshot_row_payload,
+    decode_snapshot_timeline_payload, encode_snapshot_row_section, FormatError, SnapshotContainer,
+    SnapshotSection, SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND, SNAPSHOT_ROW_SECTION_KIND,
     SNAPSHOT_TIMELINE_SECTION_KIND, SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY,
 };
 use crate::object::ObjectName;
@@ -27,7 +28,7 @@ use crate::service::{
     QuarantineServiceError, SnapshotServiceError, WalRepair, WalServiceError, WalTruncation,
 };
 use crate::table::{ImmutableTableReader, TableCursor, TableIdentity, TableRow};
-use strata_core::{CommitVersion, Timestamp};
+use strata_core::{BranchId, CommitVersion, Timestamp};
 
 #[derive(Debug)]
 pub(crate) struct LifecycleRecoveryRuntime<'shell, 'backend, S> {
@@ -71,6 +72,12 @@ pub(crate) struct LifecycleRecoveredCheckpoint {
     // is seeded during `recover_checkpoint`; the rest are seeded post-
     // catalog-build alongside the non-seeded row install.
     timeline_groups: Vec<crate::format::SnapshotTimelineBranchGroup>,
+    // Space-reclamation contract §3.2 (slice 11): the branches the snapshot
+    // recorded as holding a durable table-manifest base when it was written.
+    // `None` when the snapshot predates the section (membership unknown, the
+    // pre-extension structural guard stays in force); `Some` is authoritative,
+    // and an empty set means the snapshot contains every branch in full.
+    durable_base_branches: Option<Vec<BranchId>>,
     // Identity seed for L0 table materialization during post-catalog
     // install. Carried from the recovery request so the seeded and non-
     // seeded installs share the same derivation base.
@@ -368,6 +375,7 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
         if let Some(branch) = recovered_branch.as_ref() {
             seed_branch_timeline_from_groups(branch, &timeline_groups);
         }
+        let durable_base_branches = decode_durable_base_branches(container.sections())?;
         Ok((
             LifecycleRecoveredCheckpoint {
                 snapshot_id: Some(snapshot_id),
@@ -377,6 +385,7 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
                 install_outcome: Some(install_outcome),
                 non_seeded_rows,
                 timeline_groups,
+                durable_base_branches,
                 install_identity_seed: Some(request.checkpoint_identity_seed().clone()),
             },
             recovered_branch,
@@ -797,6 +806,7 @@ impl LifecycleRecoveredCheckpoint {
             install_outcome: None,
             non_seeded_rows: Vec::new(),
             timeline_groups: Vec::new(),
+            durable_base_branches: None,
             install_identity_seed: None,
         }
     }
@@ -810,6 +820,7 @@ impl LifecycleRecoveredCheckpoint {
             install_outcome: None,
             non_seeded_rows: Vec::new(),
             timeline_groups: Vec::new(),
+            durable_base_branches: None,
             install_identity_seed: None,
         }
     }
@@ -818,6 +829,21 @@ impl LifecycleRecoveredCheckpoint {
     /// applied; non-seeded branches applied post-catalog-build).
     pub(crate) fn timeline_groups(&self) -> &[crate::format::SnapshotTimelineBranchGroup] {
         &self.timeline_groups
+    }
+
+    /// Space-reclamation contract §3.2: the branches the snapshot recorded as
+    /// holding a durable table-manifest base, or `None` for a snapshot written
+    /// before the section existed. Per-branch orphan recovery (slice 12)
+    /// consumes it; until then the recorded set is carried for its readers.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "consumed by per-branch orphan recovery (space-reclamation contract slice 12)"
+        )
+    )]
+    pub(crate) fn durable_base_branches(&self) -> Option<&[BranchId]> {
+        self.durable_base_branches.as_deref()
     }
 
     pub(crate) fn non_seeded_rows(&self) -> &[StorageRow] {
@@ -986,6 +1012,30 @@ fn decode_timeline_groups(
         groups.extend(decoded);
     }
     Ok(groups)
+}
+
+/// Space-reclamation contract §3.2: the snapshot's durable-base branch set.
+/// Absent (a pre-extension snapshot) is `None`; exactly one section decodes
+/// to `Some`; a second section is a corrupt or hand-assembled snapshot and
+/// fails closed rather than letting one authority silently shadow the other.
+pub(super) fn decode_durable_base_branches(
+    sections: &[SnapshotSection],
+) -> LifecycleResult<Option<Vec<BranchId>>> {
+    let mut recorded = None;
+    for section in sections {
+        if section.section_kind() != SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND {
+            continue;
+        }
+        if recorded.is_some() {
+            return Err(LifecycleError::RecoveryFailed {
+                reason: "snapshot carries more than one durable-base branch section",
+            });
+        }
+        recorded = Some(
+            decode_snapshot_flushed_branches_payload(section.payload()).map_err(format_error)?,
+        );
+    }
+    Ok(recorded)
 }
 
 /// W3.1c: the completeness INVARIANT — every branch leaves recovery with a

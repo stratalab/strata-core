@@ -17,6 +17,9 @@
 !/corpus/format_snapshot_row_payload/
 /corpus/format_snapshot_row_payload/*
 !/corpus/format_snapshot_row_payload/valid-empty
+!/corpus/format_snapshot_flushed_branches_payload/
+/corpus/format_snapshot_flushed_branches_payload/*
+!/corpus/format_snapshot_flushed_branches_payload/valid-empty
 !/corpus/format_snapshot_timeline_payload/
 /corpus/format_snapshot_timeline_payload/*
 !/corpus/format_snapshot_timeline_payload/valid-empty
