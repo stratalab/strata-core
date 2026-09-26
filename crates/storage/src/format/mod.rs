@@ -18,6 +18,7 @@ pub(crate) mod quarantine;
 mod retained_history_extension;
 mod segment_metadata;
 mod snapshot;
+mod snapshot_flushed_branches;
 mod snapshot_rows;
 mod snapshot_timeline;
 mod storage_row;
@@ -55,6 +56,10 @@ pub(crate) use segment_metadata::{
 pub(crate) use snapshot::{
     decode_snapshot_container, encode_snapshot_container, visit_snapshot_container_sections,
     SnapshotContainer, SnapshotHeader, SnapshotSection, SnapshotSectionRef,
+};
+pub(crate) use snapshot_flushed_branches::{
+    decode_snapshot_flushed_branches_payload, encode_snapshot_flushed_branches_section,
+    SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND,
 };
 pub(crate) use snapshot_rows::{
     decode_snapshot_row_payload, encode_snapshot_row_section, SNAPSHOT_ROW_SECTION_KIND,

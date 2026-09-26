@@ -2606,3 +2606,63 @@ fn zstd_flush_shrinks_on_disk_tables_versus_uncompressed() {
          compression codec is not reaching the table builder"
     );
 }
+
+/// Space-reclamation contract §3.2 (slice 11): the background off-lock
+/// checkpoint build records the durable-base branch set too — the flushed
+/// default branch is the one member of the published snapshot's section.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_background_checkpoint_records_durable_base_branches() {
+    let root = temp_dir_for_api_test("maintenance-checkpoint-durable-base-set");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        backend,
+    )
+    .expect("open durable runtime")
+    .into_runtime();
+    runtime
+        .commit(&put_batch(b"durable-base", b"value"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush gives the default branch a durable base");
+    runtime
+        .commit(&put_batch(b"delta-tail", b"value"))
+        .expect("commit tail");
+    let checkpoint = MaintenanceRequest::new(
+        MaintenanceTask::Checkpoint,
+        MaintenanceScope::Branch(branch()),
+    );
+    runtime.maintenance(&checkpoint).expect("checkpoint");
+    drain_maintenance_to_idle(&mut runtime);
+    runtime.close().expect("close");
+
+    let snapshots = root.join("snapshots");
+    let mut names: Vec<String> = std::fs::read_dir(&snapshots)
+        .expect("snapshots dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    let newest = names.last().expect("a published snapshot");
+    let bytes = std::fs::read(snapshots.join(newest)).expect("snapshot bytes");
+    let container = crate::format::decode_snapshot_container(&bytes).expect("snapshot container");
+    let recorded: Vec<Vec<strata_core::BranchId>> = container
+        .sections()
+        .iter()
+        .filter(|section| {
+            section.section_kind() == crate::format::SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND
+        })
+        .map(|section| {
+            crate::format::decode_snapshot_flushed_branches_payload(section.payload())
+                .expect("durable-base set")
+        })
+        .collect();
+    assert_eq!(recorded, vec![vec![branch()]]);
+}
