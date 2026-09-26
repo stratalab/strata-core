@@ -35,6 +35,11 @@ pub(crate) struct LifecycleCheckpointRequest {
     persist_flush_watermark_after_checkpoint: bool,
     truncate_wal_after_checkpoint: bool,
     retention_critical: bool,
+    /// The delta payload the checkpoint may publish in one snapshot; a larger
+    /// delta defers with [`LifecycleCheckpointStatus::DeferredDeltaExceedsCap`]
+    /// so the runtime flushes first. Production requests carry the format cap
+    /// (`MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES`); tests lower it.
+    delta_cap_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,6 +56,44 @@ pub(crate) struct LifecycleCheckpointOutcome {
     wal_truncation: Option<LifecycleWalTruncationOutcome>,
     recovery_health: Option<super::RecoveryHealth>,
     failure: Option<LifecycleError>,
+    /// The delta payload measured against the cap when the checkpoint
+    /// deferred for exceeding it.
+    delta_payload_bytes: Option<u64>,
+}
+
+/// Whether a checkpoint's delta fits the snapshot payload cap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeltaCapDecision {
+    /// The delta fits: publish it.
+    Fits,
+    /// The delta would exceed the cap: flush the branches' memtables first so
+    /// the retry publishes a bounded tail instead of failing on the format
+    /// limit and freezing the snapshot watermark.
+    MustFlushFirst,
+}
+
+/// The delta-cap decision for a checkpoint whose sections total
+/// `total_payload_bytes`. The format rejects a container whose payload
+/// exceeds its ceiling, so exactly the cap still fits.
+pub(crate) const fn checkpoint_delta_cap_decision(
+    total_payload_bytes: usize,
+    cap_bytes: usize,
+) -> DeltaCapDecision {
+    if total_payload_bytes > cap_bytes {
+        DeltaCapDecision::MustFlushFirst
+    } else {
+        DeltaCapDecision::Fits
+    }
+}
+
+/// Whether a checkpoint deferred for exceeding the delta cap should chain a
+/// flush and a retried checkpoint: once per visible version, so a delta that
+/// no flush can shrink (the cap below one row) never spins the queue.
+pub(crate) fn should_retry_checkpoint_after_delta_cap(
+    last_retry_visible: Option<CommitVersion>,
+    visible_version: CommitVersion,
+) -> bool {
+    last_retry_visible != Some(visible_version)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,6 +112,12 @@ pub(crate) enum LifecycleCheckpointStatus {
     /// [`Self::DeferredNonSeededBranchBase`]) or stays COW, and either way a checkpoint
     /// cannot proceed (#2798).
     DeferredUnmaterializedInheritedLayers,
+    /// Deferred because the delta (active + frozen rows of every branch, plus
+    /// the retained-timeline section) would exceed the snapshot payload cap.
+    /// Publishing would fail on the format limit and freeze the snapshot
+    /// watermark; instead the runtime flushes first and retries with a
+    /// bounded tail (space-reclamation contract §3.3).
+    DeferredDeltaExceedsCap,
     SnapshotPublishedManifestNotUpdated,
     SnapshotVisibilityUncertain,
     FlushWatermarkFailed,
@@ -169,9 +218,27 @@ impl LifecycleCheckpointRequest {
             persist_flush_watermark_after_checkpoint: false,
             truncate_wal_after_checkpoint: false,
             retention_critical: false,
+            delta_cap_bytes: crate::format::MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES,
         };
         request.validate()?;
         Ok(request)
+    }
+
+    /// Lower the delta cap below the format ceiling (never above it: the
+    /// container encoder would still refuse the publish).
+    pub(crate) fn with_delta_cap_bytes(mut self, cap_bytes: usize) -> LifecycleResult<Self> {
+        if cap_bytes == 0 || cap_bytes > crate::format::MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES {
+            return Err(LifecycleError::InvalidConfig {
+                field: "checkpoint_delta_cap_bytes",
+                reason: "must be nonzero and at most the snapshot payload ceiling",
+            });
+        }
+        self.delta_cap_bytes = cap_bytes;
+        Ok(self)
+    }
+
+    pub(crate) const fn delta_cap_bytes(&self) -> usize {
+        self.delta_cap_bytes
     }
 
     #[allow(
@@ -268,6 +335,18 @@ impl LifecycleCheckpointOutcome {
             wal_truncation: None,
             recovery_health: None,
             failure: None,
+            delta_payload_bytes: None,
+        }
+    }
+
+    fn deferred_delta_exceeds_cap(
+        request: &LifecycleCheckpointRequest,
+        delta_payload_bytes: u64,
+    ) -> Self {
+        Self {
+            status: LifecycleCheckpointStatus::DeferredDeltaExceedsCap,
+            delta_payload_bytes: Some(delta_payload_bytes),
+            ..Self::deferred(request)
         }
     }
 
@@ -304,6 +383,7 @@ impl LifecycleCheckpointOutcome {
             wal_truncation: None,
             recovery_health: None,
             failure: None,
+            delta_payload_bytes: None,
         }
     }
 
@@ -331,7 +411,14 @@ impl LifecycleCheckpointOutcome {
                 object: Some(snapshot.object().as_str().to_owned()),
                 reason,
             }),
+            delta_payload_bytes: None,
         })
+    }
+
+    /// The delta payload measured against the cap, when the checkpoint
+    /// deferred for exceeding it.
+    pub(crate) const fn delta_payload_bytes(&self) -> Option<u64> {
+        self.delta_payload_bytes
     }
 
     fn with_flush_watermark(mut self, outcome: LifecycleFlushWatermarkOutcome) -> Self {
@@ -416,7 +503,8 @@ impl LifecycleCheckpointOutcome {
             LifecycleCheckpointStatus::Completed => MaintenanceOutcomeStatus::Completed,
             LifecycleCheckpointStatus::DeferredNoVisibleRows
             | LifecycleCheckpointStatus::DeferredNonSeededBranchBase
-            | LifecycleCheckpointStatus::DeferredUnmaterializedInheritedLayers => {
+            | LifecycleCheckpointStatus::DeferredUnmaterializedInheritedLayers
+            | LifecycleCheckpointStatus::DeferredDeltaExceedsCap => {
                 MaintenanceOutcomeStatus::Deferred
             }
             LifecycleCheckpointStatus::SnapshotPublishedManifestNotUpdated
@@ -461,6 +549,9 @@ impl LifecycleCheckpointOutcome {
             LifecycleCheckpointStatus::DeferredUnmaterializedInheritedLayers => {
                 Some("checkpoint deferred: branch holds unmaterialized inherited layers")
             }
+            LifecycleCheckpointStatus::DeferredDeltaExceedsCap => {
+                Some("checkpoint deferred: delta exceeds the snapshot payload cap; flushing first")
+            }
             LifecycleCheckpointStatus::SnapshotPublishedManifestNotUpdated => {
                 Some("checkpoint snapshot published before manifest update failed")
             }
@@ -479,6 +570,7 @@ impl LifecycleCheckpointOutcome {
             LifecycleCheckpointStatus::SnapshotPublishedManifestNotUpdated
                 | LifecycleCheckpointStatus::SnapshotVisibilityUncertain
                 | LifecycleCheckpointStatus::FlushWatermarkFailed
+                | LifecycleCheckpointStatus::DeferredDeltaExceedsCap
         )
     }
 }
@@ -1935,6 +2027,23 @@ fn publish_checkpoint_rows(
         );
     }
     sections.extend(request.extra_sections().iter().cloned());
+    // Measure the delta against the snapshot payload cap BEFORE publishing:
+    // the container encoder refuses a larger payload as a hard format error,
+    // which would fail this checkpoint and freeze the snapshot watermark (and
+    // with it WAL reclaim). A too-large delta defers instead; the runtime
+    // flushes the memtables and retries with a bounded tail (§3.3).
+    let delta_payload_bytes = sections
+        .iter()
+        .map(|section| section.payload().len())
+        .fold(0usize, usize::saturating_add);
+    if checkpoint_delta_cap_decision(delta_payload_bytes, request.delta_cap_bytes())
+        == DeltaCapDecision::MustFlushFirst
+    {
+        return Ok(LifecycleCheckpointOutcome::deferred_delta_exceeds_cap(
+            request,
+            u64::try_from(delta_payload_bytes).unwrap_or(u64::MAX),
+        ));
+    }
     require_checkpoint_artifact_budget(budget, request, &sections)?;
     let active_wal_segment = services.wal().active_segment_id();
     let service_request = CheckpointRequest::new(

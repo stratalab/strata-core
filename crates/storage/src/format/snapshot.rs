@@ -10,7 +10,11 @@ const SNAPSHOT_SECTION_FORMAT: &str = "snapshot_section";
 const SNAPSHOT_MAGIC: [u8; 4] = *b"SNAP";
 const MAX_SNAPSHOT_CODEC_ID_LEN: usize = u8::MAX as usize;
 const MAX_SNAPSHOT_SECTION_COUNT: usize = 4096;
-const MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// The ceiling on a snapshot container's total section payload, enforced on
+/// encode and decode so recovery's materialized decode stays bounded
+/// (DUR-017). The checkpoint measures its delta against this before it
+/// publishes (`lifecycle::checkpoint_delta_cap_decision`).
+pub(crate) const MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SnapshotMaterializedLimits {

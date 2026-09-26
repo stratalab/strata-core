@@ -861,6 +861,40 @@ fn open_durable_runtime_with_wal_segment_size(
     let lifecycle_config = LifecycleConfig::default()
         .with_wal_growth_policy(policy)
         .expect("lifecycle config");
+    open_durable_runtime_with_config(branch, backend, lifecycle_config, segment_size)
+}
+
+/// A runtime whose maintenance queue holds at most `queue_depth` pending
+/// tasks, so a test can drive the queue-full enqueue refusal.
+fn open_durable_runtime_with_queue_depth(
+    branch: BranchId,
+    backend: &'static CheckpointTestBackend,
+    queue_depth: usize,
+) -> LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource> {
+    let defaults = LifecycleConfig::default();
+    let lifecycle_config = LifecycleConfig::new(
+        queue_depth,
+        defaults.max_recovery_faults(),
+        defaults.close_timeout_policy(),
+        defaults.lossy_recovery(),
+    )
+    .expect("lifecycle config")
+    .with_wal_growth_policy(LifecycleWalGrowthPolicy::disabled())
+    .expect("lifecycle config");
+    open_durable_runtime_with_config(
+        branch,
+        backend,
+        lifecycle_config,
+        WalServiceConfig::default().segment_size(),
+    )
+}
+
+fn open_durable_runtime_with_config(
+    branch: BranchId,
+    backend: &'static CheckpointTestBackend,
+    lifecycle_config: LifecycleConfig,
+    segment_size: u64,
+) -> LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource> {
     let request = LifecycleDurableLocalOpenRequest::new(
         StorageOpenPlan::new(
             StorageMode::DurableLocalStandard,
@@ -1329,4 +1363,496 @@ fn background_wal_truncation_start_rotates_a_covered_active_segment() {
         before.active_segment_id(),
         after.active_segment_id()
     );
+}
+
+/// The delta-cap decision at the boundary: exactly the cap still fits (the
+/// format rejects only a payload strictly above its ceiling); one byte more
+/// must flush first.
+#[test]
+fn checkpoint_delta_cap_decision_truth_table() {
+    use crate::lifecycle::{checkpoint_delta_cap_decision, DeltaCapDecision};
+    let cap = 4096usize;
+    let cases = [
+        (0usize, DeltaCapDecision::Fits),
+        (cap - 1, DeltaCapDecision::Fits),
+        (cap, DeltaCapDecision::Fits),
+        (cap + 1, DeltaCapDecision::MustFlushFirst),
+        (usize::MAX, DeltaCapDecision::MustFlushFirst),
+    ];
+    for (total, expected) in cases {
+        assert_eq!(
+            checkpoint_delta_cap_decision(total, cap),
+            expected,
+            "total={total} cap={cap}"
+        );
+    }
+    assert_eq!(checkpoint_delta_cap_decision(1, 1), DeltaCapDecision::Fits);
+    assert_eq!(
+        checkpoint_delta_cap_decision(2, 1),
+        DeltaCapDecision::MustFlushFirst
+    );
+}
+
+/// A delta-cap deferral chains its flush-and-retry once per visible version.
+#[test]
+fn should_retry_checkpoint_after_delta_cap_truth_table() {
+    use crate::lifecycle::should_retry_checkpoint_after_delta_cap;
+    let v7 = CommitVersion::new(7);
+    let v8 = CommitVersion::new(8);
+    assert!(should_retry_checkpoint_after_delta_cap(None, v7));
+    assert!(!should_retry_checkpoint_after_delta_cap(Some(v7), v7));
+    assert!(should_retry_checkpoint_after_delta_cap(Some(v7), v8));
+    assert!(should_retry_checkpoint_after_delta_cap(Some(v8), v7));
+}
+
+/// A checkpoint whose delta exceeds the cap defers with the typed status,
+/// chains a flush and a retried checkpoint, and the retry completes over the
+/// flushed base with a bounded delta — never a format error, never a frozen
+/// snapshot watermark (space-reclamation contract §3.3).
+#[test]
+fn over_cap_delta_defers_flushes_first_then_checkpoints() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xc6);
+    let policy = LifecycleWalGrowthPolicy::disabled();
+    let mut runtime = open_durable_runtime(branch, backend, policy);
+    runtime.set_checkpoint_delta_cap_for_test(2048);
+    for index in 0u8..3 {
+        runtime
+            .execute_durable_commit(
+                durable_sized_batch(
+                    branch,
+                    format!("delta-cap-{index}").into_bytes(),
+                    vec![index; 1024],
+                ),
+                generation_guard(),
+            )
+            .expect("durable commit");
+    }
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+
+    let deferred = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("checkpoint outcome");
+    assert_eq!(deferred.status(), MaintenanceOutcomeStatus::Deferred);
+    assert!(deferred.retryable(), "{deferred:?}");
+    assert_eq!(
+        runtime.pending_maintenance_kinds_for_test(),
+        vec![MaintenanceTaskKind::Flush, MaintenanceTaskKind::Checkpoint],
+        "the deferral chains a flush then the retried checkpoint"
+    );
+    assert_eq!(
+        backend
+            .events()
+            .iter()
+            .filter(|event| matches!(event, CheckpointBackendEvent::SnapshotCreate))
+            .count(),
+        0,
+        "nothing was published"
+    );
+
+    let flushed = runtime
+        .run_next_flush_maintenance()
+        .expect("flush runner")
+        .expect("flush outcome");
+    assert_eq!(flushed.status(), MaintenanceOutcomeStatus::Completed);
+    let completed = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("retried checkpoint outcome");
+    assert_eq!(
+        completed.status(),
+        MaintenanceOutcomeStatus::Completed,
+        "{completed:?}"
+    );
+    assert_eq!(
+        completed.affected_objects(),
+        1,
+        "one snapshot object published"
+    );
+    let kinds = runtime.pending_maintenance_kinds_for_test();
+    assert!(
+        !kinds.contains(&MaintenanceTaskKind::Flush)
+            && !kinds.contains(&MaintenanceTaskKind::Checkpoint),
+        "a completed retry chains nothing more (the flush's own WAL follow-ups may remain): {kinds:?}"
+    );
+}
+
+/// A delta no flush can shrink (the cap below the timeline section) chains
+/// its retry exactly once per visible version; a new commit re-arms it.
+#[test]
+fn delta_cap_retry_chains_once_per_visible_version() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xc7);
+    let policy = LifecycleWalGrowthPolicy::disabled();
+    let mut runtime = open_durable_runtime(branch, backend, policy);
+    runtime.set_checkpoint_delta_cap_for_test(1);
+    runtime
+        .execute_durable_commit(
+            durable_sized_batch(branch, b"cap-spin".to_vec(), vec![1; 512]),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+
+    let first = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("first outcome");
+    assert_eq!(first.status(), MaintenanceOutcomeStatus::Deferred);
+    assert_eq!(
+        runtime.pending_maintenance_kinds_for_test(),
+        vec![MaintenanceTaskKind::Flush, MaintenanceTaskKind::Checkpoint]
+    );
+    let armed_at = runtime.checkpoint_delta_cap_retry_for_test();
+    assert!(armed_at.is_some(), "a queued retry arms the guard");
+    runtime
+        .run_next_flush_maintenance()
+        .expect("flush runner")
+        .expect("flush outcome");
+    let second = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("second outcome");
+    assert_eq!(
+        second.status(),
+        MaintenanceOutcomeStatus::Deferred,
+        "{second:?}"
+    );
+    let kinds = runtime.pending_maintenance_kinds_for_test();
+    assert!(
+        !kinds.contains(&MaintenanceTaskKind::Flush)
+            && !kinds.contains(&MaintenanceTaskKind::Checkpoint),
+        "the same visible version never chains twice: {kinds:?}"
+    );
+    assert_eq!(runtime.checkpoint_delta_cap_retry_for_test(), armed_at);
+
+    // A new commit moves the visible version: the next deferral chains again.
+    runtime
+        .execute_durable_commit(
+            durable_sized_batch(branch, b"cap-spin-2".to_vec(), vec![2; 512]),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+    let third = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("third outcome");
+    assert_eq!(third.status(), MaintenanceOutcomeStatus::Deferred);
+    let kinds = runtime.pending_maintenance_kinds_for_test();
+    assert!(
+        kinds.contains(&MaintenanceTaskKind::Flush)
+            && kinds.contains(&MaintenanceTaskKind::Checkpoint),
+        "a new visible version re-arms the chain: {kinds:?}"
+    );
+    assert_ne!(
+        runtime.checkpoint_delta_cap_retry_for_test(),
+        armed_at,
+        "the guard follows the visible version"
+    );
+}
+
+/// The explicit (non-queued) checkpoint reports the typed deferral with the
+/// measured delta and chains the same flush-and-retry for the background.
+#[test]
+fn explicit_checkpoint_over_cap_defers_with_measured_delta_and_chains_flush() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xc8);
+    let policy = LifecycleWalGrowthPolicy::disabled();
+    let mut runtime = open_durable_runtime(branch, backend, policy);
+    runtime.set_checkpoint_delta_cap_for_test(2048);
+    for index in 0u8..3 {
+        runtime
+            .execute_durable_commit(
+                durable_sized_batch(
+                    branch,
+                    format!("explicit-cap-{index}").into_bytes(),
+                    vec![index; 1024],
+                ),
+                generation_guard(),
+            )
+            .expect("durable commit");
+    }
+
+    let outcome = runtime
+        .checkpoint_for_explicit_maintenance(branch, false)
+        .expect("explicit checkpoint");
+    assert_eq!(
+        outcome.status(),
+        crate::lifecycle::LifecycleCheckpointStatus::DeferredDeltaExceedsCap
+    );
+    // The measured delta is the encoded sections' total, so it reflects every
+    // committed row rather than a constant just above the cap: three 1 KiB
+    // values put a floor of 3 KiB on the row section alone.
+    assert!(
+        outcome
+            .delta_payload_bytes()
+            .is_some_and(|bytes| bytes >= 3 * 1024),
+        "measured delta must cover all committed rows: {outcome:?}"
+    );
+    assert_eq!(outcome.snapshot_id(), None);
+    assert_eq!(
+        runtime.pending_maintenance_kinds_for_test(),
+        vec![MaintenanceTaskKind::Flush, MaintenanceTaskKind::Checkpoint]
+    );
+}
+
+/// The common engine shape (a tiny never-flushed non-seeded branch beside a
+/// bloated seeded branch): the seeded-branch flush is enough — the retry
+/// deltas over the seeded base plus the small non-seeded tail and completes,
+/// and the non-seeded branch gains no durable base (so the multi-branch
+/// structural guard stays clear).
+#[test]
+fn delta_cap_chain_flushes_the_seeded_branch_and_completes_beside_a_small_non_seeded_branch() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xc9);
+    let extra = branch_id(0xca);
+    let policy = LifecycleWalGrowthPolicy::disabled();
+    let mut runtime = open_durable_runtime(initial, backend, policy);
+    runtime.set_checkpoint_delta_cap_for_test(2048);
+    runtime
+        .execute_durable_commit(
+            durable_batch(initial, b"seed-anchor", b"anchor"),
+            generation_guard(),
+        )
+        .expect("commit anchor");
+    runtime
+        .create_branch(
+            extra,
+            CommitBranchGeneration::new(1).expect("generation"),
+            Some(CommitVersion::new(1)),
+        )
+        .expect("create extra");
+    runtime
+        .execute_durable_commit(
+            durable_batch(extra, b"extra-control-row", b"tiny"),
+            generation_guard(),
+        )
+        .expect("commit extra control row");
+    for index in 0u8..3 {
+        runtime
+            .execute_durable_commit(
+                durable_sized_batch(
+                    initial,
+                    format!("seeded-bloat-{index}").into_bytes(),
+                    vec![index; 1024],
+                ),
+                generation_guard(),
+            )
+            .expect("commit seeded bloat");
+    }
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+
+    let deferred = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("deferred outcome");
+    assert_eq!(deferred.status(), MaintenanceOutcomeStatus::Deferred);
+    runtime
+        .run_next_flush_maintenance()
+        .expect("flush runner")
+        .expect("flush outcome");
+    let completed = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("retried outcome");
+    assert_eq!(
+        completed.status(),
+        MaintenanceOutcomeStatus::Completed,
+        "{completed:?}"
+    );
+    assert!(
+        !backend.snapshot_objects().is_empty(),
+        "the retry published"
+    );
+    assert_eq!(
+        runtime
+            .branch_catalog()
+            .branch_state(extra)
+            .expect("extra branch state")
+            .owned_table_count(),
+        0,
+        "the seeded-branch flush must not give the non-seeded branch a durable base"
+    );
+}
+
+/// Bloat on a NON-seeded branch stays deferred: the chain flushes only the
+/// seeded branch (a global flush would give the non-seeded branch a durable
+/// base and latch the structural guard), so the retry defers again on the
+/// cap, chains nothing more at this version, and the branch gains no base.
+/// The per-branch orphan-recovery slice flips this to the completing
+/// behaviour with a global flush (space-reclamation contract §3.3, slice 12).
+#[test]
+fn delta_cap_chain_flushes_only_the_seeded_branch_while_the_multi_branch_guard_stands() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xcb);
+    let extra = branch_id(0xcc);
+    let policy = LifecycleWalGrowthPolicy::disabled();
+    let mut runtime = open_durable_runtime(initial, backend, policy);
+    runtime.set_checkpoint_delta_cap_for_test(2048);
+    runtime
+        .execute_durable_commit(
+            durable_batch(initial, b"seed-anchor", b"anchor"),
+            generation_guard(),
+        )
+        .expect("commit anchor");
+    runtime
+        .create_branch(
+            extra,
+            CommitBranchGeneration::new(1).expect("generation"),
+            Some(CommitVersion::new(1)),
+        )
+        .expect("create extra");
+    for index in 0u8..3 {
+        runtime
+            .execute_durable_commit(
+                durable_sized_batch(
+                    extra,
+                    format!("extra-bloat-{index}").into_bytes(),
+                    vec![index; 1024],
+                ),
+                generation_guard(),
+            )
+            .expect("commit extra bloat");
+    }
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+
+    let first = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("first outcome");
+    assert_eq!(first.status(), MaintenanceOutcomeStatus::Deferred);
+    assert_eq!(
+        runtime.pending_maintenance_kinds_for_test(),
+        vec![MaintenanceTaskKind::Flush, MaintenanceTaskKind::Checkpoint]
+    );
+    runtime
+        .run_next_flush_maintenance()
+        .expect("flush runner")
+        .expect("flush outcome");
+    let second = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("second outcome");
+    assert_eq!(
+        second.status(),
+        MaintenanceOutcomeStatus::Deferred,
+        "{second:?}"
+    );
+    let kinds = runtime.pending_maintenance_kinds_for_test();
+    assert!(
+        !kinds.contains(&MaintenanceTaskKind::Flush)
+            && !kinds.contains(&MaintenanceTaskKind::Checkpoint),
+        "{kinds:?}"
+    );
+    assert!(backend.snapshot_objects().is_empty(), "nothing published");
+    assert_eq!(
+        runtime
+            .branch_catalog()
+            .branch_state(extra)
+            .expect("extra branch state")
+            .owned_table_count(),
+        0,
+        "the non-seeded branch keeps no durable base"
+    );
+}
+
+/// A full queue can refuse the retried checkpoint after the chain's flush took
+/// the slot the running checkpoint freed. The guard must stay unarmed then, so
+/// the next deferral at this version can chain again instead of waiting for
+/// the WAL-growth backstop.
+#[test]
+fn delta_cap_chain_leaves_the_retry_guard_unarmed_when_the_queue_refuses_the_checkpoint() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xcd);
+    let mut runtime = open_durable_runtime_with_queue_depth(branch, backend, 4);
+    runtime.set_checkpoint_delta_cap_for_test(1);
+    runtime
+        .execute_durable_commit(
+            durable_sized_batch(branch, b"cap-refused".to_vec(), vec![1; 512]),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+    // Three distinct reclaim kinds fill the remaining slots. Running the
+    // checkpoint frees one; the chain's flush takes it and the retried
+    // checkpoint is refused.
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::table_object_retention(branch))
+        .expect("enqueue mark");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::quarantine())
+        .expect("enqueue sweep");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::purge_quarantine(branch))
+        .expect("enqueue purge");
+    assert_eq!(runtime.pending_maintenance_kinds_for_test().len(), 4);
+
+    let deferred = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("deferred outcome");
+    assert_eq!(deferred.status(), MaintenanceOutcomeStatus::Deferred);
+    let kinds = runtime.pending_maintenance_kinds_for_test();
+    assert_eq!(kinds.len(), 4, "{kinds:?}");
+    assert!(
+        kinds.contains(&MaintenanceTaskKind::Flush)
+            && !kinds.contains(&MaintenanceTaskKind::Checkpoint),
+        "the flush queued and the checkpoint was refused: {kinds:?}"
+    );
+    assert_eq!(
+        runtime.checkpoint_delta_cap_retry_for_test(),
+        None,
+        "a refused retry must not arm the guard"
+    );
+}
+
+/// The delta cap is bounded on both sides: zero would defer every checkpoint,
+/// and anything above the format ceiling would let the container encoder
+/// refuse a publish the cap had admitted.
+#[test]
+fn delta_cap_request_bound_truth_table() {
+    let ceiling = crate::format::MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES;
+    let request = || {
+        LifecycleCheckpointRequest::new(branch_id(0xce), 1, Timestamp::from_micros(1))
+            .expect("request")
+    };
+    for (cap, admitted) in [
+        (0usize, false),
+        (1, true),
+        (ceiling, true),
+        (ceiling + 1, false),
+    ] {
+        let outcome = request().with_delta_cap_bytes(cap);
+        match outcome {
+            Ok(request) => {
+                assert!(admitted, "cap {cap} must be refused");
+                assert_eq!(request.delta_cap_bytes(), cap);
+            }
+            Err(LifecycleError::InvalidConfig { field, .. }) => {
+                assert!(!admitted, "cap {cap} must be admitted");
+                assert_eq!(field, "checkpoint_delta_cap_bytes");
+            }
+            Err(other) => panic!("cap {cap}: unexpected error {other:?}"),
+        }
+    }
 }
