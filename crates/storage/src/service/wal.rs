@@ -1943,14 +1943,40 @@ impl<'a> WalService<'a> {
                 continue;
             }
 
-            let read = read_segment(
+            let read = match read_segment(
                 &self.backend,
                 self.database_id,
                 segment_id,
                 &object,
                 false,
                 self.codec_id,
-            )?;
+            ) {
+                Ok(read) => read,
+                // A segment listed at the start of this pass can be gone by
+                // the read: another covered-segment pass — the off-lock
+                // retention clone, or a worker detached at close — deleted it
+                // under the same retention-proof discipline, so its bytes are
+                // already reclaimed. Report it exactly as the delete branch
+                // below reports a vanished object instead of failing the whole
+                // pass on a read nobody needs (#3603; `scan_sealed_retention`
+                // tolerates the same tear).
+                Err(WalServiceError::Backend { source, .. })
+                    if source.kind() == BackendErrorKind::NotFound =>
+                {
+                    report.record_deleted(
+                        segment_id,
+                        DeleteOutcome::already_missing(
+                            object.clone(),
+                            DeleteDurability::NonDurable,
+                        ),
+                    );
+                    if let Some(sidecar) = self.delete_segment_sidecar_best_effort(segment_id) {
+                        report.record_sidecar_delete(sidecar);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if read
                 .records
                 .iter()
