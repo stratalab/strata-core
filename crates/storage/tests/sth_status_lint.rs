@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// `fuzz.yml` enumerates them dynamically (`cargo fuzz list`), so this is an
 /// OBSERVED fact the lint keeps honest — never a normative cap. A new target
 /// must bump this line (which is the point: the count stops silently drifting).
-const STH_FUZZ_TARGET_COUNT: usize = 38;
+const STH_FUZZ_TARGET_COUNT: usize = 39;
 
 /// The STH / Phase-1 nightly jobs. Each MUST exist as a job in `nightly.yml`;
 /// a renamed or removed lane fails the lint (so the ledger cannot claim a lane

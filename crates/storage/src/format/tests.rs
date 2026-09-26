@@ -1032,6 +1032,9 @@ const SNAPSHOT_ROW_SECTION_PUT_AND_TOMBSTONE: &str = include_str!(
 const SNAPSHOT_TIMELINE_SECTION_ONE_GROUP: &str = include_str!(
     "../../testdata/goldens/storage-format-v1/snapshot-timeline-section-one-group.hex"
 );
+const SNAPSHOT_FLUSHED_BRANCHES_SECTION_TWO_BRANCHES: &str = include_str!(
+    "../../testdata/goldens/storage-format-v1/snapshot-flushed-branches-section-two-branches.hex"
+);
 const TABLE_ROW_SPLIT_PAYLOAD_TWO_SPLITS: &str =
     include_str!("../../testdata/goldens/storage-format-v1/table-row-split-payload-two-splits.hex");
 const INTERNAL_KEY_MAX_VERSION: &str =
@@ -1169,6 +1172,44 @@ fn snapshot_timeline_section_matches_golden_vector() {
     assert_eq!(
         super::decode_snapshot_timeline_payload(decoded.payload(), decoded.section_kind()),
         Ok(groups)
+    );
+}
+
+/// Two members so the golden pins both the count and the ascending-by-bytes
+/// layout (space-reclamation contract §3.2, section kind 4).
+fn flushed_branches_golden_members() -> Vec<BranchId> {
+    vec![ordinary_branch_id(), BranchId::from_bytes([0xa5; 16])]
+}
+
+#[test]
+#[ignore = "prints the kind-4 durable-base branch-set golden bytes; run when regenerating"]
+fn dump_snapshot_flushed_branches_section_golden_bytes() {
+    let section =
+        super::encode_snapshot_flushed_branches_section(&flushed_branches_golden_members())
+            .expect("flushed-branches section");
+    let bytes = super::snapshot::encode_snapshot_section(&section).expect("encode section");
+    eprintln!("FLUSHED_BRANCHES_SECTION\n{}", to_hex_lines(&bytes));
+}
+
+#[test]
+fn snapshot_flushed_branches_section_matches_golden_vector() {
+    let members = flushed_branches_golden_members();
+    let section = super::encode_snapshot_flushed_branches_section(&members)
+        .expect("flushed-branches section");
+    let golden = parse_hex(SNAPSHOT_FLUSHED_BRANCHES_SECTION_TWO_BRANCHES);
+    assert_eq!(
+        super::snapshot::encode_snapshot_section(&section).expect("encode section"),
+        golden
+    );
+    let (decoded, consumed) = decode_snapshot_section(&golden).expect("decode section");
+    assert_eq!(consumed, golden.len());
+    assert_eq!(
+        decoded.section_kind(),
+        super::SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND
+    );
+    assert_eq!(
+        super::decode_snapshot_flushed_branches_payload(decoded.payload()),
+        Ok(members)
     );
 }
 
@@ -1324,6 +1365,15 @@ fn adversarial_decoder(file: &str) -> Option<AdversarialArm> {
                     .is_ok()
             })
         }),
+        // Routed through the fuzz arm so the matrix also pins that arm's
+        // round-trip oracle (a `-> true` arm would accept every flip).
+        ("snapshot-flushed-branches-section-", |bytes| {
+            decode_snapshot_section(bytes).is_ok_and(|(section, consumed)| {
+                consumed == bytes.len()
+                    && section.section_kind() == super::SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND
+                    && fuzzing::decode_snapshot_flushed_branches_payload(section.payload())
+            })
+        }),
         ("snapshot-watermark-", fuzzing::decode_watermark),
         ("storage-row-", fuzzing::decode_storage_row),
         ("table-data-block-", fuzzing::decode_table_block),
@@ -1405,7 +1455,7 @@ fn adversarial_matrix_matches_the_pinned_contract() {
         .collect();
     files.sort();
     assert!(
-        files.len() >= 54,
+        files.len() >= 55,
         "the golden inventory shrank: {}",
         files.len()
     );

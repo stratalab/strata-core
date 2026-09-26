@@ -1605,9 +1605,70 @@ pub(crate) fn checkpoint_durable_branch_with_budget(
             let timeline_groups = timeline_group_for_branch(branch, visible_version)
                 .into_iter()
                 .collect();
-            Ok((rows, has_durable_rows, flush_boundary, timeline_groups))
+            let mut collection =
+                CheckpointCollection::new(rows, has_durable_rows, flush_boundary, timeline_groups);
+            collection.record_durable_base(branch.branch_id(), has_durable_rows);
+            Ok(collection)
         },
     )
+}
+
+/// What a checkpoint's collectors hand the publisher: the bounded delta plus
+/// the per-branch facts the snapshot records about it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CheckpointCollection {
+    /// The delta rows (active + frozen, plus any volatile owned table's rows)
+    /// of every checkpointed branch.
+    pub(crate) rows: Vec<crate::row::StorageRow>,
+    /// Whether any checkpointed branch holds durable owned-level rows under
+    /// the watermark (an empty delta still advances the watermark then).
+    pub(crate) has_durable_rows: bool,
+    /// The snapshot's base floor: the highest durably flushed commit the delta
+    /// sits on, `None` for a self-contained full snapshot.
+    pub(crate) flush_boundary: Option<CommitVersion>,
+    /// W3.1b: the retained-timeline groups of every branch whose index was
+    /// provably complete at the watermark.
+    pub(crate) timeline_groups: Vec<crate::format::SnapshotTimelineBranchGroup>,
+    /// Space-reclamation contract §3.2: the branches whose delta sits on a
+    /// durable table-manifest base (a durably catalogued owned table). The
+    /// snapshot records the set so recovery can tell an orphaned delta from a
+    /// branch it carries in full. Insertion order; sorted at encode.
+    pub(crate) durable_base_branches: Vec<BranchId>,
+}
+
+impl CheckpointCollection {
+    pub(crate) fn new(
+        rows: Vec<crate::row::StorageRow>,
+        has_durable_rows: bool,
+        flush_boundary: Option<CommitVersion>,
+        timeline_groups: Vec<crate::format::SnapshotTimelineBranchGroup>,
+    ) -> Self {
+        Self {
+            rows,
+            has_durable_rows,
+            flush_boundary,
+            timeline_groups,
+            durable_base_branches: Vec::new(),
+        }
+    }
+
+    /// Record one branch's membership in the durable-base set. Membership is
+    /// the branch's `has_durable_rows` fact from `branch_checkpoint_collection`:
+    /// a durably catalogued owned table, NOT merely an owned table (a volatile
+    /// snapshot-install L0 has its rows captured into the delta instead).
+    pub(crate) fn record_durable_base(&mut self, branch_id: BranchId, has_durable_base: bool) {
+        if has_durable_base {
+            self.durable_base_branches.push(branch_id);
+        }
+    }
+
+    /// The durable-base set as the section encoder requires it: strictly
+    /// ascending by byte order.
+    fn sorted_durable_base_branches(&self) -> Vec<BranchId> {
+        let mut members = self.durable_base_branches.clone();
+        members.sort_unstable_by_key(|branch| *branch.as_bytes());
+        members
+    }
 }
 
 /// #2863: one branch's checkpoint collection — the snapshot rows, whether the
@@ -1729,24 +1790,26 @@ pub(crate) fn checkpoint_durable_runtime_with_budget(
         budget,
         |visible_version| {
             let active_descriptors = branch_catalog.list_branches(false);
-            let mut combined = Vec::new();
-            let mut has_durable_rows = false;
-            let mut flush_boundary: Option<CommitVersion> = None;
-            let mut timeline_groups = Vec::new();
+            let mut collection = CheckpointCollection::default();
             for descriptor in &active_descriptors {
                 let branch = branch_catalog.branch_state(descriptor.branch_id())?;
                 let (mut rows, branch_has_durable, branch_boundary) =
                     branch_checkpoint_collection(branch, visible_version, table_is_durable)?;
-                has_durable_rows |= branch_has_durable;
+                collection.has_durable_rows |= branch_has_durable;
+                collection.record_durable_base(descriptor.branch_id(), branch_has_durable);
                 if let Some(boundary) = branch_boundary {
-                    flush_boundary = Some(flush_boundary.map_or(boundary, |f| f.max(boundary)));
+                    collection.flush_boundary = Some(
+                        collection
+                            .flush_boundary
+                            .map_or(boundary, |f| f.max(boundary)),
+                    );
                 }
-                combined.append(&mut rows);
+                collection.rows.append(&mut rows);
                 if let Some(group) = timeline_group_for_branch(branch, visible_version) {
-                    timeline_groups.push(group);
+                    collection.timeline_groups.push(group);
                 }
             }
-            Ok((combined, has_durable_rows, flush_boundary, timeline_groups))
+            Ok(collection)
         },
     )
 }
@@ -1840,23 +1903,11 @@ pub(crate) fn checkpoint_durable_rows_with_budget(
     services: &LifecycleDurableLocalServices<'_>,
     request: &LifecycleCheckpointRequest,
     visible_version: CommitVersion,
-    rows: &[crate::row::StorageRow],
-    timeline_groups: &[crate::format::SnapshotTimelineBranchGroup],
-    has_durable_rows: bool,
-    flush_boundary: Option<CommitVersion>,
+    collection: &CheckpointCollection,
     budget: Option<&StorageBudgetLedger>,
 ) -> LifecycleResult<LifecycleCheckpointOutcome> {
     request.validate()?;
-    publish_checkpoint_rows(
-        services,
-        visible_version,
-        request,
-        budget,
-        rows,
-        timeline_groups,
-        has_durable_rows,
-        flush_boundary,
-    )
+    publish_checkpoint_rows(services, visible_version, request, budget, collection)
 }
 
 fn publish_checkpoint(
@@ -1865,14 +1916,7 @@ fn publish_checkpoint(
     read_visible_version: impl FnOnce() -> CommitVersion,
     request: &LifecycleCheckpointRequest,
     budget: Option<&StorageBudgetLedger>,
-    collect_rows: impl FnOnce(
-        CommitVersion,
-    ) -> LifecycleResult<(
-        Vec<crate::row::StorageRow>,
-        bool,
-        Option<CommitVersion>,
-        Vec<crate::format::SnapshotTimelineBranchGroup>,
-    )>,
+    collect_rows: impl FnOnce(CommitVersion) -> LifecycleResult<CheckpointCollection>,
 ) -> LifecycleResult<LifecycleCheckpointOutcome> {
     let quiesce = guard_set.try_begin_quiesce().map_err(commit_error)?;
     let visible_version = read_visible_version();
@@ -1882,20 +1926,12 @@ fn publish_checkpoint(
     }
     // `collect_rows` returns the delta rows, whether any checkpointed branch has durable
     // owned-level rows under the watermark (so an empty delta still advances the snapshot
-    // watermark instead of deferring), and the snapshot's base floor (the highest durably
-    // flushed commit it deltas over, `None` for a self-contained full snapshot).
-    let (rows, has_durable_rows, flush_boundary, timeline_groups) = collect_rows(visible_version)?;
+    // watermark instead of deferring), the snapshot's base floor (the highest durably
+    // flushed commit it deltas over, `None` for a self-contained full snapshot), and the
+    // per-branch facts the snapshot records.
+    let collection = collect_rows(visible_version)?;
     drop(quiesce);
-    publish_checkpoint_rows(
-        services,
-        visible_version,
-        request,
-        budget,
-        &rows,
-        &timeline_groups,
-        has_durable_rows,
-        flush_boundary,
-    )
+    publish_checkpoint_rows(services, visible_version, request, budget, &collection)
 }
 
 fn publish_checkpoint_rows(
@@ -1903,11 +1939,10 @@ fn publish_checkpoint_rows(
     visible_version: CommitVersion,
     request: &LifecycleCheckpointRequest,
     budget: Option<&StorageBudgetLedger>,
-    rows: &[crate::row::StorageRow],
-    timeline_groups: &[crate::format::SnapshotTimelineBranchGroup],
-    has_durable_rows: bool,
-    flush_boundary: Option<CommitVersion>,
+    collection: &CheckpointCollection,
 ) -> LifecycleResult<LifecycleCheckpointOutcome> {
+    let rows = collection.rows.as_slice();
+    let flush_boundary = collection.flush_boundary;
     // The checkpoint snapshot is a bounded delta (active + frozen rows). An empty
     // delta does NOT mean "nothing to checkpoint": when the branch has durable
     // owned-level rows, the snapshot watermark must still advance to
@@ -1915,7 +1950,7 @@ fn publish_checkpoint_rows(
     // only after the durable point (otherwise pruned/flushed commits get replayed).
     // Defer only when there is genuinely nothing under the watermark — no delta and
     // no durable owned rows.
-    if visible_version == CommitVersion::ZERO || (rows.is_empty() && !has_durable_rows) {
+    if visible_version == CommitVersion::ZERO || (rows.is_empty() && !collection.has_durable_rows) {
         return Ok(LifecycleCheckpointOutcome::deferred(request));
     }
     let row_count =
@@ -1923,17 +1958,26 @@ fn publish_checkpoint_rows(
             reason: "checkpoint row count must fit in u64",
         })?;
     validate_snapshot_id_advances(services.manifest(), request.snapshot_id())?;
-    let mut sections = Vec::with_capacity(2 + request.extra_sections().len());
+    let mut sections = Vec::with_capacity(3 + request.extra_sections().len());
     sections.push(encode_checkpoint_row_section(rows).map_err(format_error)?);
     // W3.1b: the retained-timeline section, only for branches whose index was
     // provably complete at the watermark (absent = reopen falls back to the
     // timeline-space scan, the W3.1a behavior).
-    if !timeline_groups.is_empty() {
+    if !collection.timeline_groups.is_empty() {
         sections.push(
-            crate::format::encode_snapshot_timeline_section(timeline_groups)
+            crate::format::encode_snapshot_timeline_section(&collection.timeline_groups)
                 .map_err(format_error)?,
         );
     }
+    // Space-reclamation contract §3.2: the durable-base branch set, written on
+    // EVERY checkpoint (an empty set is a fact; only an absent section means
+    // "unknown", which is what pre-extension snapshots say).
+    sections.push(
+        crate::format::encode_snapshot_flushed_branches_section(
+            &collection.sorted_durable_base_branches(),
+        )
+        .map_err(format_error)?,
+    );
     sections.extend(request.extra_sections().iter().cloned());
     require_checkpoint_artifact_budget(budget, request, &sections)?;
     let active_wal_segment = services.wal().active_segment_id();

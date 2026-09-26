@@ -135,7 +135,8 @@ fn checkpoint_recovery_ignores_opaque_snapshot_sections() {
         .expect("recovery ignores opaque section");
     let reopened = shell.complete_recovery(&outcome).expect("open runtime");
 
-    assert_eq!(outcome.checkpoint().section_count(), 3);
+    // Rows, retained timeline, durable-base branch set, and the opaque extra.
+    assert_eq!(outcome.checkpoint().section_count(), 4);
     assert_eq!(
         reopened
             .read_view()
@@ -1133,4 +1134,63 @@ fn dynamic_physical_key(branch: BranchId, user_key: Vec<u8>) -> PhysicalKey {
         user_key,
     )
     .expect("physical key")
+}
+
+/// Space-reclamation contract §3.2 (slice 11, #3598): every checkpoint records
+/// the branches holding a durable table-manifest base. The flushed seeded
+/// branch is a member; the never-flushed non-seeded branch beside it (its rows
+/// captured in the delta) is not; recovery reads the set back.
+#[test]
+fn checkpoint_records_branches_with_durable_base() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x39);
+    let extra = branch_id(0x3a);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"seeded-row", b"value"),
+            generation_guard(),
+        )
+        .expect("commit seeded");
+    runtime
+        .create_branch(
+            extra,
+            crate::commit::CommitBranchGeneration::new(1).expect("generation"),
+            Some(CommitVersion::new(1)),
+        )
+        .expect("create extra");
+    runtime
+        .execute_durable_commit(
+            durable_batch(extra, b"extra-row", b"value"),
+            generation_guard(),
+        )
+        .expect("commit extra");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::flush(branch))
+        .expect("enqueue flush");
+    runtime
+        .run_next_flush_maintenance()
+        .expect("flush runner")
+        .expect("flush outcome");
+
+    let request =
+        LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(16)).expect("request");
+    let outcome = runtime.checkpoint(&request).expect("checkpoint");
+    assert_eq!(outcome.status(), LifecycleCheckpointStatus::Completed);
+    drop(runtime);
+
+    let mut shell = assemble_shell(branch, backend).expect("recovery shell");
+    let recovery_request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let recovered = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&recovery_request)
+        .expect("recovery");
+    assert_eq!(
+        recovered.checkpoint().durable_base_branches(),
+        Some(&[branch][..]),
+        "the flushed seeded branch is the only member"
+    );
+    // Rows, retained timeline, and the durable-base branch set.
+    assert_eq!(recovered.checkpoint().section_count(), 3);
 }

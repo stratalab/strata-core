@@ -225,12 +225,9 @@ pub(crate) enum DurableBackgroundMaintenanceBuilt {
         task: MaintenanceTask,
         request: LifecycleCheckpointRequest,
         visible_version: CommitVersion,
-        rows: Vec<crate::row::StorageRow>,
-        has_durable_rows: bool,
-        flush_boundary: Option<CommitVersion>,
-        /// W3.1b: per-branch retained-timeline groups (present only for
-        /// branches whose index is provably complete at the watermark).
-        timeline_groups: Vec<crate::format::SnapshotTimelineBranchGroup>,
+        /// The off-lock-built delta plus the per-branch facts the snapshot
+        /// records (retained-timeline groups, durable-base membership).
+        collection: crate::lifecycle::checkpoint::CheckpointCollection,
     },
     WalTruncation {
         task: MaintenanceTask,
@@ -299,16 +296,13 @@ impl DurableBackgroundMaintenanceBuild<'_> {
                 visible_version,
                 branches,
             } => {
-                let mut rows = Vec::new();
-                let mut has_durable_rows = false;
-                let mut flush_boundary: Option<CommitVersion> = None;
-                let mut timeline_groups = Vec::new();
+                let mut collection = crate::lifecycle::checkpoint::CheckpointCollection::default();
                 for (branch, durable_identities) in &branches {
                     if let Some(group) = crate::lifecycle::checkpoint::timeline_group_for_branch(
                         branch,
                         visible_version,
                     ) {
-                        timeline_groups.push(group);
+                        collection.timeline_groups.push(group);
                     }
                     let (mut branch_rows, branch_has_durable, branch_boundary) =
                         crate::lifecycle::checkpoint::branch_checkpoint_collection(
@@ -316,20 +310,22 @@ impl DurableBackgroundMaintenanceBuild<'_> {
                             visible_version,
                             &|identity| durable_identities.contains(identity),
                         )?;
-                    has_durable_rows |= branch_has_durable;
+                    collection.has_durable_rows |= branch_has_durable;
+                    collection.record_durable_base(branch.branch_id(), branch_has_durable);
                     if let Some(boundary) = branch_boundary {
-                        flush_boundary = Some(flush_boundary.map_or(boundary, |f| f.max(boundary)));
+                        collection.flush_boundary = Some(
+                            collection
+                                .flush_boundary
+                                .map_or(boundary, |f| f.max(boundary)),
+                        );
                     }
-                    rows.append(&mut branch_rows);
+                    collection.rows.append(&mut branch_rows);
                 }
                 Ok(DurableBackgroundMaintenanceBuilt::Checkpoint {
                     task,
                     request,
                     visible_version,
-                    rows,
-                    has_durable_rows,
-                    flush_boundary,
-                    timeline_groups,
+                    collection,
                 })
             }
             Self::WalTruncation { task, proof, wal } => {
@@ -2124,19 +2120,13 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 task,
                 request,
                 visible_version,
-                rows,
-                has_durable_rows,
-                flush_boundary,
-                timeline_groups,
+                collection,
             } => {
                 let checkpoint = checkpoint_durable_rows_with_budget(
                     &self.services,
                     &request,
                     visible_version,
-                    &rows,
-                    &timeline_groups,
-                    has_durable_rows,
-                    flush_boundary,
+                    &collection,
                     Some(&self.budget),
                 );
                 let outcome = match checkpoint {

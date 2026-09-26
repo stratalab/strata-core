@@ -21,6 +21,7 @@ retained-history-extension-version-only	trunc:24R	flip:8A1R8A7R	ext1:R	ext8:R
 retained-history-extension-with-timestamp	trunc:24R	flip:8A1R8A7R	ext1:R	ext8:R
 segment-metadata-sidecar	trunc:60R	flip:60R	ext1:R	ext8:R
 snapshot-container-single-section	trunc:72R17A	flip:8R40A24R17A	ext1:A	ext8:A
+snapshot-flushed-branches-section-two-branches	trunc:45R	flip:14R31A	ext1:R	ext8:R
 snapshot-header-identity	trunc:72R	flip:8R40A24R	ext1:A	ext8:A
 snapshot-row-section-put-and-tombstone	trunc:175R	flip:1A29R16A8R6A2R24A9R5A9R16A9R2A1R2A3R16A17R	ext1:R	ext8:R
 snapshot-section-empty	trunc:9R	flip:1A8R	ext1:A	ext8:A
