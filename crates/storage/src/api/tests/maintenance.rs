@@ -3152,6 +3152,178 @@ fn api_read_only_reopen_reclaims_deterministically() {
     runtime.close().expect("close");
 }
 
+/// #3626: quarantine a prior session left behind — swept, never purged (a
+/// crash after the sweep, a close whose reclaim budget ran out between sweep
+/// and purge, or a rejected purge enqueue) — is purged by the reopened
+/// session with no writes. The mark
+/// finds nothing unreferenced (the objects are already quarantined) and the
+/// sweep quarantines nothing, so the purge must be chained on the quarantine
+/// inventory, not on this pass's count.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_reopen_purges_quarantine_a_prior_session_left_unpurged() {
+    let root = temp_dir_for_api_test("maintenance-stranded-quarantine");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let manual = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(manual, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    runtime.commit(&put_batch(b"gc-a", b"one")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime.commit(&put_batch(b"gc-a", b"two")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    let superseded = table_data_object_files(&root);
+    assert!(superseded.len() >= 2, "two flushes: {superseded:?}");
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Compact,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("compact");
+    // Mark, then sweep: the superseded inputs move to quarantine and the sweep
+    // queues its purge, which nothing runs.
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Reclaim,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("mark");
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Quarantine,
+            MaintenanceScope::Global,
+        ))
+        .expect("sweep");
+    let quarantined = |runtime: &StorageRuntime<'_>| {
+        runtime
+            .diagnostics(
+                DiagnosticsRequest::new(DiagnosticsScope::Global)
+                    .with_detail(DiagnosticsDetail::Audit),
+            )
+            .expect("audit")
+            .quarantine()
+            .quarantined_objects()
+    };
+    assert!(
+        quarantined(&runtime).is_some_and(|count| count >= 2),
+        "the sweep quarantined the superseded inputs: {:?}",
+        quarantined(&runtime)
+    );
+    // The session ends before the queued purge runs (a crash here; a clean
+    // close whose reclaim budget expires between sweep and purge leaves the
+    // same state). The quarantine and its record are durable.
+    drop(runtime);
+
+    let inline = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(inline, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        quarantined(&runtime),
+        Some(0),
+        "the reopened session purges the stranded quarantine"
+    );
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0
+    );
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    let purge = ledger
+        .last(ReclaimFamily::QuarantinePurge)
+        .expect("the reopen ran a purge");
+    assert_eq!(purge.outcome(), ReclaimOutcome::Reclaimed, "{ledger:?}");
+    assert!(
+        superseded
+            .iter()
+            .all(|object| !table_data_object_files(&root).contains(object)),
+        "the superseded inputs are gone"
+    );
+    runtime.close().expect("close");
+}
+
+/// Direction control for #3626: a reopen with an empty quarantine queues no
+/// purge — the ledger records none.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_reopen_with_an_empty_quarantine_queues_no_purge() {
+    let root = temp_dir_for_api_test("maintenance-empty-quarantine-reopen");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root));
+    let inline = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(inline, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    runtime.commit(&put_batch(b"k", b"v")).expect("commit");
+    runtime.close().expect("close");
+    let mut runtime = StorageRuntime::open_with_backend(inline, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    runtime.wait_background_idle_for_test();
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert!(ledger.last_open_wake().is_some(), "{ledger:?}");
+    assert_eq!(
+        ledger.last(ReclaimFamily::QuarantinePurge),
+        None,
+        "no purge for an empty quarantine: {ledger:?}"
+    );
+    runtime.close().expect("close");
+}
+
+/// Direction control for #3626 on the background worker, whose sweep takes
+/// the off-lock path (`finish_quarantine_sweep`): a reopen whose sweep
+/// quarantines nothing queues no purge.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_background_sweep_that_quarantines_nothing_queues_no_purge() {
+    let root = temp_dir_for_api_test("maintenance-empty-quarantine-background");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root));
+    let background = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::Background);
+    let mut runtime = StorageRuntime::open_with_backend(background, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    runtime.commit(&put_batch(b"k", b"v")).expect("commit");
+    runtime.close().expect("close");
+    let mut runtime = StorageRuntime::open_with_backend(background, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let ledger = loop {
+        runtime.wait_background_idle_for_test();
+        let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+        if ledger.last(ReclaimFamily::TableObjectSweep).is_some()
+            || std::time::Instant::now() >= deadline
+        {
+            break ledger;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        ledger.last(ReclaimFamily::TableObjectSweep).is_some(),
+        "the reopen's sweep ran on the worker: {ledger:?}"
+    );
+    assert_eq!(
+        ledger.last(ReclaimFamily::QuarantinePurge),
+        None,
+        "no purge for a sweep that quarantined nothing: {ledger:?}"
+    );
+    runtime.close().expect("close");
+}
+
 /// DUR-018: `open` itself reclaims nothing. Without a worker the wake is a
 /// no-op, so the debt is intact right after open — and still reclaimable by an
 /// explicit foreground drain, proving bootstrap queued the real mark.
