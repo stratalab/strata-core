@@ -148,6 +148,19 @@ pub(super) fn lifecycle_plan(
     config = config
         .with_wal_growth_policy(map_wal_growth_policy(options.wal_growth_policy()))
         .map_err(map_lifecycle_error)?;
+    #[cfg(any(test, feature = "testkit"))]
+    {
+        if let Some(millis) = options.quiescence_debounce_millis_for_test() {
+            config = config
+                .with_quiescence_debounce_millis(millis)
+                .map_err(map_lifecycle_error)?;
+        }
+        if let Some(objects) = options.low_tier_debt_threshold_objects_for_test() {
+            config = config
+                .with_low_tier_debt_threshold_objects(objects)
+                .map_err(map_lifecycle_error)?;
+        }
+    }
     if let Some(bytes) = options.data_block_bytes() {
         // B2: per-database data-block byte target (validated in options).
         config = config

@@ -418,6 +418,8 @@ fn prefix_orphan_with_inventory_failure_is_retained() {
     );
 }
 
+/// An entry named only by another branch's inventory is delegated to that
+/// branch's sweep (the request lists no own-branch quarantined sources here).
 #[test]
 fn already_quarantined_object_is_delegated() {
     let branch = branch_id(0x6c);
@@ -799,12 +801,47 @@ fn quarantine_candidate_can_build_reclaim_request() {
     assert!(token.validates_for(&object, outcome.proof_context()));
 }
 
+/// #3608: an own-branch entry whose source is still on disk is a retry
+/// candidate on EVERY run, with a fresh proof token each time — the sweep's
+/// existing-entry path retries the delete, and a still-refused delete leaves it
+/// a candidate for the next run.
+#[test]
+fn own_branch_quarantined_source_is_a_retry_candidate_on_every_run() {
+    let branch = branch_id(0x8f);
+    let object = table_object(branch, 0, "quar0103");
+    let request = request(
+        branch,
+        vec![manifest(branch, vec![], vec![])],
+        vec![entry(object.clone(), 100)],
+        vec![object.clone()],
+        RecoveryHealth::Healthy,
+    )
+    .with_own_quarantined_objects(vec![object.clone()]);
+    let first = table_object_retention_outcome(&request).expect("first run");
+    let second = table_object_retention_outcome(&request).expect("second run");
+
+    for outcome in [&first, &second] {
+        assert_decision(
+            outcome,
+            &object,
+            RetentionDecision::QuarantineCandidate,
+            LifecycleRetentionDecisionReason::QuarantinedSourceStillPresent,
+        );
+        assert_eq!(
+            outcome.quarantine_tokens().len(),
+            1,
+            "the retry candidate carries exactly one proof token"
+        );
+    }
+}
+
 #[test]
 fn already_quarantined_object_is_not_requarantined() {
     // Distinct from already_quarantined_object_is_delegated: asserts the
     // *absence* of a fresh proof token (downstream quarantine would
     // otherwise see two tokens for the same object on consecutive
-    // retention runs).
+    // retention runs). The entry is another branch's (no own-branch
+    // quarantined sources on the request), so it stays delegated.
     let branch = branch_id(0x8e);
     let object = table_object(branch, 0, "quar0102");
     let request = request(

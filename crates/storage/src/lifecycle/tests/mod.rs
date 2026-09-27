@@ -22,6 +22,7 @@ mod flush_watermark;
 mod footprint;
 mod maintenance;
 mod quarantine;
+mod reclaim_wake;
 mod recovery;
 mod retention;
 mod state;

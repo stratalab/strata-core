@@ -227,8 +227,9 @@ pub(crate) use quarantine::{
     reason = "reclaim ledger exports define the local surface the footprint diagnostics slice consumes"
 )]
 pub(crate) use reclaim_ledger::{
-    classify_reclaim, classify_reclaim_follow_up, ReclaimFamily, ReclaimLedger, ReclaimOutcome,
-    ReclaimPass, ReclaimTotals,
+    classify_reclaim, classify_reclaim_follow_up, reclaim_owed_transition, ReclaimFamily,
+    ReclaimLedger, ReclaimOutcome, ReclaimOwedTransition, ReclaimPass, ReclaimTotals,
+    ReclaimWakeOrigin,
 };
 pub(crate) use reclaim_scope::{
     drain_scope_admits_upper_tier, reclaim_only_scope_after_open, ReclaimOnlyScope,

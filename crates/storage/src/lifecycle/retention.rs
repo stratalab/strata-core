@@ -132,7 +132,13 @@ pub(crate) enum LifecycleRetentionDecisionReason {
     ReachableMaterializedTable,
     ReachableSharedTable,
     TableRequiresQuarantine,
+    /// Another branch's quarantine inventory names this source: that branch's
+    /// sweep owns it (delegate, never a fresh candidate from here).
     TableAlreadyQuarantined,
+    /// This branch's quarantine inventory names the source and it is still on
+    /// disk — a refused or failed source delete (#3608). A candidate again: the
+    /// sweep retries the delete through the existing entry.
+    QuarantinedSourceStillPresent,
     MalformedTableObject,
     ProofIncomplete,
     UnsafeRecoveryHealth,

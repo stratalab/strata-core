@@ -3,7 +3,7 @@ use super::diagnostics::require_valid_branch_identifier;
 use super::error::{map_lifecycle_error, map_recovery_health};
 use super::{
     perf_trace, ApiTimestampSource, Arc, BackgroundTaskPriority, CacheBackgroundMaintenanceStep,
-    DurableBackgroundMaintenanceStep, LifecycleCacheRuntime, LifecycleCheckpointOutcome,
+    DurableBackgroundMaintenanceStep, Duration, LifecycleCacheRuntime, LifecycleCheckpointOutcome,
     LifecycleDurableLocalRuntime, LifecycleError, LifecycleMaintenanceOutcome,
     LifecycleMaintenanceOutcomeReasonClass, LifecycleMaintenanceOutcomeStatus,
     LifecycleMaintenanceTaskKind, LifecycleMaintenanceTaskPolicy, LifecycleMaintenanceTaskPriority,
@@ -13,7 +13,7 @@ use super::{
     MaintenanceReasonClass, MaintenanceRequest, MaintenanceScope, MaintenanceSummary,
     MaintenanceSummaryStatus, MaintenanceTask, MaintenanceWalGrowthStatus,
     MaintenanceWalGrowthSummary, MaintenanceWalGrowthTrigger, ParkingMutex, PreparedPublishStep,
-    StorageApiError, StorageApiErrorClass, StorageApiResult, StorageRuntime,
+    ReclaimWakeOrigin, StorageApiError, StorageApiErrorClass, StorageApiResult, StorageRuntime,
 };
 
 pub(super) fn validate_maintenance_request(request: &MaintenanceRequest) -> StorageApiResult<()> {
@@ -411,6 +411,7 @@ pub(super) fn drain_cache_background_round(
     commit_waiters: &std::sync::atomic::AtomicUsize,
     limits: BackgroundDrainLimits,
     clock: &Arc<dyn MaintenanceClock>,
+    _origin: ReclaimWakeOrigin,
 ) -> BackgroundDrainRound {
     let start = clock.now();
     let mut tasks_completed = 0;
@@ -515,6 +516,9 @@ pub(super) fn drain_cache_background_round(
         tasks_completed,
         pending_tasks,
         made_progress,
+        // Cache mode has no table-object reclaim, hence no idle wake.
+        arm_idle_wake: false,
+        quiescence_debounce: Duration::ZERO,
     }
 }
 
@@ -628,7 +632,22 @@ pub(super) fn run_next_background_durable_maintenance(
 /// unboundedly (~9× the live dataset observed at 10M). The wake priority mapping is
 /// untouched: low-tier work still never *wakes* a worker ahead of durability work; this
 /// only bounds how long an already-awake round may ignore it.
-const LOW_TIER_SERVICE_INTERVAL: usize = 4;
+const LOW_TIER_FAIRNESS_FLOOR: usize = 4;
+
+/// Space-reclamation contract §3.1 (slice 8): service the low tier now? Either the
+/// fairness floor is reached, or the suspected table-object debt (objects whose
+/// refs publishes dropped since the last clean sweep) sits at or above the
+/// runtime's threshold — under a sustained firehose the floor alone let debt run
+/// away (#3591). The caller still requires pending low-tier work: this never
+/// scans an empty tier.
+pub(super) const fn should_service_low_tier(
+    upper_since_low: usize,
+    floor: usize,
+    debt_objects: u64,
+    threshold_objects: u64,
+) -> bool {
+    upper_since_low >= floor || debt_objects >= threshold_objects
+}
 
 /// The strict upper-tier dispatch ladder of the durable background round: flush → checkpoint →
 /// flush-watermark → WAL truncation → table rewrite → (all empty) low-tier maintenance.
@@ -709,6 +728,7 @@ pub(super) fn drain_durable_background_round(
     commit_waiters: &std::sync::atomic::AtomicUsize,
     limits: BackgroundDrainLimits,
     clock: &Arc<dyn MaintenanceClock>,
+    origin: ReclaimWakeOrigin,
 ) -> BackgroundDrainRound {
     let start = clock.now();
     let mut tasks_completed = 0;
@@ -718,6 +738,13 @@ pub(super) fn drain_durable_background_round(
     // hot rounds never break coalescing).
     {
         let mut runtime = runtime.lock();
+        // Space-reclamation contract §3.1 (slice 8): record what woke this
+        // round; an idle wake's one action is to queue the owed sweep (which
+        // marks afresh inside), so the round below runs it.
+        runtime.record_background_wake(origin);
+        if origin == ReclaimWakeOrigin::Idle {
+            runtime.enqueue_idle_reclaim_sweep();
+        }
         if runtime.flush_stale_wal_buffer() {
             made_progress = true;
         }
@@ -752,8 +779,12 @@ pub(super) fn drain_durable_background_round(
             // outputs by name and make real progress during builds (the skip made reclaim
             // run only in lulls: zero retention passes across an entire sustained seed,
             // ~10-17x transient space debt).
-            let step = if upper_tier_since_low >= LOW_TIER_SERVICE_INTERVAL
-                && runtime.has_pending_low_tier_maintenance()
+            let step = if should_service_low_tier(
+                upper_tier_since_low,
+                LOW_TIER_FAIRNESS_FLOOR,
+                runtime.suspected_debt_objects(),
+                runtime.low_tier_debt_threshold_objects(),
+            ) && runtime.has_pending_low_tier_maintenance()
             {
                 let low_tier_start = perf_trace::start_timer();
                 let low_tier = run_next_background_durable_maintenance(&mut runtime);
@@ -988,12 +1019,16 @@ pub(super) fn drain_durable_background_round(
             }
         }
     }
-    let mut pending_tasks = {
+    let (mut pending_tasks, arm_idle_wake, quiescence_debounce) = {
         let runtime = runtime.lock();
         // C2: the armed preheat flag counts as pending work so an idle
         // runtime keeps re-arming drain rounds until the fill chain ends.
-        runtime.maintenance_status().pending_tasks()
-            + usize::from(runtime.cache_preheat_work_pending())
+        (
+            runtime.maintenance_status().pending_tasks()
+                + usize::from(runtime.cache_preheat_work_pending()),
+            runtime.idle_wake_pending(),
+            Duration::from_millis(runtime.quiescence_debounce_millis()),
+        )
     };
     if tasks_completed > 0 && pending_tasks == 0 {
         let coverage_scheduled = {
@@ -1009,6 +1044,8 @@ pub(super) fn drain_durable_background_round(
         tasks_completed,
         pending_tasks,
         made_progress,
+        arm_idle_wake,
+        quiescence_debounce,
     }
 }
 
@@ -1070,5 +1107,32 @@ mod tests {
             failures[0].source_error_code(),
             Some("io.lifecycle.backend")
         );
+    }
+
+    /// Space-reclamation contract §3.1 (slice 8): the low tier is serviced at
+    /// the fairness floor or as soon as the suspected debt reaches the threshold.
+    #[test]
+    fn should_service_low_tier_truth_table() {
+        use super::should_service_low_tier;
+        for (upper_since_low, floor, debt, threshold, expected) in [
+            (0, 4, 0, 16, false),
+            (3, 4, 0, 16, false),
+            (4, 4, 0, 16, true),
+            (5, 4, 0, 16, true),
+            (0, 4, 15, 16, false),
+            (0, 4, 16, 16, true),
+            (0, 4, 17, 16, true),
+            (3, 4, 16, 16, true),
+            (0, 1, 0, 1, false),
+            (1, 1, 0, 1, true),
+            (0, 1, 1, 1, true),
+            (0, 4, u64::MAX, u64::MAX, true),
+        ] {
+            assert_eq!(
+                should_service_low_tier(upper_since_low, floor, debt, threshold),
+                expected,
+                "upper_since_low={upper_since_low} floor={floor} debt={debt} threshold={threshold}"
+            );
+        }
     }
 }

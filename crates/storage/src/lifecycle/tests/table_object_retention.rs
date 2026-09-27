@@ -374,6 +374,9 @@ fn runtime_only_ref_does_not_make_object_live() {
     );
 }
 
+/// An inventory entry that is NOT this branch's own (the request lists it only
+/// among every branch's quarantined sources) is delegated to the branch that
+/// staged it: never a fresh candidate from here.
 #[test]
 fn already_quarantined_table_object_is_not_requeued() {
     let branch = branch_id(0x1a);
@@ -396,6 +399,63 @@ fn already_quarantined_table_object_is_not_requeued() {
         outcome.decisions()[0].reason(),
         LifecycleRetentionDecisionReason::TableAlreadyQuarantined
     );
+    assert!(outcome.quarantine_tokens().is_empty());
+}
+
+/// #3608: a source THIS branch's own quarantine inventory names, yet still on
+/// disk — the first pass's source delete was refused — is a candidate again
+/// with its own reason and a fresh proof token, so the sweep retries the delete
+/// through the existing entry instead of skipping it forever.
+#[test]
+fn own_branch_quarantined_source_still_on_disk_is_a_retry_candidate() {
+    let branch = branch_id(0x1b);
+    let object = table_object(branch, 0, "retry0001");
+    let request = request(
+        branch,
+        vec![manifest(branch, vec![], vec![])],
+        vec![entry(object.clone(), 100)],
+        vec![object.clone()],
+        RecoveryHealth::Healthy,
+    )
+    .with_own_quarantined_objects(vec![object.clone()]);
+
+    let outcome = table_object_retention_outcome(&request).expect("outcome");
+
+    assert_eq!(outcome.decisions()[0].object(), Some(&object));
+    assert_eq!(
+        outcome.decisions()[0].decision(),
+        RetentionDecision::QuarantineCandidate
+    );
+    assert_eq!(
+        outcome.decisions()[0].reason(),
+        LifecycleRetentionDecisionReason::QuarantinedSourceStillPresent
+    );
+    let token = outcome
+        .quarantine_tokens()
+        .first()
+        .expect("the retry candidate carries a proof token");
+    assert!(token.validates_for(&object, outcome.proof_context()));
+}
+
+/// The in-memory pin (#2553) outranks the retry: an own-branch quarantined
+/// source that some branch still reaches in memory is retained, not retried.
+#[test]
+fn own_branch_quarantined_source_that_is_pinned_is_retained() {
+    let branch = branch_id(0x1c);
+    let object = table_object(branch, 0, "retry0002");
+    let request = request(
+        branch,
+        vec![manifest(branch, vec![], vec![])],
+        vec![entry(object.clone(), 100)],
+        vec![object.clone()],
+        RecoveryHealth::Healthy,
+    )
+    .with_own_quarantined_objects(vec![object.clone()])
+    .with_pinned_objects(vec![object.clone()]);
+
+    let outcome = table_object_retention_outcome(&request).expect("outcome");
+
+    assert_eq!(outcome.decisions()[0].decision(), RetentionDecision::Retain);
     assert!(outcome.quarantine_tokens().is_empty());
 }
 

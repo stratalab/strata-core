@@ -33,6 +33,15 @@ const DEFAULT_WRITE_THROTTLE_MIN_RATE_BYTES_PER_SEC: u64 = 16 * 1024;
 /// seconds; the L0 hard-stop grade handles the sustained extreme instead. Well above the effective
 /// in-band pacing (single-digit ms), so it clips only the pathological tail. Graded path only.
 const DEFAULT_WRITE_THROTTLE_MAX_GRADED_DELAY_MILLIS: u64 = 250;
+/// Space-reclamation contract §3.1 (slice 8): how long a drain round that ended
+/// with reclaim owed waits, with nothing else waking the worker, before one
+/// idle (quiescence) wake retries the table-object sweep. Stored as millis to
+/// keep the `const fn` constructors free of a `Duration` import.
+const DEFAULT_QUIESCENCE_DEBOUNCE_MILLIS: u64 = 1_000;
+/// Space-reclamation contract §3.1 (slice 8): suspected table-object debt (objects
+/// whose refs publishes dropped since the last clean sweep) at or above which a
+/// drain round services the low tier before its fairness floor.
+const DEFAULT_LOW_TIER_DEBT_THRESHOLD_OBJECTS: u64 = 16;
 
 /// #3502 Slice D: per-database MVCC version-retention policy. `KeepAll`
 /// (the default) retains every version — unbounded time-travel history.
@@ -71,6 +80,10 @@ pub(crate) struct LifecycleConfig {
     // #3502 Slice D: MVCC version-retention policy. `KeepAll` by default
     // (unbounded history); `KeepRecentVersions` opts a database into pruning.
     version_retention: StorageVersionRetentionPolicy,
+    // Space-reclamation contract §3.1 (slice 8): the idle wake's debounce and
+    // the debt-aware fairness threshold. Both nonzero.
+    quiescence_debounce_millis: u64,
+    low_tier_debt_threshold_objects: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,6 +271,8 @@ impl LifecycleConfig {
             table_compression: TableCompression::Uncompressed,
             // #3502 Slice D: pruning is opt-in; retain all versions by default.
             version_retention: StorageVersionRetentionPolicy::KeepAll,
+            quiescence_debounce_millis: DEFAULT_QUIESCENCE_DEBOUNCE_MILLIS,
+            low_tier_debt_threshold_objects: DEFAULT_LOW_TIER_DEBT_THRESHOLD_OBJECTS,
         };
         config.validate()?;
         Ok(config)
@@ -405,7 +420,46 @@ impl LifecycleConfig {
         self.compaction_io_policy
     }
 
+    /// Space-reclamation contract §3.1 (slice 8): the idle wake's debounce.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn with_quiescence_debounce_millis(mut self, millis: u64) -> LifecycleResult<Self> {
+        self.quiescence_debounce_millis = millis;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Space-reclamation contract §3.1 (slice 8): the debt-aware fairness threshold.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn with_low_tier_debt_threshold_objects(
+        mut self,
+        objects: u64,
+    ) -> LifecycleResult<Self> {
+        self.low_tier_debt_threshold_objects = objects;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) const fn quiescence_debounce_millis(self) -> u64 {
+        self.quiescence_debounce_millis
+    }
+
+    pub(crate) const fn low_tier_debt_threshold_objects(self) -> u64 {
+        self.low_tier_debt_threshold_objects
+    }
+
     pub(crate) fn validate(self) -> LifecycleResult<()> {
+        if self.quiescence_debounce_millis == 0 {
+            return Err(LifecycleError::InvalidConfig {
+                field: "quiescence_debounce_millis",
+                reason: "must be nonzero",
+            });
+        }
+        if self.low_tier_debt_threshold_objects == 0 {
+            return Err(LifecycleError::InvalidConfig {
+                field: "low_tier_debt_threshold_objects",
+                reason: "must be nonzero",
+            });
+        }
         if self.max_maintenance_queue_depth == 0 {
             return Err(LifecycleError::InvalidConfig {
                 field: "max_maintenance_queue_depth",

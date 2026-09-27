@@ -68,6 +68,13 @@ pub(crate) trait MaintenanceClock: Send + Sync + std::fmt::Debug {
     /// counter; the real clock is a deliberate no-op (an explicit advance must never
     /// block a background runtime). Distinct from `sleep`, which the real clock honors.
     fn advance(&self, duration: Duration);
+
+    /// Space-reclamation contract §3.1 (slice 8): run `on_fire` once, `delay`
+    /// from now, without blocking the caller. The real clock does it on a
+    /// detached one-shot thread; the manual clock does nothing (its owner
+    /// fires due timers from `advance`). Never load-bearing (DUR-006): a timer
+    /// that never fires costs idle latency, not correctness.
+    fn schedule(&self, delay: Duration, on_fire: Box<dyn FnOnce() + Send + 'static>);
 }
 
 #[derive(Debug)]
@@ -96,6 +103,17 @@ impl MaintenanceClock for RealMaintenanceClock {
         // Real time advances on its own; an explicit advance is a no-op so it can
         // never block a background runtime running on the real clock.
     }
+
+    fn schedule(&self, delay: Duration, on_fire: Box<dyn FnOnce() + Send + 'static>) {
+        // Rationale: a timer thread that cannot be created only loses one idle
+        // wake; the next ordinary wake re-evaluates the debt.
+        let _ = std::thread::Builder::new()
+            .name("strata-idle-wake".to_owned())
+            .spawn(move || {
+                std::thread::sleep(delay);
+                on_fire();
+            });
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -121,6 +139,11 @@ impl MaintenanceClock for ManualMaintenanceClock {
                 Some(current.saturating_add(nanos))
             })
             .expect("manual maintenance clock update is infallible");
+    }
+
+    fn schedule(&self, _delay: Duration, _on_fire: Box<dyn FnOnce() + Send + 'static>) {
+        // Simulated time never fires on its own: the controller that armed the
+        // timer checks the deadline when the clock is advanced.
     }
 }
 
