@@ -4173,6 +4173,52 @@ fn api_round_with_work_still_queued_rearms_without_an_external_wake() {
     assert!(after.checkpoint().snapshot_id().is_some());
 }
 
+/// A fixed-point compaction that removes no input table owes nothing: it
+/// notes no debt and queues no mark, so compacting a branch with nothing to
+/// compact leaves the reclaim ledger and the queue untouched.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_compaction_that_removes_no_input_queues_no_mark() {
+    let (mut runtime, _root) = open_inline_durable_runtime(
+        "maintenance-compact-no-input",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    runtime.commit(&put_batch(b"solo", b"one")).expect("commit");
+    runtime.wait_background_idle_for_test();
+    assert!(!runtime.reclaim_owed_for_test());
+    let started_before = runtime.maintenance_status().expect("status").started();
+
+    // No durable table on the branch: the compaction drains to its fixed
+    // point at once and removes nothing.
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&compact).expect("compact");
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0,
+        "nothing removed, nothing to mark"
+    );
+    assert!(
+        !runtime.reclaim_owed_for_test(),
+        "a compaction that removed nothing notes no debt"
+    );
+    runtime.wait_background_idle_for_test();
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(
+        ledger.last(ReclaimFamily::TableObjectMark),
+        None,
+        "{ledger:?}"
+    );
+    assert_eq!(
+        runtime.maintenance_status().expect("status").started(),
+        started_before,
+        "no task started for a no-op compaction"
+    );
+}
+
 /// Close with an idle wake armed: the close completes (its own drive tries the
 /// sweep once more and yields to the held reader) and the armed wake is
 /// cancelled with the workers — it never fires into a closed runtime.
