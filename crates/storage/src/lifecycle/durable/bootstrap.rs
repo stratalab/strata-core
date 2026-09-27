@@ -39,6 +39,7 @@ use crate::lifecycle::{
 };
 use crate::observability::perf_trace;
 use crate::row::PhysicalKey;
+use crate::service::SnapshotObject;
 use crate::service::WalGrowthFacts;
 use crate::service::{WalGroupSyncTicket, WalServiceError};
 use std::cell::Cell;
@@ -289,11 +290,24 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             .lifecycle_config()
             .max_maintenance_queue_depth();
         let attested_snapshot_present = self.assembly_facts().manifest_snapshot_id().is_some();
-        let next_checkpoint_snapshot_id = self
-            .assembly_facts()
-            .manifest_snapshot_id()
-            .unwrap_or(0)
-            .checked_add(1)
+        // #3612: seed the allocator past any snapshot object already on disk, not
+        // just past the attested id — a crash orphan at attested+1 would otherwise
+        // collide with every checkpoint until the open-time reconcile removes it.
+        // A listing failure is a typed open error like every other recovery scan
+        // (a fault the open cannot see through must never yield a healthy open).
+        let highest_listed_snapshot_id = self
+            .services
+            .snapshot()
+            .list_snapshots()
+            .map_err(super::maintenance::snapshot_error)?
+            .iter()
+            .map(SnapshotObject::snapshot_id)
+            .max();
+        let next_checkpoint_snapshot_id =
+            crate::lifecycle::checkpoint::next_checkpoint_snapshot_id_after_open(
+                self.assembly_facts().manifest_snapshot_id(),
+                highest_listed_snapshot_id,
+            )
             .ok_or(LifecycleError::CheckpointPublicationFailed {
                 reason: "checkpoint snapshot id overflow",
             })?;

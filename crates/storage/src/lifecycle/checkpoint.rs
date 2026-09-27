@@ -2504,6 +2504,28 @@ pub(crate) fn wal_truncation_request_from_maintenance_task(
     Ok(Some(validate_wal_retention_proof(proof)?))
 }
 
+/// The first snapshot id a reopened runtime allocates (#3612): one past the
+/// attested id AND one past any snapshot object already on disk. A crash
+/// between a snapshot publish and its manifest re-point leaves an orphan at
+/// attested+1 — exactly the id the old `attested+1` seed handed the next
+/// checkpoint, whose create-only publish then collided until the open-time
+/// reconcile removed the orphan. `None` on overflow.
+pub(crate) const fn next_checkpoint_snapshot_id_after_open(
+    attested: Option<u64>,
+    highest_listed: Option<u64>,
+) -> Option<u64> {
+    let attested = match attested {
+        Some(id) => id,
+        None => 0,
+    };
+    let listed = match highest_listed {
+        Some(id) => id,
+        None => 0,
+    };
+    let floor = if attested >= listed { attested } else { listed };
+    floor.checked_add(1)
+}
+
 fn validate_snapshot_id_advances(
     manifest: &DatabaseManifestService<'_>,
     snapshot_id: u64,

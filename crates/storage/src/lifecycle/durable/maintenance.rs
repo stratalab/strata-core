@@ -6420,7 +6420,7 @@ fn manifest_error(error: crate::service::ManifestServiceError) -> LifecycleError
     )
 }
 
-fn snapshot_error(error: crate::service::SnapshotServiceError) -> LifecycleError {
+pub(super) fn snapshot_error(error: crate::service::SnapshotServiceError) -> LifecycleError {
     LifecycleError::lower_layer_with(
         crate::lifecycle::LifecycleLowerLayer::Service,
         "snapshot service failed",
