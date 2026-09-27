@@ -2,12 +2,14 @@
 
 mod adapter;
 mod fault;
+mod footprint;
 mod key;
 mod plan;
 mod row;
 mod scan_ordered;
 mod space;
 
+pub(crate) use adapter::maintenance_scheduling_for_storage;
 pub use adapter::MemoryBudgetSource;
 pub(crate) use adapter::{
     close_summary_is_durable, PersistenceBranchCleanup, PersistenceBranchOutcome,

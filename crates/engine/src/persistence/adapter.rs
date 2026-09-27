@@ -19,8 +19,10 @@ use strata_storage::api::{
     WallClockLookupRequest,
 };
 use strata_storage::api::{
+    DiagnosticsDetail, DiagnosticsOutcome, DiagnosticsRequest, DiagnosticsScope,
     MaintenanceRequest, MaintenanceScope,
     MaintenanceSummaryStatus as StorageMaintenanceSummaryStatus, MaintenanceTask,
+    StorageMaintenanceSchedulingPolicy,
 };
 
 use crate::branch::catalog::{DEFAULT_BRANCH_GENERATION, SYSTEM_BRANCH_ID};
@@ -36,7 +38,40 @@ use super::{CommitPlan, ReadSelector, RowAddress, RowClass, RowMutation};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PersistenceOpenTarget {
     Cache,
-    DurableLocal(PathBuf, crate::api::DurabilityMode),
+    /// A durable directory, its commit durability, and the maintenance
+    /// scheduling a test seam selected (`None` = the background scheduler).
+    DurableLocal(
+        PathBuf,
+        crate::api::DurabilityMode,
+        Option<StorageMaintenanceSchedulingPolicy>,
+    ),
+}
+
+/// The storage scheduling policy the `testkit` seam selected, when the seam
+/// is compiled in; production builds always answer `None`.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn maintenance_scheduling_for_storage(
+    options: &crate::api::DurableLocalOpenOptions,
+) -> Option<StorageMaintenanceSchedulingPolicy> {
+    options
+        .maintenance_scheduling_for_test()
+        .map(|scheduling| match scheduling {
+            crate::api::MaintenanceScheduling::Background => {
+                StorageMaintenanceSchedulingPolicy::Background
+            }
+            crate::api::MaintenanceScheduling::DeterministicInline => {
+                StorageMaintenanceSchedulingPolicy::DeterministicInline
+            }
+        })
+}
+
+/// The `testkit` seam is compiled out: production always runs the background
+/// scheduler.
+#[cfg(not(any(test, feature = "testkit")))]
+pub(crate) const fn maintenance_scheduling_for_storage(
+    _options: &crate::api::DurableLocalOpenOptions,
+) -> Option<StorageMaintenanceSchedulingPolicy> {
+    None
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -418,7 +453,7 @@ impl StoragePersistence {
                 let (runtime, summary) = outcome.into_parts();
                 (runtime, summary, false)
             }
-            PersistenceOpenTarget::DurableLocal(path, durability) => {
+            PersistenceOpenTarget::DurableLocal(path, durability, scheduling) => {
                 let policy = match durability {
                     crate::api::DurabilityMode::Standard => StorageDurabilityPolicy::Standard,
                     crate::api::DurabilityMode::Always => StorageDurabilityPolicy::Always,
@@ -442,6 +477,11 @@ impl StoragePersistence {
                     crate::api::CachePreheat::WhenIdle => StorageCachePreheatPolicy::WhenIdle,
                     crate::api::CachePreheat::Disabled => StorageCachePreheatPolicy::Disabled,
                 });
+                // Test seam only (space-reclamation contract §3.5): production
+                // passes `None` and keeps storage's background scheduler.
+                if let Some(scheduling) = scheduling {
+                    options = options.with_maintenance_scheduling_policy(scheduling);
+                }
                 let outcome = StorageRuntime::open_durable_local_with_options(path, options)
                     .map_err(map_storage_error)?;
                 let (runtime, summary) = outcome.into_parts();
@@ -1011,6 +1051,19 @@ impl StoragePersistence {
         // run under the normal scheduler; draining here would only add
         // failure surface to creation.
         Ok(())
+    }
+
+    /// The storage diagnostics at the requested tier (space-reclamation
+    /// contract §3.5): the one passthrough the engine's storage footprint
+    /// rides on. Read-only; the `Audit` tier lists and stats objects.
+    pub(crate) fn storage_diagnostics(
+        &self,
+        scope: DiagnosticsScope,
+        detail: DiagnosticsDetail,
+    ) -> Result<DiagnosticsOutcome, EngineError> {
+        self.runtime
+            .diagnostics(DiagnosticsRequest::new(scope).with_detail(detail))
+            .map_err(map_storage_error)
     }
 
     #[cfg(any(test, feature = "testkit"))]

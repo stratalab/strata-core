@@ -14,7 +14,8 @@ use crate::data::vector::{VectorArtifactStore, VectorService};
 use crate::diagnostics::EngineError;
 pub use crate::persistence::MemoryBudgetSource;
 use crate::persistence::{
-    close_summary_is_durable, PersistenceOpenSummary, PersistenceOpenTarget, StoragePersistence,
+    close_summary_is_durable, maintenance_scheduling_for_storage, PersistenceOpenSummary,
+    PersistenceOpenTarget, StoragePersistence,
 };
 #[cfg(any(test, feature = "testkit"))]
 use crate::persistence::{
@@ -24,6 +25,7 @@ use crate::persistence::{
 
 use strata_core::Timestamp;
 
+use super::footprint::{FootprintDetail, StorageFootprint};
 use super::{
     AdminService, BranchName, CacheOpenOptions, CachePreheat, ControlDiagnostics,
     DurableLocalOpenOptions, SpaceService,
@@ -182,8 +184,13 @@ impl Database {
         // #3502 Slice D2: map the user-facing retention policy to the keep-newer-
         // than window the storage boundary consumes (`None` = KeepAll).
         let version_retention_window = options.version_retention().retained_window();
+        let maintenance_scheduling = maintenance_scheduling_for_storage(&options);
         Self::open(
-            PersistenceOpenTarget::DurableLocal(path.into(), options.durability()),
+            PersistenceOpenTarget::DurableLocal(
+                path.into(),
+                options.durability(),
+                maintenance_scheduling,
+            ),
             DatabaseOpenTarget::DurableLocal,
             options.into_default_branch(),
             memory_budget_bytes,
@@ -452,6 +459,16 @@ impl Database {
         ))
     }
 
+    /// Returns the database's on-disk footprint; see
+    /// [`AdminService::storage_footprint`].
+    pub fn storage_footprint(
+        &mut self,
+        branch: Option<&BranchName>,
+        detail: FootprintDetail,
+    ) -> Result<StorageFootprint, EngineError> {
+        self.admin()?.storage_footprint(branch, detail)
+    }
+
     /// Returns typed core control-plane diagnostics.
     pub fn control_diagnostics(
         &mut self,
@@ -662,7 +679,7 @@ impl Database {
         // Captured before the open consumes the target: the dataset dir gets
         // its advisory README after a successful durable open (#3004).
         let dataset_dir = match &target {
-            PersistenceOpenTarget::DurableLocal(path, _) => Some(path.clone()),
+            PersistenceOpenTarget::DurableLocal(path, _, _) => Some(path.clone()),
             PersistenceOpenTarget::Cache => None,
         };
         let (mut persistence, persistence_summary) = StoragePersistence::open_with_budget(
@@ -734,7 +751,7 @@ impl Database {
 fn vector_artifact_store_for_target(target: &PersistenceOpenTarget) -> VectorArtifactStore {
     match target {
         PersistenceOpenTarget::Cache => VectorArtifactStore::memory(),
-        PersistenceOpenTarget::DurableLocal(path, _) => {
+        PersistenceOpenTarget::DurableLocal(path, _, _) => {
             VectorArtifactStore::durable_local(path.join("engine-artifacts").join("vector"))
         }
     }

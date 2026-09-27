@@ -34,6 +34,9 @@ pub use strata_core::{
     BranchId, BranchIdError, CommitVersion, ParseCommitVersionError, ParseTimestampError, Timestamp,
 };
 
+/// Test seam (`testkit`): selects how the opened database runs maintenance.
+#[cfg(any(test, feature = "testkit"))]
+pub use api::MaintenanceScheduling;
 pub use api::{
     error_code_registry_entries, error_code_registry_entry, AdminCapabilitySummary,
     AdminConfigSummary, AdminDatabaseInfo, AdminDescribeSummary, AdminGraphSummary,
@@ -49,7 +52,7 @@ pub use api::{
     EngineResult, ErrorClass, ErrorCodeRegistryEntry, ErrorDetail, EventAppendOutcome,
     EventBatchAppendEntry, EventBatchAppendItemOutcome, EventBatchAppendOutcome,
     EventChainVerification, EventLength, EventPayload, EventRangeDirection, EventRangePage,
-    EventSequence, EventService, EventType, EventTypeList, EventVersionedRecord,
+    EventSequence, EventService, EventType, EventTypeList, EventVersionedRecord, FootprintDetail,
     GraphAdjacencyEdge, GraphAdjacencyIndex, GraphAnalyticsBudget, GraphBatchOpOutcome,
     GraphBatchOperation, GraphBatchWrite, GraphBatchWriteOutcome, GraphBfsOptions, GraphBfsResult,
     GraphBinding, GraphBindingPage, GraphBindingPrimitive, GraphBindingTarget,
@@ -69,8 +72,9 @@ pub use api::{
     JsonVersionedValue, JsonWriteOutcome, KvBatchDeleteOutcome, KvBatchPutOutcome, KvDeleteOutcome,
     KvHistory, KvHistoryRow, KvKey, KvListPage, KvSample, KvScanRow, KvService, KvValue,
     KvVersionedValue, KvWriteOutcome, MemoryBudgetSource, PreviewConflict, ProductSpace,
-    PromotedEntity, PromotionOutcome, PromotionStrategy, RetryPolicy, SpaceCatalogDiagnostics,
-    SpaceComparison, SpaceCreateOutcome, SpaceDeleteOutcome, SpaceService, SpaceUsageSummary,
+    PromotedEntity, PromotionOutcome, PromotionStrategy, ReclaimDeferralReason, ReclaimOutcome,
+    ReclaimPass, RetryPolicy, SpaceCatalogDiagnostics, SpaceComparison, SpaceCreateOutcome,
+    SpaceDeleteOutcome, SpaceService, SpaceUsageSummary, StorageFootprint, StorageReclaimStatus,
     VectorArtifactSourceDiagnostic, VectorBatchDeleteOutcome, VectorBatchGetOutcome,
     VectorBatchUpsertOutcome, VectorBulkDeleteOutcome, VectorCollectionInfo, VectorCollectionName,
     VectorConfig, VectorDeleteOutcome, VectorDistanceMetric, VectorEmbedding,

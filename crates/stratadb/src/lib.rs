@@ -256,7 +256,8 @@ pub mod admin {
         AdminCapabilitySummary, AdminConfigSummary, AdminDatabaseInfo, AdminDescribeSummary,
         AdminGraphSummary, AdminHealthStatus, AdminHealthSummary, AdminMetricsSummary,
         AdminPingSummary, AdminPrimitiveSummary, AdminService, AdminVectorCollectionSummary,
-        ControlDiagnostics, ControlHealthStatus,
+        ControlDiagnostics, ControlHealthStatus, FootprintDetail, ReclaimDeferralReason,
+        ReclaimOutcome, ReclaimPass, StorageFootprint, StorageReclaimStatus,
     };
 }
 
