@@ -213,6 +213,11 @@ pub(in crate::lifecycle::tests) struct CheckpointTestBackend {
     /// without touching it — a transient backend fault the callers must
     /// propagate, unlike a vanished object.
     fail_on_read: Mutex<Option<ObjectName>>,
+    /// The `fail_sync_call`-th `sync_object` call fails `Unavailable`
+    /// (space-reclamation contract §3.1, slice 7: a close that fails AFTER
+    /// its checkpoint and retries).
+    fail_sync_call: AtomicUsize,
+    sync_calls: AtomicUsize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,6 +267,8 @@ impl CheckpointTestBackend {
             lock_held: Arc::new(AtomicBool::new(false)),
             vanish_on_read: Mutex::new(None),
             fail_on_read: Mutex::new(None),
+            fail_sync_call: AtomicUsize::new(0),
+            sync_calls: AtomicUsize::new(0),
         }
     }
 
@@ -310,11 +317,11 @@ impl CheckpointTestBackend {
         self.fail_list.store(true, Ordering::SeqCst);
     }
 
-    pub(super) fn fail_snapshot_publish(&self) {
+    pub(in crate::lifecycle::tests) fn fail_snapshot_publish(&self) {
         self.fail_snapshot_publish.store(true, Ordering::SeqCst);
     }
 
-    pub(super) fn fail_delete(&self) {
+    pub(in crate::lifecycle::tests) fn fail_delete(&self) {
         self.fail_delete.store(true, Ordering::SeqCst);
     }
 
@@ -360,7 +367,7 @@ impl CheckpointTestBackend {
             .store(call, Ordering::SeqCst);
     }
 
-    pub(super) fn event_count(&self) -> usize {
+    pub(in crate::lifecycle::tests) fn event_count(&self) -> usize {
         self.events.lock().expect("events").len()
     }
 
@@ -371,7 +378,7 @@ impl CheckpointTestBackend {
         self.objects.lock().expect("objects").clone()
     }
 
-    pub(super) fn checkpoint_events(&self) -> Vec<CheckpointBackendEvent> {
+    pub(in crate::lifecycle::tests) fn checkpoint_events(&self) -> Vec<CheckpointBackendEvent> {
         self.events
             .lock()
             .expect("events")
@@ -402,6 +409,18 @@ impl CheckpointTestBackend {
 
     pub(in crate::lifecycle::tests) fn delete_calls(&self) -> usize {
         self.delete_calls.load(Ordering::SeqCst)
+    }
+
+    pub(in crate::lifecycle::tests) fn manifest_replace_calls(&self) -> usize {
+        self.manifest_replace_calls.load(Ordering::SeqCst)
+    }
+
+    pub(in crate::lifecycle::tests) fn sync_calls(&self) -> usize {
+        self.sync_calls.load(Ordering::SeqCst)
+    }
+
+    pub(in crate::lifecycle::tests) fn fail_sync_on_call(&self, call: usize) {
+        self.fail_sync_call.store(call, Ordering::SeqCst);
     }
 
     pub(in crate::lifecycle::tests) fn table_object_create_calls(&self) -> usize {
@@ -768,6 +787,16 @@ impl Backend for CheckpointTestBackend {
     }
 
     fn sync_object(&self, _name: &ObjectName) -> crate::backend::BackendResult<()> {
+        let call = self
+            .sync_calls
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        if self.fail_sync_call.load(Ordering::SeqCst) == call {
+            return Err(BackendError::new(
+                BackendErrorKind::Unavailable,
+                "injected sync failure",
+            ));
+        }
         Ok(())
     }
 

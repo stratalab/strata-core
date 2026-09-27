@@ -1428,6 +1428,16 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         request: &LifecycleRetentionRequest,
     ) -> LifecycleResult<LifecycleSnapshotPruningOutcome> {
         require_admitted(self.state, LifecycleOperationKind::OrdinaryMaintenance)?;
+        self.prune_snapshots_unadmitted(request)
+    }
+
+    /// The inline prune without the ordinary-maintenance admission: the close
+    /// path (space-reclamation contract §3.1, slice 7) runs it in `Closing`
+    /// after its own checkpoint. Records into the reclaim ledger like the verb.
+    pub(super) fn prune_snapshots_unadmitted(
+        &mut self,
+        request: &LifecycleRetentionRequest,
+    ) -> LifecycleResult<LifecycleSnapshotPruningOutcome> {
         let health = self.current_recovery_health.clone();
         if recovery_health_prevents_listing(request, &health) {
             let proof = retention_proof_from_assembly(request, &self.services, &health);
@@ -1573,7 +1583,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     /// outcome and the maintenance summary record) from the cached retention
     /// watermark — no per-commit manifest read. Extracted so
     /// `evaluate_wal_growth_policy` stays within the per-function line budget.
-    fn wal_growth_commits_since_checkpoint(&self) -> LifecycleResult<u64> {
+    pub(super) fn wal_growth_commits_since_checkpoint(&self) -> LifecycleResult<u64> {
         Ok(commits_since_checkpoint(
             self.visible.visible_version(),
             self.cached_retention_watermark()?,

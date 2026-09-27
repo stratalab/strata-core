@@ -12,7 +12,24 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{assert_status, branch, key, open_durable_database, space, value};
-use strata_engine::{EngineErrorClass, ErrorClass, RetryPolicy};
+use strata_engine::{
+    Database, DatabaseOpenOutcome, DurabilityMode, DurableLocalOpenOptions, EngineErrorClass,
+    ErrorClass, RetryPolicy,
+};
+
+/// Opens with `Always` durability so every acknowledged put is already on
+/// disk when the session is abandoned WITHOUT a clean close. A clean close
+/// checkpoints and truncates the WAL (space-reclamation contract §3.1,
+/// slice 7), which would leave no durable log record for these tests to
+/// damage; the abandoned session is the shape whose WAL still holds them.
+fn open_always_synced(root: &Path) -> Database {
+    Database::open_local(
+        root,
+        DurableLocalOpenOptions::new().with_durability(DurabilityMode::Always),
+    )
+    .map(DatabaseOpenOutcome::into_database)
+    .expect("durable open")
+}
 
 /// The active WAL segment file, so a test can damage the durable log directly.
 fn active_wal_segment(root: &Path) -> PathBuf {
@@ -46,7 +63,7 @@ fn opening_a_byte_corrupted_wal_reports_permanent_corruption() {
     let dir = tempfile::tempdir().expect("tmp");
     let root = dir.path().join("db");
     {
-        let mut db = open_durable_database(&root).expect("durable open");
+        let db = open_always_synced(&root);
         let mut kv = db.kv(branch("default"), space("app")).expect("kv opens");
         for index in 0u32..64 {
             kv.put(
@@ -56,9 +73,8 @@ fn opening_a_byte_corrupted_wal_reports_permanent_corruption() {
             .expect("seed write");
         }
         drop(kv);
-        // Flush the buffered WAL to disk so the corruption lands in a durable
-        // record rather than an in-memory buffer.
-        db.close().expect("clean close flushes the WAL");
+        // Abandon the session: every record is synced, none is checkpointed.
+        drop(db);
     }
 
     let segment = active_wal_segment(&root);
@@ -89,12 +105,13 @@ fn deleting_the_sole_wal_segment_refuses_to_open_instead_of_silently_erasing() {
     let dir = tempfile::tempdir().expect("tmp");
     let root = dir.path().join("db");
     {
-        let mut db = open_durable_database(&root).expect("durable open");
+        let db = open_always_synced(&root);
         let mut kv = db.kv(branch("default"), space("app")).expect("kv opens");
         kv.put(key(b"alpha"), value(b"1")).expect("seed write");
         kv.put(key(b"beta"), value(b"2")).expect("seed write");
         drop(kv);
-        db.close().expect("clean close flushes the WAL");
+        // Abandon the session: every record is synced, none is checkpointed.
+        drop(db);
     }
 
     // Remove the sole WAL segment — the un-checkpointed rows live only there.

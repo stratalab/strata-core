@@ -1,10 +1,12 @@
 //! Lifecycle outcome facts.
 
+use super::checkpoint::CheckpointStructuralDeferral;
 use super::{
-    ClosePhase, LifecycleCloseFact, LifecycleError, LifecycleRecoveredCheckpoint,
-    LifecycleRecoveredQuarantine, LifecycleRecoveredTables, LifecycleRecoveredWal,
-    LifecycleRecoveryBootstrapReport, LifecycleRecoveryOutcome, LifecycleResult, LifecycleStats,
-    MaintenanceTaskKind, RecoveryHealth, StorageBudgetSnapshot, StorageMode,
+    ClosePhase, LifecycleCheckpointStatus, LifecycleCloseFact, LifecycleError,
+    LifecycleRecoveredCheckpoint, LifecycleRecoveredQuarantine, LifecycleRecoveredTables,
+    LifecycleRecoveredWal, LifecycleRecoveryBootstrapReport, LifecycleRecoveryOutcome,
+    LifecycleResult, LifecycleStats, MaintenanceTaskKind, RecoveryHealth, StorageBudgetSnapshot,
+    StorageMode,
 };
 use crate::backend::BackendCapabilities;
 use crate::lifecycle::maintenance::{MaintenanceTaskId, MaintenanceTaskScope};
@@ -130,6 +132,7 @@ pub(crate) struct CloseOutcome {
     close_fact: Option<LifecycleCloseFact>,
     effects: CloseOutcomeEffects,
     stats: LifecycleStats,
+    checkpoint: CloseCheckpointReport,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -144,6 +147,48 @@ pub(crate) enum CloseOutcomeStatus {
     Idempotent,
     Timeout,
     Failed,
+}
+
+/// Space-reclamation contract §3.1 (slice 7): why a clean close skipped its
+/// checkpoint before doing any work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CloseCheckpointSkip {
+    /// The caller disabled close-time reclaim work.
+    Disabled,
+    /// Nothing sits above the retention watermark: a snapshot would only
+    /// re-cover what the last checkpoint or flush already covers.
+    NothingNew,
+    /// The registry defers every checkpoint in this shape (the fresh-fork
+    /// window, or a flushed non-seeded branch until the per-branch recovery
+    /// of slice 12).
+    Structural(CheckpointStructuralDeferral),
+}
+
+/// The single decision the close path takes about its checkpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CloseCheckpointDecision {
+    /// Publish: close-time reclaim work is admitted, the registry reports no
+    /// structural deferral, and commits exist above the retention watermark.
+    Publish,
+    /// Skip before any work, for the reason carried.
+    Skip(CloseCheckpointSkip),
+}
+
+/// What the close-time checkpoint did, carried on the close outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CloseCheckpointReport {
+    /// The close never reached its checkpoint step: a cache runtime, an
+    /// idempotent second close, or a close that failed before it.
+    NotReached,
+    /// The decision skipped the checkpoint before any work.
+    Skipped(CloseCheckpointSkip),
+    /// The checkpoint ran to an outcome; only `Completed` published a snapshot
+    /// and truncated the WAL behind it.
+    Attempted(LifecycleCheckpointStatus),
+    /// The checkpoint refused with an error the close does not retry (a
+    /// storage budget with no room for the artifact, a snapshot id an orphan
+    /// occupies — #3612); the WAL stays the durable record for the next open.
+    Refused,
 }
 
 impl StorageOpenOutcome {
@@ -494,12 +539,24 @@ impl CloseOutcome {
             close_fact: None,
             effects: CloseOutcomeEffects::empty(),
             stats: LifecycleStats::new(0, 0, 0, 0, 0),
+            checkpoint: CloseCheckpointReport::NotReached,
         }
     }
 
     pub(crate) const fn with_close_fact(mut self, close_fact: LifecycleCloseFact) -> Self {
         self.close_fact = Some(close_fact);
         self
+    }
+
+    /// Space-reclamation contract §3.1 (slice 7): what the close-time
+    /// checkpoint did.
+    pub(crate) const fn with_checkpoint(mut self, checkpoint: CloseCheckpointReport) -> Self {
+        self.checkpoint = checkpoint;
+        self
+    }
+
+    pub(crate) const fn checkpoint(&self) -> CloseCheckpointReport {
+        self.checkpoint
     }
 
     pub(crate) const fn with_close_effects(mut self, effects: CloseOutcomeEffects) -> Self {

@@ -4,9 +4,10 @@ use super::{commit_error, manifest_error, require_admitted, wal_error};
 use crate::branch::state::BranchLocalState;
 use crate::commit::{CommitBranchGuardSet, CommitRuntimeError, VisibleVersionTracker};
 use crate::lifecycle::checkpoint::{
-    checkpoint_durable_branch_with_budget,
-    checkpoint_request_from_maintenance_task_with_snapshot_id, truncate_wal,
-    wal_truncation_request_from_maintenance_task,
+    checkpoint_durable_branch_with_budget, checkpoint_durable_runtime_with_budget,
+    checkpoint_request_from_maintenance_task_with_snapshot_id, checkpoint_structural_deferral,
+    truncate_wal, wal_truncation_request_from_maintenance_task, CheckpointStructuralDeferral,
+    LifecycleCheckpointRequest, LifecycleCheckpointStatus,
 };
 use crate::lifecycle::compaction::{
     compact_durable_branch, current_compaction_request_from_maintenance_task,
@@ -32,8 +33,9 @@ use crate::lifecycle::{
     repair_branch_from_maintenance_task,
     repair_branch_quarantine as repair_branch_lifecycle_quarantine,
     repair_quarantine_family as repair_lifecycle_quarantine_family, require_rotate_budget,
-    CloseOutcome, CloseOutcomeEffects, CloseOutcomeStatus, ClosePhase, LifecycleCloseFact,
-    LifecycleCodecId, LifecycleDurableLocalRuntime, LifecycleDurableLocalServices, LifecycleError,
+    CloseCheckpointDecision, CloseCheckpointReport, CloseCheckpointSkip, CloseOutcome,
+    CloseOutcomeEffects, CloseOutcomeStatus, ClosePhase, LifecycleCloseFact, LifecycleCodecId,
+    LifecycleDurableLocalRuntime, LifecycleDurableLocalServices, LifecycleError,
     LifecycleLowerLayer, LifecycleOperationKind, LifecycleResult, LifecycleState, LifecycleStats,
     LifecycleTransitionTrigger, MaintenanceOutcome, MaintenanceOutcomeStatus, MaintenanceTask,
     MaintenanceTaskKind, MaintenanceTaskRequest, MaintenanceTaskRunner, RecoveryDegradationClass,
@@ -51,6 +53,29 @@ pub(crate) enum LifecycleCloseReclaimBudget {
     Disabled,
     /// Run reclaim rounds while this budget has not elapsed.
     Bounded(Duration),
+}
+
+/// Space-reclamation contract §3.1 (slice 7): the single decision the close
+/// path takes about its checkpoint — the budget gate first (a disabled budget
+/// skips every close-time reclaim), then the registry's structural deferral,
+/// then whether anything sits above the retention watermark.
+pub(crate) const fn close_checkpoint_decision(
+    budget: LifecycleCloseReclaimBudget,
+    structural: Option<CheckpointStructuralDeferral>,
+    commits_since_checkpoint: u64,
+) -> CloseCheckpointDecision {
+    match (budget, structural, commits_since_checkpoint) {
+        (LifecycleCloseReclaimBudget::Disabled, _, _) => {
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Disabled)
+        }
+        (LifecycleCloseReclaimBudget::Bounded(_), Some(deferral), _) => {
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Structural(deferral))
+        }
+        (LifecycleCloseReclaimBudget::Bounded(_), None, 0) => {
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::NothingNew)
+        }
+        (LifecycleCloseReclaimBudget::Bounded(_), None, _) => CloseCheckpointDecision::Publish,
+    }
 }
 
 impl LifecycleCloseReclaimBudget {
@@ -304,6 +329,22 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             self.record_recovery_health(Some(health));
         }
 
+        // Space-reclamation contract §3.1 (slice 7): the close-time checkpoint —
+        // one multi-branch snapshot covering every branch's uncovered rows, the
+        // covered WAL truncated behind it, the superseded snapshots pruned.
+        // It runs before this close's own quiesce because the checkpoint takes
+        // its own. Any refusal (a storage budget with no room for the
+        // artifact, a snapshot id an orphan occupies — #3612, a commit still
+        // in flight at the checkpoint's quiesce probe) leaves the WAL as the
+        // durable record: the next open replays it, and the next session's
+        // growth chain checkpoints. The close itself stays clean; a commit
+        // still in flight is reported by this close's own quiesce below, and
+        // the retry it triggers checkpoints once the commit has drained.
+        let checkpoint = match self.close_checkpoint(reclaim_budget, created_at) {
+            Ok(report) => report,
+            Err(_) => CloseCheckpointReport::Refused,
+        };
+
         let quiesce = match self.guard_set.try_begin_quiesce() {
             Ok(guard) => guard,
             Err(error) => {
@@ -358,6 +399,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             active_tasks
                 .saturating_add(drain.drained_tasks())
                 .saturating_add(reclaim_drained),
+            checkpoint,
         );
         // Snapshot the first-close outcome so subsequent idempotent close
         // calls return the same stats. Without this cache, a retry after
@@ -366,6 +408,101 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         // keeps the close type out of the bootstrap source per layering.
         self.close_retry_state = Some(DurableCloseRetryState::new(outcome));
         Ok(outcome)
+    }
+
+    /// The close-time checkpoint (space-reclamation contract §3.1, slice 7).
+    /// A publish that fails part-way is reported through its outcome and
+    /// recovery health, and every error is the caller's `Refused` — the WAL a
+    /// skipped or failed checkpoint did not truncate is replayed by the next
+    /// open.
+    fn close_checkpoint(
+        &mut self,
+        budget: LifecycleCloseReclaimBudget,
+        created_at: strata_core::Timestamp,
+    ) -> LifecycleResult<CloseCheckpointReport> {
+        let structural =
+            checkpoint_structural_deferral(&self.branch_catalog, self.initial_branch_id)?;
+        let commits_since_checkpoint = self.wal_growth_commits_since_checkpoint()?;
+        match close_checkpoint_decision(budget, structural, commits_since_checkpoint) {
+            CloseCheckpointDecision::Publish => {}
+            CloseCheckpointDecision::Skip(skip) => return Ok(CloseCheckpointReport::Skipped(skip)),
+        }
+        let visible_version = self.visible.visible_version();
+        // Probe the quiesce before sealing anything: a commit still in flight
+        // refuses this checkpoint (the checkpoint's own quiesce would refuse
+        // the same way) and makes the close's own quiesce report the retry,
+        // and that retry must not rotate the log again.
+        drop(self.guard_set.try_begin_quiesce().map_err(commit_error)?);
+        // Reclaim rotation first (#3494): the snapshot below covers every
+        // record in the active segment, so sealing it now lets the
+        // checkpoint's own truncation pass release it, leaving an empty
+        // active segment as the whole WAL. Sealing is safe even if the
+        // checkpoint then defers or fails: the sealed segment is replayed.
+        self.services
+            .wal_mut()
+            .rotate_active_segment_for_reclaim(visible_version)
+            .map_err(wal_error)?;
+        let request = LifecycleCheckpointRequest::new(
+            self.initial_branch_id,
+            self.next_checkpoint_snapshot_id,
+            created_at,
+        )?
+        .with_wal_truncation_after_checkpoint(true)
+        .with_delta_cap_bytes(self.checkpoint_delta_cap_bytes)?;
+        let table_catalog = &self.table_catalog;
+        let table_is_durable = |identity: &crate::table::TableIdentity| {
+            table_catalog.object_for_identity(identity).is_some()
+        };
+        let outcome = checkpoint_durable_runtime_with_budget(
+            &self.branch_catalog,
+            &self.services,
+            &self.guard_set,
+            || visible_version,
+            &request,
+            self.initial_branch_id,
+            Some(&self.budget),
+            &table_is_durable,
+        )?;
+        if let Some(snapshot_id) = outcome.snapshot_id() {
+            self.next_checkpoint_snapshot_id =
+                snapshot_id
+                    .checked_add(1)
+                    .ok_or(LifecycleError::CheckpointPublicationFailed {
+                        reason: "checkpoint snapshot id overflow",
+                    })?;
+        }
+        self.invalidate_retention_watermark_cache();
+        // Not a queued task: the checkpoint and its truncation follow-up reach
+        // the reclaim ledger through the inline entry point.
+        self.maintenance
+            .record_reclaim(&outcome.maintenance_outcome());
+        if let Some(health) = outcome.recovery_health() {
+            self.record_recovery_health(Some(health));
+        }
+        if outcome.status() == LifecycleCheckpointStatus::Completed {
+            // Best-effort like the chained prune (slice 5): a prune that
+            // cannot run leaves the superseded objects for the next open's
+            // reconcile. Its health debt is recorded, never a close failure.
+            let request = LifecycleRetentionRequest::snapshot_pruning(1)
+                .with_snapshot_prune_mode(crate::service::SnapshotPruneMode::Superseded);
+            match self.prune_snapshots_unadmitted(&request) {
+                Ok(prune) => {
+                    if let Some(health) = prune.recovery_health() {
+                        self.record_recovery_health(Some(health));
+                    }
+                }
+                Err(_) => {
+                    // The static reason cannot fail validation; a prune error
+                    // is health debt for the next open, never a close failure.
+                    if let Ok(debt) =
+                        crate::lifecycle::telemetry_health_debt("close-time snapshot prune failed")
+                    {
+                        self.record_recovery_health(Some(&debt));
+                    }
+                }
+            }
+        }
+        Ok(CloseCheckpointReport::Attempted(outcome.status()))
     }
 
     fn mark_close_retry_pending(&mut self) -> LifecycleResult<()> {
@@ -419,6 +556,13 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
     #[cfg(test)]
     pub(crate) fn record_recovery_health_for_test(&mut self, health: &RecoveryHealth) {
         self.record_recovery_health(Some(health));
+    }
+
+    /// The session's current recovery health, for tests that observe the
+    /// debt a close-time step recorded.
+    #[cfg(test)]
+    pub(crate) const fn current_recovery_health_for_test(&self) -> &RecoveryHealth {
+        &self.current_recovery_health
     }
 
     #[cfg(test)]
@@ -722,8 +866,13 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
     }
 }
 
-fn durable_close_outcome(canceled_tasks: usize, drained_tasks: usize) -> CloseOutcome {
+fn durable_close_outcome(
+    canceled_tasks: usize,
+    drained_tasks: usize,
+    checkpoint: CloseCheckpointReport,
+) -> CloseOutcome {
     CloseOutcome::new(ClosePhase::Closed, CloseOutcomeStatus::Complete)
+        .with_checkpoint(checkpoint)
         .with_close_fact(LifecycleCloseFact::Complete)
         .with_close_effects(CloseOutcomeEffects::durable_complete(false))
         .with_stats(LifecycleStats::new(

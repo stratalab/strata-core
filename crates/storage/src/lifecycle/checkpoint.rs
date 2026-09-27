@@ -1935,9 +1935,12 @@ pub(crate) enum CheckpointStructuralDeferral {
 /// all consult this one function, and the underlying predicates are private
 /// so a new scheduling site cannot consult a divergent subset (#2792 and
 /// #2798 were both the fork lifecycle and checkpoint scheduling disagreeing
-/// about the same state). The close-drain path deliberately uses a STRICTER
-/// any-non-seeded-branch predicate (see `durable/close.rs`) — a different
-/// decision with its own documented rationale, not a registry bypass.
+/// about the same state). The close path's own checkpoint (space-reclamation
+/// contract §3.1, slice 7) consults this registry too; only the close
+/// runner's arm for a DRAINED checkpoint task keeps the stricter
+/// any-non-seeded-branch predicate (see `durable/close.rs`), because that arm
+/// publishes through the single-branch collector — a different decision with
+/// its own documented rationale, not a registry bypass.
 pub(crate) fn checkpoint_structural_deferral(
     branch_catalog: &crate::lifecycle::LifecycleBranchCatalog,
     seeded_branch_id: BranchId,

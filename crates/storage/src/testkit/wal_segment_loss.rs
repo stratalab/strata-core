@@ -4,6 +4,9 @@
 //! test-only tiny segment size (`with_wal_segment_size_for_test`) to force
 //! real rotations at CI scale — hence they live in-crate rather than in the
 //! public-API integration suite (whose sole-deletion cases need no knob).
+//! The stages close with close-time reclaim DISABLED: a default clean close
+//! checkpoints and truncates the WAL (space-reclamation contract §3.1,
+//! slice 7), which would leave nothing uncheckpointed to lose.
 
 #[cfg(test)]
 #[cfg(all(feature = "localfs", not(target_arch = "wasm32")))]
@@ -15,9 +18,9 @@ mod tests {
 
     use crate::api::{
         CommitBatch, CommitMutation, CommitOptions, MaintenanceRequest, MaintenanceScope,
-        MaintenanceSummaryStatus, MaintenanceTask, PointReadRequest, ReadBound,
-        StorageDurabilityPolicy, StorageKey, StorageOpenOptions, StorageRuntime, StorageSpaceId,
-        StorageValue,
+        MaintenanceSummaryStatus, MaintenanceTask, PointReadRequest, ReadBound, ReclaimBudget,
+        StorageCloseOptions, StorageDurabilityPolicy, StorageKey, StorageOpenOptions,
+        StorageRuntime, StorageSpaceId, StorageValue,
     };
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -111,7 +114,9 @@ mod tests {
                 put(&mut runtime, index);
             }
             runtime
-                .close()
+                .close_with_options(
+                    StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+                )
                 .expect("clean close publishes the commit watermark");
         }
 
@@ -150,7 +155,9 @@ mod tests {
                 put(&mut runtime, index);
             }
             runtime
-                .close()
+                .close_with_options(
+                    StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+                )
                 .expect("clean close publishes the commit watermark");
         }
 

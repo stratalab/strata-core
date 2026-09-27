@@ -12,6 +12,7 @@ mod cache_mode_lifecycle_policy;
 mod capability;
 mod checkpoint;
 mod close;
+mod close_checkpoint;
 mod commit_group;
 mod commit_hardening;
 mod compaction;

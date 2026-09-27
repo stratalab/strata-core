@@ -849,55 +849,95 @@ fn durable_bounded_latest_read_hides_applied_not_visible_row_while_gate_blocks_c
     ));
 }
 
+/// Space-reclamation contract §3.1 (slice 7): a clean close checkpoints the
+/// session and truncates the WAL behind the snapshot. With one commit above
+/// the retention watermark the close publishes exactly one snapshot, re-points
+/// the manifest, deletes only the sealed WAL segment the snapshot covers, and
+/// still never lists, prunes or purges the quarantine family (the table-object
+/// inventory is the reclaim mark's, slice 3).
 #[test]
-fn durable_close_does_not_truncate_wal_prune_snapshots_or_purge_quarantine_implicitly() {
+fn durable_close_checkpoints_and_truncates_the_covered_wal_but_purges_nothing_else() {
+    use crate::service::DatabaseManifestService;
+
     let backend: &'static DurableTestBackend =
         crate::testkit::leak_static(DurableTestBackend::new());
     let branch = branch_id(0x26);
     let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
     runtime
         .execute_durable_commit(
-            durable_put_batch(branch, b"close-no-retention", b"value"),
+            durable_put_batch(branch, b"close-checkpoint", b"value"),
             generation_guard(),
         )
         .expect("durable commit");
     let operations_before_close = backend.operations().len();
 
-    runtime.close().expect("durable close");
+    let close = runtime.close().expect("durable close");
     let close_operations = backend.operations()[operations_before_close..].to_vec();
 
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
     assert!(close_operations
         .iter()
         .any(|operation| matches!(operation, Operation::SyncObject(_))));
-    assert!(!close_operations
-        .iter()
-        .any(|operation| matches!(operation, Operation::DeleteObject(_))));
-    // Space-reclamation contract §3.1 (slice 3): the one listing a clean close
-    // performs is the reclaim mark's table-object inventory; the WAL, snapshot
-    // and quarantine families are never listed, truncated, pruned or purged
-    // implicitly (a debt-free close costs exactly that listing).
-    let table_prefix = ObjectLayout::table_prefix().expect("table prefix");
-    let listed: Vec<_> = close_operations
+    let snapshot = ObjectLayout::snapshot(1).expect("snapshot object");
+    assert!(
+        close_operations.iter().any(|operation| matches!(
+            operation,
+            Operation::Publish(object, PublishMode::Create) if object == &snapshot
+        )),
+        "the close publishes the session's snapshot: {close_operations:?}"
+    );
+    // Deletes: the covered WAL segment and its metadata sidecar, nothing else.
+    let wal_prefix = ObjectLayout::wal_prefix().expect("wal prefix");
+    let wal_metadata_prefix =
+        ObjectLayout::wal_segment_metadata_prefix().expect("wal metadata prefix");
+    let deleted: Vec<&ObjectName> = close_operations
         .iter()
         .filter_map(|operation| match operation {
-            Operation::ListPrefix(prefix) => Some(prefix.clone()),
+            Operation::DeleteObject(object) => Some(object),
             _ => None,
         })
         .collect();
     assert!(
-        !listed.is_empty()
-            && listed
-                .iter()
-                .all(|prefix| prefix.as_str().starts_with(table_prefix.as_str())),
-        "close listed {listed:?}"
+        deleted
+            .iter()
+            .any(|object| object.as_str().starts_with(wal_prefix.as_str()))
+            && deleted.iter().all(|object| {
+                object.as_str().starts_with(wal_prefix.as_str())
+                    || object.as_str().starts_with(wal_metadata_prefix.as_str())
+            }),
+        "close deleted exactly the covered WAL segments: {deleted:?}"
     );
-    // The only close-time publish is the #2690 durable commit watermark
-    // attesting the synced log; close never rewrites checkpoints, manifests,
-    // snapshots, or quarantine state.
+    let quarantine_prefix = ObjectLayout::quarantine_prefix().expect("quarantine prefix");
+    assert!(
+        !close_operations.iter().any(|operation| matches!(
+            operation,
+            Operation::ListPrefix(prefix) if prefix.as_str().starts_with(quarantine_prefix.as_str())
+        )),
+        "close listed the quarantine family: {close_operations:?}"
+    );
+    // Publishes: the snapshot, the manifest re-points, the fresh active WAL
+    // segment the reclaim rotation opened (#3494), and the #2690 durable
+    // commit watermark attesting the sealed log — nothing else.
+    let manifest_object = ObjectLayout::database_manifest().expect("manifest object");
     let watermark = ObjectLayout::wal_watermark().expect("watermark object");
-    assert!(!close_operations.iter().any(|operation| {
-        matches!(operation, Operation::Publish(object, _) if object != &watermark)
-    }));
+    assert!(
+        close_operations.iter().all(|operation| match operation {
+            Operation::Publish(object, PublishMode::Create) =>
+                object == &snapshot || object.as_str().starts_with(wal_prefix.as_str()),
+            Operation::Publish(object, PublishMode::Replace) =>
+                object == &manifest_object || object == &watermark,
+            _ => true,
+        }),
+        "close published outside the checkpoint, the rotation and the watermark: {close_operations:?}"
+    );
+    let manifest = DatabaseManifestService::new(backend)
+        .load_required()
+        .expect("database manifest");
+    assert_eq!(manifest.snapshot_id(), Some(1));
+    assert_eq!(manifest.snapshot_watermark(), Some(1));
 }
 
 #[test]
@@ -1190,19 +1230,71 @@ fn durable_close_after_checkpoint_does_not_rewrite_checkpoint_without_dirty_fact
     assert_eq!(checkpoint.status(), LifecycleCheckpointStatus::Completed);
     let operations_before_close = backend.operations().len();
 
-    runtime.close().expect("durable close");
+    let close = runtime.close().expect("durable close");
     let close_operations = backend.operations()[operations_before_close..].to_vec();
 
     // The #2690 commit watermark is the only close-time publish; the
-    // checkpoint itself is never rewritten without a dirty fact.
+    // checkpoint itself is never rewritten without a dirty fact — the close
+    // checkpoint (slice 7) skips because nothing sits above the watermark.
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Skipped(CloseCheckpointSkip::NothingNew)
+    );
     let watermark = ObjectLayout::wal_watermark().expect("watermark object");
     assert!(!close_operations.iter().any(|operation| {
         matches!(operation, Operation::Publish(object, _) if object != &watermark)
     }));
 }
 
+/// Space-reclamation contract §3.1 (slice 7): a clean close after a flush
+/// checkpoints; the checkpoint attests the snapshot and records the flushed
+/// table's boundary as the flush watermark, exactly as every checkpoint of a
+/// flushed branch does. The close itself never advances the flush watermark
+/// (the disabled-budget twin below).
 #[test]
-fn durable_close_after_flush_does_not_advance_flush_watermark_unless_checkpointed() {
+fn durable_close_after_flush_checkpoints_and_records_the_flush_boundary() {
+    use crate::service::DatabaseManifestService;
+
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x36);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_put_batch(branch, b"flush-before-close", b"value"),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    runtime
+        .rotate_active_for_maintenance()
+        .expect("rotate active");
+    let flush = runtime
+        .flush_frozen(&flush_request(branch, "close-flush"))
+        .expect("flush frozen");
+    assert!(flush.completed());
+
+    let close = runtime.close().expect("durable close");
+
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
+    let manifest = DatabaseManifestService::new(backend)
+        .load_required()
+        .expect("database manifest");
+    assert_eq!(manifest.snapshot_id(), Some(1));
+    assert_eq!(
+        manifest.flushed_through_commit_id(),
+        Some(CommitVersion::new(1)),
+        "the checkpoint records the flushed table's boundary"
+    );
+}
+
+/// With close-time reclaim disabled the pre-slice-7 contract holds verbatim:
+/// the #2690 commit watermark replace is close's only publish, and the flush
+/// watermark does not advance without a checkpoint.
+#[test]
+fn durable_close_after_flush_with_reclaim_disabled_does_not_advance_the_flush_watermark() {
     let backend: &'static DurableTestBackend =
         crate::testkit::leak_static(DurableTestBackend::new());
     let branch = branch_id(0x36);
@@ -1222,11 +1314,15 @@ fn durable_close_after_flush_does_not_advance_flush_watermark_unless_checkpointe
     assert!(flush.completed());
     let operations_before_close = backend.operations().len();
 
-    runtime.close().expect("durable close");
+    let close = runtime
+        .close_with_reclaim_budget(LifecycleCloseReclaimBudget::Disabled)
+        .expect("durable close");
     let close_operations = backend.operations()[operations_before_close..].to_vec();
 
-    // The #2690 commit watermark replace is close's only publish; the flush
-    // watermark itself must not advance without a checkpoint.
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Skipped(CloseCheckpointSkip::Disabled)
+    );
     let watermark = ObjectLayout::wal_watermark().expect("watermark object");
     assert!(!close_operations.iter().any(|operation| {
         matches!(
@@ -2221,31 +2317,227 @@ fn durable_commit_rejects_blocking_active_bytes_before_allocating_version() {
     );
 }
 
+/// Space-reclamation contract §3.1 (slice 7): a clean close truncates the WAL
+/// its own checkpoint covers — after the close at most the fresh active
+/// segment remains, and none of the deleted segments do.
 #[test]
-fn durable_close_does_not_truncate_wal_unless_drain_task_did_so() {
+fn durable_close_truncates_the_wal_its_checkpoint_covers() {
     let backend: &'static DurableTestBackend =
         crate::testkit::leak_static(DurableTestBackend::new());
     let branch = branch_id(0x37);
     let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
     runtime
         .execute_durable_commit(
-            durable_put_batch(branch, b"no-truncate-on-close", b"value"),
+            durable_put_batch(branch, b"truncate-on-close", b"value"),
             generation_guard(),
         )
         .expect("durable commit");
     let operations_before_close = backend.operations().len();
 
-    runtime.close().expect("durable close");
+    let close = runtime.close().expect("durable close");
     let close_operations = backend.operations()[operations_before_close..].to_vec();
 
-    assert!(!close_operations
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
+    let wal_prefix = ObjectLayout::wal_prefix().expect("wal prefix");
+    let wal_metadata_prefix =
+        ObjectLayout::wal_segment_metadata_prefix().expect("wal metadata prefix");
+    let deleted: Vec<ObjectName> = close_operations
         .iter()
-        .any(|operation| matches!(operation, Operation::DeleteObject(_))));
+        .filter_map(|operation| match operation {
+            Operation::DeleteObject(object) => Some(object.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        deleted
+            .iter()
+            .any(|object| object.as_str().starts_with(wal_prefix.as_str()))
+            && deleted.iter().all(|object| {
+                object.as_str().starts_with(wal_prefix.as_str())
+                    || object.as_str().starts_with(wal_metadata_prefix.as_str())
+            }),
+        "close deleted exactly the covered WAL segments and their sidecars: {deleted:?}"
+    );
+    let remaining = backend.list_prefix(&wal_prefix).expect("list wal objects");
+    assert!(
+        remaining.len() <= 1,
+        "at most the fresh active segment remains: {remaining:?}"
+    );
+    assert!(remaining.iter().all(|object| !deleted.contains(object)));
+    // The inline checkpoint's truncation reaches the reclaim ledger (slice 1)
+    // exactly like a queued one.
+    let truncation = runtime
+        .reclaim_ledger()
+        .last(crate::lifecycle::ReclaimFamily::WalTruncation)
+        .expect("the close-time truncation is recorded");
+    assert_eq!(
+        truncation.outcome(),
+        crate::lifecycle::ReclaimOutcome::Reclaimed,
+        "{truncation:?}"
+    );
+    assert!(truncation.state_changes() > 0, "{truncation:?}");
 }
 
 #[test]
-fn durable_close_does_not_prune_snapshots_or_purge_quarantine_implicitly() {
-    durable_close_does_not_truncate_wal_prune_snapshots_or_purge_quarantine_implicitly();
+fn durable_close_checkpoint_purges_no_quarantine_implicitly() {
+    durable_close_checkpoints_and_truncates_the_covered_wal_but_purges_nothing_else();
+}
+
+/// Space-reclamation contract §3.1 (slice 7): the close-time checkpoint is
+/// followed by the superseded prune, so a session that checkpointed earlier
+/// leaves exactly one snapshot behind.
+#[test]
+fn durable_close_checkpoint_prunes_the_snapshot_it_supersedes() {
+    use crate::service::{DatabaseManifestService, SnapshotService};
+
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x95);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_put_batch(branch, b"close-supersede-a", b"value"),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+    let checkpoint = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("run checkpoint")
+        .expect("checkpoint outcome");
+    assert_eq!(checkpoint.status(), MaintenanceOutcomeStatus::Completed);
+    runtime
+        .execute_durable_commit(
+            durable_put_batch(branch, b"close-supersede-b", b"value"),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    let snapshot_ids = |backend: &DurableTestBackend| -> Vec<u64> {
+        SnapshotService::new(backend)
+            .list_snapshots()
+            .expect("list snapshots")
+            .iter()
+            .map(crate::service::SnapshotObject::snapshot_id)
+            .collect()
+    };
+    assert_eq!(snapshot_ids(backend), vec![1]);
+    let operations_before_close = backend.operations().len();
+
+    let close = runtime.close().expect("durable close");
+
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
+    let superseded = ObjectLayout::snapshot(1).expect("superseded object");
+    assert!(
+        backend.operations()[operations_before_close..]
+            .iter()
+            .any(|operation| matches!(operation, Operation::DeleteObject(object) if object == &superseded)),
+        "the close prunes the snapshot its checkpoint superseded"
+    );
+    assert_eq!(snapshot_ids(backend), vec![2]);
+    let manifest = DatabaseManifestService::new(backend)
+        .load_required()
+        .expect("database manifest");
+    assert_eq!(manifest.snapshot_id(), Some(2));
+}
+
+/// A snapshot publish that fails at close is not a close failure: the close
+/// completes, deletes nothing, and the next open replays the WAL it left.
+#[test]
+fn durable_close_checkpoint_publish_failure_leaves_the_wal_for_the_next_open() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x96);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_put_batch(branch, b"close-publish-fault", b"value"),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    backend.set_publish_apply_then_fail(Some((
+        ObjectLayout::snapshot(1).expect("snapshot object"),
+        PublishFailureKind::FailedBeforeVisibility,
+    )));
+    let operations_before_close = backend.operations().len();
+
+    let close = runtime
+        .close()
+        .expect("a refused close checkpoint keeps the close clean");
+
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    assert_eq!(close.checkpoint(), CloseCheckpointReport::Refused);
+    assert!(
+        !backend.operations()[operations_before_close..]
+            .iter()
+            .any(|operation| matches!(operation, Operation::DeleteObject(_))),
+        "a refused checkpoint truncates nothing"
+    );
+    let reopened = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    assert!(
+        reopened
+            .read_view()
+            .expect("read view")
+            .latest(&physical_key(branch, b"close-publish-fault"))
+            .expect("latest read")
+            .is_some(),
+        "the next open replays the WAL the refused checkpoint left"
+    );
+}
+
+/// A commit still in flight makes the close checkpoint's quiesce unavailable:
+/// the close reports the retryable timeout without publishing anything, and
+/// the retry after the commit drains checkpoints normally.
+#[test]
+fn durable_close_checkpoint_retries_after_an_in_flight_commit_drains() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x97);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_put_batch(branch, b"close-in-flight", b"value"),
+            generation_guard(),
+        )
+        .expect("durable commit");
+    let in_flight = runtime
+        .guard_set()
+        .try_acquire_branch_guard(branch)
+        .expect("in-flight commit guard");
+    let operations_before_close = backend.operations().len();
+
+    let error = runtime
+        .close()
+        .expect_err("the close checkpoint cannot quiesce past an in-flight commit");
+
+    assert!(
+        matches!(error, LifecycleError::CloseTimeout { .. }),
+        "expected the retryable close timeout, got {error:?}"
+    );
+    assert_eq!(runtime.state(), LifecycleState::Closing);
+    assert!(
+        !backend.operations()[operations_before_close..]
+            .iter()
+            .any(|operation| matches!(operation, Operation::Publish(_, PublishMode::Create))),
+        "nothing is published while the quiesce is unavailable"
+    );
+    drop(in_flight);
+
+    let close = runtime.close().expect("the retry closes");
+
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
 }
 
 #[test]

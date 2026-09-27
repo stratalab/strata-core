@@ -89,7 +89,7 @@ fn phase_seed() {
         return;
     };
     let root = Path::new(&dir).join("db");
-    let mut db = open_unbudgeted(&root);
+    let db = open_unbudgeted(&root);
     let payload = vec![b'v'; VALUE_BYTES];
     {
         let mut kv = db.kv(branch(), space()).expect("kv opens");
@@ -98,8 +98,12 @@ fn phase_seed() {
                 .expect("unbudgeted seed write");
         }
     }
-    db.close().expect("clean close flushes the WAL");
+    // Crash-exit without a clean close: a clean close checkpoints and
+    // truncates the WAL (space-reclamation contract, slice 7), and this phase
+    // exists to leave a WAL tail several times the recovery budget. Every
+    // put above was acknowledged durable, so the tail is complete.
     println!("PHASE-SEED-OK");
+    std::process::exit(0);
 }
 
 /// Reports the recovery-phase RSS peak and proves the recovered state is

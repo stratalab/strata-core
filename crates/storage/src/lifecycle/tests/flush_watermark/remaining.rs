@@ -1248,7 +1248,12 @@ fn maintenance_task_does_not_run_table_manifest_watermark_after_close_begins() {
         ))
         .expect("enqueue");
 
-    let outcome = runtime.close().expect("close");
+    // Close-time reclaim disabled: the close's own checkpoint (slice 7) would
+    // record the flushed table's boundary as the flush watermark itself, and
+    // this test's oracle is that the CANCELED task did not.
+    let outcome = runtime
+        .close_with_reclaim_budget(LifecycleCloseReclaimBudget::Disabled)
+        .expect("close");
 
     assert_eq!(outcome.status(), CloseOutcomeStatus::Complete);
     assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
