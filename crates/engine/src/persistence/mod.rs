@@ -9,7 +9,7 @@ mod row;
 mod scan_ordered;
 mod space;
 
-pub(crate) use adapter::maintenance_scheduling_for_storage;
+pub(crate) use adapter::storage_test_seams;
 pub use adapter::MemoryBudgetSource;
 pub(crate) use adapter::{
     close_summary_is_durable, PersistenceBranchCleanup, PersistenceBranchOutcome,

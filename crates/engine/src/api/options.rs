@@ -135,6 +135,8 @@ pub struct DurableLocalOpenOptions {
     version_retention: VersionRetention,
     #[cfg(any(test, feature = "testkit"))]
     maintenance_scheduling: Option<MaintenanceScheduling>,
+    #[cfg(feature = "testkit")]
+    wal_segment_size: Option<u64>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -151,6 +153,8 @@ impl DurableLocalOpenOptions {
             version_retention: VersionRetention::KeepAll,
             #[cfg(any(test, feature = "testkit"))]
             maintenance_scheduling: None,
+            #[cfg(feature = "testkit")]
+            wal_segment_size: None,
         }
     }
 
@@ -170,6 +174,21 @@ impl DurableLocalOpenOptions {
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) const fn maintenance_scheduling_for_test(&self) -> Option<MaintenanceScheduling> {
         self.maintenance_scheduling
+    }
+
+    /// Test seam (`testkit`, space-reclamation contract §3.5): the WAL
+    /// segment size in bytes, so a small workload spans several segments and
+    /// a test can observe WAL reclaim. Production keeps storage's default.
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub const fn with_wal_segment_size_for_test(mut self, bytes: u64) -> Self {
+        self.wal_segment_size = Some(bytes);
+        self
+    }
+
+    #[cfg(feature = "testkit")]
+    pub(crate) const fn wal_segment_size_for_test(&self) -> Option<u64> {
+        self.wal_segment_size
     }
 
     /// #3502: opts into MVCC version pruning (`KeepAll` by default). Pruning is

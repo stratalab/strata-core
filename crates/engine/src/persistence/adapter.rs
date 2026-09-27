@@ -38,40 +38,84 @@ use super::{CommitPlan, ReadSelector, RowAddress, RowClass, RowMutation};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PersistenceOpenTarget {
     Cache,
-    /// A durable directory, its commit durability, and the maintenance
-    /// scheduling a test seam selected (`None` = the background scheduler).
-    DurableLocal(
-        PathBuf,
-        crate::api::DurabilityMode,
-        Option<StorageMaintenanceSchedulingPolicy>,
-    ),
+    /// A durable directory, its commit durability, and the storage test
+    /// seams a `testkit` build selected (all `None` in production).
+    DurableLocal(PathBuf, crate::api::DurabilityMode, StorageTestSeams),
 }
 
-/// The storage scheduling policy the `testkit` seam selected, when the seam
-/// is compiled in; production builds always answer `None`.
+/// The storage-level test seams a durable open carries (space-reclamation
+/// contract §3.5). Every field is `None` in production: the background
+/// scheduler and storage's default WAL segment size.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StorageTestSeams {
+    /// The maintenance scheduling policy (`None` = the background scheduler).
+    pub(crate) scheduling: Option<StorageMaintenanceSchedulingPolicy>,
+    /// The WAL segment size in bytes (`None` = storage's default).
+    pub(crate) wal_segment_size: Option<u64>,
+}
+
+/// The storage test seams the `testkit` options selected, when the seams are
+/// compiled in; production builds always answer the default (no seam).
 #[cfg(any(test, feature = "testkit"))]
-pub(crate) fn maintenance_scheduling_for_storage(
+pub(crate) fn storage_test_seams(
     options: &crate::api::DurableLocalOpenOptions,
-) -> Option<StorageMaintenanceSchedulingPolicy> {
-    options
-        .maintenance_scheduling_for_test()
-        .map(|scheduling| match scheduling {
-            crate::api::MaintenanceScheduling::Background => {
-                StorageMaintenanceSchedulingPolicy::Background
-            }
-            crate::api::MaintenanceScheduling::DeterministicInline => {
-                StorageMaintenanceSchedulingPolicy::DeterministicInline
-            }
-        })
+) -> StorageTestSeams {
+    StorageTestSeams {
+        scheduling: options
+            .maintenance_scheduling_for_test()
+            .map(|scheduling| match scheduling {
+                crate::api::MaintenanceScheduling::Background => {
+                    StorageMaintenanceSchedulingPolicy::Background
+                }
+                crate::api::MaintenanceScheduling::DeterministicInline => {
+                    StorageMaintenanceSchedulingPolicy::DeterministicInline
+                }
+            }),
+        wal_segment_size: wal_segment_size_seam(options),
+    }
 }
 
-/// The `testkit` seam is compiled out: production always runs the background
-/// scheduler.
-#[cfg(not(any(test, feature = "testkit")))]
-pub(crate) const fn maintenance_scheduling_for_storage(
-    _options: &crate::api::DurableLocalOpenOptions,
-) -> Option<StorageMaintenanceSchedulingPolicy> {
+#[cfg(feature = "testkit")]
+const fn wal_segment_size_seam(options: &crate::api::DurableLocalOpenOptions) -> Option<u64> {
+    options.wal_segment_size_for_test()
+}
+
+/// Engine unit tests without `testkit` link storage without its segment-size
+/// seam, so the seam is absent there.
+#[cfg(all(test, not(feature = "testkit")))]
+const fn wal_segment_size_seam(_options: &crate::api::DurableLocalOpenOptions) -> Option<u64> {
     None
+}
+
+/// The `testkit` seams are compiled out: production always runs the
+/// background scheduler with storage's default segment size.
+#[cfg(not(any(test, feature = "testkit")))]
+pub(crate) fn storage_test_seams(
+    _options: &crate::api::DurableLocalOpenOptions,
+) -> StorageTestSeams {
+    StorageTestSeams::default()
+}
+
+/// Apply the WAL segment-size seam to the storage open options.
+#[cfg(feature = "testkit")]
+fn apply_wal_segment_size_seam(
+    options: StorageOpenOptions,
+    wal_segment_size: Option<u64>,
+) -> StorageOpenOptions {
+    match wal_segment_size {
+        Some(bytes) => options.with_wal_segment_size_for_test(bytes),
+        None => options,
+    }
+}
+
+/// Without `testkit` storage has no segment-size seam; the value is always
+/// `None` there.
+#[cfg(not(feature = "testkit"))]
+const fn apply_wal_segment_size_seam(
+    options: StorageOpenOptions,
+    _wal_segment_size: Option<u64>,
+) -> StorageOpenOptions {
+    options
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -453,7 +497,7 @@ impl StoragePersistence {
                 let (runtime, summary) = outcome.into_parts();
                 (runtime, summary, false)
             }
-            PersistenceOpenTarget::DurableLocal(path, durability, scheduling) => {
+            PersistenceOpenTarget::DurableLocal(path, durability, seams) => {
                 let policy = match durability {
                     crate::api::DurabilityMode::Standard => StorageDurabilityPolicy::Standard,
                     crate::api::DurabilityMode::Always => StorageDurabilityPolicy::Always,
@@ -479,9 +523,10 @@ impl StoragePersistence {
                 });
                 // Test seam only (space-reclamation contract §3.5): production
                 // passes `None` and keeps storage's background scheduler.
-                if let Some(scheduling) = scheduling {
+                if let Some(scheduling) = seams.scheduling {
                     options = options.with_maintenance_scheduling_policy(scheduling);
                 }
+                options = apply_wal_segment_size_seam(options, seams.wal_segment_size);
                 let outcome = StorageRuntime::open_durable_local_with_options(path, options)
                     .map_err(map_storage_error)?;
                 let (runtime, summary) = outcome.into_parts();
