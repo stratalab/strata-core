@@ -4120,6 +4120,59 @@ fn api_foreground_verb_with_nothing_queued_is_not_an_activity_edge() {
     );
 }
 
+/// A round's pending count is the queue's size plus the armed preheat flag:
+/// a round that made progress with work still queued re-arms the next round
+/// by itself, so the follow-ups one task chains drain without any further
+/// external wake. One task per wake makes every chained follow-up its own
+/// round; a single enqueue (one wake) is the only external signal.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_round_with_work_still_queued_rearms_without_an_external_wake() {
+    let (runtime, _root) = open_inline_durable_runtime(
+        "maintenance-round-rearm",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_background_max_tasks_per_wake(1),
+    );
+    for index in 0..3u8 {
+        runtime
+            .commit(&put_batch(format!("rearm-{index}").as_bytes(), b"value"))
+            .expect("commit");
+    }
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0
+    );
+
+    // One wake, several tasks: the completed checkpoint chains its snapshot
+    // prune and WAL-truncation follow-ups, each drained by its own round.
+    runtime
+        .enqueue_maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Checkpoint,
+            MaintenanceScope::Global,
+        ))
+        .expect("enqueue checkpoint");
+    runtime.wait_background_idle_for_test();
+
+    let status = runtime.maintenance_status().expect("status");
+    assert_eq!(
+        status.pending_tasks(),
+        0,
+        "every chained follow-up drained on self-armed rounds: {status:?}"
+    );
+    assert!(
+        status.completed() >= 2,
+        "the checkpoint and at least one follow-up ran: {status:?}"
+    );
+    let after = runtime
+        .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+        .expect("diagnostics");
+    assert!(after.checkpoint().snapshot_id().is_some());
+}
+
 /// Close with an idle wake armed: the close completes (its own drive tries the
 /// sweep once more and yields to the held reader) and the armed wake is
 /// cancelled with the workers — it never fires into a closed runtime.
