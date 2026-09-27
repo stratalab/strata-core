@@ -461,3 +461,51 @@ fn audit_tolerates_wal_segments_that_vanish_between_listing_and_read() {
         complete.wal_tail_bytes() - wal[&active]
     );
 }
+
+/// The tolerance is for `NotFound` only: any other failure to read a sealed
+/// segment or to stat the active one is the audit's error, never a dropped
+/// segment — a silently smaller figure would misreport the debt.
+#[test]
+fn audit_propagates_wal_segment_read_and_stat_failures_other_than_not_found() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xd8);
+    let mut runtime = open_runtime_with_wal_segment_size(branch, backend, 4096);
+    for index in 0..6u8 {
+        let key: &'static [u8] =
+            Box::leak(format!("wal-fault-{index}").into_bytes().into_boxed_slice());
+        let value: &'static [u8] = Box::leak(vec![index; 1500].into_boxed_slice());
+        runtime
+            .execute_durable_commit(durable_batch(branch, key, value), generation_guard())
+            .expect("commit");
+    }
+    let request =
+        LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(53)).expect("request");
+    assert_eq!(
+        runtime.checkpoint(&request).expect("checkpoint").status(),
+        LifecycleCheckpointStatus::Completed
+    );
+    let active_id = runtime.services().wal().active_segment_id();
+    let active = ObjectLayout::wal_segment(active_id).expect("active segment");
+    let sealed = ObjectLayout::wal_segment(active_id - 1).expect("a sealed segment");
+
+    backend.fail_object_on_next_read(sealed);
+    assert!(
+        runtime.footprint_audit_facts().is_err(),
+        "a sealed segment read failure propagates instead of dropping the segment"
+    );
+    backend.fail_object_on_next_read(active);
+    assert!(
+        runtime.footprint_audit_facts().is_err(),
+        "an active segment stat failure propagates instead of dropping the segment"
+    );
+
+    // Once the faults are spent the audit is whole again.
+    let complete = runtime
+        .footprint_audit_facts()
+        .expect("audit after the faults");
+    assert_eq!(
+        complete.wal_reclaimable_bytes() + complete.wal_tail_bytes(),
+        wal_bytes_by_object(backend).values().sum::<u64>()
+    );
+}

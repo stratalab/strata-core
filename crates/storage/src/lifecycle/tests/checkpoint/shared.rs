@@ -209,6 +209,10 @@ pub(in crate::lifecycle::tests) struct CheckpointTestBackend {
     /// `NotFound` — a concurrent table-object sweep unlinking an orphan between
     /// a retry's adoption of it and the build's read of it.
     vanish_on_read: Mutex<Option<ObjectName>>,
+    /// The next read (data or metadata) of this object fails `Unavailable`
+    /// without touching it — a transient backend fault the callers must
+    /// propagate, unlike a vanished object.
+    fail_on_read: Mutex<Option<ObjectName>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -257,6 +261,7 @@ impl CheckpointTestBackend {
             table_object_create_calls: AtomicUsize::new(0),
             lock_held: Arc::new(AtomicBool::new(false)),
             vanish_on_read: Mutex::new(None),
+            fail_on_read: Mutex::new(None),
         }
     }
 
@@ -283,6 +288,22 @@ impl CheckpointTestBackend {
             return true;
         }
         false
+    }
+
+    pub(in crate::lifecycle::tests) fn fail_object_on_next_read(&self, object: ObjectName) {
+        *self.fail_on_read.lock().expect("fail on read") = Some(object);
+    }
+
+    fn take_read_fault(&self, name: &ObjectName) -> Option<BackendError> {
+        let mut fault = self.fail_on_read.lock().expect("fail on read");
+        if fault.as_ref() == Some(name) {
+            *fault = None;
+            return Some(BackendError::new(
+                BackendErrorKind::Unavailable,
+                "injected read failure",
+            ));
+        }
+        None
     }
 
     pub(in crate::lifecycle::tests) fn fail_wal_listing(&self) {
@@ -626,6 +647,9 @@ impl Backend for CheckpointTestBackend {
                 "object not found",
             ));
         }
+        if let Some(fault) = self.take_read_fault(name) {
+            return Err(fault);
+        }
         self.objects
             .lock()
             .expect("objects")
@@ -704,6 +728,9 @@ impl Backend for CheckpointTestBackend {
                 BackendErrorKind::NotFound,
                 "object not found",
             ));
+        }
+        if let Some(fault) = self.take_read_fault(name) {
+            return Err(fault);
         }
         self.objects
             .lock()

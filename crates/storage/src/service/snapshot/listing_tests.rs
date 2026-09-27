@@ -404,6 +404,8 @@ fn prune_snapshots_requires_delete_capability_before_listing() {
 struct ListingBackend {
     names: Vec<ObjectName>,
     list_error: Option<BackendError>,
+    /// `object_metadata` fails with this kind instead of `NotFound`.
+    stat_error: Option<BackendErrorKind>,
     delete_failures: BTreeSet<ObjectName>,
     deleted: Mutex<Vec<ObjectName>>,
     reads: Mutex<u64>,
@@ -471,6 +473,12 @@ impl ListingBackend {
         )
     }
 
+    fn with_stat_error(names: Vec<ObjectName>, kind: BackendErrorKind) -> Self {
+        let mut backend = Self::with_names(names);
+        backend.stat_error = Some(kind);
+        backend
+    }
+
     fn with_list_error(source: BackendError) -> Self {
         Self::new(
             Vec::new(),
@@ -525,6 +533,7 @@ impl ListingBackend {
             reads: Mutex::new(0),
             lists: Mutex::new(0),
             capabilities,
+            stat_error: None,
         }
     }
 
@@ -585,7 +594,10 @@ impl Backend for ListingBackend {
     }
 
     fn object_metadata(&self, _name: &ObjectName) -> BackendResult<BackendMetadata> {
-        Err(BackendError::new(BackendErrorKind::NotFound, "not found"))
+        match self.stat_error {
+            Some(kind) => Err(BackendError::new(kind, "injected stat failure")),
+            None => Err(BackendError::new(BackendErrorKind::NotFound, "not found")),
+        }
     }
 }
 
@@ -750,6 +762,24 @@ fn list_snapshot_sizes_reports_each_objects_bytes_in_id_order() {
             .expect("placeholder bytes");
         assert_eq!(*bytes, stored.len() as u64);
     }
+}
+
+/// The tolerance is for `NotFound` only: any other stat failure is the
+/// listing's error, never a silently smaller family.
+#[test]
+fn list_snapshot_sizes_propagates_a_stat_failure_other_than_not_found() {
+    let backend =
+        ListingBackend::with_stat_error(vec![snapshot_object(1)], BackendErrorKind::Unavailable);
+    let service = SnapshotService::new(&backend);
+
+    let error = service
+        .list_snapshot_sizes()
+        .expect_err("an unavailable stat propagates");
+
+    assert!(
+        matches!(error, SnapshotServiceError::List { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]

@@ -976,6 +976,20 @@ fn footprint_live_tier_does_no_listing_or_metadata_io() {
     assert_eq!(report.quarantine().state(), DiagnosticsFactState::Unknown);
     assert_eq!(report.reclaim().state(), DiagnosticsFactState::Known);
     assert!(report.reclaim().pending_reclaim_tasks().is_some());
+
+    // The count follows the catalog: a second flushed table makes two.
+    runtime
+        .commit(&put_batch(b"live-2", b"value"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("second flush");
+    assert_eq!(
+        diagnostics_with(&runtime, DiagnosticsDetail::Live)
+            .footprint()
+            .live_table_objects(),
+        Some(2)
+    );
 }
 
 #[cfg(feature = "localfs")]
@@ -1036,4 +1050,100 @@ fn footprint_audit_tier_reports_quarantine_snapshots_and_what_the_prune_reclaims
     assert_eq!(prune.state_changes(), 1);
     assert_eq!(after.reclaim().pending_reclaim_tasks(), Some(0));
     assert!(after.reclaim().total_passes() >= 1);
+}
+
+/// The reclaim report carries a deferred pass's typed reason: a sweep held
+/// off by a retired read view reports `ReaderPinned` (never prose), and the
+/// pass that reclaims once the reader is gone reports no deferral.
+#[cfg(feature = "localfs")]
+#[test]
+fn reclaim_report_carries_the_typed_deferral_of_a_reader_pinned_sweep() {
+    let mut runtime = open_durable_runtime("diagnostics-reclaim-deferral");
+    runtime
+        .commit(&put_batch(b"deferral-a", b"one"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime
+        .commit(&put_batch(b"deferral-a", b"two"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    // An off-lock reader holds the pre-compaction view across the sweep.
+    let held_view = runtime
+        .load_snapshot_for_test(branch())
+        .expect("published snapshot");
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&compact).expect("compact");
+    super::maintenance::drain_maintenance_to_idle(&mut runtime);
+
+    let deferred = diagnostics_with(&runtime, DiagnosticsDetail::Live)
+        .reclaim()
+        .last_sweep()
+        .expect("the deferred sweep is on the report");
+    assert_eq!(deferred.outcome(), DiagnosticsReclaimOutcome::Deferred);
+    assert_eq!(
+        deferred.deferral(),
+        Some(DiagnosticsReclaimDeferral::ReaderPinned)
+    );
+    assert_eq!(deferred.bytes_reclaimed(), 0);
+
+    drop(held_view);
+    let reclaim =
+        MaintenanceRequest::new(MaintenanceTask::Reclaim, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&reclaim).expect("reclaim");
+    super::maintenance::drain_maintenance_to_idle(&mut runtime);
+
+    let report = diagnostics_with(&runtime, DiagnosticsDetail::Live).reclaim();
+    let sweep = report.last_sweep().expect("the sweep is on the report");
+    assert_eq!(sweep.outcome(), DiagnosticsReclaimOutcome::Reclaimed);
+    assert_eq!(sweep.deferral(), None);
+    assert!(sweep.bytes_reclaimed() > 0, "{sweep:?}");
+    assert_eq!(sweep.objects_affected(), 2, "{sweep:?}");
+    assert_eq!(
+        sweep.state_changes(),
+        2,
+        "both superseded objects were staged"
+    );
+    assert_eq!(report.deferred_passes(), 1);
+    assert_eq!(
+        report.reclaimed_passes(),
+        2,
+        "the sweep and its purge both reclaimed: {report:?}"
+    );
+}
+
+/// The live tier reports the retention watermark the runtime's cache holds:
+/// cold right after a checkpoint invalidates it, the checkpoint's version once
+/// the next commit has warmed it.
+#[cfg(feature = "localfs")]
+#[test]
+fn footprint_live_tier_reports_the_warm_retention_watermark() {
+    let mut runtime = open_durable_runtime("diagnostics-live-watermark");
+    runtime
+        .commit(&put_batch(b"watermark-a", b"value"))
+        .expect("commit");
+    checkpoint_completed(&mut runtime);
+    // The checkpoint invalidated the cache: cold, never warmed by a live call.
+    assert_eq!(
+        diagnostics_with(&runtime, DiagnosticsDetail::Live)
+            .footprint()
+            .wal_retention_watermark(),
+        None
+    );
+
+    runtime
+        .commit(&put_batch(b"watermark-b", b"value"))
+        .expect("commit warms the retention watermark cache");
+
+    assert_eq!(
+        diagnostics_with(&runtime, DiagnosticsDetail::Live)
+            .footprint()
+            .wal_retention_watermark(),
+        Some(CommitVersion::new(1)),
+        "the checkpoint's watermark"
+    );
 }
