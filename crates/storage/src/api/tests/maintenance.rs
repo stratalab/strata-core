@@ -4057,6 +4057,69 @@ fn api_idle_wake_after_the_debt_settled_queues_no_sweep() {
     );
 }
 
+/// The foreground verb wakes the worker only for the follow-ups it queued. A
+/// verb that leaves nothing pending is not an activity edge: it runs no empty
+/// round and does not re-open the quiet period whose one idle wake is spent —
+/// time alone still wakes nothing, exactly as before the verb.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_foreground_verb_with_nothing_queued_is_not_an_activity_edge() {
+    let (mut runtime, root) = open_inline_durable_runtime(
+        "maintenance-verb-no-wake",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let (_superseded, _held_view) = plant_reader_deferred_debt(&mut runtime, &root);
+    let debounce = std::time::Duration::from_millis(IDLE_WAKE_DEBOUNCE_MILLIS);
+    // Spend the quiet period's one idle wake; the reader still pins the sweep.
+    assert!(runtime.advance_maintenance_clock_for_test(debounce));
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime
+            .reclaim_ledger_for_test()
+            .expect("ledger")
+            .idle_wakes(),
+        1
+    );
+    assert!(runtime.reclaim_owed_for_test());
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0
+    );
+
+    // A flush with nothing to flush queues no follow-up.
+    let flush = MaintenanceRequest::new(MaintenanceTask::Flush, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&flush).expect("flush verb");
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0,
+        "the verb left nothing queued"
+    );
+    let started_after_verb = runtime.maintenance_status().expect("status").started();
+
+    for _ in 0..3 {
+        assert!(runtime.advance_maintenance_clock_for_test(debounce));
+        runtime.wait_background_idle_for_test();
+    }
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(
+        ledger.idle_wakes(),
+        1,
+        "a verb with nothing queued must not wake the worker and re-arm the spent period: {ledger:?}"
+    );
+    assert_eq!(
+        runtime.maintenance_status().expect("status").started(),
+        started_after_verb,
+        "no task started on the passage of time"
+    );
+}
+
 /// Close with an idle wake armed: the close completes (its own drive tries the
 /// sweep once more and yields to the held reader) and the armed wake is
 /// cancelled with the workers — it never fires into a closed runtime.
