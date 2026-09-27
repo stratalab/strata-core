@@ -729,3 +729,38 @@ fn prune_snapshots_proof_driven_modes_ignore_the_newest_window() {
     assert_snapshot_ids(report.deleted(), &[1, 2]);
     assert_snapshot_ids(report.protected(), &[3]);
 }
+
+#[test]
+fn list_snapshot_sizes_reports_each_objects_bytes_in_id_order() {
+    let backend = DurableMemoryBackend::new();
+    write_placeholder_snapshot(&backend, 3);
+    write_placeholder_snapshot(&backend, 1);
+    let service = SnapshotService::new(&backend);
+
+    let sizes = service.list_snapshot_sizes().expect("snapshot sizes");
+
+    let ids: Vec<u64> = sizes
+        .iter()
+        .map(|(snapshot, _)| snapshot.snapshot_id())
+        .collect();
+    assert_eq!(ids, [1, 3]);
+    for (snapshot, bytes) in &sizes {
+        let stored = backend
+            .read_object(snapshot.object())
+            .expect("placeholder bytes");
+        assert_eq!(*bytes, stored.len() as u64);
+    }
+}
+
+#[test]
+fn list_snapshot_sizes_drops_a_snapshot_that_vanishes_before_its_stat() {
+    // Listed, but gone by the stat (a concurrent prune): dropped, not an error.
+    let backend = ListingBackend::with_names(vec![snapshot_object(1), snapshot_object(2)]);
+    let service = SnapshotService::new(&backend);
+
+    let sizes = service
+        .list_snapshot_sizes()
+        .expect("a vanished snapshot is tolerated");
+
+    assert!(sizes.is_empty());
+}

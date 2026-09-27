@@ -6111,7 +6111,7 @@ fn global_retention_maintenance_outcome(
     outcome
 }
 
-fn table_object_retention_request(
+pub(super) fn table_object_retention_request(
     services: &crate::lifecycle::LifecycleDurableLocalServices<'_>,
     branch_id: strata_core::BranchId,
     health: &RecoveryHealth,
@@ -6412,7 +6412,7 @@ const fn branch_id_from_inherited_layer_request(
     }
 }
 
-fn manifest_error(error: crate::service::ManifestServiceError) -> LifecycleError {
+pub(super) fn manifest_error(error: crate::service::ManifestServiceError) -> LifecycleError {
     LifecycleError::lower_layer_with(
         crate::lifecycle::LifecycleLowerLayer::Service,
         "manifest service failed",
@@ -6420,7 +6420,7 @@ fn manifest_error(error: crate::service::ManifestServiceError) -> LifecycleError
     )
 }
 
-fn snapshot_error(error: crate::service::SnapshotServiceError) -> LifecycleError {
+pub(super) fn snapshot_error(error: crate::service::SnapshotServiceError) -> LifecycleError {
     LifecycleError::lower_layer_with(
         crate::lifecycle::LifecycleLowerLayer::Service,
         "snapshot service failed",
@@ -6428,7 +6428,7 @@ fn snapshot_error(error: crate::service::SnapshotServiceError) -> LifecycleError
     )
 }
 
-fn wal_error(error: crate::service::WalServiceError) -> LifecycleError {
+pub(super) fn wal_error(error: crate::service::WalServiceError) -> LifecycleError {
     LifecycleError::lower_layer_with(LifecycleLowerLayer::Service, "WAL service failed", error)
 }
 

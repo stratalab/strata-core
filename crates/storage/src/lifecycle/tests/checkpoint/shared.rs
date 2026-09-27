@@ -28,7 +28,7 @@ pub(in crate::lifecycle::tests) fn open_runtime_with_lifecycle_config(
     shell.complete_recovery(&outcome).expect("open runtime")
 }
 
-pub(super) fn open_runtime_with_wal_segment_size(
+pub(in crate::lifecycle::tests) fn open_runtime_with_wal_segment_size(
     branch: BranchId,
     backend: &'static CheckpointTestBackend,
     segment_size: u64,

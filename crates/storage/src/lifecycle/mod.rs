@@ -144,14 +144,16 @@ pub(crate) use config::{
     reason = "durable lifecycle assembly exports define the local surface for recovery slices"
 )]
 pub(crate) use durable::{
-    close_reclaim_should_continue, combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
-    parentless_content_predates_generation, record_predates_current_generation,
-    DurableBackgroundMaintenanceBuild, DurableBackgroundMaintenanceBuilt,
-    DurableBackgroundMaintenanceStep, DurableGroupApplyDone, DurableGroupApplyWork,
-    DurableGroupInFlight, DurableGroupMemberResult, LifecycleCloseReclaimBudget,
-    LifecycleDurableAssemblyFacts, LifecycleDurableLocalOpenRequest, LifecycleDurableLocalRuntime,
-    LifecycleDurableLocalServices, LifecycleDurableLocalShell, LifecycleRecoveryBootstrapReport,
-    PreparedPublishStep, TABLE_OBJECT_SWEEP_MAX_OBJECTS,
+    classify_wal_segment, close_reclaim_should_continue, combine_non_seeded_checkpoint_rows,
+    descriptor_version_anchor, parentless_content_predates_generation,
+    record_predates_current_generation, DurableBackgroundMaintenanceBuild,
+    DurableBackgroundMaintenanceBuilt, DurableBackgroundMaintenanceStep, DurableGroupApplyDone,
+    DurableGroupApplyWork, DurableGroupInFlight, DurableGroupMemberResult,
+    LifecycleCloseReclaimBudget, LifecycleDurableAssemblyFacts, LifecycleDurableLocalOpenRequest,
+    LifecycleDurableLocalRuntime, LifecycleDurableLocalServices, LifecycleDurableLocalShell,
+    LifecycleFootprintAuditFacts, LifecycleFootprintLiveFacts, LifecycleFootprintWatermark,
+    LifecycleRecoveryBootstrapReport, PreparedPublishStep, WalSegmentClass,
+    TABLE_OBJECT_SWEEP_MAX_OBJECTS,
 };
 #[allow(
     unused_imports,
@@ -224,8 +226,8 @@ pub(crate) use quarantine::{
     reason = "reclaim ledger exports define the local surface the footprint diagnostics slice consumes"
 )]
 pub(crate) use reclaim_ledger::{
-    classify_reclaim, classify_reclaim_follow_up, ReclaimEvent, ReclaimFamily, ReclaimLedger,
-    ReclaimOutcome, ReclaimTotals,
+    classify_reclaim, classify_reclaim_follow_up, ReclaimFamily, ReclaimLedger, ReclaimOutcome,
+    ReclaimPass, ReclaimTotals,
 };
 pub(crate) use reclaim_scope::{
     drain_scope_admits_upper_tier, reclaim_only_scope_after_open, ReclaimOnlyScope,

@@ -53,17 +53,18 @@ use super::{
     CommitDurabilitySummary, CommitExpectedVersion, CommitInstantsRequest, CommitSummary,
     DiagnosticsBranchCatalogReport, DiagnosticsBudgetAccuracy, DiagnosticsBudgetPool,
     DiagnosticsBudgetPressure, DiagnosticsBudgetReport, DiagnosticsBudgetUsage,
-    DiagnosticsCheckpointReport, DiagnosticsOutcome, DiagnosticsQuarantineReport,
-    DiagnosticsReadActivityReport, DiagnosticsRecoveryClass, DiagnosticsRecoveryFault,
-    DiagnosticsRecoveryFaultKind, DiagnosticsRecoveryReport, DiagnosticsRequest,
-    DiagnosticsRetentionReport, DiagnosticsScope, DiagnosticsSourceLayoutReport,
-    DiagnosticsSourceLevelTableCount, DiagnosticsStoragePressureReason,
-    DiagnosticsStoragePressureReport, DiagnosticsStoragePressureSeverity,
-    DiagnosticsTableReachabilityReport, DiagnosticsTimelineReport, DiagnosticsWalGrowthReport,
-    HistoryReadOutcome, HistoryReadRequest, ImmutableSourceScanReadOutcome,
-    ImmutableSourceScanReadRequest, MaintenanceDrainSummary, MaintenanceQueueSummary,
-    MaintenanceReasonClass, MaintenanceRequest, MaintenanceScope, MaintenanceSummary,
-    MaintenanceSummaryStatus, MaintenanceTask, MaintenanceWalGrowthStatus,
+    DiagnosticsCheckpointReport, DiagnosticsDetail, DiagnosticsFootprintReport, DiagnosticsOutcome,
+    DiagnosticsQuarantineReport, DiagnosticsReadActivityReport, DiagnosticsReclaimDeferral,
+    DiagnosticsReclaimOutcome, DiagnosticsReclaimPass, DiagnosticsReclaimReport,
+    DiagnosticsRecoveryClass, DiagnosticsRecoveryFault, DiagnosticsRecoveryFaultKind,
+    DiagnosticsRecoveryReport, DiagnosticsRequest, DiagnosticsRetentionReport, DiagnosticsScope,
+    DiagnosticsSourceLayoutReport, DiagnosticsSourceLevelTableCount,
+    DiagnosticsStoragePressureReason, DiagnosticsStoragePressureReport,
+    DiagnosticsStoragePressureSeverity, DiagnosticsTableReachabilityReport,
+    DiagnosticsTimelineReport, DiagnosticsWalGrowthReport, HistoryReadOutcome, HistoryReadRequest,
+    ImmutableSourceScanReadOutcome, ImmutableSourceScanReadRequest, MaintenanceDrainSummary,
+    MaintenanceQueueSummary, MaintenanceReasonClass, MaintenanceRequest, MaintenanceScope,
+    MaintenanceSummary, MaintenanceSummaryStatus, MaintenanceTask, MaintenanceWalGrowthStatus,
     MaintenanceWalGrowthSummary, MaintenanceWalGrowthTrigger, PointReadOutcome, PointReadRequest,
     PrefixScanReadRequest, ReadBound, ReadLimit, RecoveryHealthSummary, ScanReadOutcome,
     ScanReadRequest, StorageApiError, StorageApiErrorClass, StorageApiLowerLayer, StorageApiResult,
@@ -107,9 +108,9 @@ use data::{
 use diagnostics::{
     branch_for_diagnostics_scope, branch_generation_or_default, current_visible,
     diagnostics_mode_from_plan, diagnostics_pressure_report, diagnostics_source_layout_report,
-    durable_checkpoint_report, map_branch_catalog_report, map_branch_cleanup,
-    map_branch_descriptor, map_budget_report, map_diagnostics_recovery, map_generation_guard,
-    map_wal_growth_report, require_valid_branch_identifier,
+    durable_checkpoint_report, durable_footprint_report, map_branch_catalog_report,
+    map_branch_cleanup, map_branch_descriptor, map_budget_report, map_diagnostics_recovery,
+    map_generation_guard, map_wal_growth_report, require_valid_branch_identifier,
 };
 #[cfg(test)]
 use error::commit_error;
@@ -1076,6 +1077,8 @@ impl<'a> StorageRuntime<'a> {
                 DiagnosticsWalGrowthReport::unknown(),
                 DiagnosticsBranchCatalogReport::unknown(),
                 DiagnosticsTimelineReport::unknown(),
+                DiagnosticsFootprintReport::unknown(),
+                DiagnosticsReclaimReport::unknown(),
             )),
         }
     }
@@ -1130,6 +1133,8 @@ impl<'a> StorageRuntime<'a> {
             ),
             map_branch_catalog_report(&branches),
             timeline,
+            DiagnosticsFootprintReport::unsupported(),
+            DiagnosticsReclaimReport::unsupported(),
         ))
     }
 
@@ -1144,6 +1149,7 @@ impl<'a> StorageRuntime<'a> {
         let timeline = self.diagnostics_timeline(branch_id);
         let runtime = slot.lock();
         let table_catalog = runtime.table_catalog();
+        let (footprint, reclaim, quarantine) = durable_footprint_report(&runtime, request.detail());
         Ok(DiagnosticsOutcome::new(
             request.scope(),
             StorageRuntimeState::Open,
@@ -1178,7 +1184,7 @@ impl<'a> StorageRuntime<'a> {
                 Some(table_catalog.next_manifest_sequence()),
             ),
             DiagnosticsRetentionReport::known(None, Some(runtime.pending_releases().len()), None),
-            DiagnosticsQuarantineReport::unknown(),
+            quarantine,
             durable_checkpoint_report(&runtime),
             map_wal_growth_report(
                 runtime.open_plan().lifecycle_config().wal_growth_policy(),
@@ -1189,6 +1195,8 @@ impl<'a> StorageRuntime<'a> {
             ),
             map_branch_catalog_report(&branches),
             timeline,
+            footprint,
+            reclaim,
         ))
     }
 

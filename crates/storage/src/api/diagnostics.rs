@@ -14,9 +14,22 @@ pub enum DiagnosticsScope {
     Branch(BranchId),
 }
 
+/// Which tier of footprint facts a diagnostics request gathers
+/// (space-reclamation contract §3.5).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiagnosticsDetail {
+    /// Facts the runtime already holds; no backend I/O.
+    #[default]
+    Live,
+    /// Adds the listings and stats the reclaim runners would perform.
+    Audit,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DiagnosticsRequest {
     scope: DiagnosticsScope,
+    detail: DiagnosticsDetail,
 }
 
 #[non_exhaustive]
@@ -255,6 +268,104 @@ pub struct DiagnosticsTimelineReport {
     max_timestamp: Option<Timestamp>,
 }
 
+/// On-disk footprint by component (space-reclamation contract §3.5). The
+/// live fields come from state the runtime already holds; the audit fields
+/// are `None` unless the request asked for `DiagnosticsDetail::Audit`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticsFootprintReport {
+    state: DiagnosticsFactState,
+    detail: DiagnosticsDetail,
+    live_table_objects: Option<usize>,
+    live_table_bytes: Option<u64>,
+    wal_retained_bytes: Option<u64>,
+    wal_active_bytes: Option<u64>,
+    wal_retained_segments: Option<usize>,
+    wal_retention_watermark: Option<CommitVersion>,
+    unreferenced_objects: Option<usize>,
+    unreferenced_bytes: Option<u64>,
+    snapshot_objects: Option<usize>,
+    snapshot_bytes: Option<u64>,
+    superseded_snapshots: Option<usize>,
+    superseded_snapshot_bytes: Option<u64>,
+    wal_reclaimable_bytes: Option<u64>,
+    wal_tail_bytes: Option<u64>,
+}
+
+/// Audit-tier footprint facts as the runtime gathered them; folded into the
+/// report by `footprint_for_detail`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DiagnosticsFootprintAudit {
+    pub(crate) unreferenced_objects: Option<usize>,
+    pub(crate) unreferenced_bytes: Option<u64>,
+    pub(crate) snapshot_objects: usize,
+    pub(crate) snapshot_bytes: u64,
+    pub(crate) superseded_snapshots: usize,
+    pub(crate) superseded_snapshot_bytes: u64,
+    pub(crate) wal_reclaimable_bytes: u64,
+    pub(crate) wal_tail_bytes: u64,
+}
+
+/// How a reclaim pass ended.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticsReclaimOutcome {
+    Reclaimed,
+    Nothing,
+    Deferred,
+    Failed,
+    Canceled,
+}
+
+/// Why a reclaim pass deferred, when the runner classified it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticsReclaimDeferral {
+    ReaderPinned,
+    Referenced,
+    IncompleteProof,
+    StaleProof,
+    RecoveryHealth,
+    InventoryAdvanced,
+    UnsupportedScope,
+}
+
+/// The last recorded pass of one reclaim family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticsReclaimPass {
+    outcome: DiagnosticsReclaimOutcome,
+    deferral: Option<DiagnosticsReclaimDeferral>,
+    bytes_reclaimed: u64,
+    objects_affected: usize,
+    state_changes: usize,
+}
+
+/// The last pass of every reclaim family, as the runtime gathered them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DiagnosticsReclaimPasses {
+    pub(crate) mark: Option<DiagnosticsReclaimPass>,
+    pub(crate) sweep: Option<DiagnosticsReclaimPass>,
+    pub(crate) purge: Option<DiagnosticsReclaimPass>,
+    pub(crate) snapshot_prune: Option<DiagnosticsReclaimPass>,
+    pub(crate) wal_truncation: Option<DiagnosticsReclaimPass>,
+}
+
+/// The reclaim ledger (space-reclamation contract §3.5): the last pass of
+/// every reclaim family, running totals, and the reclaim work still queued.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticsReclaimReport {
+    state: DiagnosticsFactState,
+    last_mark: Option<DiagnosticsReclaimPass>,
+    last_sweep: Option<DiagnosticsReclaimPass>,
+    last_purge: Option<DiagnosticsReclaimPass>,
+    last_snapshot_prune: Option<DiagnosticsReclaimPass>,
+    last_wal_truncation: Option<DiagnosticsReclaimPass>,
+    total_passes: u64,
+    total_bytes_reclaimed: u64,
+    reclaimed_passes: u64,
+    deferred_passes: u64,
+    pending_reclaim_tasks: Option<usize>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticsOutcome {
     scope: DiagnosticsScope,
@@ -275,17 +386,33 @@ pub struct DiagnosticsOutcome {
     wal_growth: DiagnosticsWalGrowthReport,
     branch_catalog: DiagnosticsBranchCatalogReport,
     timeline: DiagnosticsTimelineReport,
+    footprint: DiagnosticsFootprintReport,
+    reclaim: DiagnosticsReclaimReport,
 }
 
 impl DiagnosticsRequest {
     #[must_use]
     pub const fn new(scope: DiagnosticsScope) -> Self {
-        Self { scope }
+        Self {
+            scope,
+            detail: DiagnosticsDetail::Live,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_detail(mut self, detail: DiagnosticsDetail) -> Self {
+        self.detail = detail;
+        self
     }
 
     #[must_use]
     pub const fn scope(self) -> DiagnosticsScope {
         self.scope
+    }
+
+    #[must_use]
+    pub const fn detail(self) -> DiagnosticsDetail {
+        self.detail
     }
 }
 
@@ -879,6 +1006,15 @@ impl DiagnosticsRetentionReport {
 
 impl DiagnosticsQuarantineReport {
     #[must_use]
+    pub const fn known(quarantined_objects: usize, quarantined_bytes: u64) -> Self {
+        Self {
+            state: DiagnosticsFactState::Known,
+            quarantined_objects: Some(quarantined_objects),
+            quarantined_bytes: Some(quarantined_bytes),
+        }
+    }
+
+    #[must_use]
     pub const fn unsupported() -> Self {
         Self {
             state: DiagnosticsFactState::Unsupported,
@@ -909,6 +1045,318 @@ impl DiagnosticsQuarantineReport {
     #[must_use]
     pub const fn quarantined_bytes(self) -> Option<u64> {
         self.quarantined_bytes
+    }
+}
+
+impl DiagnosticsFootprintReport {
+    const fn empty(state: DiagnosticsFactState) -> Self {
+        Self {
+            state,
+            detail: DiagnosticsDetail::Live,
+            live_table_objects: None,
+            live_table_bytes: None,
+            wal_retained_bytes: None,
+            wal_active_bytes: None,
+            wal_retained_segments: None,
+            wal_retention_watermark: None,
+            unreferenced_objects: None,
+            unreferenced_bytes: None,
+            snapshot_objects: None,
+            snapshot_bytes: None,
+            superseded_snapshots: None,
+            superseded_snapshot_bytes: None,
+            wal_reclaimable_bytes: None,
+            wal_tail_bytes: None,
+        }
+    }
+
+    /// The live tier: the WAL facts are `None` while the runtime's caches are
+    /// cold, never gathered by a listing.
+    #[must_use]
+    pub(crate) const fn known_live(
+        live_table_objects: usize,
+        live_table_bytes: u64,
+        wal_retained_bytes: Option<u64>,
+        wal_active_bytes: Option<u64>,
+        wal_retained_segments: Option<usize>,
+        wal_retention_watermark: Option<CommitVersion>,
+    ) -> Self {
+        let mut report = Self::empty(DiagnosticsFactState::Known);
+        report.live_table_objects = Some(live_table_objects);
+        report.live_table_bytes = Some(live_table_bytes);
+        report.wal_retained_bytes = wal_retained_bytes;
+        report.wal_active_bytes = wal_active_bytes;
+        report.wal_retained_segments = wal_retained_segments;
+        report.wal_retention_watermark = wal_retention_watermark;
+        report
+    }
+
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self::empty(DiagnosticsFactState::Unsupported)
+    }
+
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self::empty(DiagnosticsFactState::Unknown)
+    }
+
+    const fn with_audit(mut self, audit: DiagnosticsFootprintAudit) -> Self {
+        self.unreferenced_objects = audit.unreferenced_objects;
+        self.unreferenced_bytes = audit.unreferenced_bytes;
+        self.snapshot_objects = Some(audit.snapshot_objects);
+        self.snapshot_bytes = Some(audit.snapshot_bytes);
+        self.superseded_snapshots = Some(audit.superseded_snapshots);
+        self.superseded_snapshot_bytes = Some(audit.superseded_snapshot_bytes);
+        self.wal_reclaimable_bytes = Some(audit.wal_reclaimable_bytes);
+        self.wal_tail_bytes = Some(audit.wal_tail_bytes);
+        self
+    }
+
+    #[must_use]
+    pub const fn state(self) -> DiagnosticsFactState {
+        self.state
+    }
+
+    #[must_use]
+    pub const fn detail(self) -> DiagnosticsDetail {
+        self.detail
+    }
+
+    #[must_use]
+    pub const fn live_table_objects(self) -> Option<usize> {
+        self.live_table_objects
+    }
+
+    #[must_use]
+    pub const fn live_table_bytes(self) -> Option<u64> {
+        self.live_table_bytes
+    }
+
+    #[must_use]
+    pub const fn wal_retained_bytes(self) -> Option<u64> {
+        self.wal_retained_bytes
+    }
+
+    #[must_use]
+    pub const fn wal_active_bytes(self) -> Option<u64> {
+        self.wal_active_bytes
+    }
+
+    #[must_use]
+    pub const fn wal_retained_segments(self) -> Option<usize> {
+        self.wal_retained_segments
+    }
+
+    #[must_use]
+    pub const fn wal_retention_watermark(self) -> Option<CommitVersion> {
+        self.wal_retention_watermark
+    }
+
+    #[must_use]
+    pub const fn unreferenced_objects(self) -> Option<usize> {
+        self.unreferenced_objects
+    }
+
+    #[must_use]
+    pub const fn unreferenced_bytes(self) -> Option<u64> {
+        self.unreferenced_bytes
+    }
+
+    #[must_use]
+    pub const fn snapshot_objects(self) -> Option<usize> {
+        self.snapshot_objects
+    }
+
+    #[must_use]
+    pub const fn snapshot_bytes(self) -> Option<u64> {
+        self.snapshot_bytes
+    }
+
+    #[must_use]
+    pub const fn superseded_snapshots(self) -> Option<usize> {
+        self.superseded_snapshots
+    }
+
+    #[must_use]
+    pub const fn superseded_snapshot_bytes(self) -> Option<u64> {
+        self.superseded_snapshot_bytes
+    }
+
+    #[must_use]
+    pub const fn wal_reclaimable_bytes(self) -> Option<u64> {
+        self.wal_reclaimable_bytes
+    }
+
+    #[must_use]
+    pub const fn wal_tail_bytes(self) -> Option<u64> {
+        self.wal_tail_bytes
+    }
+}
+
+/// Space-reclamation contract §3.5: the audit facts ride the report only when
+/// the request asked for the audit tier AND the runtime gathered them.
+pub(crate) const fn footprint_for_detail(
+    detail: DiagnosticsDetail,
+    live: DiagnosticsFootprintReport,
+    audit: Option<DiagnosticsFootprintAudit>,
+) -> DiagnosticsFootprintReport {
+    let mut report = live;
+    report.detail = detail;
+    match (detail, audit) {
+        (DiagnosticsDetail::Audit, Some(audit)) => report.with_audit(audit),
+        (DiagnosticsDetail::Audit, None) | (DiagnosticsDetail::Live, _) => report,
+    }
+}
+
+impl DiagnosticsReclaimPass {
+    #[must_use]
+    pub(crate) const fn new(
+        outcome: DiagnosticsReclaimOutcome,
+        deferral: Option<DiagnosticsReclaimDeferral>,
+        bytes_reclaimed: u64,
+        objects_affected: usize,
+        state_changes: usize,
+    ) -> Self {
+        Self {
+            outcome,
+            deferral,
+            bytes_reclaimed,
+            objects_affected,
+            state_changes,
+        }
+    }
+
+    #[must_use]
+    pub const fn outcome(self) -> DiagnosticsReclaimOutcome {
+        self.outcome
+    }
+
+    #[must_use]
+    pub const fn deferral(self) -> Option<DiagnosticsReclaimDeferral> {
+        self.deferral
+    }
+
+    #[must_use]
+    pub const fn bytes_reclaimed(self) -> u64 {
+        self.bytes_reclaimed
+    }
+
+    #[must_use]
+    pub const fn objects_affected(self) -> usize {
+        self.objects_affected
+    }
+
+    #[must_use]
+    pub const fn state_changes(self) -> usize {
+        self.state_changes
+    }
+}
+
+impl DiagnosticsReclaimReport {
+    #[must_use]
+    pub(crate) const fn known(
+        last: DiagnosticsReclaimPasses,
+        total_passes: u64,
+        total_bytes_reclaimed: u64,
+        reclaimed_passes: u64,
+        deferred_passes: u64,
+        pending_reclaim_tasks: usize,
+    ) -> Self {
+        Self {
+            state: DiagnosticsFactState::Known,
+            last_mark: last.mark,
+            last_sweep: last.sweep,
+            last_purge: last.purge,
+            last_snapshot_prune: last.snapshot_prune,
+            last_wal_truncation: last.wal_truncation,
+            total_passes,
+            total_bytes_reclaimed,
+            reclaimed_passes,
+            deferred_passes,
+            pending_reclaim_tasks: Some(pending_reclaim_tasks),
+        }
+    }
+
+    const fn empty(state: DiagnosticsFactState) -> Self {
+        Self {
+            state,
+            last_mark: None,
+            last_sweep: None,
+            last_purge: None,
+            last_snapshot_prune: None,
+            last_wal_truncation: None,
+            total_passes: 0,
+            total_bytes_reclaimed: 0,
+            reclaimed_passes: 0,
+            deferred_passes: 0,
+            pending_reclaim_tasks: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self::empty(DiagnosticsFactState::Unsupported)
+    }
+
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self::empty(DiagnosticsFactState::Unknown)
+    }
+
+    #[must_use]
+    pub const fn state(self) -> DiagnosticsFactState {
+        self.state
+    }
+
+    #[must_use]
+    pub const fn last_mark(self) -> Option<DiagnosticsReclaimPass> {
+        self.last_mark
+    }
+
+    #[must_use]
+    pub const fn last_sweep(self) -> Option<DiagnosticsReclaimPass> {
+        self.last_sweep
+    }
+
+    #[must_use]
+    pub const fn last_purge(self) -> Option<DiagnosticsReclaimPass> {
+        self.last_purge
+    }
+
+    #[must_use]
+    pub const fn last_snapshot_prune(self) -> Option<DiagnosticsReclaimPass> {
+        self.last_snapshot_prune
+    }
+
+    #[must_use]
+    pub const fn last_wal_truncation(self) -> Option<DiagnosticsReclaimPass> {
+        self.last_wal_truncation
+    }
+
+    #[must_use]
+    pub const fn total_passes(self) -> u64 {
+        self.total_passes
+    }
+
+    #[must_use]
+    pub const fn total_bytes_reclaimed(self) -> u64 {
+        self.total_bytes_reclaimed
+    }
+
+    #[must_use]
+    pub const fn reclaimed_passes(self) -> u64 {
+        self.reclaimed_passes
+    }
+
+    #[must_use]
+    pub const fn deferred_passes(self) -> u64 {
+        self.deferred_passes
+    }
+
+    #[must_use]
+    pub const fn pending_reclaim_tasks(self) -> Option<usize> {
+        self.pending_reclaim_tasks
     }
 }
 
@@ -1204,6 +1652,8 @@ impl DiagnosticsOutcome {
         wal_growth: DiagnosticsWalGrowthReport,
         branch_catalog: DiagnosticsBranchCatalogReport,
         timeline: DiagnosticsTimelineReport,
+        footprint: DiagnosticsFootprintReport,
+        reclaim: DiagnosticsReclaimReport,
     ) -> Self {
         Self {
             scope,
@@ -1228,6 +1678,8 @@ impl DiagnosticsOutcome {
             wal_growth,
             branch_catalog,
             timeline,
+            footprint,
+            reclaim,
         }
     }
 
@@ -1319,5 +1771,15 @@ impl DiagnosticsOutcome {
     #[must_use]
     pub const fn timeline(&self) -> DiagnosticsTimelineReport {
         self.timeline
+    }
+
+    #[must_use]
+    pub const fn footprint(&self) -> DiagnosticsFootprintReport {
+        self.footprint
+    }
+
+    #[must_use]
+    pub const fn reclaim(&self) -> DiagnosticsReclaimReport {
+        self.reclaim
     }
 }

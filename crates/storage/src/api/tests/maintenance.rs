@@ -105,7 +105,7 @@ fn fork_branch(runtime: &mut StorageRuntime<'_>, child: BranchId) {
 }
 
 #[cfg(feature = "localfs")]
-fn stage_quarantine_object(
+pub(super) fn stage_quarantine_object(
     backend: &StorageBackend,
     branch_id: BranchId,
     table_id: &str,

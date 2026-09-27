@@ -18,6 +18,7 @@ mod compaction;
 mod durable;
 mod flush;
 mod flush_watermark;
+mod footprint;
 mod maintenance;
 mod quarantine;
 mod recovery;

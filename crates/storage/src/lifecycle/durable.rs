@@ -35,10 +35,15 @@ use strata_core::{BranchId, CommitVersion};
 
 mod bootstrap;
 mod close;
+mod footprint;
 mod inflight;
 mod maintenance;
 
 pub(crate) use close::{close_reclaim_should_continue, LifecycleCloseReclaimBudget};
+pub(crate) use footprint::{
+    classify_wal_segment, LifecycleFootprintAuditFacts, LifecycleFootprintLiveFacts,
+    LifecycleFootprintWatermark, WalSegmentClass,
+};
 pub(crate) use inflight::{InFlightOutputsGuard, InFlightTableOutputs};
 pub(crate) use maintenance::TABLE_OBJECT_SWEEP_MAX_OBJECTS;
 
