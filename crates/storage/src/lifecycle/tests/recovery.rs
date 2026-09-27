@@ -2956,6 +2956,19 @@ fn orphan_replay_filter_truth_table() {
         assert_eq!(holed.admits(branch, v(version)), expected, "v{version}");
     }
 
+    // The replay-start boundary: a non-orphaned record AT the replay start is
+    // already covered by the snapshot and skips; the next one applies.
+    let mut boundary = OrphanReplayFilter::new(&orphaned, v(4));
+    for (branch, version, expected) in [
+        (orphan, 1, true),
+        (orphan, 2, true),
+        (orphan, 3, true),
+        (seeded, 4, false),
+        (seeded, 5, true),
+    ] {
+        assert_eq!(boundary.admits(branch, v(version)), expected, "v{version}");
+    }
+
     // A truncated log (first record above version 1): the orphan applies
     // nothing at all.
     let mut truncated = OrphanReplayFilter::new(&orphaned, v(4));
