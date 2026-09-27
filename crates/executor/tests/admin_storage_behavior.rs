@@ -62,9 +62,13 @@ fn storage_reports_the_live_tier_without_audit_facts() {
     // still hold that task here; the count is known either way.
     assert!(live.reclaim.pending_reclaim_tasks.is_some());
 
-    let Output::Storage(scoped) = storage(&mut executor, Some("default"), false) else {
+    let Output::Storage(mut scoped) = storage(&mut executor, Some("default"), false) else {
         panic!("storage returns the storage output");
     };
+    // The footprint facts are database-global. The reclaim ledger is left out
+    // of the comparison: the background worker may run the open's wake
+    // between the two reads, and the ledger legitimately moves when it does.
+    scoped.reclaim = live.reclaim;
     assert_eq!(scoped, live, "the facts are database-global");
 }
 
