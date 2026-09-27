@@ -636,3 +636,96 @@ fn snapshot_raw(component: &str) -> String {
 fn family_object(family: ObjectFamily, component: &str) -> ObjectName {
     object_name(format!("{}/{}", family.as_str(), component))
 }
+
+// Space-reclamation contract §3.4 (slice 5, #3592): the proof-driven modes.
+
+#[test]
+fn prune_snapshots_with_mode_superseded_deletes_below_the_live_id_only() {
+    use super::SnapshotPruneMode;
+
+    let backend = DurableMemoryBackend::new();
+    for snapshot_id in [1, 2, 3, 5] {
+        write_placeholder_snapshot(&backend, snapshot_id);
+    }
+    let service = SnapshotService::new(&backend);
+
+    let report = service
+        .prune_snapshots_with_mode(Some(3), SnapshotPruneMode::Superseded, 1)
+        .expect("prune snapshots");
+
+    assert_snapshot_ids(report.deleted(), &[1, 2]);
+    assert_snapshot_ids(report.protected(), &[3, 5]);
+    assert!(report.failed().is_empty());
+    assert_missing(&backend, 1);
+    assert_missing(&backend, 2);
+    assert_present(&backend, 3);
+    assert_present(&backend, 5);
+}
+
+#[test]
+fn prune_snapshots_with_mode_reconcile_deletes_everything_but_the_attested_id() {
+    use super::SnapshotPruneMode;
+
+    let backend = DurableMemoryBackend::new();
+    for snapshot_id in [1, 2, 3, 5] {
+        write_placeholder_snapshot(&backend, snapshot_id);
+    }
+    let service = SnapshotService::new(&backend);
+
+    let report = service
+        .prune_snapshots_with_mode(Some(3), SnapshotPruneMode::ReconcileToAttested, 1)
+        .expect("prune snapshots");
+
+    assert_snapshot_ids(report.deleted(), &[1, 2, 5]);
+    assert_snapshot_ids(report.protected(), &[3]);
+    assert!(report.failed().is_empty());
+    for snapshot_id in [1, 2, 5] {
+        assert_missing(&backend, snapshot_id);
+    }
+    assert_present(&backend, 3);
+}
+
+#[test]
+fn prune_snapshots_proof_driven_modes_protect_everything_without_a_live_id() {
+    use super::SnapshotPruneMode;
+
+    for mode in [
+        SnapshotPruneMode::Superseded,
+        SnapshotPruneMode::ReconcileToAttested,
+    ] {
+        let backend = DurableMemoryBackend::new();
+        for snapshot_id in [1, 2, 3] {
+            write_placeholder_snapshot(&backend, snapshot_id);
+        }
+        let service = SnapshotService::new(&backend);
+
+        let report = service
+            .prune_snapshots_with_mode(None, mode, 1)
+            .expect("prune snapshots");
+
+        assert!(report.deleted().is_empty(), "{mode:?}");
+        assert_snapshot_ids(report.protected(), &[1, 2, 3]);
+        for snapshot_id in [1, 2, 3] {
+            assert_present(&backend, snapshot_id);
+        }
+    }
+}
+
+#[test]
+fn prune_snapshots_proof_driven_modes_ignore_the_newest_window() {
+    use super::SnapshotPruneMode;
+
+    let backend = DurableMemoryBackend::new();
+    for snapshot_id in [1, 2, 3] {
+        write_placeholder_snapshot(&backend, snapshot_id);
+    }
+    let service = SnapshotService::new(&backend);
+
+    // A window wide enough to keep everything under the newest-window verb.
+    let report = service
+        .prune_snapshots_with_mode(Some(3), SnapshotPruneMode::Superseded, 10)
+        .expect("prune snapshots");
+
+    assert_snapshot_ids(report.deleted(), &[1, 2]);
+    assert_snapshot_ids(report.protected(), &[3]);
+}

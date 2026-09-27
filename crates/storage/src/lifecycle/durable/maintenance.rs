@@ -1083,6 +1083,19 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         result.is_ok()
     }
 
+    /// Space-reclamation contract §3.4 (slice 5): after a completed checkpoint
+    /// every earlier snapshot object is dead — queue the proof-driven prune.
+    /// Best-effort like every post-publish enqueue: a refusal only defers the
+    /// reclaim to the next checkpoint or the next open's reconcile.
+    pub(super) fn schedule_superseded_snapshot_prune(&mut self) {
+        // Rationale: a refused enqueue (queue full, closing) leaves the
+        // superseded objects for the next completed checkpoint or the next
+        // open's `ReconcileToAttested` prune; nothing else depends on it.
+        let _ = self.enqueue_maintenance(MaintenanceTaskRequest::snapshot_pruning_with_mode(
+            crate::service::SnapshotPruneMode::Superseded,
+        ));
+    }
+
     #[allow(
         dead_code,
         reason = "durable maintenance dispatch uses this concrete checkpoint hook"
@@ -1112,6 +1125,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         // any, reaches the reclaim ledger through the inline entry point.
         self.maintenance
             .record_reclaim(&outcome.maintenance_outcome());
+        if outcome.status() == crate::lifecycle::LifecycleCheckpointStatus::Completed {
+            self.schedule_superseded_snapshot_prune();
+        }
         Ok(outcome)
     }
 
@@ -1415,8 +1431,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         let health = self.current_recovery_health.clone();
         if recovery_health_prevents_listing(request, &health) {
             let proof = retention_proof_from_assembly(request, &self.services, &health);
-            let pruning =
-                LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())?;
+            let pruning = LifecycleSnapshotPruningRequest::for_request(proof, request)?;
             let outcome = prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
             self.maintenance
                 .record_reclaim(&outcome.maintenance_outcome());
@@ -1434,8 +1449,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             .map_err(snapshot_error)?
             .len();
         let proof = build_retention_proof(request, manifest.as_ref(), &health, snapshot_count);
-        let pruning =
-            LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())?;
+        let pruning = LifecycleSnapshotPruningRequest::for_request(proof, request)?;
         // Inline verb: not a queued task, so record the prune here.
         let outcome = prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
         self.maintenance
@@ -1986,8 +2000,11 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         });
         let delta_cap_deferral = runner.delta_cap_deferral;
         // A completed checkpoint advanced the manifest snapshot watermark.
-        if matches!(outcome, Ok(Some(_))) {
+        if let Ok(Some(completed)) = &outcome {
             self.invalidate_retention_watermark_cache();
+            if completed.status() == MaintenanceOutcomeStatus::Completed {
+                self.schedule_superseded_snapshot_prune();
+            }
         }
         if let Some((visible_version, options)) = delta_cap_deferral {
             self.chain_flush_and_checkpoint_after_delta_cap(visible_version, options);
@@ -2261,6 +2278,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                                 visible_version,
                                 options,
                             );
+                        }
+                        if outcome.status() == LifecycleCheckpointStatus::Completed {
+                            self.schedule_superseded_snapshot_prune();
                         }
                         self.maintenance
                             .finish_started(task, outcome.maintenance_outcome(), false)
@@ -5600,16 +5620,16 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
             let proof = retention_proof_from_assembly(&request, self.services, &self.health);
             return match request.scope() {
                 LifecycleRetentionScope::SnapshotObjects => {
-                    let pruning = LifecycleSnapshotPruningRequest::new(
-                        proof,
-                        request.retain_newest_snapshots(),
-                    )?;
+                    let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
                     Ok(
                         prune_snapshots_with_proof(self.services.snapshot(), &pruning)?
                             .maintenance_outcome(),
                     )
                 }
-                _ => Ok(append_released_table_names(
+                LifecycleRetentionScope::Global
+                | LifecycleRetentionScope::TableObjects { .. }
+                | LifecycleRetentionScope::WalObjects
+                | LifecycleRetentionScope::QuarantineObjects => Ok(append_released_table_names(
                     retention_outcome_for_scope(&request, proof, &[])?.maintenance_outcome(),
                     &drained,
                 )),
@@ -5630,18 +5650,15 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
             build_retention_proof(&request, manifest.as_ref(), &self.health, snapshot_count);
         match request.scope() {
             LifecycleRetentionScope::SnapshotObjects => {
-                let pruning =
-                    LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())?;
+                let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
                 Ok(
                     prune_snapshots_with_proof(self.services.snapshot(), &pruning)?
                         .maintenance_outcome(),
                 )
             }
             LifecycleRetentionScope::Global => {
-                let pruning = LifecycleSnapshotPruningRequest::new(
-                    proof.clone(),
-                    request.retain_newest_snapshots(),
-                )?;
+                let pruning =
+                    LifecycleSnapshotPruningRequest::for_request(proof.clone(), &request)?;
                 let snapshot_outcome =
                     prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
                 let retention_outcome = retention_outcome_for_delegated_families(proof)?;

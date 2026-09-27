@@ -118,6 +118,37 @@ impl SnapshotDeleteReport {
     }
 }
 
+/// Space-reclamation contract §3.4 (slice 5, #3592): which snapshot objects a
+/// prune deletes. Every mode protects the manifest-attested (live) snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SnapshotPruneMode {
+    /// The explicit caller verb: keep the newest N objects (and the live one).
+    RetainNewest,
+    /// After a completed checkpoint: delete every object below the live id.
+    /// An id at or above the live id is never touched — it may be a publish in
+    /// flight whose manifest re-point has not landed yet.
+    Superseded,
+    /// Queued at open: delete every object other than the attested one,
+    /// reclaiming a crash orphan (a newer id the manifest never attested) as
+    /// well as the superseded ones. Safe against a checkpoint in the same
+    /// session because a checkpoint writes its snapshot and re-points the
+    /// manifest under the runtime lock the prune also runs under — an
+    /// unattested object is never a publish in flight, only a crash's leftover.
+    ReconcileToAttested,
+}
+
+/// `Superseded`: an object strictly below the live id is dead — the live
+/// snapshot supersedes it and recovery loads only the attested id.
+pub(crate) const fn superseded_snapshot(snapshot_id: u64, live_snapshot_id: u64) -> bool {
+    snapshot_id < live_snapshot_id
+}
+
+/// `ReconcileToAttested`: any object other than the attested one is dead once
+/// no publish can be in flight (the open reclaim window).
+pub(crate) const fn reconcilable_orphan(snapshot_id: u64, attested_snapshot_id: u64) -> bool {
+    snapshot_id != attested_snapshot_id
+}
+
 impl SnapshotService<'_> {
     pub(crate) fn list_snapshots(&self) -> SnapshotServiceResult<Vec<SnapshotObject>> {
         list_snapshot_objects(&self.backend)
@@ -127,9 +158,24 @@ impl SnapshotService<'_> {
         Ok(self.list_snapshots()?.into_iter().next_back())
     }
 
+    /// The explicit caller verb: newest-N with live protection. The mode-aware
+    /// entry `prune_snapshots_with_mode` is the single implementation.
     pub(crate) fn prune_snapshots(
         &self,
         live_snapshot_id: Option<u64>,
+        retain_newest: usize,
+    ) -> SnapshotServiceResult<SnapshotDeleteReport> {
+        self.prune_snapshots_with_mode(
+            live_snapshot_id,
+            SnapshotPruneMode::RetainNewest,
+            retain_newest,
+        )
+    }
+
+    pub(crate) fn prune_snapshots_with_mode(
+        &self,
+        live_snapshot_id: Option<u64>,
+        mode: SnapshotPruneMode,
         retain_newest: usize,
     ) -> SnapshotServiceResult<SnapshotDeleteReport> {
         if let Some(snapshot_id) = live_snapshot_id {
@@ -143,9 +189,19 @@ impl SnapshotService<'_> {
         let mut report = SnapshotDeleteReport::default();
 
         for (index, snapshot) in snapshots.into_iter().enumerate() {
-            let newest_retained = index >= retain_start;
             let live = live_snapshot_id == Some(snapshot.snapshot_id());
-            if newest_retained || live {
+            // The newest-window verb keeps its shape with or without a live id.
+            // The proof-driven modes can prove nothing dead without one, so they
+            // protect everything then (the lifecycle proof never admits that
+            // shape, but the service must not depend on it).
+            let protected = match mode {
+                SnapshotPruneMode::RetainNewest => live || index >= retain_start,
+                SnapshotPruneMode::Superseded => live_snapshot_id
+                    .is_none_or(|live_id| !superseded_snapshot(snapshot.snapshot_id(), live_id)),
+                SnapshotPruneMode::ReconcileToAttested => live_snapshot_id
+                    .is_none_or(|attested| !reconcilable_orphan(snapshot.snapshot_id(), attested)),
+            };
+            if protected {
                 report.record_protected(snapshot);
                 continue;
             }

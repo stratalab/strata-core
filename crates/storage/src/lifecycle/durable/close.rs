@@ -596,16 +596,18 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
             let proof = retention_proof_from_assembly(&request, self.services, &self.health);
             return match request.scope() {
                 LifecycleRetentionScope::SnapshotObjects => {
-                    let pruning = LifecycleSnapshotPruningRequest::new(
-                        proof,
-                        request.retain_newest_snapshots(),
-                    )?;
+                    let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
                     Ok(
                         prune_snapshots_with_proof(self.services.snapshot(), &pruning)?
                             .maintenance_outcome(),
                     )
                 }
-                _ => Ok(retention_outcome_for_scope(&request, proof, &[])?.maintenance_outcome()),
+                LifecycleRetentionScope::Global
+                | LifecycleRetentionScope::TableObjects { .. }
+                | LifecycleRetentionScope::WalObjects
+                | LifecycleRetentionScope::QuarantineObjects => {
+                    Ok(retention_outcome_for_scope(&request, proof, &[])?.maintenance_outcome())
+                }
             };
         }
 
@@ -624,18 +626,15 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
             build_retention_proof(&request, manifest.as_ref(), &self.health, snapshot_count);
         match request.scope() {
             LifecycleRetentionScope::SnapshotObjects => {
-                let pruning =
-                    LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())?;
+                let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
                 Ok(
                     prune_snapshots_with_proof(self.services.snapshot(), &pruning)?
                         .maintenance_outcome(),
                 )
             }
             LifecycleRetentionScope::Global => {
-                let pruning = LifecycleSnapshotPruningRequest::new(
-                    proof.clone(),
-                    request.retain_newest_snapshots(),
-                )?;
+                let pruning =
+                    LifecycleSnapshotPruningRequest::for_request(proof.clone(), &request)?;
                 let snapshot_outcome =
                     prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
                 let retention_outcome = retention_outcome_for_delegated_families(proof)?;

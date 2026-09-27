@@ -85,6 +85,10 @@ pub(crate) struct MaintenanceCheckpointOptions {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MaintenanceRetentionOptions {
     retain_newest_snapshots: usize,
+    /// Space-reclamation contract §3.4 (slice 5): which snapshot objects a
+    /// pruning task deletes. Part of the coalesce key, so a proof-driven
+    /// prune never merges into a queued newest-window one or vice versa.
+    snapshot_prune_mode: crate::service::SnapshotPruneMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -491,6 +495,16 @@ impl MaintenanceTaskRequest {
         request
     }
 
+    /// Space-reclamation contract §3.4 (slice 5): a proof-driven snapshot
+    /// prune — `Superseded` after a completed checkpoint, `ReconcileToAttested`
+    /// in the open reclaim window. The newest-window verb is `snapshot_pruning`.
+    pub(crate) fn snapshot_pruning_with_mode(mode: crate::service::SnapshotPruneMode) -> Self {
+        let mut request = Self::snapshot_pruning(1);
+        request.retention_options =
+            Some(MaintenanceRetentionOptions::new(1).with_snapshot_prune_mode(mode));
+        request
+    }
+
     pub(crate) fn retention(retain_newest_snapshots: usize) -> Self {
         let mut request = Self::new(
             MaintenanceTaskKind::Retention,
@@ -760,11 +774,26 @@ impl MaintenanceRetentionOptions {
     pub(crate) const fn new(retain_newest_snapshots: usize) -> Self {
         Self {
             retain_newest_snapshots,
+            snapshot_prune_mode: crate::service::SnapshotPruneMode::RetainNewest,
         }
+    }
+
+    /// Space-reclamation contract §3.4 (slice 5): a proof-driven snapshot
+    /// prune mode instead of the newest-window verb.
+    pub(crate) const fn with_snapshot_prune_mode(
+        mut self,
+        mode: crate::service::SnapshotPruneMode,
+    ) -> Self {
+        self.snapshot_prune_mode = mode;
+        self
     }
 
     pub(crate) const fn retain_newest_snapshots(self) -> usize {
         self.retain_newest_snapshots
+    }
+
+    pub(crate) const fn snapshot_prune_mode(self) -> crate::service::SnapshotPruneMode {
+        self.snapshot_prune_mode
     }
 }
 

@@ -297,7 +297,7 @@ impl CheckpointTestBackend {
         self.fail_delete.store(true, Ordering::SeqCst);
     }
 
-    pub(super) fn fail_delete_on_call(&self, call: usize) {
+    pub(in crate::lifecycle::tests) fn fail_delete_on_call(&self, call: usize) {
         self.fail_delete_call.store(call, Ordering::SeqCst);
     }
 

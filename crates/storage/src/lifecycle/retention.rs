@@ -14,8 +14,8 @@ use super::{
 use crate::format::DatabaseManifest;
 use crate::object::ObjectName;
 use crate::service::{
-    SnapshotDeleteFailure, SnapshotDeleteOutcome, SnapshotDeleteReport, SnapshotObject,
-    SnapshotService, SnapshotServiceError,
+    reconcilable_orphan, superseded_snapshot, SnapshotDeleteFailure, SnapshotDeleteOutcome,
+    SnapshotDeleteReport, SnapshotObject, SnapshotPruneMode, SnapshotService, SnapshotServiceError,
 };
 use strata_core::{BranchId, CommitVersion};
 
@@ -34,6 +34,10 @@ pub(crate) struct LifecycleRetentionRequest {
     scope: LifecycleRetentionScope,
     retain_newest_snapshots: usize,
     allow_telemetry_degraded_recovery: bool,
+    /// Space-reclamation contract §3.4 (slice 5): which snapshot objects the
+    /// snapshot family prunes; the newest window unless a proof-driven mode
+    /// was requested.
+    snapshot_prune_mode: SnapshotPruneMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,6 +118,15 @@ pub(crate) enum LifecycleRetentionDecisionReason {
     LiveManifestSnapshot,
     NewestSnapshotWindow,
     SnapshotPruneCandidate,
+    /// Space-reclamation contract §3.4 (slice 5): below the live id after a
+    /// completed checkpoint.
+    SupersededSnapshot,
+    /// Above the live id: possibly a publish in flight, never touched by the
+    /// `Superseded` mode.
+    AboveLiveSnapshot,
+    /// Not the attested id, in the open reclaim window: a crash orphan or a
+    /// superseded object, reclaimed by `ReconcileToAttested`.
+    NonAttestedSnapshot,
     ReachableTable,
     ReachableInheritedTable,
     ReachableMaterializedTable,
@@ -154,6 +167,7 @@ pub(crate) struct LifecycleSnapshotPruningRequest {
     live_snapshot_id: Option<u64>,
     retain_newest: usize,
     proof: LifecycleRetentionProof,
+    snapshot_prune_mode: SnapshotPruneMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,9 +186,21 @@ impl LifecycleRetentionRequest {
             scope,
             retain_newest_snapshots,
             allow_telemetry_degraded_recovery: true,
+            snapshot_prune_mode: SnapshotPruneMode::RetainNewest,
         };
         request.validate();
         request
+    }
+
+    /// Space-reclamation contract §3.4 (slice 5): prune the snapshot family
+    /// by a proof-driven mode instead of the newest window.
+    pub(crate) const fn with_snapshot_prune_mode(mut self, mode: SnapshotPruneMode) -> Self {
+        self.snapshot_prune_mode = mode;
+        self
+    }
+
+    pub(crate) const fn snapshot_prune_mode(&self) -> SnapshotPruneMode {
+        self.snapshot_prune_mode
     }
 
     pub(crate) fn snapshot_pruning(retain_newest_snapshots: usize) -> Self {
@@ -483,17 +509,44 @@ impl LifecycleRetentionOutcome {
 }
 
 impl LifecycleSnapshotPruningRequest {
+    /// The newest-window verb; the mode-aware entry is `for_request`.
     pub(crate) fn new(
         proof: LifecycleRetentionProof,
         retain_newest: usize,
+    ) -> LifecycleResult<Self> {
+        Self::with_mode(proof, retain_newest, SnapshotPruneMode::RetainNewest)
+    }
+
+    /// Space-reclamation contract §3.4 (slice 5): the pruning request a
+    /// retention request implies — its newest window AND its prune mode.
+    pub(crate) fn for_request(
+        proof: LifecycleRetentionProof,
+        request: &LifecycleRetentionRequest,
+    ) -> LifecycleResult<Self> {
+        Self::with_mode(
+            proof,
+            request.retain_newest_snapshots(),
+            request.snapshot_prune_mode(),
+        )
+    }
+
+    fn with_mode(
+        proof: LifecycleRetentionProof,
+        retain_newest: usize,
+        snapshot_prune_mode: SnapshotPruneMode,
     ) -> LifecycleResult<Self> {
         let request = Self {
             live_snapshot_id: proof.live_snapshot_id(),
             retain_newest,
             proof,
+            snapshot_prune_mode,
         };
         request.validate()?;
         Ok(request)
+    }
+
+    pub(crate) const fn snapshot_prune_mode(&self) -> SnapshotPruneMode {
+        self.snapshot_prune_mode
     }
 
     fn validate(&self) -> LifecycleResult<()> {
@@ -742,6 +795,7 @@ pub(crate) fn retention_outcome_for_scope(
                 &proof,
                 snapshots,
                 request.retain_newest_snapshots(),
+                request.snapshot_prune_mode(),
             ));
             decisions.extend(delegated_family_decisions([
                 (
@@ -759,6 +813,7 @@ pub(crate) fn retention_outcome_for_scope(
                 &proof,
                 snapshots,
                 request.retain_newest_snapshots(),
+                request.snapshot_prune_mode(),
             ));
         }
         LifecycleRetentionScope::WalObjects => {
@@ -807,8 +862,9 @@ pub(crate) fn prune_snapshots_with_proof(
         }
     }
     let report = snapshots
-        .prune_snapshots(
+        .prune_snapshots_with_mode(
             request.live_snapshot_id(),
+            request.snapshot_prune_mode(),
             request.effective_retain_newest(),
         )
         .map_err(snapshot_error)?;
@@ -830,7 +886,8 @@ pub(crate) fn retention_request_from_maintenance_task(
     match task.kind() {
         MaintenanceTaskKind::SnapshotPruning => Ok(LifecycleRetentionRequest::snapshot_pruning(
             options.retain_newest_snapshots(),
-        )),
+        )
+        .with_snapshot_prune_mode(options.snapshot_prune_mode())),
         MaintenanceTaskKind::Retention => match task.scope() {
             crate::lifecycle::MaintenanceTaskScope::Branch(branch_id) => {
                 Ok(LifecycleRetentionRequest::new(
@@ -921,6 +978,7 @@ fn snapshot_retention_decisions(
     proof: &LifecycleRetentionProof,
     snapshots: &[SnapshotObject],
     retain_newest: usize,
+    mode: SnapshotPruneMode,
 ) -> Vec<LifecycleRetentionDecisionRecord> {
     if !proof.is_complete() {
         return Vec::new();
@@ -934,26 +992,67 @@ fn snapshot_retention_decisions(
         .enumerate()
         .map(|(index, snapshot)| {
             let live = proof.live_snapshot_id() == Some(snapshot.snapshot_id());
-            let newest_retained = index >= retain_start;
             let (decision, reason) = if live {
                 (
                     RetentionDecision::Retain,
                     LifecycleRetentionDecisionReason::LiveManifestSnapshot,
                 )
-            } else if newest_retained {
-                (
-                    RetentionDecision::Retain,
-                    LifecycleRetentionDecisionReason::NewestSnapshotWindow,
-                )
             } else {
-                (
-                    RetentionDecision::PruneCandidate,
-                    LifecycleRetentionDecisionReason::SnapshotPruneCandidate,
-                )
+                snapshot_mode_decision(mode, snapshot.snapshot_id(), proof.live_snapshot_id(), {
+                    index >= retain_start
+                })
             };
             LifecycleRetentionDecisionRecord::snapshot(snapshot.object().clone(), decision, reason)
         })
         .collect()
+}
+
+/// Space-reclamation contract §3.4 (slice 5): the per-object verdict of each
+/// prune mode for a non-live snapshot. `RetainNewest` keeps the newest window;
+/// `Superseded` prunes below the live id and keeps anything at or above it;
+/// `ReconcileToAttested` prunes everything that is not the attested id.
+/// Without a live id the proof-driven modes can prove nothing dead (the proof
+/// is incomplete) and retain everything.
+pub(super) fn snapshot_mode_decision(
+    mode: SnapshotPruneMode,
+    snapshot_id: u64,
+    live_snapshot_id: Option<u64>,
+    newest_retained: bool,
+) -> (RetentionDecision, LifecycleRetentionDecisionReason) {
+    match (mode, live_snapshot_id) {
+        (SnapshotPruneMode::RetainNewest, _) if newest_retained => (
+            RetentionDecision::Retain,
+            LifecycleRetentionDecisionReason::NewestSnapshotWindow,
+        ),
+        (SnapshotPruneMode::RetainNewest, _) => (
+            RetentionDecision::PruneCandidate,
+            LifecycleRetentionDecisionReason::SnapshotPruneCandidate,
+        ),
+        (SnapshotPruneMode::Superseded | SnapshotPruneMode::ReconcileToAttested, None) => (
+            RetentionDecision::Retain,
+            LifecycleRetentionDecisionReason::ProofIncomplete,
+        ),
+        (SnapshotPruneMode::Superseded, Some(live)) if superseded_snapshot(snapshot_id, live) => (
+            RetentionDecision::PruneCandidate,
+            LifecycleRetentionDecisionReason::SupersededSnapshot,
+        ),
+        (SnapshotPruneMode::Superseded, Some(_)) => (
+            RetentionDecision::Retain,
+            LifecycleRetentionDecisionReason::AboveLiveSnapshot,
+        ),
+        (SnapshotPruneMode::ReconcileToAttested, Some(attested))
+            if reconcilable_orphan(snapshot_id, attested) =>
+        {
+            (
+                RetentionDecision::PruneCandidate,
+                LifecycleRetentionDecisionReason::NonAttestedSnapshot,
+            )
+        }
+        (SnapshotPruneMode::ReconcileToAttested, Some(_)) => (
+            RetentionDecision::Retain,
+            LifecycleRetentionDecisionReason::LiveManifestSnapshot,
+        ),
+    }
 }
 
 fn delegated_family_decisions<const N: usize>(

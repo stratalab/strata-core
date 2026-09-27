@@ -1858,6 +1858,141 @@ fn api_snapshot_pruning_preserves_required_snapshot() {
     }
 }
 
+#[cfg(feature = "localfs")]
+fn snapshot_object_ids(backend: &StorageBackend) -> Vec<u64> {
+    crate::service::SnapshotService::new(backend.as_backend())
+        .list_snapshots()
+        .expect("list snapshots")
+        .iter()
+        .map(crate::service::SnapshotObject::snapshot_id)
+        .collect()
+}
+
+#[cfg(feature = "localfs")]
+fn attested_snapshot_id(backend: &StorageBackend) -> Option<u64> {
+    crate::service::DatabaseManifestService::new(backend.as_backend())
+        .load_required()
+        .expect("database manifest")
+        .snapshot_id()
+}
+
+#[cfg(feature = "localfs")]
+fn checkpoint_completed(runtime: &mut StorageRuntime<'static>) {
+    let outcome = runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Checkpoint,
+            MaintenanceScope::Global,
+        ))
+        .expect("checkpoint");
+    assert_eq!(outcome.status(), MaintenanceSummaryStatus::Completed);
+}
+
+/// Space-reclamation contract §3.4 (slice 5, #3592): every completed
+/// checkpoint chains a superseded-snapshot prune, so a session that
+/// checkpoints N times owns one snapshot object once the queue drains.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_completed_checkpoints_chain_a_prune_that_leaves_one_snapshot() {
+    let (backend, mut runtime) = open_durable_runtime_with_backend(
+        "snapshot-prune-chain",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_maintenance_scheduling_policy(
+                StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+            ),
+    );
+    for key in [b"chain-a" as &[u8], b"chain-b", b"chain-c"] {
+        runtime.commit(&put_batch(key, b"value")).expect("commit");
+        checkpoint_completed(&mut runtime);
+    }
+    let attested = attested_snapshot_id(backend).expect("attested snapshot");
+    assert_eq!(
+        snapshot_object_ids(backend).len(),
+        3,
+        "enqueue-only scheduling leaves the chained prunes queued"
+    );
+
+    let drain = runtime.drain_maintenance().expect("drain");
+
+    assert!(drain.outcomes().iter().any(|outcome| {
+        outcome.task() == MaintenanceTask::SnapshotPruning
+            && outcome.status() == MaintenanceSummaryStatus::Completed
+    }));
+    assert_eq!(snapshot_object_ids(backend), vec![attested]);
+    runtime.close().expect("close");
+}
+
+/// Space-reclamation contract §3.4 (slice 5, #3592): the open reclaim window
+/// reconciles the snapshot family to the manifest-attested id — superseded
+/// objects a prior session never pruned AND a crash orphan above it.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_reopen_reconciles_snapshots_to_the_attested_id() {
+    let root = temp_dir_for_api_test("snapshot-prune-reopen");
+    let backend: &'static StorageBackend =
+        crate::testkit::leak_static(StorageBackend::local_fs(root));
+    let options = || {
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_maintenance_scheduling_policy(
+                StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+            )
+    };
+    {
+        let mut runtime = StorageRuntime::open_with_backend(options(), backend)
+            .expect("open")
+            .into_runtime();
+        for key in [b"reopen-a" as &[u8], b"reopen-b"] {
+            runtime.commit(&put_batch(key, b"value")).expect("commit");
+            checkpoint_completed(&mut runtime);
+        }
+        runtime.close().expect("close");
+    }
+    let attested = attested_snapshot_id(backend).expect("attested snapshot");
+    // A crash orphan: a snapshot object the manifest never attested.
+    let orphan_id = attested + 7;
+    let live_object = crate::layout::ObjectLayout::snapshot(attested).expect("live object");
+    let orphan_object = crate::layout::ObjectLayout::snapshot(orphan_id).expect("orphan object");
+    let live_bytes = backend
+        .as_backend()
+        .read_object(&live_object)
+        .expect("live snapshot bytes");
+    backend
+        .as_backend()
+        .write_object(&orphan_object, &live_bytes)
+        .expect("plant orphan");
+    let before_open = snapshot_object_ids(backend);
+    assert!(before_open.contains(&orphan_id));
+    assert!(before_open.len() >= 2);
+
+    let mut runtime = StorageRuntime::open_with_backend(options(), backend)
+        .expect("reopen")
+        .into_runtime();
+
+    assert_eq!(
+        snapshot_object_ids(backend),
+        before_open,
+        "open reclaims nothing inline"
+    );
+    let drain = runtime.drain_maintenance().expect("drain");
+    assert!(drain.outcomes().iter().any(|outcome| {
+        outcome.task() == MaintenanceTask::SnapshotPruning
+            && outcome.status() == MaintenanceSummaryStatus::Completed
+    }));
+    assert_eq!(snapshot_object_ids(backend), vec![attested]);
+    assert_eq!(attested_snapshot_id(backend), Some(attested));
+    let value = runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"reopen-b"),
+            ReadBound::Latest,
+        ))
+        .expect("read")
+        .row()
+        .map(|row| row.value().expect("put row").as_bytes().to_vec());
+    assert_eq!(value, Some(b"value".to_vec()));
+    runtime.close().expect("close");
+}
+
 #[test]
 fn api_cache_runtime_has_no_reclaim_ledger() {
     // A cache runtime owns no durable objects to reclaim, so it exposes no

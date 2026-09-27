@@ -991,6 +991,20 @@ fn drain_wal_growth_maintenance(
             outcomes.push(outcome);
             continue;
         }
+        // Slice 5 (#3592): a completed checkpoint chains a superseded-snapshot
+        // prune, served by the retention lane.
+        if let Some(outcome) = runtime
+            .run_next_retention_maintenance()
+            .expect("snapshot prune maintenance")
+        {
+            assert_eq!(
+                outcome.task_kind(),
+                MaintenanceTaskKind::SnapshotPruning,
+                "WAL growth maintenance chains nothing else through the retention lane"
+            );
+            outcomes.push(outcome);
+            continue;
+        }
         panic!("pending WAL growth maintenance did not match a WAL runner");
     }
     assert_eq!(runtime.maintenance_status().pending_tasks(), 0);

@@ -566,7 +566,10 @@ fn validate_snapshot_header_identity(
 
 mod listing;
 pub(crate) use listing::SnapshotDeleteReport;
-pub(crate) use listing::{SnapshotDeleteFailure, SnapshotDeleteOutcome, SnapshotObject};
+pub(crate) use listing::{
+    reconcilable_orphan, superseded_snapshot, SnapshotDeleteFailure, SnapshotDeleteOutcome,
+    SnapshotObject, SnapshotPruneMode,
+};
 
 #[cfg(test)]
 mod listing_tests;
