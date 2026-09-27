@@ -287,4 +287,19 @@ exclude_re = [
     # `storage_footprint_audit_reports_debt_and_the_reclaim_that_settles_it`).
     "DurableLocalOpenOptions::with_maintenance_scheduling_policy_for_test",
     "maintenance_scheduling_for_storage",
+    # The same seam's getter, `DurableLocalOpenOptions::maintenance_scheduling_for_test`
+    # (same cfg, same lane blindness). Planting `-> None` reds
+    # `inline::storage_footprint_audit_reports_debt_and_the_reclaim_that_settles_it`
+    # under `-p strata-engine --features testkit` (verified by hand).
+    "DurableLocalOpenOptions::maintenance_scheduling_for_test",
+    # `vector_artifact_store_for_target` (a pre-existing fn slice 9 touched
+    # when the durable open target grew its scheduling element): under
+    # DEFAULT features no vector workload builds a durable artifact, so the
+    # durable and in-memory stores are indistinguishable to this lane and
+    # `-> Default::default()` survives. Every artifact-observing test is in
+    # `engine_vector.rs` under `testkit`; planting that mutant there reds
+    # `a_write_failure_on_the_artifact_directory_reports_the_unavailable_code`
+    # and `vector_durable_artifact_io_failure_does_not_fail_query` (verified
+    # by hand).
+    "replace vector_artifact_store_for_target -> VectorArtifactStore with Default::default\\(\\)",
 ]
