@@ -2925,12 +2925,36 @@ fn reopen_of_a_never_checkpointed_store_queues_no_reconcile() {
     assert!(backend.snapshot_objects().is_empty());
 }
 
-/// A crash between the snapshot publish and the manifest re-point leaves an
-/// orphan at attested+1 — exactly the id the next open allocates (#3612).
-/// Until the reconcile removes it, a runtime-allocated checkpoint collides;
-/// after it, the same allocation completes.
+/// #3612: the first snapshot id a reopened runtime allocates is one past the
+/// attested id AND past any object on disk.
 #[test]
-fn reopen_reconcile_unblocks_the_snapshot_id_a_crash_orphan_occupies() {
+fn next_checkpoint_snapshot_id_after_open_truth_table() {
+    use crate::lifecycle::checkpoint::next_checkpoint_snapshot_id_after_open;
+    for (attested, listed, expected) in [
+        (None, None, Some(1)),
+        (Some(1), None, Some(2)),
+        (None, Some(1), Some(2)),
+        (Some(1), Some(1), Some(2)),
+        (Some(1), Some(2), Some(3)),
+        (Some(3), Some(2), Some(4)),
+        (Some(u64::MAX), None, None),
+        (None, Some(u64::MAX), None),
+    ] {
+        assert_eq!(
+            next_checkpoint_snapshot_id_after_open(attested, listed),
+            expected,
+            "attested={attested:?} listed={listed:?}"
+        );
+    }
+}
+
+/// A crash between the snapshot publish and the manifest re-point leaves an
+/// orphan at attested+1. The next open seeds its allocator past every object
+/// on disk (#3612), so a runtime-allocated checkpoint completes at once and
+/// attests attested+2; the reconcile then removes both the superseded and the
+/// orphan object.
+#[test]
+fn reopen_allocates_past_the_snapshot_id_a_crash_orphan_occupies() {
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let branch = durable_branch_id(0xaa);
@@ -2961,36 +2985,15 @@ fn reopen_reconcile_unblocks_the_snapshot_id_a_crash_orphan_occupies() {
     drop(runtime);
 
     let mut reopened = open_runtime(branch, backend);
+    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 2]));
     reopened
         .execute_durable_commit(
             durable_batch(branch, b"occupied-c", b"value-c"),
             generation_guard(),
         )
         .expect("third commit");
-    // Before the reconcile: the runtime allocates attested+1 = 2, the orphan's id.
-    reopened
-        .enqueue_maintenance(MaintenanceTaskRequest::checkpoint_with_options(
-            MaintenanceCheckpointOptions::new(None, false),
-        ))
-        .expect("enqueue checkpoint");
-    let blocked = reopened.run_next_checkpoint_maintenance();
-    match &blocked {
-        Ok(Some(outcome)) => assert_ne!(
-            outcome.status(),
-            MaintenanceOutcomeStatus::Completed,
-            "the orphan occupies the allocated id"
-        ),
-        Ok(None) => panic!("the checkpoint was not attempted"),
-        Err(_) => {}
-    }
-    assert_eq!(attested_snapshot_id(backend), Some(1));
-    assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 2]));
-
-    let prune = drain_snapshot_prune(&mut reopened);
-    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
-    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(1)]);
-
-    // After the reconcile: the same runtime allocation completes and attests 2.
+    // The allocator was seeded past the orphan: the checkpoint completes at
+    // once, before any reconcile, at id 3.
     reopened
         .enqueue_maintenance(MaintenanceTaskRequest::checkpoint_with_options(
             MaintenanceCheckpointOptions::new(None, false),
@@ -3000,10 +3003,22 @@ fn reopen_reconcile_unblocks_the_snapshot_id_a_crash_orphan_occupies() {
         .run_next_checkpoint_maintenance()
         .expect("run checkpoint")
         .expect("checkpoint outcome");
-    assert_eq!(completed.status(), MaintenanceOutcomeStatus::Completed);
-    assert_eq!(attested_snapshot_id(backend), Some(2));
-    drain_snapshot_prune(&mut reopened);
-    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(2)]);
+    assert_eq!(
+        completed.status(),
+        MaintenanceOutcomeStatus::Completed,
+        "{completed:?}"
+    );
+    assert_eq!(attested_snapshot_id(backend), Some(3));
+    assert_eq!(
+        backend.snapshot_objects(),
+        sorted_snapshot_objects([1, 2, 3])
+    );
+
+    // The reconcile (queued at open) removes the superseded object and the
+    // orphan alike; the chained superseded prune coalesces with it.
+    let prune = drain_snapshot_prune(&mut reopened);
+    assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+    assert_eq!(backend.snapshot_objects(), vec![snapshot_object(3)]);
 }
 
 /// The reopen reconcile can never run against a family whose attested object
