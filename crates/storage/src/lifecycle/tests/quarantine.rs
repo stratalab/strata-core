@@ -769,21 +769,6 @@ fn purge_and_repair_maintenance_requests_preserve_branch_scope() {
 }
 
 #[test]
-fn queued_quarantine_task_drains_as_deferred_without_service_payload() {
-    let task =
-        MaintenanceTask::new_for_test(1, MaintenanceTaskRequest::quarantine()).expect("task");
-    let outcome = quarantine_task_without_request();
-
-    assert_eq!(task.kind(), MaintenanceTaskKind::Quarantine);
-    assert_eq!(task.scope(), MaintenanceTaskScope::Quarantine);
-    assert_eq!(outcome.status(), MaintenanceOutcomeStatus::Deferred);
-    assert_eq!(
-        outcome.reason(),
-        Some("quarantine task requires an explicit quarantine request")
-    );
-}
-
-#[test]
 fn durable_quarantine_runs_through_runtime_maintenance_surface() {
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());

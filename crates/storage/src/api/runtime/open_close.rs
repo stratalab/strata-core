@@ -253,6 +253,19 @@ pub(super) const fn map_maintenance_scheduling_policy(
     }
 }
 
+/// Space-reclamation contract §3.1 (slice 3): the API close budget in the
+/// lifecycle's terms.
+pub(super) const fn map_close_reclaim_budget(
+    budget: super::ReclaimBudget,
+) -> crate::lifecycle::LifecycleCloseReclaimBudget {
+    match budget {
+        super::ReclaimBudget::Disabled => crate::lifecycle::LifecycleCloseReclaimBudget::Disabled,
+        super::ReclaimBudget::Bounded(limit) => {
+            crate::lifecycle::LifecycleCloseReclaimBudget::Bounded(limit)
+        }
+    }
+}
+
 pub(super) const fn background_executor_mode(
     policy: StorageMaintenanceSchedulingPolicy,
 ) -> BackgroundExecutorMode {

@@ -2307,7 +2307,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     /// durably-confirmed manifest or a built-but-unconfirmed publication still lists (#2553).
     /// Every mark entry point MUST use this helper; a mark missing any component can classify
     /// a recovery-relevant object as garbage.
-    fn reclaim_pinned_table_objects(&self) -> Vec<crate::object::ObjectName> {
+    pub(super) fn reclaim_pinned_table_objects(&self) -> Vec<crate::object::ObjectName> {
         let mut pinned = in_memory_pinned_table_objects(&self.branch_catalog, &self.table_catalog);
         pinned.extend(self.inflight_outputs.snapshot());
         let frontier = self.table_catalog.manifest_frontier_pinned_objects();
@@ -5739,7 +5739,7 @@ pub(super) fn durable_quarantine_service_error(
 /// `quarantine/` before deleting the source, so this bounds the copy I/O held under the runtime
 /// lock; a larger backlog converges over successive retention → quarantine → purge cycles (each
 /// cycle's purge reclaims the previous cycle's staged bytes, bounding transient disk growth).
-const TABLE_OBJECT_SWEEP_MAX_OBJECTS: usize = 32;
+pub(crate) const TABLE_OBJECT_SWEEP_MAX_OBJECTS: usize = 32;
 
 /// The table-object sweep (the reclaim half of GC). Recomputes the reachability mark fresh under
 /// the same runtime-lock hold it acts in — there is no decision-to-action gap for a fork, publish,
@@ -5751,23 +5751,23 @@ const TABLE_OBJECT_SWEEP_MAX_OBJECTS: usize = 32;
 /// sweep runs DURING builds instead of deferring wholesale). The one remaining wholesale defer
 /// is a held retired read view (durable readers are name-addressed with no held fd, so a source
 /// delete would break their block fetches).
-struct DurableTableObjectSweepRunner<'a, 'b> {
-    services: &'a crate::lifecycle::LifecycleDurableLocalServices<'b>,
-    branch_id: strata_core::BranchId,
-    health: RecoveryHealth,
-    database_id: [u8; 16],
-    codec_id: LifecycleCodecId,
-    staged_at: Timestamp,
-    retired_readers_alive: bool,
-    pinned_objects: Vec<crate::object::ObjectName>,
+pub(super) struct DurableTableObjectSweepRunner<'a, 'b> {
+    pub(super) services: &'a crate::lifecycle::LifecycleDurableLocalServices<'b>,
+    pub(super) branch_id: strata_core::BranchId,
+    pub(super) health: RecoveryHealth,
+    pub(super) database_id: [u8; 16],
+    pub(super) codec_id: LifecycleCodecId,
+    pub(super) staged_at: Timestamp,
+    pub(super) retired_readers_alive: bool,
+    pub(super) pinned_objects: Vec<crate::object::ObjectName>,
     /// Out: objects staged into quarantine this pass (drives the follow-up Purge enqueue).
-    quarantined_objects: usize,
+    pub(super) quarantined_objects: usize,
     /// Out: bytes of the source objects staged this pass (the reclaim ledger's bytes).
-    staged_bytes: u64,
+    pub(super) staged_bytes: u64,
     /// Out: candidates left unprocessed (cap) or deferred (interlocks) — drives re-enqueue.
-    remaining_candidates: usize,
+    pub(super) remaining_candidates: usize,
     /// Out: worst recovery health reported by the quarantine service this pass.
-    sweep_health: Option<RecoveryHealth>,
+    pub(super) sweep_health: Option<RecoveryHealth>,
 }
 
 impl MaintenanceTaskRunner for DurableTableObjectSweepRunner<'_, '_> {

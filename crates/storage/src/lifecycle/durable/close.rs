@@ -15,7 +15,7 @@ use crate::lifecycle::compaction::{
 };
 use crate::lifecycle::durable::maintenance::{
     checkpoint_created_at, durable_quarantine_service_error, publish_table_manifest_after_flush,
-    purge_branch_id_from_task,
+    purge_branch_id_from_task, DurableTableObjectSweepRunner,
 };
 use crate::lifecycle::flush::{
     flush_branch_drain_with, flush_drain_request_from_maintenance_task,
@@ -29,20 +29,76 @@ use crate::lifecycle::retention::{
 };
 use crate::lifecycle::{
     purge_proof_from_maintenance_task, purge_quarantine as purge_lifecycle_quarantine,
-    quarantine_task_without_request, repair_branch_from_maintenance_task,
+    repair_branch_from_maintenance_task,
     repair_branch_quarantine as repair_branch_lifecycle_quarantine,
     repair_quarantine_family as repair_lifecycle_quarantine_family, require_rotate_budget,
     CloseOutcome, CloseOutcomeEffects, CloseOutcomeStatus, ClosePhase, LifecycleCloseFact,
     LifecycleCodecId, LifecycleDurableLocalRuntime, LifecycleDurableLocalServices, LifecycleError,
     LifecycleLowerLayer, LifecycleOperationKind, LifecycleResult, LifecycleState, LifecycleStats,
     LifecycleTransitionTrigger, MaintenanceOutcome, MaintenanceOutcomeStatus, MaintenanceTask,
-    MaintenanceTaskKind, MaintenanceTaskRunner, RecoveryDegradationClass, RecoveryHealth,
-    StorageBudgetLedger,
+    MaintenanceTaskKind, MaintenanceTaskRequest, MaintenanceTaskRunner, RecoveryDegradationClass,
+    RecoveryHealth, StorageBudgetLedger,
 };
+use std::time::{Duration, Instant};
 use strata_core::Timestamp;
+
+/// Space-reclamation contract §3.1 (slice 3, #3596): how much wall-clock time
+/// a clean close may spend draining the session's table-object reclaim debt
+/// (mark → sweep → purge) before it hands the remainder to the next open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LifecycleCloseReclaimBudget {
+    /// Skip the close-time reclaim drive entirely; the next open reconciles.
+    Disabled,
+    /// Run reclaim rounds while this budget has not elapsed.
+    Bounded(Duration),
+}
+
+impl LifecycleCloseReclaimBudget {
+    /// The default close budget: enough for a session's ordinary debt, far
+    /// below what an operator would notice at close.
+    pub(crate) const DEFAULT: Self = Self::Bounded(Duration::from_millis(500));
+}
+
+impl Default for LifecycleCloseReclaimBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Whether the close-time reclaim drive runs another sweep → purge round. It
+/// stops once the budget has elapsed, once the last sweep found nothing left
+/// (`debt_remaining` is false), or once a sweep deferred behind a held read
+/// view — a retry inside the same close resolves none of those. The first
+/// round asks with `debt_remaining = true` and no deferral: a zero budget
+/// therefore runs no round at all.
+pub(crate) fn close_reclaim_should_continue(
+    elapsed: Duration,
+    budget: Duration,
+    debt_remaining: bool,
+    sweep_deferred: bool,
+) -> bool {
+    debt_remaining && !sweep_deferred && elapsed < budget
+}
+
+/// What the last close-time sweep found, read back by the drive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CloseSweepFacts {
+    quarantined: usize,
+    remaining: usize,
+    deferred: bool,
+}
 
 impl<S> LifecycleDurableLocalRuntime<'_, S> {
     pub(crate) fn close(&mut self) -> LifecycleResult<CloseOutcome> {
+        self.close_with_reclaim_budget(LifecycleCloseReclaimBudget::DEFAULT)
+    }
+
+    /// Close with an explicit close-time reclaim budget (space-reclamation
+    /// contract §3.1, slice 3). `close` is this with the default budget.
+    pub(crate) fn close_with_reclaim_budget(
+        &mut self,
+        reclaim_budget: LifecycleCloseReclaimBudget,
+    ) -> LifecycleResult<CloseOutcome> {
         match self.state.state() {
             LifecycleState::Closed => {
                 self.state
@@ -60,13 +116,13 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
                 require_admitted(self.state, LifecycleOperationKind::Close)?;
                 self.state
                     .transition(LifecycleTransitionTrigger::CloseRequested)?;
-                self.finish_close()
+                self.finish_close(reclaim_budget)
             }
             LifecycleState::Closing => {
                 require_admitted(self.state, LifecycleOperationKind::CloseRetry)?;
                 self.state
                     .transition(LifecycleTransitionTrigger::CloseRetried)?;
-                self.finish_close()
+                self.finish_close(reclaim_budget)
             }
             LifecycleState::Failed => {
                 // Failed admits Close only when the prior failure was raised
@@ -80,7 +136,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
                 require_admitted(self.state, LifecycleOperationKind::Close)?;
                 self.state
                     .transition(LifecycleTransitionTrigger::CloseRequested)?;
-                self.finish_close()
+                self.finish_close(reclaim_budget)
             }
             LifecycleState::New | LifecycleState::Opening | LifecycleState::Recovering => {
                 Err(LifecycleError::InvalidLifecycleState {
@@ -94,13 +150,22 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         clippy::too_many_lines,
         reason = "close drain orchestrates several phases that read cleaner inline than split"
     )]
-    fn finish_close(&mut self) -> LifecycleResult<CloseOutcome> {
+    fn finish_close(
+        &mut self,
+        reclaim_budget: LifecycleCloseReclaimBudget,
+    ) -> LifecycleResult<CloseOutcome> {
         let cancel = self.maintenance.cancel_pending_for_close(self.state)?;
         let created_at = checkpoint_created_at(
             self.allocator.timestamp_guard().last_allocated(),
             self.recovered_checkpoint_timestamp_max,
         );
         let branch_id = self.initial_branch_id;
+        // Space-reclamation contract §3.1 (slice 3): the inline sweep's inputs,
+        // captured before the runner takes its borrows of this runtime.
+        let database_id = *self.services.assembly_facts().database_id();
+        let codec_id = LifecycleCodecId::new(self.services.assembly_facts().codec_id())?;
+        let retired_readers_alive = self.snapshot_publisher.retired_views_alive();
+        let pinned_objects = self.reclaim_pinned_table_objects();
         let generation = self
             .branch_catalog
             .registry()
@@ -138,6 +203,11 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             table_catalog: &mut self.table_catalog,
             data_block_bytes: self.open_plan.lifecycle_config().data_block_bytes(),
             table_compression: self.open_plan.lifecycle_config().table_compression(),
+            database_id,
+            codec_id,
+            retired_readers_alive,
+            pinned_objects,
+            last_sweep: None,
         };
         let mut observed_health = Vec::new();
         let mut active_tasks = 0_usize;
@@ -170,6 +240,63 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         for outcome in drain.outcomes() {
             if let Some(health) = outcome.recovery_health() {
                 observed_health.push(health.clone());
+            }
+        }
+        // Space-reclamation contract §3.1 (slice 3): the close-time reclaim
+        // drive. Each round queues one sweep (which marks afresh inside) and,
+        // when the sweep quarantined anything, one purge; both run through
+        // this runner under the close lock. Best-effort by design: a refused
+        // enqueue or a failing round ends the drive and the close proceeds —
+        // the next open's reconcile owns whatever is left, and a failing
+        // reclaim must never turn a clean close into a retry.
+        let mut reclaim_drained = 0_usize;
+        if let LifecycleCloseReclaimBudget::Bounded(limit) = reclaim_budget {
+            let started = Instant::now();
+            let mut debt_remaining = true;
+            let mut sweep_deferred = false;
+            while close_reclaim_should_continue(
+                started.elapsed(),
+                limit,
+                debt_remaining,
+                sweep_deferred,
+            ) {
+                runner.last_sweep = None;
+                let sweep = self
+                    .maintenance
+                    .enqueue_for_close(self.state, MaintenanceTaskRequest::quarantine())
+                    .and_then(|_| self.maintenance.drain_for_close(self.state, &mut runner));
+                let Ok(sweep) = sweep else {
+                    break;
+                };
+                reclaim_drained = reclaim_drained.saturating_add(sweep.drained_tasks());
+                for outcome in sweep.outcomes() {
+                    if let Some(health) = outcome.recovery_health() {
+                        observed_health.push(health.clone());
+                    }
+                }
+                let Some(facts) = runner.last_sweep.take() else {
+                    break;
+                };
+                if facts.quarantined > 0 {
+                    let purge = self
+                        .maintenance
+                        .enqueue_for_close(
+                            self.state,
+                            MaintenanceTaskRequest::purge_quarantine(branch_id),
+                        )
+                        .and_then(|_| self.maintenance.drain_for_close(self.state, &mut runner));
+                    let Ok(purge) = purge else {
+                        break;
+                    };
+                    reclaim_drained = reclaim_drained.saturating_add(purge.drained_tasks());
+                    for outcome in purge.outcomes() {
+                        if let Some(health) = outcome.recovery_health() {
+                            observed_health.push(health.clone());
+                        }
+                    }
+                }
+                debt_remaining = facts.remaining > 0;
+                sweep_deferred = facts.deferred;
             }
         }
         drop(runner);
@@ -228,7 +355,9 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             .transition(LifecycleTransitionTrigger::CloseCompleted)?;
         let outcome = durable_close_outcome(
             cancel.canceled_tasks(),
-            active_tasks.saturating_add(drain.drained_tasks()),
+            active_tasks
+                .saturating_add(drain.drained_tasks())
+                .saturating_add(reclaim_drained),
         );
         // Snapshot the first-close outcome so subsequent idempotent close
         // calls return the same stats. Without this cache, a retry after
@@ -313,6 +442,14 @@ struct DurableCloseMaintenanceRunner<'a, 'b> {
     table_catalog: &'a mut crate::lifecycle::LifecycleDurableTableCatalog,
     data_block_bytes: Option<u32>,
     table_compression: crate::format::TableCompression,
+    /// Space-reclamation contract §3.1 (slice 3): what the inline close-time
+    /// sweep needs from the runtime, captured before this runner borrows it.
+    database_id: [u8; 16],
+    codec_id: LifecycleCodecId,
+    retired_readers_alive: bool,
+    pinned_objects: Vec<crate::object::ObjectName>,
+    /// The last sweep's facts, read back by the close-time reclaim drive.
+    last_sweep: Option<CloseSweepFacts>,
 }
 
 impl MaintenanceTaskRunner for DurableCloseMaintenanceRunner<'_, '_> {
@@ -384,7 +521,7 @@ impl MaintenanceTaskRunner for DurableCloseMaintenanceRunner<'_, '_> {
             }
             MaintenanceTaskKind::Purge => self.run_purge(task),
             MaintenanceTaskKind::Repair => self.run_repair(task),
-            MaintenanceTaskKind::Quarantine => Ok(quarantine_task_without_request()),
+            MaintenanceTaskKind::Quarantine => self.run_sweep(task),
             MaintenanceTaskKind::HealthCollection => Ok(MaintenanceOutcome::new(
                 MaintenanceTaskKind::HealthCollection,
                 MaintenanceOutcomeStatus::Completed,
@@ -534,6 +671,35 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
             &proof,
         )?
         .maintenance_outcome())
+    }
+
+    /// Space-reclamation contract §3.1 (slice 3): the close-time sweep is the
+    /// same inline runner the foreground path uses — a fresh table-object mark
+    /// under the close lock, then staging of every unreachable object into
+    /// quarantine, deferred while a retired read view is still held. Its
+    /// facts are kept for the drive in `finish_close`.
+    fn run_sweep(&mut self, task: &MaintenanceTask) -> LifecycleResult<MaintenanceOutcome> {
+        let mut sweep = DurableTableObjectSweepRunner {
+            services: self.services,
+            branch_id: self.branch.branch_id(),
+            health: self.health.clone(),
+            database_id: self.database_id,
+            codec_id: self.codec_id.clone(),
+            staged_at: self.created_at,
+            retired_readers_alive: self.retired_readers_alive,
+            pinned_objects: self.pinned_objects.clone(),
+            quarantined_objects: 0,
+            staged_bytes: 0,
+            remaining_candidates: 0,
+            sweep_health: None,
+        };
+        let outcome = sweep.run_task(task)?;
+        self.last_sweep = Some(CloseSweepFacts {
+            quarantined: sweep.quarantined_objects,
+            remaining: sweep.remaining_candidates,
+            deferred: outcome.status() == MaintenanceOutcomeStatus::Deferred,
+        });
+        Ok(outcome)
     }
 
     fn run_repair(&mut self, task: &MaintenanceTask) -> LifecycleResult<MaintenanceOutcome> {

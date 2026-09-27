@@ -144,13 +144,14 @@ pub(crate) use config::{
     reason = "durable lifecycle assembly exports define the local surface for recovery slices"
 )]
 pub(crate) use durable::{
-    combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
+    close_reclaim_should_continue, combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
     parentless_content_predates_generation, record_predates_current_generation,
     DurableBackgroundMaintenanceBuild, DurableBackgroundMaintenanceBuilt,
     DurableBackgroundMaintenanceStep, DurableGroupApplyDone, DurableGroupApplyWork,
-    DurableGroupInFlight, DurableGroupMemberResult, LifecycleDurableAssemblyFacts,
-    LifecycleDurableLocalOpenRequest, LifecycleDurableLocalRuntime, LifecycleDurableLocalServices,
-    LifecycleDurableLocalShell, LifecycleRecoveryBootstrapReport, PreparedPublishStep,
+    DurableGroupInFlight, DurableGroupMemberResult, LifecycleCloseReclaimBudget,
+    LifecycleDurableAssemblyFacts, LifecycleDurableLocalOpenRequest, LifecycleDurableLocalRuntime,
+    LifecycleDurableLocalServices, LifecycleDurableLocalShell, LifecycleRecoveryBootstrapReport,
+    PreparedPublishStep, TABLE_OBJECT_SWEEP_MAX_OBJECTS,
 };
 #[allow(
     unused_imports,
@@ -186,9 +187,9 @@ pub(crate) use health::{
     reason = "maintenance executor exports define the local surface for later slices"
 )]
 pub(crate) use maintenance::{
-    compaction_lane_cap, evaluate_mutating_write_admission, maintenance_ready_for_recovery_health,
-    subcompaction_cap, telemetry_health_debt, LifecycleMaintenanceExecutor,
-    LifecycleMaintenanceStats, LifecyclePostCommitMaintenanceOutcome,
+    close_policy_for_kind, compaction_lane_cap, evaluate_mutating_write_admission,
+    maintenance_ready_for_recovery_health, subcompaction_cap, telemetry_health_debt,
+    LifecycleMaintenanceExecutor, LifecycleMaintenanceStats, LifecyclePostCommitMaintenanceOutcome,
     LifecyclePostCommitMaintenanceStatus, LifecycleWriteAdmissionOutcome,
     LifecycleWriteAdmissionStatus, MaintenanceCancelOutcome, MaintenanceCheckpointOptions,
     MaintenanceClosePolicy, MaintenanceCoalesceKey, MaintenanceEnqueueOutcome,
@@ -212,11 +213,11 @@ pub(crate) use outcome::{
 )]
 pub(crate) use quarantine::{
     purge_proof_from_maintenance_task, purge_quarantine, quarantine_object,
-    quarantine_task_without_request, repair_branch_from_maintenance_task, repair_branch_quarantine,
-    repair_quarantine_family, unsupported_quarantine_maintenance, LifecyclePurgeOutcome,
-    LifecyclePurgeProof, LifecyclePurgeStatus, LifecycleQuarantineOutcome,
-    LifecycleQuarantineProof, LifecycleQuarantineProofStatus, LifecycleQuarantineRepairOutcome,
-    LifecycleQuarantineRequest, LifecycleQuarantineStatus,
+    repair_branch_from_maintenance_task, repair_branch_quarantine, repair_quarantine_family,
+    unsupported_quarantine_maintenance, LifecyclePurgeOutcome, LifecyclePurgeProof,
+    LifecyclePurgeStatus, LifecycleQuarantineOutcome, LifecycleQuarantineProof,
+    LifecycleQuarantineProofStatus, LifecycleQuarantineRepairOutcome, LifecycleQuarantineRequest,
+    LifecycleQuarantineStatus,
 };
 #[allow(
     unused_imports,

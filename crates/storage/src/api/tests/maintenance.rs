@@ -2849,8 +2849,8 @@ fn api_background_checkpoint_records_durable_base_branches() {
 
 /// Space-reclamation contract §3.1 (slice 4): leave a prior session's reclaim
 /// debt on disk. Two flushed L0 objects are superseded by a compaction whose
-/// mark → sweep → purge chain never runs (the close cancels the queued mark,
-/// the contract slice 3 rewrites), and one unflushed tail row is committed so
+/// mark → sweep → purge chain never runs (the close's own reclaim drain is
+/// disabled, so the queued mark is cancelled), and one unflushed tail row is committed so
 /// a later flush would be observable as a new table object. Returns the root,
 /// the backend, the superseded objects, and the full on-disk set at close.
 #[cfg(feature = "localfs")]
@@ -2886,7 +2886,8 @@ fn plant_reclaim_debt_and_close(
     let compact =
         MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
     // The compaction request runs the compaction itself; its publish queues the
-    // reclaim mark, which nothing below runs (the close cancels it).
+    // reclaim mark, which nothing below runs (the close drain is disabled, so
+    // the close cancels it and the debt is left for the reopen).
     let compacted = runtime.maintenance(&compact).expect("compact");
     assert_eq!(compacted.task(), MaintenanceTask::Compact);
     let at_close = table_data_object_files(&root);
@@ -2901,11 +2902,15 @@ fn plant_reclaim_debt_and_close(
     runtime
         .commit(&put_batch(b"tail", b"unflushed"))
         .expect("commit the unflushed tail row");
-    runtime.close().expect("close");
+    runtime
+        .close_with_options(
+            StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+        )
+        .expect("close");
     assert_eq!(
         table_data_object_files(&root),
         at_close,
-        "a close reclaims nothing before slice 3"
+        "with the close drain disabled the debt survives for the reopen"
     );
     (root, backend, superseded, at_close)
 }
@@ -3211,4 +3216,342 @@ fn api_first_write_under_blocking_pressure_ends_the_reclaim_only_scope_at_admiss
         "compaction ran once the session wrote"
     );
     runtime.close().expect("close");
+}
+
+/// Space-reclamation contract §3.1 (slice 3): a session with reclaim debt.
+/// Two flushed L0 objects are superseded by a compaction whose reclaim mark is
+/// queued but has not run, and one unflushed tail row keeps a WAL tail. No
+/// worker, so nothing runs until the test drives it. Returns the open runtime
+/// with the superseded objects and the full on-disk set before close.
+#[cfg(feature = "localfs")]
+fn plant_reclaim_debt(
+    backend: &'static StorageBackend,
+    root: &std::path::Path,
+) -> (
+    StorageRuntime<'static>,
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    runtime.commit(&put_batch(b"gc-a", b"one")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime.commit(&put_batch(b"gc-a", b"two")).expect("commit");
+    runtime.commit(&put_batch(b"gc-b", b"x")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    let superseded = table_data_object_files(root);
+    assert!(superseded.len() >= 2, "two flushes: {superseded:?}");
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    let compacted = runtime.maintenance(&compact).expect("compact");
+    assert_eq!(compacted.task(), MaintenanceTask::Compact);
+    runtime
+        .commit(&put_batch(b"tail", b"unflushed"))
+        .expect("commit the unflushed tail row");
+    let before_close = table_data_object_files(root);
+    assert!(
+        superseded
+            .iter()
+            .all(|object| before_close.contains(object)),
+        "the superseded objects are still on disk: {before_close:?}"
+    );
+    assert!(
+        before_close.len() > superseded.len(),
+        "the compaction output exists"
+    );
+    (runtime, superseded, before_close)
+}
+
+#[cfg(feature = "localfs")]
+fn wal_segment_files(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(root.join("wal"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_file())
+                .map(|entry| entry.path().display().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "localfs")]
+fn quarantine_object_files(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+    let mut files = std::collections::BTreeSet::new();
+    let Ok(branches) = std::fs::read_dir(root.join("quarantine")) else {
+        return files;
+    };
+    for branch_dir in branches.flatten() {
+        let Ok(objects) = std::fs::read_dir(branch_dir.path()) else {
+            continue;
+        };
+        for object in objects.flatten() {
+            // The inventory manifest is bookkeeping, not a quarantined object.
+            let name = object.file_name().to_string_lossy().into_owned();
+            if object.path().is_file() && !name.starts_with("manifest") {
+                files.insert(object.path().display().to_string());
+            }
+        }
+    }
+    files
+}
+
+#[cfg(feature = "localfs")]
+fn reopen_and_drain(backend: &'static StorageBackend) -> StorageRuntime<'static> {
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    drain_maintenance_to_idle(&mut runtime);
+    runtime
+}
+
+/// A clean close drains the session's reclaim debt itself: the on-disk set
+/// shrinks by exactly the superseded objects, and the reopened database reads
+/// as before.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_clean_close_drains_the_sessions_reclaim_debt() {
+    let root = temp_dir_for_api_test("maintenance-close-drain-reclaims");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let (mut runtime, superseded, before_close) = plant_reclaim_debt(backend, &root);
+    let expected: std::collections::BTreeSet<String> =
+        before_close.difference(&superseded).cloned().collect();
+
+    // A generous budget with a tight elapsed bound: the drive must stop the
+    // moment a sweep finds nothing left, never spin the budget down.
+    let started = std::time::Instant::now();
+    let close = runtime
+        .close_with_options(
+            StorageCloseOptions::graceful()
+                .with_reclaim_budget(ReclaimBudget::Bounded(std::time::Duration::from_secs(2))),
+        )
+        .expect("close");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the drive stopped once the debt was gone: {:?}",
+        started.elapsed()
+    );
+    assert!(close.maintenance_drained(), "{close:?}");
+    assert_eq!(table_data_object_files(&root), expected);
+    assert!(
+        quarantine_object_files(&root).is_empty(),
+        "the purge emptied the quarantine: {:?}",
+        quarantine_object_files(&root)
+    );
+
+    let runtime = reopen_and_drain(backend);
+    assert_eq!(read_value(&runtime, b"gc-a"), Some(b"two".to_vec()));
+    assert_eq!(read_value(&runtime, b"tail"), Some(b"unflushed".to_vec()));
+    assert_eq!(table_data_object_files(&root), expected);
+}
+
+/// The drive is bounded by its budget: a zero budget runs no round, the debt
+/// survives the close intact, and the next open reclaims it.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_reclaim_is_bounded_by_the_budget() {
+    let root = temp_dir_for_api_test("maintenance-close-drain-budget");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let (mut runtime, superseded, before_close) = plant_reclaim_debt(backend, &root);
+    let expected: std::collections::BTreeSet<String> =
+        before_close.difference(&superseded).cloned().collect();
+
+    runtime
+        .close_with_options(
+            StorageCloseOptions::graceful()
+                .with_reclaim_budget(ReclaimBudget::Bounded(std::time::Duration::ZERO)),
+        )
+        .expect("close");
+    assert_eq!(
+        table_data_object_files(&root),
+        before_close,
+        "a zero budget reclaims nothing at close"
+    );
+
+    let _runtime = reopen_and_drain(backend);
+    assert_eq!(
+        table_data_object_files(&root),
+        expected,
+        "the next open reclaims what the close left"
+    );
+}
+
+/// `ReclaimBudget::Disabled` skips the drive entirely.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_disabled_reclaim_budget_skips_the_close_drain() {
+    let root = temp_dir_for_api_test("maintenance-close-drain-disabled");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let (mut runtime, _superseded, before_close) = plant_reclaim_debt(backend, &root);
+
+    runtime
+        .close_with_options(
+            StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+        )
+        .expect("close");
+    assert_eq!(table_data_object_files(&root), before_close);
+}
+
+/// A retired read view still held across the close pins its objects: the
+/// close-time sweep defers, the debt survives, and the next open reclaims
+/// once the view is gone.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_reclaim_defers_behind_a_held_read_view() {
+    let root = temp_dir_for_api_test("maintenance-close-drain-reader-pin");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    runtime
+        .commit(&put_batch(b"pin-a", b"one"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime
+        .commit(&put_batch(b"pin-a", b"two"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    let superseded = table_data_object_files(&root);
+    // The view is taken BEFORE the compaction retires the objects it reads.
+    let held_view = runtime
+        .load_snapshot_for_test(branch())
+        .expect("published snapshot");
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&compact).expect("compact");
+    let before_close = table_data_object_files(&root);
+    let expected: std::collections::BTreeSet<String> =
+        before_close.difference(&superseded).cloned().collect();
+
+    runtime.close().expect("close");
+    assert_eq!(
+        table_data_object_files(&root),
+        before_close,
+        "a held retired view defers the close-time sweep"
+    );
+    drop(held_view);
+
+    let _runtime = reopen_and_drain(backend);
+    assert_eq!(table_data_object_files(&root), expected);
+}
+
+/// The drive reclaims objects only: the WAL tail is untouched by a clean
+/// close in this slice (the close-time checkpoint is slice 7).
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_reclaim_leaves_the_wal_tail() {
+    let root = temp_dir_for_api_test("maintenance-close-drain-wal-tail");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let (mut runtime, superseded, before_close) = plant_reclaim_debt(backend, &root);
+    let expected: std::collections::BTreeSet<String> =
+        before_close.difference(&superseded).cloned().collect();
+    let wal_before = wal_segment_files(&root);
+    assert!(
+        !wal_before.is_empty(),
+        "the unflushed tail row lives in the WAL"
+    );
+
+    runtime.close().expect("close");
+    assert_eq!(table_data_object_files(&root), expected);
+    assert_eq!(
+        wal_segment_files(&root),
+        wal_before,
+        "the close-time drive never touches WAL segments"
+    );
+}
+
+/// A backend that refuses deletes during the close-time sweep must not turn
+/// the clean close into a failure: the close completes and the debt stays on
+/// disk (what reclaims it afterwards is #3608).
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_reclaim_fault_leaves_the_debt_for_the_next_open() {
+    use crate::testkit::{BackendOperation, FaultKind, FaultMode, FaultRule, FaultScript};
+    let root = temp_dir_for_api_test("maintenance-close-drain-fault");
+    let faulting = crate::testkit::leak_static(StorageBackend::faulting_local_fs(
+        root.clone(),
+        FaultScript::new([FaultRule::with_mode(
+            BackendOperation::DeleteObject,
+            std::num::NonZeroU64::new(1).expect("nonzero"),
+            FaultKind::Unavailable,
+            FaultMode::Continuously,
+        )]),
+    ));
+    let (mut runtime, superseded, before_close) = plant_reclaim_debt(faulting, &root);
+    let expected: std::collections::BTreeSet<String> =
+        before_close.difference(&superseded).cloned().collect();
+
+    runtime
+        .close()
+        .expect("a failing close-time reclaim never fails the close");
+    assert!(
+        superseded
+            .iter()
+            .all(|object| table_data_object_files(&root).contains(object)),
+        "refused deletes leave the debt on disk"
+    );
+
+    // What the refused deletes leave behind — source-delete-retried
+    // quarantine entries that neither the reopen chain nor an explicit repair
+    // revisits — is #3608, not this slice: the close stayed clean and the
+    // objects are still there for whoever fixes that.
+    let _ = expected;
+}
+
+/// More superseded objects than one sweep stages: the drive runs the extra
+/// rounds inside the budget until nothing is left, and purges after each.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_reclaim_runs_multiple_rounds_within_the_budget() {
+    let root = temp_dir_for_api_test("maintenance-close-drain-multi-round");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    // One more L0 object than a single sweep stages.
+    for index in 0..=crate::lifecycle::TABLE_OBJECT_SWEEP_MAX_OBJECTS {
+        runtime
+            .commit(&put_batch(format!("multi-{index}").as_bytes(), b"v"))
+            .expect("commit");
+        runtime
+            .flush_default_branch_for_test()
+            .expect("flush one more L0 table");
+    }
+    let superseded = table_data_object_files(&root);
+    assert!(superseded.len() > crate::lifecycle::TABLE_OBJECT_SWEEP_MAX_OBJECTS);
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&compact).expect("compact");
+    let before_close = table_data_object_files(&root);
+    let expected: std::collections::BTreeSet<String> =
+        before_close.difference(&superseded).cloned().collect();
+    assert!(!expected.is_empty(), "the compaction output exists");
+
+    // Staging dozens of objects (each a durable publish) can outrun the
+    // default budget on a slow disk; the rounds, not the clock, are under test.
+    runtime
+        .close_with_options(
+            StorageCloseOptions::graceful()
+                .with_reclaim_budget(ReclaimBudget::Bounded(std::time::Duration::from_secs(30))),
+        )
+        .expect("close");
+    assert_eq!(table_data_object_files(&root), expected);
+    assert!(quarantine_object_files(&root).is_empty());
 }

@@ -96,7 +96,7 @@ pub use result::StorageApiResult;
 pub(crate) use runtime::{
     map_commit_error_for_test, map_lifecycle_error_for_test, map_maintenance_outcome_for_test,
 };
-pub use runtime::{StorageCloseOptions, StorageRuntime};
+pub use runtime::{ReclaimBudget, StorageCloseOptions, StorageRuntime};
 pub use strata_core::{BranchId, CommitVersion, Timestamp};
 
 #[cfg(test)]

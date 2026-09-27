@@ -313,7 +313,41 @@ impl MaintenanceTaskPriority {
     }
 }
 
+/// Space-reclamation contract §3.1 (slice 3, #3596): the single source of each
+/// task kind's close policy. The reclaim set — the table-object mark, the
+/// quarantine sweep, the purge, and snapshot retention/pruning — drains before
+/// close so a session's reclaim debt does not outlive it; everything else
+/// (flush, checkpoint, flush-watermark, WAL truncation, rewrites, repair,
+/// preheat, health) is canceled at close as before.
+pub(crate) const fn close_policy_for_kind(kind: MaintenanceTaskKind) -> MaintenanceClosePolicy {
+    match kind {
+        MaintenanceTaskKind::Retention
+        | MaintenanceTaskKind::SnapshotPruning
+        | MaintenanceTaskKind::Quarantine
+        | MaintenanceTaskKind::Purge => MaintenanceClosePolicy::DrainBeforeClose,
+        MaintenanceTaskKind::Flush
+        | MaintenanceTaskKind::Checkpoint
+        | MaintenanceTaskKind::FlushWatermark
+        | MaintenanceTaskKind::WalTruncation
+        | MaintenanceTaskKind::Compaction
+        | MaintenanceTaskKind::Materialization
+        | MaintenanceTaskKind::Repair
+        | MaintenanceTaskKind::HealthCollection
+        | MaintenanceTaskKind::CachePreheat => MaintenanceClosePolicy::Ordinary,
+    }
+}
+
 impl MaintenanceTaskPolicy {
+    /// The production policy for `kind`: coalescing, with the close policy
+    /// `close_policy_for_kind` assigns. Every production request constructor
+    /// goes through here so no constructor can drift from the single source.
+    pub(crate) const fn coalescing_for_kind(kind: MaintenanceTaskKind) -> Self {
+        Self {
+            close_policy: close_policy_for_kind(kind),
+            coalesce: true,
+        }
+    }
+
     pub(crate) const fn ordinary() -> Self {
         Self {
             close_policy: MaintenanceClosePolicy::Ordinary,
@@ -384,7 +418,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::HealthCollection,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Global,
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::HealthCollection),
         )
         .expect("health collection task request is valid")
     }
@@ -394,7 +428,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Flush,
             MaintenanceTaskPriority::Normal,
             MaintenanceTaskScope::Branch(branch_id),
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Flush),
         )
         .expect("flush task request is valid")
     }
@@ -404,7 +438,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Checkpoint,
             MaintenanceTaskPriority::High,
             MaintenanceTaskScope::Checkpoint,
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Checkpoint),
         )
         .expect("checkpoint task request is valid")
     }
@@ -423,7 +457,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::WalTruncation,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Wal,
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::WalTruncation),
         )
         .expect("WAL truncation task request is valid")
     }
@@ -433,7 +467,7 @@ impl MaintenanceTaskRequest {
             kind: MaintenanceTaskKind::FlushWatermark,
             priority: MaintenanceTaskPriority::Low,
             scope: MaintenanceTaskScope::Wal,
-            policy: MaintenanceTaskPolicy::coalescing(),
+            policy: MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::FlushWatermark),
             checkpoint_options: None,
             flush_watermark_candidate: Some(candidate),
             retention_options: None,
@@ -450,7 +484,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::SnapshotPruning,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Retention,
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::SnapshotPruning),
         )
         .expect("snapshot pruning task request is valid");
         request.retention_options = Some(MaintenanceRetentionOptions::new(retain_newest_snapshots));
@@ -462,7 +496,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Retention,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Retention,
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Retention),
         )
         .expect("retention task request is valid");
         request.retention_options = Some(MaintenanceRetentionOptions::new(retain_newest_snapshots));
@@ -479,7 +513,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Retention,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Branch(branch_id),
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Retention),
         )
         .expect("table object retention task request is valid")
     }
@@ -489,7 +523,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Quarantine,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Quarantine,
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Quarantine),
         )
         .expect("quarantine task request is valid")
     }
@@ -503,7 +537,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::CachePreheat,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Global,
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::CachePreheat),
         )
         .expect("cache preheat task request is valid")
     }
@@ -513,7 +547,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Purge,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Branch(branch_id),
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Purge),
         )
         .expect("purge task request is valid")
     }
@@ -523,7 +557,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Repair,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Branch(branch_id),
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Repair),
         )
         .expect("repair task request is valid")
     }
@@ -533,7 +567,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Repair,
             MaintenanceTaskPriority::Low,
             MaintenanceTaskScope::Global,
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Repair),
         )
         .expect("repair task request is valid")
     }
@@ -543,7 +577,7 @@ impl MaintenanceTaskRequest {
             MaintenanceTaskKind::Compaction,
             MaintenanceTaskPriority::Normal,
             MaintenanceTaskScope::TableLevel { branch_id, level },
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Compaction),
         )
         .expect("compaction task request is valid")
     }
@@ -560,7 +594,7 @@ impl MaintenanceTaskRequest {
                 branch_id,
                 layer_index,
             },
-            MaintenanceTaskPolicy::coalescing(),
+            MaintenanceTaskPolicy::coalescing_for_kind(MaintenanceTaskKind::Materialization),
         )
         .expect("materialization task request is valid")
     }
@@ -1264,6 +1298,30 @@ impl LifecycleMaintenanceExecutor {
         self.enqueue_with_fault_and_binding(state, request, fault, Ok)
     }
 
+    /// Space-reclamation contract §3.1 (slice 3): enqueue one link of the
+    /// close-time reclaim drive while the runtime is `Closing`, where ordinary
+    /// maintenance is refused. Admits only requests whose close policy is
+    /// `DrainBeforeClose` — the drive can queue nothing the close would then
+    /// cancel — and coalesces like an ordinary enqueue.
+    pub(crate) fn enqueue_for_close(
+        &mut self,
+        state: LifecycleStateMachine,
+        request: MaintenanceTaskRequest,
+    ) -> LifecycleResult<MaintenanceEnqueueOutcome> {
+        if request.policy().close_policy() != MaintenanceClosePolicy::DrainBeforeClose {
+            return Err(LifecycleError::MaintenanceTaskFailed {
+                reason: "close-time enqueue admits only drain-before-close tasks",
+            });
+        }
+        self.enqueue_with_admission_fault_and_binding(
+            state,
+            LifecycleOperationKind::CloseRequiredDrain,
+            request,
+            &mut NoopMaintenanceFaultHook,
+            Ok,
+        )
+    }
+
     fn enqueue_with_fault_and_binding(
         &mut self,
         state: LifecycleStateMachine,
@@ -1271,7 +1329,24 @@ impl LifecycleMaintenanceExecutor {
         fault: &mut impl MaintenanceFaultHook,
         bind: impl FnOnce(MaintenanceTaskRequest) -> LifecycleResult<MaintenanceTaskRequest>,
     ) -> LifecycleResult<MaintenanceEnqueueOutcome> {
-        require_admitted(state, LifecycleOperationKind::OrdinaryMaintenance)?;
+        self.enqueue_with_admission_fault_and_binding(
+            state,
+            LifecycleOperationKind::OrdinaryMaintenance,
+            request,
+            fault,
+            bind,
+        )
+    }
+
+    fn enqueue_with_admission_fault_and_binding(
+        &mut self,
+        state: LifecycleStateMachine,
+        admission: LifecycleOperationKind,
+        request: MaintenanceTaskRequest,
+        fault: &mut impl MaintenanceFaultHook,
+        bind: impl FnOnce(MaintenanceTaskRequest) -> LifecycleResult<MaintenanceTaskRequest>,
+    ) -> LifecycleResult<MaintenanceEnqueueOutcome> {
+        require_admitted(state, admission)?;
         fault.check(MaintenanceFaultPoint::BeforeEnqueue, None)?;
         if let Some(key) = request.coalesce_key() {
             if let Some(existing_index) = self
