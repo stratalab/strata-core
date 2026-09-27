@@ -27,7 +27,7 @@ use strata_engine::{
     EventChainVerification as EngineEventChainVerification, EventPayload as EngineEventPayload,
     EventRangeDirection as EngineEventRangeDirection, EventRangePage as EngineEventRangePage,
     EventSequence as EngineEventSequence, EventService, EventType as EngineEventType,
-    EventVersionedRecord as EngineEventVersionedRecord,
+    EventVersionedRecord as EngineEventVersionedRecord, FootprintDetail as EngineFootprintDetail,
     GraphAdjacencyIndex as EngineGraphAdjacencyIndex,
     GraphAnalyticsBudget as EngineGraphAnalyticsBudget,
     GraphBatchOpOutcome as EngineGraphBatchOpOutcome,
@@ -69,8 +69,10 @@ use strata_engine::{
     KvScanRow, KvValue, KvVersionedValue, MemoryBudgetSource as EngineMemoryBudgetSource,
     PreviewConflict as EnginePreviewConflict, ProductSpace, PromotedEntity as EnginePromotedEntity,
     PromotionOutcome as EnginePromotionOutcome, PromotionStrategy as EnginePromotionStrategy,
-    SpaceComparison as EngineSpaceComparison, SpaceCreateOutcome as EngineSpaceCreateOutcome,
-    SpaceDeleteOutcome as EngineSpaceDeleteOutcome,
+    ReclaimDeferralReason as EngineReclaimDeferralReason, ReclaimOutcome as EngineReclaimOutcome,
+    ReclaimPass as EngineReclaimPass, SpaceComparison as EngineSpaceComparison,
+    SpaceCreateOutcome as EngineSpaceCreateOutcome, SpaceDeleteOutcome as EngineSpaceDeleteOutcome,
+    StorageFootprint as EngineStorageFootprint, StorageReclaimStatus as EngineStorageReclaimStatus,
     VectorBulkDeleteOutcome as EngineVectorBulkDeleteOutcome,
     VectorCollectionInfo as EngineVectorCollectionInfo,
     VectorCollectionName as EngineVectorCollectionName, VectorConfig as EngineVectorConfig,
@@ -97,6 +99,9 @@ use crate::types::{
     AdminMemoryBudget as OutputAdminMemoryBudget,
     AdminMemoryBudgetSource as OutputAdminMemoryBudgetSource, AdminMetrics as OutputAdminMetrics,
     AdminOpenTarget as OutputAdminOpenTarget, AdminPrimitives as OutputAdminPrimitives,
+    AdminReclaimDeferralReason as OutputAdminReclaimDeferralReason,
+    AdminReclaimOutcome as OutputAdminReclaimOutcome, AdminReclaimPass as OutputAdminReclaimPass,
+    AdminStorage as OutputAdminStorage, AdminStorageReclaim as OutputAdminStorageReclaim,
     AdminVectorCollection as OutputAdminVectorCollection, ArrowExportPrimitive, ArrowFileFormat,
     ArrowImportTarget, BatchEventEntry, BatchExistsItemResult, BatchExistsPresence,
     BatchGetItemResult, BatchItem, BatchItemResult, BatchJsonDeleteEntry, BatchJsonEntry,
@@ -155,7 +160,7 @@ mod vector_convert;
 
 use admin_convert::{
     output_admin_config, output_admin_describe, output_admin_health, output_admin_info,
-    output_admin_metrics, output_space_create, output_space_delete,
+    output_admin_metrics, output_admin_storage, output_space_create, output_space_delete,
 };
 use batch::{
     empty_batch_exists_results, empty_batch_get_results, empty_batch_results,

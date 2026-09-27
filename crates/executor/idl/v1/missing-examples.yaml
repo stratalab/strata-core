@@ -10,6 +10,7 @@ uncovered: []                  # empty — every hermetic-possible command is co
 
 non_hermetic:
   - admin.hub_clone            # network + hub — Strata.clone, tests/test_hub_clone.py
+  - admin.storage              # durable-only (a cache database holds no durable objects) — crates/engine/tests/storage_footprint.rs, crates/executor/tests/admin_storage_behavior.rs
   - hub.info                   # network + configured StrataHub
   - hub.list_datasets          # network + configured StrataHub
   - hub.get_dataset            # network + configured StrataHub

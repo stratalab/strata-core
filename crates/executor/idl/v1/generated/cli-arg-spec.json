@@ -1,5 +1,11 @@
 {
   "verbs": {
+    "admin storage": {
+      "positionals": [],
+      "flags": {
+        "audit": "audit"
+      }
+    },
     "agents commands": {
       "positionals": [],
       "flags": {}

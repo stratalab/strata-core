@@ -92,6 +92,7 @@ errors:
   - failed_precondition.engine.graph_ontology_frozen
   - failed_precondition.engine.graph_ontology_freeze
   - unsupported.engine.graph_binding_cross_branch
+  - unsupported.engine.persistence_capability
   - resource_exhausted.engine.graph_analytics_budget
   - invalid_argument.engine.config_key
   - unsupported.executor.arrow_feature_disabled

@@ -590,6 +590,67 @@
       }
     },
     {
+      "id": "admin.storage",
+      "family": "admin",
+      "op": "storage",
+      "kind": "read.summary",
+      "title": "Read storage footprint",
+      "summary": "Read the database's on-disk footprint.",
+      "description": "Returns the database's on-disk footprint as the storage layer computes it: the durable table objects the runtime catalogues and their bytes, the retained and active WAL bytes, and the reclaim ledger (the last pass of every reclaim family with its running totals). With `audit: true` it also lists and stats what the reclaim runners would touch — unreferenced and quarantined table objects, checkpoint snapshots and the superseded set, the WAL's reclaimable-versus-tail split — and reports a total when every part is known. The facts are database-global: every branch shares one table catalogue, one WAL and one reclaim ledger, so the branch only has to exist (it defaults to the handle branch). A cache database holds no durable objects and is refused.\n\nStatus commands return a scalar or compact status payload and do not mutate database state.",
+      "docs": "/docs/admin/storage",
+      "cli": {
+        "path": [
+          "admin",
+          "storage"
+        ],
+        "surface": "verb"
+      },
+      "mcp": {
+        "name": "strata_admin_storage",
+        "description": "Use this when the user asks how much disk a database uses, what of it is reclaimable, or whether reclaim is keeping up — live tables, WAL, snapshots, unreferenced and quarantined objects, and the reclaim ledger."
+      },
+      "feature": "core",
+      "access": "read",
+      "input": "Command::Storage",
+      "wire": "storage",
+      "output": "Output::Storage",
+      "outputs": [
+        "Output::Storage"
+      ],
+      "wire_status": "stable",
+      "response_model": "StatusResponse<AdminStorage>",
+      "commit": "none",
+      "pagination": "none",
+      "batch": "none",
+      "errors": [
+        {
+          "code": "failed_precondition.engine.runtime_closed",
+          "docs": "https://stratadb.org/e/failed_precondition.engine.runtime_closed"
+        },
+        {
+          "code": "not_found.engine.branch",
+          "docs": "https://stratadb.org/e/not_found.engine.branch"
+        },
+        {
+          "code": "invalid_argument.engine.branch_name",
+          "docs": "https://stratadb.org/e/invalid_argument.engine.branch_name"
+        },
+        {
+          "code": "unsupported.engine.persistence_capability",
+          "docs": "https://stratadb.org/e/unsupported.engine.persistence_capability"
+        }
+      ],
+      "fixtures": {
+        "request": "requests/v1/admin/storage.json",
+        "response": "responses/v1/admin/storage.json",
+        "replay_skip": "the footprint needs a durable database (a cache database holds no durable objects and is refused), so the response is captured from a durable open and never replayed against the scratch cache executor"
+      },
+      "source": {
+        "command": "crates/executor/idl/v1/commands/admin.yaml",
+        "prose": "commands/admin.storage.md"
+      }
+    },
+    {
       "id": "arrow.export",
       "family": "arrow",
       "op": "export",

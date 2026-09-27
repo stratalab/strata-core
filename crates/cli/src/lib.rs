@@ -815,6 +815,12 @@ pub(crate) fn execute_parsed_command(
         options::TopCommand::Metrics => run(Command::Metrics {
             branch: scope.branch.clone(),
         })?,
+        options::TopCommand::Admin(args) => match args.command {
+            options::AdminSubcommand::Storage { audit } => run(Command::Storage {
+                branch: scope.branch.clone(),
+                audit,
+            })?,
+        },
         options::TopCommand::Describe => run(Command::Describe {
             branch: scope.branch.clone(),
             space: scope.space.clone(),
@@ -3134,6 +3140,12 @@ fn command_to_executor(command: options::TopCommand, scope: &Scope) -> Result<Co
         Top::Metrics => Command::Metrics {
             branch: scope.branch.clone(),
         },
+        Top::Admin(args) => match args.command {
+            options::AdminSubcommand::Storage { audit } => Command::Storage {
+                branch: scope.branch.clone(),
+                audit,
+            },
+        },
         Top::Describe => Command::Describe {
             branch: scope.branch.clone(),
             space: scope.space.clone(),
@@ -3500,6 +3512,14 @@ mod tests {
         assert!(matches!(cmd("info"), Command::Info { .. }));
         assert!(matches!(cmd("health"), Command::Health { .. }));
         assert!(matches!(cmd("metrics"), Command::Metrics { .. }));
+        assert!(matches!(
+            cmd("admin storage"),
+            Command::Storage { audit: false, .. }
+        ));
+        assert!(matches!(
+            cmd("admin storage --audit"),
+            Command::Storage { audit: true, .. }
+        ));
         assert!(matches!(cmd("describe"), Command::Describe { .. }));
         assert!(matches!(cmd("config get"), Command::ConfigGet {}));
         assert!(matches!(cmd("branch list"), Command::BranchList {}));
@@ -4227,7 +4247,7 @@ mod tests {
         for line in [
             "strata kv get k",
             "strata vector upsert docs d1 --text hello",
-            "strata admin ping",
+            "strata scratch ping",
         ] {
             assert_eq!(
                 one_shot_intent(&command(line)),

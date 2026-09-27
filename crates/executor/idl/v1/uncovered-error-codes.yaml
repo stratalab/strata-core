@@ -94,4 +94,3 @@ uncovered:
   - unavailable.engine.control_plane
   - unavailable.engine.persistence
   - unavailable.engine.vector_artifacts
-  - unsupported.engine.persistence_capability

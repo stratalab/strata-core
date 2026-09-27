@@ -118,3 +118,50 @@ pong 1.2.5
 ∎
 ### admin.remote · responses/v1/admin/remote_null.json · raw
 ∎
+### admin.storage · responses/v1/admin/storage.json · human
+audit                      true
+live_table_objects         2
+live_table_bytes           3.7 kB
+unreferenced_objects       0
+unreferenced_bytes         0 B
+quarantined_objects        0
+quarantined_bytes          0 B
+snapshot_objects           1
+snapshot_bytes             1.7 kB
+superseded_snapshots       0
+superseded_snapshot_bytes  0 B
+wal_retained_bytes         55.8 kB
+wal_active_bytes           55.8 kB
+wal_retained_segments      1
+wal_retention_watermark    2
+wal_reclaimable_bytes      0 B
+wal_tail_bytes             36 B
+total_bytes                5.4 kB
+reclaim
+  pending_tasks          0
+  total_passes           1
+  total_bytes_reclaimed  0 B
+∎
+### admin.storage · responses/v1/admin/storage.json · raw
+audit	true
+live_table_objects	2
+live_table_bytes	3658
+unreferenced_objects	0
+unreferenced_bytes	0
+quarantined_objects	0
+quarantined_bytes	0
+snapshot_objects	1
+snapshot_bytes	1684
+superseded_snapshots	0
+superseded_snapshot_bytes	0
+wal_retained_bytes	55767
+wal_active_bytes	55767
+wal_retained_segments	1
+wal_retention_watermark	2
+wal_reclaimable_bytes	0
+wal_tail_bytes	36
+total_bytes	5378
+reclaim.pending_reclaim_tasks	0
+reclaim.total_passes	1
+reclaim.total_bytes_reclaimed	0
+∎

@@ -15,6 +15,7 @@
 - [Read database metrics](https://stratadb.org/docs/admin/metrics.md): Read lightweight database metrics.
 - [Ping database](https://stratadb.org/docs/admin/ping.md): Check that the database handle is live.
 - [Read remote origin](https://stratadb.org/docs/admin/remote.md): Read where this database was cloned from.
+- [Read storage footprint](https://stratadb.org/docs/admin/storage.md): Read the database's on-disk footprint.
 
 ## arrow
 

@@ -84,6 +84,7 @@ response_models:
   - StatusResponse<AdminIpcStop>
   - StatusResponse<AdminMetrics>
   - StatusResponse<AdminPing>
+  - StatusResponse<AdminStorage>
   - StatusResponse<ArrowExportResult>
   - StatusResponse<ArrowImportResult>
   - StatusResponse<BranchComparisonItem>

@@ -41,6 +41,12 @@ const SERVICES: &[(&str, &str)] = &[
 /// row — the test below fails while a stale row remains.
 const DIVERGENT_NAMES: &[(&str, &str, &str, &str)] = &[
     ("admin", "config_key", "config_value", "key vs value for the same read"),
+    (
+        "admin",
+        "storage",
+        "storage_footprint",
+        "the CLI names the subject; the engine names the measurement",
+    ),
     ("branch", "diff", "compare", "the CLI borrows git's noun; the engine states the operation"),
     (
         "branch",
