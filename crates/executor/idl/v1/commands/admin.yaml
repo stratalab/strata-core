@@ -81,6 +81,57 @@ commands:
     fixtures:
       request: requests/v1/admin/metrics.json
       response: responses/v1/admin/metrics.json
+  - id: admin.storage
+    kind: read.summary
+    title: Read storage footprint
+    input: Command::Storage
+    output: Output::Storage
+    cli_path: ["admin", "storage"]
+    prose: commands/admin.storage.md
+    errors+:
+      - invalid_argument.engine.branch_name
+      - unsupported.engine.persistence_capability
+    display:
+      fields:
+        - field: /data/audit
+        - field: /data/live_table_objects
+        - field: /data/live_table_bytes
+          as: size
+        - field: /data/unreferenced_objects
+        - field: /data/unreferenced_bytes
+          as: size
+        - field: /data/quarantined_objects
+        - field: /data/quarantined_bytes
+          as: size
+        - field: /data/snapshot_objects
+        - field: /data/snapshot_bytes
+          as: size
+        - field: /data/superseded_snapshots
+        - field: /data/superseded_snapshot_bytes
+          as: size
+        - field: /data/wal_retained_bytes
+          as: size
+        - field: /data/wal_active_bytes
+          as: size
+        - field: /data/wal_retained_segments
+        - field: /data/wal_retention_watermark
+        - field: /data/wal_reclaimable_bytes
+          as: size
+        - field: /data/wal_tail_bytes
+          as: size
+        - field: /data/total_bytes
+          as: size
+        - field: /data/reclaim
+          fields:
+            - field: /data/reclaim/pending_reclaim_tasks
+              header: pending_tasks
+            - field: /data/reclaim/total_passes
+            - field: /data/reclaim/total_bytes_reclaimed
+              as: size
+    fixtures:
+      request: requests/v1/admin/storage.json
+      response: responses/v1/admin/storage.json
+      replay_skip: the footprint needs a durable database (a cache database holds no durable objects and is refused), so the response is captured from a durable open and never replayed against the scratch cache executor
   - id: admin.describe
     kind: read.summary
     title: Describe database

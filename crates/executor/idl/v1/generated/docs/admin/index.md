@@ -20,3 +20,4 @@ section: admin
 | [Read database metrics](/docs/admin/metrics) | Read lightweight database metrics. |
 | [Ping database](/docs/admin/ping) | Check that the database handle is live. |
 | [Read remote origin](/docs/admin/remote) | Read where this database was cloned from. |
+| [Read storage footprint](/docs/admin/storage) | Read the database's on-disk footprint. |

@@ -25,6 +25,7 @@ impl Executor {
             Command::Info { branch } => self.execute_info(branch.as_deref()),
             Command::Health { branch } => self.execute_health(branch.as_deref()),
             Command::Metrics { branch } => self.execute_metrics(branch.as_deref()),
+            Command::Storage { branch, audit } => self.execute_storage(branch.as_deref(), audit),
             Command::Describe { branch, space } => {
                 self.execute_describe(branch.as_deref(), space.as_deref())
             }

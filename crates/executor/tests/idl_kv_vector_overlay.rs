@@ -24,6 +24,7 @@ const REQUIRED_ADMIN: &[&str] = &[
     "admin.info",
     "admin.health",
     "admin.metrics",
+    "admin.storage",
     "admin.describe",
     "admin.config",
     "admin.ipc_status",

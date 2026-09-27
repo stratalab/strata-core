@@ -1,0 +1,36 @@
+{
+  "data": {
+    "audit": true,
+    "live_table_bytes": 3658,
+    "live_table_objects": 2,
+    "quarantined_bytes": 0,
+    "quarantined_objects": 0,
+    "reclaim": {
+      "deferred_passes": 0,
+      "last_snapshot_prune": {
+        "bytes_reclaimed": 0,
+        "objects_affected": 1,
+        "outcome": "nothing",
+        "state_changes": 0
+      },
+      "pending_reclaim_tasks": 0,
+      "reclaimed_passes": 0,
+      "total_bytes_reclaimed": 0,
+      "total_passes": 1
+    },
+    "snapshot_bytes": 1684,
+    "snapshot_objects": 1,
+    "superseded_snapshot_bytes": 0,
+    "superseded_snapshots": 0,
+    "total_bytes": 5378,
+    "unreferenced_bytes": 0,
+    "unreferenced_objects": 0,
+    "wal_active_bytes": 55767,
+    "wal_reclaimable_bytes": 0,
+    "wal_retained_bytes": 55767,
+    "wal_retained_segments": 1,
+    "wal_retention_watermark": 2,
+    "wal_tail_bytes": 36
+  },
+  "type": "storage"
+}

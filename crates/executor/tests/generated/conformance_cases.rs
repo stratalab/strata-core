@@ -248,6 +248,23 @@ fn admin_remote_replay_observes_a_declared_output() {
     support::replay_observes_declared(&[], "requests/v1/admin/remote_get.json", &["remote_origin_result"]);
 }
 
+// ---- admin.storage ----
+
+#[test]
+fn admin_storage_request_wire_roundtrip_is_idempotent() {
+    support::request_roundtrip_idempotent("requests/v1/admin/storage.json");
+}
+
+#[test]
+fn admin_storage_response_wire_roundtrip_is_idempotent() {
+    support::response_roundtrip_idempotent("responses/v1/admin/storage.json");
+}
+
+#[test]
+fn admin_storage_request_rejects_unknown_keys_at_closed_objects() {
+    support::unknown_keys_rejected("requests/v1/admin/storage.json", &[""]);
+}
+
 // ---- arrow.export ----
 
 #[test]

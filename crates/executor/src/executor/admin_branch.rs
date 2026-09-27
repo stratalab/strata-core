@@ -2,8 +2,9 @@ use super::{
     branch_cleanup_item, branch_comparison, branch_item, branch_name, branch_preview,
     branch_promotion, delete_effect, engine_promotion_strategy, output_admin_config,
     output_admin_describe, output_admin_health, output_admin_info, output_admin_metrics,
-    output_space_create, output_space_delete, product_space, BranchStateSelector, CommitVersion,
-    Executor, ExecutorError, Output, PageInfo, PromotionStrategy, Timestamp, DEFAULT_BRANCH,
+    output_admin_storage, output_space_create, output_space_delete, product_space,
+    BranchStateSelector, CommitVersion, EngineFootprintDetail, Executor, ExecutorError, Output,
+    PageInfo, PromotionStrategy, Timestamp, DEFAULT_BRANCH,
 };
 
 impl Executor {
@@ -106,6 +107,22 @@ impl Executor {
         let mut admin = self.database.admin()?;
         let summary = admin.metrics(Some(&branch))?;
         Ok(Output::Metrics(output_admin_metrics(&summary)))
+    }
+
+    pub(super) fn execute_storage(
+        &mut self,
+        branch: Option<&str>,
+        audit: bool,
+    ) -> Result<Output, ExecutorError> {
+        let branch = branch_name(branch, &self.default_branch)?;
+        let detail = if audit {
+            EngineFootprintDetail::Audit
+        } else {
+            EngineFootprintDetail::Live
+        };
+        let mut admin = self.database.admin()?;
+        let footprint = admin.storage_footprint(Some(&branch), detail)?;
+        Ok(Output::Storage(output_admin_storage(&footprint)))
     }
 
     pub(super) fn execute_describe(

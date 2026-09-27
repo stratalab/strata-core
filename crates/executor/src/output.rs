@@ -2,9 +2,9 @@
 
 use crate::types::{
     AdminConfig, AdminDatabaseInfo, AdminDescribe, AdminHealth, AdminIpcStatus, AdminIpcStop,
-    AdminMetrics, AdminPing, ArrowExportResult, ArrowImportResult, BatchExistsItemResult,
-    BatchExistsPresence, BatchGetItemResult, BatchItemResult, BatchResult, BranchCleanupItem,
-    BranchComparisonItem, BranchItem, BranchPreviewItem, Bytes, CommitReceipt,
+    AdminMetrics, AdminPing, AdminStorage, ArrowExportResult, ArrowImportResult,
+    BatchExistsItemResult, BatchExistsPresence, BatchGetItemResult, BatchItemResult, BatchResult,
+    BranchCleanupItem, BranchComparisonItem, BranchItem, BranchPreviewItem, Bytes, CommitReceipt,
     EventBatchAppendItemResult, EventChainVerification, EventVersionedData, GraphBatchItemResult,
     GraphBfsData, GraphBindingHit, GraphCdlpData, GraphEdgeDataOutput, GraphInfoData, GraphLccData,
     GraphNeighborHit, GraphNodeDataOutput, GraphOntologyData, GraphOntologySummaryData,
@@ -56,6 +56,8 @@ pub enum Output {
     Health(AdminHealth),
     /// Lightweight database metrics.
     Metrics(AdminMetrics),
+    /// The database's on-disk footprint.
+    Storage(AdminStorage),
     /// Compact database description.
     Described(AdminDescribe),
     /// Sanitized configuration facts.

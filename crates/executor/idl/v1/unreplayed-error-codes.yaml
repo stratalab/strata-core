@@ -60,7 +60,15 @@
 # now declares both (it is the only raiser of the first) and replays each from
 # an error case: a negative edge in the setup, and a blank edge type in the
 # request's new `edge_types` filter.
-budget: 108
+# 108 -> 109 (space-reclamation contract §3.5, slice 10): unsupported.engine.
+# persistence_capability joins — its only declaring command, admin.storage, is
+# replay_skip'd (the footprint needs a durable database; the scratch cache
+# executor answers with exactly this refusal), and the verifier skips a
+# replay-skipped entry's error cases with its primary fixture, so no fixture
+# in this lane can pin the envelope. The envelope is pinned by
+# `crates/executor/tests/admin_storage_behavior.rs` (cache refusal by code)
+# and drains when the replay lane gains a durable scratch executor.
+budget: 109
 unreplayed:
   - already_exists.engine.json_index
   - failed_precondition.engine.graph_ontology_edge_type
@@ -139,7 +147,6 @@ unreplayed:
   - invalid_argument.executor.arrow_empty_export
   - invalid_argument.executor.arrow_encoding
   - invalid_argument.executor.arrow_event
-  - unsupported.executor.arrow_feature_disabled
   - invalid_argument.executor.arrow_format
   - invalid_argument.executor.arrow_graph
   - invalid_argument.executor.arrow_input_missing
@@ -152,7 +159,6 @@ unreplayed:
   - invalid_argument.executor.graph_analytics_budget
   - invalid_argument.executor.hub_branch
   - invalid_argument.executor.hub_dataset
-  - unsupported.executor.hub_feature_disabled
   - invalid_argument.executor.hub_filter
   - invalid_argument.executor.hub_since
   - invalid_argument.executor.hub_url
@@ -170,3 +176,6 @@ unreplayed:
   - unavailable.executor.arrow_io
   - unavailable.executor.hub_transport
   - unsupported.engine.graph_binding_cross_branch
+  - unsupported.engine.persistence_capability
+  - unsupported.executor.arrow_feature_disabled
+  - unsupported.executor.hub_feature_disabled

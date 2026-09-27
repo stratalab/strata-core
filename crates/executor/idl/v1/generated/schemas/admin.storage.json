@@ -1,0 +1,434 @@
+{
+  "$defs": {
+    "AdminReclaimDeferralReason": {
+      "description": "Why a reclaim pass deferred.",
+      "oneOf": [
+        {
+          "const": "reader_pinned",
+          "description": "A reader still pins the objects.",
+          "type": "string"
+        },
+        {
+          "const": "referenced",
+          "description": "The objects are still referenced.",
+          "type": "string"
+        },
+        {
+          "const": "incomplete_proof",
+          "description": "The retention proof was incomplete.",
+          "type": "string"
+        },
+        {
+          "const": "stale_proof",
+          "description": "The retention proof was stale.",
+          "type": "string"
+        },
+        {
+          "const": "recovery_health",
+          "description": "Recovery health forbids reclaim.",
+          "type": "string"
+        },
+        {
+          "const": "inventory_advanced",
+          "description": "The quarantine inventory advanced under the pass.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_scope",
+          "description": "The requested scope is not supported.",
+          "type": "string"
+        }
+      ]
+    },
+    "AdminReclaimOutcome": {
+      "description": "How a reclaim pass ended.",
+      "oneOf": [
+        {
+          "const": "reclaimed",
+          "description": "The pass released bytes.",
+          "type": "string"
+        },
+        {
+          "const": "nothing",
+          "description": "The pass ran and found nothing to release.",
+          "type": "string"
+        },
+        {
+          "const": "deferred",
+          "description": "The pass deferred; `deferral` says why.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The pass failed.",
+          "type": "string"
+        },
+        {
+          "const": "canceled",
+          "description": "The pass was canceled before it ran.",
+          "type": "string"
+        }
+      ]
+    },
+    "AdminReclaimPass": {
+      "additionalProperties": false,
+      "description": "One recorded reclaim pass.",
+      "properties": {
+        "bytes_reclaimed": {
+          "description": "Bytes the pass released.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deferral": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminReclaimDeferralReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why it deferred, when it did."
+        },
+        "objects_affected": {
+          "description": "Objects the pass touched.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/$defs/AdminReclaimOutcome",
+          "description": "How the pass ended."
+        },
+        "state_changes": {
+          "description": "Durable state changes the pass made.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "outcome",
+        "bytes_reclaimed",
+        "objects_affected",
+        "state_changes"
+      ],
+      "type": "object"
+    },
+    "AdminStorage": {
+      "additionalProperties": false,
+      "description": "Storage footprint output (space-reclamation contract §3.5). Audit-only\nfields are absent unless the request set `audit: true`.",
+      "properties": {
+        "audit": {
+          "description": "True when the audit tier gathered the listing-backed facts.",
+          "type": "boolean"
+        },
+        "live_table_bytes": {
+          "description": "Bytes of those table objects.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "live_table_objects": {
+          "description": "Durable table objects the runtime catalogues.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quarantined_bytes": {
+          "description": "Bytes of those objects (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "quarantined_objects": {
+          "description": "Objects held in quarantine (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reclaim": {
+          "$ref": "#/$defs/AdminStorageReclaim",
+          "description": "The reclaim ledger."
+        },
+        "snapshot_bytes": {
+          "description": "Bytes of those snapshots (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "snapshot_objects": {
+          "description": "Checkpoint snapshot objects on disk (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "superseded_snapshot_bytes": {
+          "description": "Bytes of those snapshots (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "superseded_snapshots": {
+          "description": "Snapshots the attested one supersedes (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_bytes": {
+          "description": "Every byte the database holds on disk — catalogued tables, unreferenced\nand quarantined objects, snapshots and the retained WAL — when every\npart is known (audit, with warm WAL facts).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unreferenced_bytes": {
+          "description": "Bytes of those objects (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unreferenced_objects": {
+          "description": "Table objects referenced by nothing (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wal_active_bytes": {
+          "description": "Bytes of the active WAL segment, when known.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wal_reclaimable_bytes": {
+          "description": "WAL bytes below the retention watermark a truncation may delete (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wal_retained_bytes": {
+          "description": "Bytes of the retained WAL segments, including the active one, when the\nruntime's growth facts are warm.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wal_retained_segments": {
+          "description": "Retained WAL segments, when known.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wal_retention_watermark": {
+          "description": "The commit version at and below which the WAL is reclaimable, when known.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wal_tail_bytes": {
+          "description": "WAL bytes above the retention watermark (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "audit",
+        "live_table_objects",
+        "live_table_bytes",
+        "reclaim"
+      ],
+      "type": "object"
+    },
+    "AdminStorageReclaim": {
+      "additionalProperties": false,
+      "description": "The reclaim ledger for `admin.storage`: the last pass of every reclaim\nfamily, running totals, and the reclaim work still queued.",
+      "properties": {
+        "deferred_passes": {
+          "description": "Passes that deferred.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_mark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminReclaimPass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last table-object mark."
+        },
+        "last_purge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminReclaimPass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last quarantine purge."
+        },
+        "last_snapshot_prune": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminReclaimPass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last snapshot prune."
+        },
+        "last_sweep": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminReclaimPass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last quarantine sweep."
+        },
+        "last_wal_truncation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminReclaimPass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last WAL truncation."
+        },
+        "pending_reclaim_tasks": {
+          "description": "Reclaim tasks still queued, when known.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reclaimed_passes": {
+          "description": "Passes that released bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_bytes_reclaimed": {
+          "description": "Bytes released since the database opened.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_passes": {
+          "description": "Passes recorded since the database opened.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_passes",
+        "total_bytes_reclaimed",
+        "reclaimed_passes",
+        "deferred_passes"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://stratadb.org/idl/v1/schemas/admin.storage.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "command": "admin.storage",
+  "request": {
+    "additionalProperties": false,
+    "description": "Returns the database's on-disk footprint.",
+    "properties": {
+      "audit": {
+        "description": "Gather the audit tier too: the listing-backed facts (unreferenced and\nquarantined objects, snapshots, the WAL's reclaimable-versus-tail split).",
+        "type": "boolean"
+      },
+      "branch": {
+        "description": "Branch to validate. The footprint is database-global; defaults to the executor handle branch.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "type": {
+        "const": "storage",
+        "type": "string"
+      }
+    },
+    "required": [
+      "type"
+    ],
+    "type": "object"
+  },
+  "response": {
+    "description": "The database's on-disk footprint.",
+    "properties": {
+      "data": {
+        "$ref": "#/$defs/AdminStorage"
+      },
+      "type": {
+        "const": "storage",
+        "type": "string"
+      }
+    },
+    "required": [
+      "type",
+      "data"
+    ],
+    "type": "object"
+  }
+}

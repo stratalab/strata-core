@@ -292,3 +292,157 @@ pub struct AdminDescribe {
     /// Available rebuilt capabilities.
     pub capabilities: AdminCapabilities,
 }
+
+/// How a reclaim pass ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AdminReclaimOutcome {
+    /// The pass released bytes.
+    Reclaimed,
+    /// The pass ran and found nothing to release.
+    Nothing,
+    /// The pass deferred; `deferral` says why.
+    Deferred,
+    /// The pass failed.
+    Failed,
+    /// The pass was canceled before it ran.
+    Canceled,
+}
+
+/// Why a reclaim pass deferred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AdminReclaimDeferralReason {
+    /// A reader still pins the objects.
+    ReaderPinned,
+    /// The objects are still referenced.
+    Referenced,
+    /// The retention proof was incomplete.
+    IncompleteProof,
+    /// The retention proof was stale.
+    StaleProof,
+    /// Recovery health forbids reclaim.
+    RecoveryHealth,
+    /// The quarantine inventory advanced under the pass.
+    InventoryAdvanced,
+    /// The requested scope is not supported.
+    UnsupportedScope,
+}
+
+/// One recorded reclaim pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AdminReclaimPass {
+    /// How the pass ended.
+    pub outcome: AdminReclaimOutcome,
+    /// Why it deferred, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferral: Option<AdminReclaimDeferralReason>,
+    /// Bytes the pass released.
+    pub bytes_reclaimed: u64,
+    /// Objects the pass touched.
+    pub objects_affected: u64,
+    /// Durable state changes the pass made.
+    pub state_changes: u64,
+}
+
+/// The reclaim ledger for `admin.storage`: the last pass of every reclaim
+/// family, running totals, and the reclaim work still queued.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AdminStorageReclaim {
+    /// The last table-object mark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_mark: Option<AdminReclaimPass>,
+    /// The last quarantine sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sweep: Option<AdminReclaimPass>,
+    /// The last quarantine purge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_purge: Option<AdminReclaimPass>,
+    /// The last snapshot prune.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_snapshot_prune: Option<AdminReclaimPass>,
+    /// The last WAL truncation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wal_truncation: Option<AdminReclaimPass>,
+    /// Passes recorded since the database opened.
+    pub total_passes: u64,
+    /// Bytes released since the database opened.
+    pub total_bytes_reclaimed: u64,
+    /// Passes that released bytes.
+    pub reclaimed_passes: u64,
+    /// Passes that deferred.
+    pub deferred_passes: u64,
+    /// Reclaim tasks still queued, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_reclaim_tasks: Option<u64>,
+}
+
+/// Storage footprint output (space-reclamation contract §3.5). Audit-only
+/// fields are absent unless the request set `audit: true`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AdminStorage {
+    /// True when the audit tier gathered the listing-backed facts.
+    pub audit: bool,
+    /// Durable table objects the runtime catalogues.
+    pub live_table_objects: u64,
+    /// Bytes of those table objects.
+    pub live_table_bytes: u64,
+    /// Bytes of the retained WAL segments, including the active one, when the
+    /// runtime's growth facts are warm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_retained_bytes: Option<u64>,
+    /// Bytes of the active WAL segment, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_active_bytes: Option<u64>,
+    /// Retained WAL segments, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_retained_segments: Option<u64>,
+    /// The commit version at and below which the WAL is reclaimable, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_retention_watermark: Option<u64>,
+    /// Table objects referenced by nothing (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreferenced_objects: Option<u64>,
+    /// Bytes of those objects (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreferenced_bytes: Option<u64>,
+    /// Objects held in quarantine (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantined_objects: Option<u64>,
+    /// Bytes of those objects (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantined_bytes: Option<u64>,
+    /// Checkpoint snapshot objects on disk (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_objects: Option<u64>,
+    /// Bytes of those snapshots (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_bytes: Option<u64>,
+    /// Snapshots the attested one supersedes (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_snapshots: Option<u64>,
+    /// Bytes of those snapshots (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_snapshot_bytes: Option<u64>,
+    /// WAL bytes below the retention watermark a truncation may delete (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_reclaimable_bytes: Option<u64>,
+    /// WAL bytes above the retention watermark (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_tail_bytes: Option<u64>,
+    /// Every byte the database holds on disk — catalogued tables, unreferenced
+    /// and quarantined objects, snapshots and the retained WAL — when every
+    /// part is known (audit, with warm WAL facts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    /// The reclaim ledger.
+    pub reclaim: AdminStorageReclaim,
+}

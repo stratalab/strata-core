@@ -236,6 +236,8 @@ pub(crate) enum TopCommand {
     Metrics,
     /// Print a compact database description.
     Describe,
+    /// Storage administration: the on-disk footprint.
+    Admin(AdminArgs),
     /// Configuration reads.
     Config(ConfigArgs),
     /// Multi-process IPC status and control.
@@ -341,6 +343,28 @@ pub(crate) struct ConfigArgs {
     /// Config command.
     #[command(subcommand)]
     pub(crate) command: ConfigCommand,
+}
+
+/// Admin command wrapper.
+#[derive(Debug, Args)]
+pub(crate) struct AdminArgs {
+    /// Admin command.
+    #[command(subcommand)]
+    pub(crate) command: AdminSubcommand,
+}
+
+/// Storage administration subcommands.
+#[derive(Debug, Subcommand)]
+pub(crate) enum AdminSubcommand {
+    /// Print the database's on-disk footprint: live tables, WAL, snapshots,
+    /// and the reclaim ledger. Durable databases only.
+    Storage {
+        /// Also list and stat what the reclaim runners would touch:
+        /// unreferenced and quarantined objects, snapshots and the superseded
+        /// set, the WAL's reclaimable-versus-tail split, and a total.
+        #[arg(long)]
+        audit: bool,
+    },
 }
 
 /// IPC command wrapper.
@@ -2457,6 +2481,7 @@ pub(crate) mod tests {
     /// verb is added or removed without updating this list, so the CLI surface
     /// can never silently drift again.
     const EXPECTED_VERBS: &[&str] = &[
+        "admin storage",
         "agents commands",
         "agents errors",
         "agents guide",

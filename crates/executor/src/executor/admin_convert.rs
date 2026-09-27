@@ -4,11 +4,15 @@ use super::{
     EngineAdminDescribeSummary, EngineAdminGraphSummary, EngineAdminHealthStatus,
     EngineAdminHealthSummary, EngineAdminMetricsSummary, EngineAdminPrimitiveSummary,
     EngineAdminVectorCollectionSummary, EngineControlHealthStatus, EngineDatabaseOpenTarget,
-    EngineMemoryBudgetSource, EngineSpaceCreateOutcome, EngineSpaceDeleteOutcome, Output,
-    OutputAdminCapabilities, OutputAdminConfig, OutputAdminControlStatus, OutputAdminDatabaseInfo,
-    OutputAdminDescribe, OutputAdminGraph, OutputAdminHealth, OutputAdminHealthStatus,
-    OutputAdminMemoryBudget, OutputAdminMemoryBudgetSource, OutputAdminMetrics,
-    OutputAdminOpenTarget, OutputAdminPrimitives, OutputAdminVectorCollection,
+    EngineFootprintDetail, EngineMemoryBudgetSource, EngineReclaimDeferralReason,
+    EngineReclaimOutcome, EngineReclaimPass, EngineSpaceCreateOutcome, EngineSpaceDeleteOutcome,
+    EngineStorageFootprint, EngineStorageReclaimStatus, Output, OutputAdminCapabilities,
+    OutputAdminConfig, OutputAdminControlStatus, OutputAdminDatabaseInfo, OutputAdminDescribe,
+    OutputAdminGraph, OutputAdminHealth, OutputAdminHealthStatus, OutputAdminMemoryBudget,
+    OutputAdminMemoryBudgetSource, OutputAdminMetrics, OutputAdminOpenTarget,
+    OutputAdminPrimitives, OutputAdminReclaimDeferralReason, OutputAdminReclaimOutcome,
+    OutputAdminReclaimPass, OutputAdminStorage, OutputAdminStorageReclaim,
+    OutputAdminVectorCollection,
 };
 
 #[cfg(not(feature = "arrow"))]
@@ -105,6 +109,109 @@ pub(super) fn output_admin_health(health: &EngineAdminHealthSummary) -> OutputAd
         space_catalog: health.space_catalog.map(output_admin_control_status),
         default_branch: health.default_branch.as_str().to_owned(),
         branch_count: health.branch_count,
+    }
+}
+
+/// The wire name for a reclaim outcome; `None` for a variant this build does
+/// not know (the engine enum is `#[non_exhaustive]`).
+pub(super) const fn output_admin_reclaim_outcome(
+    outcome: EngineReclaimOutcome,
+) -> Option<OutputAdminReclaimOutcome> {
+    match outcome {
+        EngineReclaimOutcome::Reclaimed => Some(OutputAdminReclaimOutcome::Reclaimed),
+        EngineReclaimOutcome::Nothing => Some(OutputAdminReclaimOutcome::Nothing),
+        EngineReclaimOutcome::Deferred => Some(OutputAdminReclaimOutcome::Deferred),
+        EngineReclaimOutcome::Failed => Some(OutputAdminReclaimOutcome::Failed),
+        EngineReclaimOutcome::Canceled => Some(OutputAdminReclaimOutcome::Canceled),
+        _ => None,
+    }
+}
+
+/// The wire name for a reclaim deferral; `None` for a variant this build does
+/// not know.
+pub(super) const fn output_admin_reclaim_deferral(
+    deferral: EngineReclaimDeferralReason,
+) -> Option<OutputAdminReclaimDeferralReason> {
+    match deferral {
+        EngineReclaimDeferralReason::ReaderPinned => {
+            Some(OutputAdminReclaimDeferralReason::ReaderPinned)
+        }
+        EngineReclaimDeferralReason::Referenced => {
+            Some(OutputAdminReclaimDeferralReason::Referenced)
+        }
+        EngineReclaimDeferralReason::IncompleteProof => {
+            Some(OutputAdminReclaimDeferralReason::IncompleteProof)
+        }
+        EngineReclaimDeferralReason::StaleProof => {
+            Some(OutputAdminReclaimDeferralReason::StaleProof)
+        }
+        EngineReclaimDeferralReason::RecoveryHealth => {
+            Some(OutputAdminReclaimDeferralReason::RecoveryHealth)
+        }
+        EngineReclaimDeferralReason::InventoryAdvanced => {
+            Some(OutputAdminReclaimDeferralReason::InventoryAdvanced)
+        }
+        EngineReclaimDeferralReason::UnsupportedScope => {
+            Some(OutputAdminReclaimDeferralReason::UnsupportedScope)
+        }
+        _ => None,
+    }
+}
+
+/// One reclaim pass on the wire; a pass whose outcome this build cannot name
+/// is left out rather than misreported.
+fn output_admin_reclaim_pass(pass: EngineReclaimPass) -> Option<OutputAdminReclaimPass> {
+    Some(OutputAdminReclaimPass {
+        outcome: output_admin_reclaim_outcome(pass.outcome)?,
+        deferral: pass.deferral.and_then(output_admin_reclaim_deferral),
+        bytes_reclaimed: pass.bytes_reclaimed,
+        objects_affected: pass.objects_affected,
+        state_changes: pass.state_changes,
+    })
+}
+
+fn output_admin_storage_reclaim(reclaim: &EngineStorageReclaimStatus) -> OutputAdminStorageReclaim {
+    OutputAdminStorageReclaim {
+        last_mark: reclaim.last_mark.and_then(output_admin_reclaim_pass),
+        last_sweep: reclaim.last_sweep.and_then(output_admin_reclaim_pass),
+        last_purge: reclaim.last_purge.and_then(output_admin_reclaim_pass),
+        last_snapshot_prune: reclaim
+            .last_snapshot_prune
+            .and_then(output_admin_reclaim_pass),
+        last_wal_truncation: reclaim
+            .last_wal_truncation
+            .and_then(output_admin_reclaim_pass),
+        total_passes: reclaim.total_passes,
+        total_bytes_reclaimed: reclaim.total_bytes_reclaimed,
+        reclaimed_passes: reclaim.reclaimed_passes,
+        deferred_passes: reclaim.deferred_passes,
+        pending_reclaim_tasks: reclaim.pending_reclaim_tasks,
+    }
+}
+
+pub(super) fn output_admin_storage(footprint: &EngineStorageFootprint) -> OutputAdminStorage {
+    OutputAdminStorage {
+        audit: matches!(footprint.detail, EngineFootprintDetail::Audit),
+        live_table_objects: footprint.live_table_objects,
+        live_table_bytes: footprint.live_table_bytes,
+        wal_retained_bytes: footprint.wal_retained_bytes,
+        wal_active_bytes: footprint.wal_active_bytes,
+        wal_retained_segments: footprint.wal_retained_segments,
+        wal_retention_watermark: footprint
+            .wal_retention_watermark
+            .map(strata_core::CommitVersion::as_u64),
+        unreferenced_objects: footprint.unreferenced_objects,
+        unreferenced_bytes: footprint.unreferenced_bytes,
+        quarantined_objects: footprint.quarantined_objects,
+        quarantined_bytes: footprint.quarantined_bytes,
+        snapshot_objects: footprint.snapshot_objects,
+        snapshot_bytes: footprint.snapshot_bytes,
+        superseded_snapshots: footprint.superseded_snapshots,
+        superseded_snapshot_bytes: footprint.superseded_snapshot_bytes,
+        wal_reclaimable_bytes: footprint.wal_reclaimable_bytes,
+        wal_tail_bytes: footprint.wal_tail_bytes,
+        total_bytes: footprint.total_bytes,
+        reclaim: output_admin_storage_reclaim(&footprint.reclaim),
     }
 }
 
@@ -251,5 +358,77 @@ mod memory_budget_tests {
         assert_eq!(out.total_bytes, 512);
         assert_eq!(out.source, OutputAdminMemoryBudgetSource::FixedDefault);
         assert_eq!(out.usable_host_bytes, None);
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::{
+        output_admin_reclaim_deferral, output_admin_reclaim_outcome, EngineReclaimDeferralReason,
+        EngineReclaimOutcome, OutputAdminReclaimDeferralReason, OutputAdminReclaimOutcome,
+    };
+
+    #[test]
+    fn reclaim_outcome_truth_table() {
+        for (engine, wire) in [
+            (
+                EngineReclaimOutcome::Reclaimed,
+                OutputAdminReclaimOutcome::Reclaimed,
+            ),
+            (
+                EngineReclaimOutcome::Nothing,
+                OutputAdminReclaimOutcome::Nothing,
+            ),
+            (
+                EngineReclaimOutcome::Deferred,
+                OutputAdminReclaimOutcome::Deferred,
+            ),
+            (
+                EngineReclaimOutcome::Failed,
+                OutputAdminReclaimOutcome::Failed,
+            ),
+            (
+                EngineReclaimOutcome::Canceled,
+                OutputAdminReclaimOutcome::Canceled,
+            ),
+        ] {
+            assert_eq!(output_admin_reclaim_outcome(engine), Some(wire));
+        }
+    }
+
+    #[test]
+    fn reclaim_deferral_truth_table() {
+        for (engine, wire) in [
+            (
+                EngineReclaimDeferralReason::ReaderPinned,
+                OutputAdminReclaimDeferralReason::ReaderPinned,
+            ),
+            (
+                EngineReclaimDeferralReason::Referenced,
+                OutputAdminReclaimDeferralReason::Referenced,
+            ),
+            (
+                EngineReclaimDeferralReason::IncompleteProof,
+                OutputAdminReclaimDeferralReason::IncompleteProof,
+            ),
+            (
+                EngineReclaimDeferralReason::StaleProof,
+                OutputAdminReclaimDeferralReason::StaleProof,
+            ),
+            (
+                EngineReclaimDeferralReason::RecoveryHealth,
+                OutputAdminReclaimDeferralReason::RecoveryHealth,
+            ),
+            (
+                EngineReclaimDeferralReason::InventoryAdvanced,
+                OutputAdminReclaimDeferralReason::InventoryAdvanced,
+            ),
+            (
+                EngineReclaimDeferralReason::UnsupportedScope,
+                OutputAdminReclaimDeferralReason::UnsupportedScope,
+            ),
+        ] {
+            assert_eq!(output_admin_reclaim_deferral(engine), Some(wire));
+        }
     }
 }

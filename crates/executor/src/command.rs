@@ -47,6 +47,16 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
+    /// Returns the database's on-disk footprint.
+    Storage {
+        /// Branch to validate. The footprint is database-global; defaults to the executor handle branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// Gather the audit tier too: the listing-backed facts (unreferenced and
+        /// quarantined objects, snapshots, the WAL's reclaimable-versus-tail split).
+        #[serde(default, skip_serializing_if = "is_false")]
+        audit: bool,
+    },
     /// Returns a compact database description.
     Describe {
         /// Branch whose primitive data should be described. Defaults to the executor handle branch.
@@ -2729,6 +2739,7 @@ impl Command {
             Self::Info { .. } => "info",
             Self::Health { .. } => "health",
             Self::Metrics { .. } => "metrics",
+            Self::Storage { .. } => "storage",
             Self::Describe { .. } => "describe",
             Self::ConfigGet {} => "config_get",
             Self::IpcStatus {} => "ipc_status",

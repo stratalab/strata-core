@@ -14,7 +14,13 @@
 #   * arrow — reads/writes real files outside the scratch executor;
 #   * inference — loads a model / performs network I/O / is machine-dependent;
 #   * event reads — wall-clock timestamps are hashed into event content, so the
-#     output never reproduces.
+#     output never reproduces;
+#   * durable-only admin — the storage footprint measures durable objects a
+#     cache database does not have; the scratch cache executor answers with the
+#     `unsupported.engine.persistence_capability` refusal, never the payload,
+#     so the golden is captured from a durable open (`admin.storage`,
+#     space-reclamation contract §3.5; covered end to end by
+#     `crates/executor/tests/admin_storage_behavior.rs`).
 #
 # `budget` (W0b) MUST equal the number of `skipped` entries below. The list is
 # shrink-only per entry; this budget caps the TOTAL so the debt cannot creep up
@@ -22,9 +28,10 @@
 # raising `budget` in the same change with a rationale; draining requires lowering
 # `budget` to match. Enforced by `enforce_debt_budget` in
 # `crates/executor/src/idl_tooling.rs`.
-budget: 12
+budget: 13
 skipped:
   - admin.hub_clone
+  - admin.storage
   - arrow.export
   - arrow.import
   - event.get
