@@ -777,6 +777,13 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         &mut self,
         branch_id: BranchId,
     ) -> LifecycleResult<()> {
+        // Space-reclamation contract §3.1: a mutating commit's admission is the
+        // session's first write intent, so the reclaim-only scope ends HERE
+        // rather than at apply. Admission under blocking pressure waits for
+        // exactly the upper-tier progress (compaction, flush) the scope would
+        // otherwise withhold from the worker, and the first commit could
+        // never be admitted.
+        self.reclaim_only_scope = crate::lifecycle::ReclaimOnlyScope::Inactive;
         self.last_write_admission = None;
         let pressure = self.storage_pressure_for_branch(branch_id);
         let mut outcome = evaluate_mutating_write_admission(
