@@ -1665,7 +1665,10 @@ mod tests {
         );
         // The session reclaim ledgers, folded across epochs: a constant of
         // the seed like every other counter.
-        assert_eq!(facts.reclaim_passes(), 16, "{facts:?}");
+        // Re-pinned for slice 12: checkpoints no longer defer on a flushed
+        // non-seeded branch, so more checkpoints complete and more reclaim
+        // passes follow them.
+        assert_eq!(facts.reclaim_passes(), 18, "{facts:?}");
     }
 
     /// Pool ids and branch labels are stable identifiers.

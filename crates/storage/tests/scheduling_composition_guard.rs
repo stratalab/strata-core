@@ -15,10 +15,7 @@ fn source(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
-const PREDICATES: [&str; 2] = [
-    "non_seeded_branch_has_durable_base",
-    "any_branch_holds_unmaterialized_inherited_layers",
-];
+const PREDICATES: [&str; 1] = ["any_branch_holds_unmaterialized_inherited_layers"];
 
 #[test]
 fn structural_deferral_predicates_stay_private_to_the_registry() {

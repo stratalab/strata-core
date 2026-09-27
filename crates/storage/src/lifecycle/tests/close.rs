@@ -457,7 +457,6 @@ fn close_checkpoint_decision_truth_table() {
     use std::time::Duration;
     let bounded = LifecycleCloseReclaimBudget::Bounded(Duration::from_millis(500));
     let disabled = LifecycleCloseReclaimBudget::Disabled;
-    let base = CheckpointStructuralDeferral::NonSeededDurableBase;
     let fork = CheckpointStructuralDeferral::UnmaterializedInheritedLayers;
     for (budget, structural, commits, expected) in [
         (
@@ -474,15 +473,15 @@ fn close_checkpoint_decision_truth_table() {
         ),
         (
             disabled,
-            Some(base),
+            Some(fork),
             7,
             CloseCheckpointDecision::Skip(CloseCheckpointSkip::Disabled),
         ),
         (
             bounded,
-            Some(base),
+            Some(fork),
             7,
-            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Structural(base)),
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Structural(fork)),
         ),
         (
             bounded,

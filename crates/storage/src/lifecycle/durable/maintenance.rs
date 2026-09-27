@@ -1177,21 +1177,16 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     }
 
     /// After a checkpoint deferred for exceeding the delta cap: enqueue a flush
-    /// of the seeded branch (rotating and draining its memtables so the retry
+    /// of EVERY active branch (rotating and draining each memtable so the retry
     /// deltas over a bounded tail) and a retried checkpoint carrying the same
-    /// options, once per visible version.
-    ///
-    /// Seeded-branch scope is deliberate: the completable checkpoint path is
-    /// seeded-branch-only here. A non-seeded branch that holds a durable base or
-    /// unmaterialized inherited layers defers the checkpoint *structurally*
-    /// before it ever measures a delta (`checkpoint_structural_deferral`), and a
-    /// global flush would give such a branch a durable base — latching the
-    /// `NonSeededBranchBase` structural deferral instead of resolving anything.
-    /// Mirrors the WAL-growth burst backstop, which flushes the seeded branch
-    /// for the same reason. The per-branch orphan-recovery slice that lifts
-    /// that structural deferral switches this chain to a global flush so a
-    /// non-seeded branch's bloat shrinks the delta too (space-reclamation
-    /// contract §3.3, slice 12).
+    /// options, once per visible version. Every branch since slice 12 (space-
+    /// reclamation contract §3.3): a non-seeded branch gaining a durable base no
+    /// longer defers the checkpoint — every checkpoint records the durable-base
+    /// set and recovery decides per branch — so its bloat shrinks the delta too.
+    /// One branch-scoped task per branch, not one global task: the background
+    /// flush builder borrows a single branch off-lock and starts only
+    /// branch-scoped flushes, so a global task would wait in its queue
+    /// unstarted while the retried checkpoint deferred behind it.
     pub(crate) fn chain_flush_and_checkpoint_after_delta_cap(
         &mut self,
         visible_version: CommitVersion,
@@ -1207,7 +1202,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         // retry to the periodic growth backstop. The guard arms only when the
         // retried checkpoint actually queued, so a rejected enqueue does not
         // block the next attempt at this version.
-        let _ = self.enqueue_maintenance(MaintenanceTaskRequest::flush(self.initial_branch_id));
+        for descriptor in self.branch_catalog.list_branches(false) {
+            let _ = self.enqueue_maintenance(MaintenanceTaskRequest::flush(descriptor.branch_id()));
+        }
         if self
             .enqueue_maintenance(MaintenanceTaskRequest::checkpoint_with_options(options))
             .is_ok()
@@ -1657,9 +1654,6 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         Ok(
             checkpoint_structural_deferral(&self.branch_catalog, self.initial_branch_id)?.map(
                 |deferral| match deferral {
-                    CheckpointStructuralDeferral::NonSeededDurableBase => {
-                        "checkpoint policy deferred while a non-seeded branch holds a durable table base"
-                    }
                     CheckpointStructuralDeferral::UnmaterializedInheritedLayers => {
                         "checkpoint policy deferred while a branch holds unmaterialized inherited layers"
                     }
@@ -2151,22 +2145,15 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             self.record_optional_maintenance_health(&Ok(Some(outcome.clone())));
             return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
         }
-        // Multi-branch durability guard: defer when a branch other than the recovery-seeded
-        // branch holds a durable table-manifest base. Recovery rebuilds non-seeded branches from a
-        // global snapshot delta plus their per-branch table manifest, never replaying the WAL below
-        // the snapshot watermark for them, so a snapshot taken over such a branch would recover a
-        // non-contiguous gap if a crash later dropped that branch's manifest (the seeded-only
-        // orphan detector cannot see it). The per-branch fix that lifts this guard is tracked in
-        // multi-branch-orphaned-delta-recovery-gap.md.
         // TCP4.14: one registry decides structural deferral for BOTH this
-        // execution-time arm and every enqueue/pacing site (#2792, #2798).
+        // execution-time arm and every enqueue/pacing site (#2792, #2798). The
+        // multi-branch durable-base guard is gone (space-reclamation contract
+        // §3.2, slice 12): recovery decides per branch from the snapshot's
+        // recorded durable-base set.
         if let Some(deferral) =
             checkpoint_structural_deferral(&self.branch_catalog, self.initial_branch_id)?
         {
             let reason = match deferral {
-                CheckpointStructuralDeferral::NonSeededDurableBase => {
-                    "checkpoint deferred: non-seeded branch holds a durable table base"
-                }
                 CheckpointStructuralDeferral::UnmaterializedInheritedLayers => {
                     "checkpoint deferred: branch holds unmaterialized inherited layers"
                 }

@@ -2,11 +2,10 @@
 
 use super::{commit_error, manifest_error, require_admitted, wal_error};
 use crate::branch::state::BranchLocalState;
-use crate::commit::{CommitBranchGuardSet, CommitRuntimeError, VisibleVersionTracker};
+use crate::commit::CommitRuntimeError;
 use crate::lifecycle::checkpoint::{
-    checkpoint_durable_branch_with_budget, checkpoint_durable_runtime_with_budget,
-    checkpoint_request_from_maintenance_task_with_snapshot_id, checkpoint_structural_deferral,
-    truncate_wal, wal_truncation_request_from_maintenance_task, CheckpointStructuralDeferral,
+    checkpoint_durable_runtime_with_budget, checkpoint_structural_deferral, truncate_wal,
+    wal_truncation_request_from_maintenance_task, CheckpointStructuralDeferral,
     LifecycleCheckpointRequest, LifecycleCheckpointStatus,
 };
 use crate::lifecycle::compaction::{
@@ -197,32 +196,13 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             .lookup(branch_id)
             .map_err(commit_error)?
             .generation();
-        // A close-drained checkpoint publishes through the single-branch
-        // collector below, so it must defer whenever any branch besides the
-        // seeded one exists: a seeded-only snapshot advances the WAL-replay
-        // floor (its watermark is the global visible version) past non-seeded
-        // rows it does not carry — silent loss on the next open, and the exact
-        // snapshot the multi-branch guard (`non_seeded_branch_has_durable_base`)
-        // exists to prevent. Deferring is always safe at close: the rows stay
-        // in the WAL and the next open replays them. Lifted together with the
-        // guard by the per-branch fix tracked in
-        // multi-branch-orphaned-delta-recovery-gap.md.
-        let non_seeded_branches_present = self
-            .branch_catalog
-            .list_branches(false)
-            .iter()
-            .any(|descriptor| descriptor.branch_id() != branch_id);
         let mut runner = DurableCloseMaintenanceRunner {
             branch: self.branch_catalog.branch_state_mut(
                 branch_id,
                 crate::commit::CommitBranchGenerationGuard::exact(generation),
             )?,
-            non_seeded_branches_present,
             services: &self.services,
-            guard_set: &self.guard_set,
-            visible: &self.visible,
             created_at,
-            next_snapshot_id: &mut self.next_checkpoint_snapshot_id,
             health: self.current_recovery_health.clone(),
             budget: &self.budget,
             table_catalog: &mut self.table_catalog,
@@ -571,16 +551,24 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
     }
 }
 
+/// A checkpoint task drained at close defers to the close's own checkpoint
+/// (space-reclamation contract §3.1, slice 7), which runs right after the
+/// drains through the multi-branch collector under the registry. The close
+/// runner borrows the seeded branch alone, so it could only publish a
+/// seeded-only snapshot — one whose watermark would advance the replay floor
+/// past every other branch's rows. It never publishes.
+fn close_drained_checkpoint_outcome() -> MaintenanceOutcome {
+    MaintenanceOutcome::new(
+        MaintenanceTaskKind::Checkpoint,
+        MaintenanceOutcomeStatus::Deferred,
+    )
+    .with_reason("checkpoint deferred during close: the close publishes its own checkpoint")
+}
+
 struct DurableCloseMaintenanceRunner<'a, 'b> {
     branch: &'a mut BranchLocalState,
-    /// Branches other than the seeded one exist: the close-drained checkpoint
-    /// must defer (see the construction site in `finish_close`).
-    non_seeded_branches_present: bool,
     services: &'a LifecycleDurableLocalServices<'b>,
-    guard_set: &'a CommitBranchGuardSet,
-    visible: &'a VisibleVersionTracker,
     created_at: Timestamp,
-    next_snapshot_id: &'a mut u64,
     health: RecoveryHealth,
     budget: &'a StorageBudgetLedger,
     table_catalog: &'a mut crate::lifecycle::LifecycleDurableTableCatalog,
@@ -634,7 +622,7 @@ impl MaintenanceTaskRunner for DurableCloseMaintenanceRunner<'_, '_> {
                     .maintenance_outcome(),
                 )
             }
-            MaintenanceTaskKind::Checkpoint => self.run_checkpoint(task),
+            MaintenanceTaskKind::Checkpoint => Ok(close_drained_checkpoint_outcome()),
             MaintenanceTaskKind::FlushWatermark => Ok(MaintenanceOutcome::new(
                 MaintenanceTaskKind::FlushWatermark,
                 MaintenanceOutcomeStatus::Deferred,
@@ -675,48 +663,6 @@ impl MaintenanceTaskRunner for DurableCloseMaintenanceRunner<'_, '_> {
 }
 
 impl DurableCloseMaintenanceRunner<'_, '_> {
-    fn run_checkpoint(&mut self, task: &MaintenanceTask) -> LifecycleResult<MaintenanceOutcome> {
-        if self.non_seeded_branches_present {
-            return Ok(MaintenanceOutcome::new(
-                MaintenanceTaskKind::Checkpoint,
-                MaintenanceOutcomeStatus::Deferred,
-            )
-            .with_reason(
-                "checkpoint deferred during close: non-seeded branches present, and a \
-                 seeded-only snapshot would advance the replay floor past their rows",
-            ));
-        }
-        let request = checkpoint_request_from_maintenance_task_with_snapshot_id(
-            task,
-            self.branch.branch_id(),
-            self.services.manifest(),
-            self.created_at,
-            Some(*self.next_snapshot_id),
-        )?;
-        let table_catalog = &*self.table_catalog;
-        let table_is_durable = |identity: &crate::table::TableIdentity| {
-            table_catalog.object_for_identity(identity).is_some()
-        };
-        let outcome = checkpoint_durable_branch_with_budget(
-            self.branch,
-            self.services,
-            self.guard_set,
-            || self.visible.visible_version(),
-            &request,
-            Some(self.budget),
-            &table_is_durable,
-        )?;
-        if let Some(snapshot_id) = outcome.snapshot_id() {
-            *self.next_snapshot_id =
-                snapshot_id
-                    .checked_add(1)
-                    .ok_or(LifecycleError::CheckpointPublicationFailed {
-                        reason: "checkpoint snapshot id overflow",
-                    })?;
-        }
-        Ok(outcome.maintenance_outcome())
-    }
-
     fn run_wal_truncation(
         &mut self,
         task: &MaintenanceTask,

@@ -148,29 +148,24 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
         // non-contiguous gap, so recover only the WAL-contiguous prefix instead (empty when the
         // base is unrecoverable).
         //
-        // MULTI-BRANCH GAP (guarded upstream): `table_manifest_stage` is the SEEDED branch's only
-        // and `flushed_through` is global, so a non-seeded branch whose table manifest is lost is
-        // not checked here. The checkpoint is prevented from recording such a snapshot: the
-        // synchronous and background paths defer while any non-seeded branch holds a durable base
-        // (`non_seeded_branch_has_durable_base`), and the close-drain path defers whenever any
-        // non-seeded branch exists at all (its collector is seeded-only, so a published snapshot
-        // would also drop non-seeded WAL rows outright — see #2624), so those rows stay in the
-        // WAL and a full replay recovers them. The per-branch detection
-        // that would let the checkpoint run (lifting the guard) is the deferred fix. Guard test:
-        // `multi_branch_checkpoint_defers_so_lost_non_seeded_manifest_recovers_cleanly`; fix plan:
-        // multi-branch-orphaned-delta-recovery-gap.md.
-        let orphaned_delta = match (
+        // This detector is the SEEDED branch's: `table_manifest_stage` is its staged
+        // manifest. Non-seeded branches are decided per branch in bootstrap
+        // (space-reclamation contract §3.2, slice 12): a recorded branch whose
+        // manifest is gone is an orphaned delta — its snapshot rows are discarded
+        // and only its WAL-contiguous prefix from the first version is replayed
+        // (`branch_recovery_disposition`, `replay_wal_into_catalog`).
+        let seeded_branch_id = self.shell.branch_state().branch_id();
+        let orphaned_delta = seeded_branch_is_orphaned_delta(
+            checkpoint
+                .durable_base_branches()
+                .map(|recorded| recorded.contains(&seeded_branch_id)),
+            table_manifest_stage.is_some(),
             checkpoint.trusted_watermark(),
             self.shell.assembly_facts().manifest_flush_watermark(),
-        ) {
-            (Some(snapshot_watermark), Some(flush_watermark)) if table_manifest_stage.is_none() => {
-                flush_watermark < snapshot_watermark
-                    || recovered_branch
-                        .as_ref()
-                        .is_some_and(BranchLocalState::is_empty)
-            }
-            _ => false,
-        };
+            recovered_branch
+                .as_ref()
+                .is_some_and(BranchLocalState::is_empty),
+        );
         if orphaned_delta {
             push_fault(
                 &mut faults,
@@ -773,6 +768,13 @@ impl LifecycleRecoveryOutcome {
         &self.health
     }
 
+    /// The same outcome with its health replaced: bootstrap's per-branch
+    /// orphan recovery (slice 12) adds the faults Phase 1 could not see.
+    pub(crate) fn with_health(mut self, health: RecoveryHealth) -> Self {
+        self.health = health;
+        self
+    }
+
     pub(crate) const fn checkpoint(&self) -> &LifecycleRecoveredCheckpoint {
         &self.checkpoint
     }
@@ -833,15 +835,8 @@ impl LifecycleRecoveredCheckpoint {
 
     /// Space-reclamation contract §3.2: the branches the snapshot recorded as
     /// holding a durable table-manifest base, or `None` for a snapshot written
-    /// before the section existed. Per-branch orphan recovery (slice 12)
-    /// consumes it; until then the recorded set is carried for its readers.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by per-branch orphan recovery (space-reclamation contract slice 12)"
-        )
-    )]
+    /// before the section existed. Per-branch orphan recovery (slice 12) drives
+    /// each non-seeded branch's disposition off it.
     pub(crate) fn durable_base_branches(&self) -> Option<&[BranchId]> {
         self.durable_base_branches.as_deref()
     }
@@ -1360,7 +1355,74 @@ fn validate_checkpoint_rows(watermark: CommitVersion, rows: &[StorageRow]) -> Li
     Ok(())
 }
 
-fn recovery_health_from_faults(
+/// Space-reclamation contract §3.2 (slice 12): what recovery does with one
+/// non-seeded branch's part of a checkpoint snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BranchRecoveryDisposition {
+    /// The snapshot recorded a durable base for the branch and the base is
+    /// present: layer the snapshot's delta rows over the manifest (rule 9).
+    Combine,
+    /// The snapshot recorded a durable base that is now missing: the snapshot's
+    /// rows are a delta over a lost base. Discard them and recover only the
+    /// branch's WAL-contiguous prefix; record `MissingTableManifestBase`.
+    OrphanedDelta,
+    /// The snapshot recorded no durable base: its rows are the branch's whole
+    /// state (a self-contained full snapshot). Install them as they are.
+    FullSnapshot,
+    /// The snapshot predates the recorded set: no per-branch verdict, today's
+    /// install path decides (a present manifest combines, an absent one leaves
+    /// the snapshot rows as they are).
+    Unrecorded,
+}
+
+/// The single per-branch rule (slice 12). `recorded_durable_base` is the
+/// snapshot's verdict for this branch — `None` when the snapshot carries no
+/// recorded set at all.
+pub(crate) const fn branch_recovery_disposition(
+    recorded_durable_base: Option<bool>,
+    manifest_present: bool,
+) -> BranchRecoveryDisposition {
+    match (recorded_durable_base, manifest_present) {
+        (None, _) => BranchRecoveryDisposition::Unrecorded,
+        (Some(true), true) => BranchRecoveryDisposition::Combine,
+        (Some(true), false) => BranchRecoveryDisposition::OrphanedDelta,
+        (Some(false), _) => BranchRecoveryDisposition::FullSnapshot,
+    }
+}
+
+/// Space-reclamation contract §3.2 (slice 12): whether the SEEDED branch's
+/// checkpoint rows are an orphaned delta — a delta over a durable base that
+/// is now missing. A snapshot that records its durable-base set answers from
+/// the record, exactly as bootstrap does for every non-seeded branch
+/// (`branch_recovery_disposition`). `flushed_through` cannot stand in for
+/// that record once every branch may flush: it is the highest base floor
+/// across branches, which a non-seeded branch can own while the seeded branch
+/// never flushed (a false orphan). The floor heuristic remains for snapshots
+/// older than the section: the recorded floor sits strictly below the
+/// watermark (rows above it are in the snapshot; the base below it is gone),
+/// or the snapshot carries no seeded rows of its own (everything was in the
+/// base).
+pub(crate) fn seeded_branch_is_orphaned_delta(
+    recorded_durable_base: Option<bool>,
+    manifest_present: bool,
+    snapshot_watermark: Option<CommitVersion>,
+    flush_watermark: Option<CommitVersion>,
+    seeded_rows_empty: bool,
+) -> bool {
+    match branch_recovery_disposition(recorded_durable_base, manifest_present) {
+        BranchRecoveryDisposition::Combine | BranchRecoveryDisposition::FullSnapshot => false,
+        BranchRecoveryDisposition::OrphanedDelta => true,
+        BranchRecoveryDisposition::Unrecorded => {
+            !manifest_present
+                && match (snapshot_watermark, flush_watermark) {
+                    (Some(snapshot), Some(flush)) => flush < snapshot || seeded_rows_empty,
+                    _ => false,
+                }
+        }
+    }
+}
+
+pub(crate) fn recovery_health_from_faults(
     request: &LifecycleRecoveryRequest,
     faults: Vec<RecoveryFault>,
 ) -> LifecycleResult<RecoveryHealth> {

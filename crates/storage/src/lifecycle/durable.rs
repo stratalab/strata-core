@@ -49,6 +49,8 @@ pub(crate) use footprint::{
 pub(crate) use inflight::{InFlightOutputsGuard, InFlightTableOutputs};
 pub(crate) use maintenance::TABLE_OBJECT_SWEEP_MAX_OBJECTS;
 
+#[cfg(test)]
+pub(crate) use bootstrap::OrphanReplayFilter;
 pub(crate) use bootstrap::{
     combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
     parentless_content_predates_generation, record_predates_current_generation,

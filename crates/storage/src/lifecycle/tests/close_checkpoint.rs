@@ -215,11 +215,12 @@ fn close_checkpoint_defers_in_the_fresh_fork_window() {
     assert!(snapshot_ids(backend).is_empty());
 }
 
-/// A non-seeded branch holding a durable table base defers the checkpoint
-/// (the orphaned-delta guard) until slice 12's per-branch recovery lifts it;
-/// the close leaves the WAL as the durable record.
+/// A non-seeded branch holding a durable table base no longer defers the
+/// close checkpoint (space-reclamation contract §3.2, slice 12): one snapshot
+/// covers both branches and records both as durable-base holders, the WAL is
+/// truncated behind it, and the next open replays nothing.
 #[test]
-fn close_checkpoint_defers_with_a_flushed_non_seeded_branch() {
+fn close_checkpoint_completes_with_a_flushed_non_seeded_branch() {
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let initial = branch_id(0xe5);
@@ -257,21 +258,43 @@ fn close_checkpoint_defers_with_a_flushed_non_seeded_branch() {
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
     assert_eq!(
         close.checkpoint(),
-        CloseCheckpointReport::Skipped(CloseCheckpointSkip::Structural(
-            crate::lifecycle::checkpoint::CheckpointStructuralDeferral::NonSeededDurableBase
-        ))
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
     );
     let events = events_since(backend, events_before);
-    assert!(!events.contains(&CheckpointBackendEvent::SnapshotCreate));
-    assert!(!events.contains(&CheckpointBackendEvent::ObjectDelete));
-    assert_eq!(wal_objects(backend), wal_before, "the WAL is untouched");
-    assert!(snapshot_ids(backend).is_empty());
-
-    let (reopened, replayed) = reopen_counting_replay(initial, backend);
-    assert!(
-        replayed > 0,
-        "the WAL is the durable record the next open replays"
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == CheckpointBackendEvent::SnapshotCreate)
+            .count(),
+        1,
+        "one snapshot covers both branches: {events:?}"
     );
+    assert_eq!(snapshot_ids(backend), vec![1]);
+    let wal_after = wal_objects(backend);
+    assert!(
+        wal_after.iter().all(|object| !wal_before.contains(object)),
+        "every pre-close segment is covered and deleted: before={wal_before:?} after={wal_after:?}"
+    );
+
+    let mut shell = assemble_shell(initial, backend).expect("shell");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let outcome = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect("recovery outcome");
+    assert_eq!(
+        outcome.wal().record_count(),
+        0,
+        "the next open replays nothing"
+    );
+    assert_eq!(
+        outcome.checkpoint().durable_base_branches(),
+        Some(&[extra][..]),
+        "the flushed non-seeded branch alone holds a durable base"
+    );
+    let reopened = shell.complete_recovery(&outcome).expect("open runtime");
+    assert!(reopened.current_recovery_health_for_test().is_healthy());
+    assert!(row_is_present(&reopened, initial, b"close-flushed-root-a"));
     assert!(row_is_present(&reopened, initial, b"close-flushed-root-b"));
     assert!(row_is_present(&reopened, extra, b"close-flushed-root-base"));
 }

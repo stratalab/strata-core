@@ -30,12 +30,12 @@ use crate::lifecycle::{
     maintenance_ready_for_recovery_health, projected_commit_rotation_would_exceed_frozen_budget,
     BudgetedCommitBranch, LifecycleBranchCatalog, LifecycleDurableTableCatalog, LifecycleError,
     LifecycleMaintenanceExecutor, LifecycleOperationKind, LifecycleRecoveryOutcome,
-    LifecycleResult, LifecycleState, LifecycleStateMachine, LifecycleStats,
-    LifecycleStoragePressureReason, LifecycleStoragePressureSeverity, LifecycleTransitionTrigger,
-    LifecycleWalGrowthOutcome, LifecycleWalGrowthTrigger, LifecycleWriteAdmissionOutcome,
-    RecoveryExclusivityToken, RecoveryHealth, RuntimeReadHandles, StorageBudgetLedger,
-    StorageBudgetPressureSeverity, StorageBudgetSnapshot, StorageMode, StorageOpenOutcome,
-    StorageOpenPlan,
+    LifecycleRecoveryRequest, LifecycleResult, LifecycleState, LifecycleStateMachine,
+    LifecycleStats, LifecycleStoragePressureReason, LifecycleStoragePressureSeverity,
+    LifecycleTransitionTrigger, LifecycleWalGrowthOutcome, LifecycleWalGrowthTrigger,
+    LifecycleWriteAdmissionOutcome, RecoveryExclusivityToken, RecoveryHealth, RuntimeReadHandles,
+    StorageBudgetLedger, StorageBudgetPressureSeverity, StorageBudgetSnapshot, StorageMode,
+    StorageOpenOutcome, StorageOpenPlan,
 };
 use crate::observability::perf_trace;
 use crate::row::PhysicalKey;
@@ -250,6 +250,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
                 return Err(error);
             }
         };
+        let current_recovery_health = report.recovery_health().clone();
         let open_outcome = match StorageOpenOutcome::new(
             self.assembly_facts().mode(),
             self.assembly_facts().disposition(),
@@ -268,7 +269,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
                 .with_budget_snapshot(self.budget.snapshot())
                 .with_stats(LifecycleStats::new(
                     1,
-                    recovery.health().fault_count(),
+                    report.recovery_health().fault_count(),
                     0,
                     0,
                     0,
@@ -351,7 +352,9 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             budget: self.budget,
             recovered_checkpoint_timestamp_max: recovery.checkpoint().timestamp_max(),
             next_checkpoint_snapshot_id,
-            current_recovery_health: recovery.health().clone(),
+            // The report's health carries the per-branch orphan faults bootstrap
+            // adds (slice 12); `recovery.health()` is Phase 1's view alone.
+            current_recovery_health,
             last_wal_growth_outcome: None,
             pressure_rejected_commit_branches: HashSet::new(),
             last_write_admission: None,
@@ -466,6 +469,50 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
         Ok((durability, checkpoint_watermark))
     }
 
+    /// Reload the durable `PendingReleasesManifest` if present: each entry
+    /// becomes a release plan carrying the persisted releasable-table list
+    /// (`protected_tables` and `removed_refs` stay empty; the next retention
+    /// pass recomputes reachability from the manifest). Returns the plans and
+    /// the manifest sequence, `(empty, 0)` when none was ever published.
+    fn reload_pending_releases(
+        &self,
+    ) -> LifecycleResult<(Vec<crate::branch::facts::BranchReleasePlan>, u64)> {
+        let reloaded = match self
+            .services
+            .pending_releases_manifest()
+            .load_current()
+            .map_err(pending_releases_manifest_service_error)?
+        {
+            Some(manifest) => {
+                let mut plans = Vec::with_capacity(manifest.entries().len());
+                for entry in manifest.entries() {
+                    let identities = entry
+                        .released_tables()
+                        .iter()
+                        .map(|identity| {
+                            crate::table::TableIdentity::new(identity.clone()).map_err(|source| {
+                                LifecycleError::lower_layer_with(
+                                    crate::lifecycle::LifecycleLowerLayer::Format,
+                                    "pending releases manifest table identity invalid",
+                                    source,
+                                )
+                            })
+                        })
+                        .collect::<LifecycleResult<Vec<_>>>()?;
+                    plans.push(
+                        crate::branch::facts::BranchReleasePlan::from_releasable_tables(
+                            entry.branch_id(),
+                            identities,
+                        ),
+                    );
+                }
+                (plans, manifest.manifest_sequence())
+            }
+            None => (Vec::new(), 0),
+        };
+        Ok(reloaded)
+    }
+
     fn prepare_catalog_and_replay(
         &mut self,
         recovery: &LifecycleRecoveryOutcome,
@@ -516,55 +563,27 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             None => 0,
         };
 
-        // Reload the durable PendingReleasesManifest if present. Each
-        // entry is converted back to a release plan carrying the
-        // persisted releasable-table list; protected_tables and
-        // removed_refs stay empty (the next retention pass recomputes
-        // reachability from the manifest).
-        let (pending_releases, pending_releases_sequence) = match self
-            .services
-            .pending_releases_manifest()
-            .load_current()
-            .map_err(pending_releases_manifest_service_error)?
-        {
-            Some(manifest) => {
-                let mut plans = Vec::with_capacity(manifest.entries().len());
-                for entry in manifest.entries() {
-                    let identities = entry
-                        .released_tables()
-                        .iter()
-                        .map(|identity| {
-                            crate::table::TableIdentity::new(identity.clone()).map_err(|source| {
-                                LifecycleError::lower_layer_with(
-                                    crate::lifecycle::LifecycleLowerLayer::Format,
-                                    "pending releases manifest table identity invalid",
-                                    source,
-                                )
-                            })
-                        })
-                        .collect::<LifecycleResult<Vec<_>>>()?;
-                    plans.push(
-                        crate::branch::facts::BranchReleasePlan::from_releasable_tables(
-                            entry.branch_id(),
-                            identities,
-                        ),
-                    );
-                }
-                (plans, manifest.manifest_sequence())
-            }
-            None => (Vec::new(), 0),
-        };
+        let (pending_releases, pending_releases_sequence) = self.reload_pending_releases()?;
 
-        // Install per-branch durable table manifests into non-seeded slots.
-        // The seeded branch's manifest was already applied by the pre-catalog
-        // recovery phase (apply_table_manifest_recovery on the shell).
-        recover_per_branch_table_manifests(
+        // Install per-branch durable table manifests into non-seeded slots
+        // (the seeded branch's was applied by the pre-catalog recovery phase),
+        // then decide every non-seeded branch's recovery disposition from the
+        // snapshot's durable-base record (space-reclamation contract §3.2).
+        let present_manifests = recover_per_branch_table_manifests(
             &self.services,
             &mut self.table_catalog,
             &mut branch_catalog,
             initial_branch_id,
             Some(&self.budget),
         )?;
+        let (orphaned, amended_recovery) = resolve_orphaned_deltas(
+            &self.open_plan,
+            recovery,
+            &branch_catalog,
+            initial_branch_id,
+            &present_manifests,
+        )?;
+        let recovery = amended_recovery.as_ref().unwrap_or(recovery);
 
         // Install non-seeded checkpoint rows and seed non-seeded timeline
         // indexes (seeded-branch state was handled by `recover_checkpoint`).
@@ -572,6 +591,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             &mut branch_catalog,
             recovery.checkpoint(),
             initial_branch_id,
+            &orphaned,
         )?;
 
         // Dispatch WAL replay by branch_id into per-branch catalog slots,
@@ -596,6 +616,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             recovery,
             durability,
             checkpoint_watermark,
+            &orphaned,
         )?;
         rebuild_fork_snapshot_rows(&mut branch_catalog)?;
         complete_forked_branch_timelines_after_replay(&branch_catalog)?;
@@ -664,6 +685,8 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             recovery,
             durability,
             checkpoint_watermark,
+            // The temporary catalog holds the shell's branch alone.
+            &[],
         )
     }
 
@@ -2960,14 +2983,17 @@ fn manifest_max_commit_version(manifest: &crate::format::TableManifest) -> Optio
     owned.chain(inherited).max()
 }
 
+/// Returns the non-seeded branches whose table manifest was present and
+/// applied — the `manifest_present` input of the per-branch disposition.
 fn recover_per_branch_table_manifests(
     services: &LifecycleDurableLocalServices<'_>,
     table_catalog: &mut crate::lifecycle::LifecycleDurableTableCatalog,
     branch_catalog: &mut LifecycleBranchCatalog,
     initial_branch_id: BranchId,
     budget: Option<&StorageBudgetLedger>,
-) -> LifecycleResult<()> {
+) -> LifecycleResult<Vec<BranchId>> {
     use crate::lifecycle::LifecycleBranchStatus;
+    let mut present = Vec::new();
     let manifests = services
         .table_manifest()
         .load_all_current()
@@ -3024,8 +3050,148 @@ fn recover_per_branch_table_manifests(
             table_catalog,
             budget,
         )?;
+        present.push(branch_id);
     }
-    Ok(())
+    Ok(present)
+}
+
+/// Space-reclamation contract §3.2 (slice 12): every active non-seeded branch
+/// the snapshot recorded as holding a durable base whose manifest is absent.
+/// A branch re-created after the snapshot (its creation point at or above the
+/// snapshot watermark) is not a member for its current generation: the
+/// recorded base belonged to the dead one, and the generation fence already
+/// drops that generation's rows.
+fn orphaned_non_seeded_branches(
+    branch_catalog: &LifecycleBranchCatalog,
+    checkpoint: &crate::lifecycle::LifecycleRecoveredCheckpoint,
+    seeded_branch_id: BranchId,
+    present_manifests: &[BranchId],
+) -> Vec<BranchId> {
+    let Some(recorded) = checkpoint.durable_base_branches() else {
+        return Vec::new();
+    };
+    let Some(watermark) = checkpoint.trusted_watermark() else {
+        return Vec::new();
+    };
+    let mut orphaned = Vec::new();
+    for descriptor in branch_catalog.list_branches(false) {
+        let branch_id = descriptor.branch_id();
+        if branch_id == seeded_branch_id {
+            continue;
+        }
+        let recorded_for_this_generation = recorded.contains(&branch_id)
+            && !record_predates_current_generation(watermark, descriptor.created_at());
+        let disposition = crate::lifecycle::branch_recovery_disposition(
+            Some(recorded_for_this_generation),
+            present_manifests.contains(&branch_id),
+        );
+        if disposition == crate::lifecycle::BranchRecoveryDisposition::OrphanedDelta {
+            orphaned.push(branch_id);
+        }
+    }
+    orphaned
+}
+
+/// Space-reclamation contract §3.2 (slice 12): the non-seeded branches the
+/// snapshot recorded as holding a durable base whose base is now gone, and
+/// the Phase 1 outcome amended with their faults. An orphan's snapshot rows
+/// are a delta over nothing — `install_non_seeded_checkpoint_state` discards
+/// them — and only its WAL-contiguous prefix replays (`OrphanReplayFilter`).
+fn resolve_orphaned_deltas(
+    open_plan: &StorageOpenPlan,
+    recovery: &LifecycleRecoveryOutcome,
+    branch_catalog: &LifecycleBranchCatalog,
+    seeded_branch_id: BranchId,
+    present_manifests: &[BranchId],
+) -> LifecycleResult<(Vec<BranchId>, Option<LifecycleRecoveryOutcome>)> {
+    let orphaned = orphaned_non_seeded_branches(
+        branch_catalog,
+        recovery.checkpoint(),
+        seeded_branch_id,
+        present_manifests,
+    );
+    let amended = amend_recovery_for_orphaned_deltas(open_plan, recovery, &orphaned)?;
+    Ok((orphaned, amended))
+}
+
+/// Slice 12: the Phase 1 outcome amended with the faults only bootstrap can
+/// see — one `MissingTableManifestBase` per orphaned non-seeded branch, each
+/// naming its branch — or `None` when nothing is orphaned. Strict recovery
+/// refuses here, exactly as it refuses Phase 1's own faults.
+fn amend_recovery_for_orphaned_deltas(
+    open_plan: &StorageOpenPlan,
+    recovery: &LifecycleRecoveryOutcome,
+    orphaned: &[BranchId],
+) -> LifecycleResult<Option<LifecycleRecoveryOutcome>> {
+    if orphaned.is_empty() {
+        return Ok(None);
+    }
+    let request = LifecycleRecoveryRequest::from_open_plan(open_plan)?;
+    let mut faults = recovery.health().faults().to_vec();
+    for branch_id in orphaned {
+        faults.push(
+            crate::lifecycle::RecoveryFault::new(
+                crate::lifecycle::RecoveryFaultKind::MissingTableManifestBase,
+                "non-seeded branch's delta checkpoint table-manifest base is missing",
+            )?
+            .with_affected_branch(*branch_id),
+        );
+    }
+    let health = crate::lifecycle::recovery::recovery_health_from_faults(&request, faults)?;
+    Ok(Some(recovery.clone().with_health(health)))
+}
+
+/// Slice 12: which WAL records a replay applies once some non-seeded branch
+/// has lost its base and the visit therefore starts from the FIRST version.
+/// An orphaned branch's records apply only while the log is one dense run
+/// from version 1 — a truncated log breaks the run at once and the branch
+/// recovers empty, never with a gap. Every other branch's records at or below
+/// `replay_start` already sit in its base or delta and are skipped; above it
+/// they replay as usual. With nothing orphaned the visit starts at
+/// `replay_start` and every record admits.
+pub(crate) struct OrphanReplayFilter<'a> {
+    orphaned: &'a [BranchId],
+    replay_start: CommitVersion,
+    prefix_intact: bool,
+    expected_next: u64,
+}
+
+impl<'a> OrphanReplayFilter<'a> {
+    pub(crate) const fn new(orphaned: &'a [BranchId], replay_start: CommitVersion) -> Self {
+        Self {
+            orphaned,
+            replay_start,
+            prefix_intact: true,
+            expected_next: 1,
+        }
+    }
+
+    /// The version the WAL visit starts after.
+    pub(crate) const fn visit_from(&self) -> CommitVersion {
+        if self.orphaned.is_empty() {
+            self.replay_start
+        } else {
+            CommitVersion::ZERO
+        }
+    }
+
+    /// Whether the record at `version` on `branch_id` replays. Records must be
+    /// offered in log order: the dense-prefix tracker advances on each call.
+    pub(crate) fn admits(&mut self, branch_id: BranchId, version: CommitVersion) -> bool {
+        if self.orphaned.is_empty() {
+            return true;
+        }
+        if self.prefix_intact && version.as_u64() == self.expected_next {
+            self.expected_next = self.expected_next.saturating_add(1);
+        } else {
+            self.prefix_intact = false;
+        }
+        if self.orphaned.contains(&branch_id) {
+            self.prefix_intact
+        } else {
+            version > self.replay_start
+        }
+    }
 }
 
 /// Install checkpoint rows that did not belong to the seeded branch.
@@ -3048,12 +3214,24 @@ fn install_non_seeded_checkpoint_state(
     branch_catalog: &mut LifecycleBranchCatalog,
     checkpoint: &crate::lifecycle::LifecycleRecoveredCheckpoint,
     seeded_branch_id: BranchId,
+    orphaned: &[BranchId],
 ) -> LifecycleResult<()> {
-    install_non_seeded_checkpoint_rows(
-        branch_catalog,
-        checkpoint.non_seeded_rows(),
-        checkpoint.install_identity_seed(),
-    )?;
+    // Slice 12: an orphaned branch's snapshot rows are a delta over a lost
+    // base — installing them would recover a gap. They are discarded here;
+    // the branch starts empty and takes only its WAL-contiguous prefix.
+    let retained_rows;
+    let rows: &[crate::row::StorageRow] = if orphaned.is_empty() {
+        checkpoint.non_seeded_rows()
+    } else {
+        retained_rows = checkpoint
+            .non_seeded_rows()
+            .iter()
+            .filter(|row| !orphaned.contains(&row.physical_key().branch_id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        &retained_rows
+    };
+    install_non_seeded_checkpoint_rows(branch_catalog, rows, checkpoint.install_identity_seed())?;
     seed_non_seeded_branch_timelines(
         branch_catalog,
         checkpoint.timeline_groups(),
@@ -3854,6 +4032,7 @@ fn replay_wal_into_catalog<S>(
     recovery: &LifecycleRecoveryOutcome,
     durability: CommitDurabilityClass,
     checkpoint_watermark: CommitVersion,
+    orphaned: &[BranchId],
 ) -> LifecycleResult<LifecycleRecoveryBootstrapReport> {
     let mut report = LifecycleRecoveryBootstrapReport::new(recovery.health().clone());
     let mut replayed_max = CommitVersion::ZERO;
@@ -3879,6 +4058,10 @@ fn replay_wal_into_catalog<S>(
     // failure always was.
     let replay_start = recovery.wal().replay_start();
     let replay_ceiling = recovery.wal().replay_ceiling();
+    // Slice 12: an orphaned non-seeded branch lost its base and its snapshot
+    // delta with it; see `OrphanReplayFilter` for which records replay.
+    let mut orphan_filter = OrphanReplayFilter::new(orphaned, replay_start);
+    let visit_from = orphan_filter.visit_from();
     let mut previous: Option<CommitVersion> = None;
     let mut failure: Option<LifecycleError> = None;
     let mut replay_one = |record: &WalRecord| -> LifecycleResult<()> {
@@ -3904,10 +4087,13 @@ fn replay_wal_into_catalog<S>(
         flush_replayed_state_if_over_threshold(flush_context, branch_catalog, record.branch_id())?;
         Ok(())
     };
-    wal.visit_records_after(replay_start, &mut |record| {
+    wal.visit_records_after(visit_from, &mut |record| {
         // The contiguity fence (recovering past a lost table-manifest base):
         // records above it are the orphaned tail recovery deliberately drops.
         if replay_ceiling.is_some_and(|ceiling| record.commit_version() > ceiling) {
+            return std::ops::ControlFlow::Continue(());
+        }
+        if !orphan_filter.admits(record.branch_id(), record.commit_version()) {
             return std::ops::ControlFlow::Continue(());
         }
         match replay_one(record) {
