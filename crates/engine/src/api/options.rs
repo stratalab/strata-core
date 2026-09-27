@@ -111,6 +111,19 @@ impl VersionRetention {
     }
 }
 
+/// How the opened database runs its maintenance — a test seam (`testkit`).
+/// Production always runs the background scheduler.
+#[cfg(any(test, feature = "testkit"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MaintenanceScheduling {
+    /// The background worker, as in production.
+    Background,
+    /// Maintenance runs inline on the calling thread at commit, close and
+    /// open, so a test observes every effect deterministically.
+    DeterministicInline,
+}
+
 /// Options for explicit durable-local database open.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableLocalOpenOptions {
@@ -120,6 +133,8 @@ pub struct DurableLocalOpenOptions {
     cache_preheat: CachePreheat,
     durability: DurabilityMode,
     version_retention: VersionRetention,
+    #[cfg(any(test, feature = "testkit"))]
+    maintenance_scheduling: Option<MaintenanceScheduling>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -134,7 +149,27 @@ impl DurableLocalOpenOptions {
             cache_preheat: CachePreheat::WhenIdle,
             durability: DurabilityMode::Standard,
             version_retention: VersionRetention::KeepAll,
+            #[cfg(any(test, feature = "testkit"))]
+            maintenance_scheduling: None,
         }
+    }
+
+    /// Test seam (`testkit`, space-reclamation contract §3.5): selects how
+    /// the opened database runs maintenance, so a test can drain every
+    /// reclaim chain inline instead of racing the background worker.
+    #[cfg(any(test, feature = "testkit"))]
+    #[must_use]
+    pub const fn with_maintenance_scheduling_policy_for_test(
+        mut self,
+        scheduling: MaintenanceScheduling,
+    ) -> Self {
+        self.maintenance_scheduling = Some(scheduling);
+        self
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) const fn maintenance_scheduling_for_test(&self) -> Option<MaintenanceScheduling> {
+        self.maintenance_scheduling
     }
 
     /// #3502: opts into MVCC version pruning (`KeepAll` by default). Pruning is

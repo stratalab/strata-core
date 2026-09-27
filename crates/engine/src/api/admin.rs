@@ -13,8 +13,8 @@ use crate::diagnostics::EngineError;
 use crate::persistence::StoragePersistence;
 
 use super::{
-    ControlHealthStatus, DatabaseOpenSummary, DatabaseOpenTarget, MemoryBudgetSource,
-    SpaceCatalogDiagnostics,
+    ControlHealthStatus, DatabaseOpenSummary, DatabaseOpenTarget, FootprintDetail,
+    MemoryBudgetSource, SpaceCatalogDiagnostics, StorageFootprint,
 };
 
 /// Health status reported by admin commands.
@@ -292,6 +292,21 @@ impl<'a> AdminService<'a> {
             space_count: self.space_count(&branch)?,
             control_status: health.status,
         })
+    }
+
+    /// Returns the database's on-disk footprint (space-reclamation contract
+    /// §3.5). The facts are database-global — every branch shares one table
+    /// catalog, one WAL and one reclaim ledger — so `branch` only has to
+    /// exist. A cache database holds no durable objects and is refused with
+    /// `unsupported.engine.persistence_capability`.
+    pub fn storage_footprint(
+        &mut self,
+        branch: Option<&BranchName>,
+        detail: FootprintDetail,
+    ) -> Result<StorageFootprint, EngineError> {
+        let branch = self.resolved_branch(branch).clone();
+        self.branch_record(&branch)?;
+        super::footprint::storage_footprint(self.persistence, detail)
     }
 
     /// Returns a structured database snapshot for agent/CLI introspection.

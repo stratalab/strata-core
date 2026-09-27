@@ -274,4 +274,17 @@ exclude_re = [
     # `api_opt_in_version_retention_prunes_old_versions`.
     "Database::force_storage_branch_compaction_for_test",
     "StoragePersistence::force_branch_compaction_for_test",
+    # Space-reclamation contract §3.5 (slice 9): the maintenance-scheduling
+    # test seam — `DurableLocalOpenOptions::with_maintenance_scheduling_policy_for_test`
+    # and the adapter's `maintenance_scheduling_for_storage` mapping — is
+    # `#[cfg(any(test, feature = "testkit"))]`, cfg'd out under this lane's
+    # DEFAULT features (the production twin answers `None` by contract), so
+    # its mutants survive vacuously here. Strength mechanism: the
+    # `-p strata-engine --features testkit` lane runs `storage_footprint.rs`,
+    # whose inline-scheduled scenarios observe the reclaim chain draining at
+    # the commit that follows a compaction — a database left on the background
+    # scheduler would race it (planting `-> None` on the mapping reds
+    # `storage_footprint_audit_reports_debt_and_the_reclaim_that_settles_it`).
+    "DurableLocalOpenOptions::with_maintenance_scheduling_policy_for_test",
+    "maintenance_scheduling_for_storage",
 ]

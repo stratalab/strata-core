@@ -6,6 +6,7 @@ mod control;
 mod database;
 mod dataset_readme;
 mod event;
+mod footprint;
 mod graph;
 mod json;
 mod kv;
@@ -37,6 +38,10 @@ pub use event::{
     EventRangeDirection, EventRangePage, EventSequence, EventService, EventType, EventTypeList,
     EventVersionedRecord,
 };
+pub use footprint::{
+    FootprintDetail, ReclaimDeferralReason, ReclaimOutcome, ReclaimPass, StorageFootprint,
+    StorageReclaimStatus,
+};
 pub use graph::{
     GraphAdjacencyEdge, GraphAdjacencyIndex, GraphAnalyticsBudget, GraphBatchOpOutcome,
     GraphBatchOperation, GraphBatchWrite, GraphBatchWriteOutcome, GraphBfsOptions, GraphBfsResult,
@@ -63,6 +68,8 @@ pub use kv::{
     KvListPage, KvSample, KvScanRow, KvService, KvValue, KvVersionedValue, KvWriteOutcome,
     ProductSpace,
 };
+#[cfg(any(test, feature = "testkit"))]
+pub use options::MaintenanceScheduling;
 pub use options::{
     CacheOpenOptions, CachePreheat, DurabilityMode, DurableLocalOpenOptions, VersionRetention,
 };
