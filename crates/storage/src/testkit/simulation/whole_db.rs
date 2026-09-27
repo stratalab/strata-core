@@ -36,8 +36,10 @@ use strata_core::{BranchId, CommitVersion};
 
 use crate::api::{
     BranchAction, BranchGeneration, BranchRequest, BranchStatus, CommitBatch, CommitOptions,
+    DiagnosticsDetail, DiagnosticsFactState, DiagnosticsRequest, DiagnosticsScope,
     MaintenanceRequest, MaintenanceScope, MaintenanceTask, PrefixScanReadRequest, ReadBound,
-    StorageBackend, StorageDurabilityPolicy, StorageOpenSummary, StorageRuntime,
+    ReclaimBudget, StorageBackend, StorageCloseOptions, StorageDurabilityPolicy,
+    StorageMaintenanceSchedulingPolicy, StorageOpenOptions, StorageOpenSummary, StorageRuntime,
 };
 use crate::testkit::recovery_oracle::model::{ExpectedState, OracleDurability, RecordedMutation};
 use crate::testkit::recovery_oracle::verify::{
@@ -56,6 +58,14 @@ const WHOLE_DB_SALT: u64 = 0x5744_4253_696d_5f31;
 const BRANCH_POOL: u8 = 4;
 /// A temporal probe fires roughly every this many steps.
 const TEMPORAL_PROBE_CADENCE: u64 = 8;
+/// One idle tick of the reclaim cadence: the manual clock advances past the
+/// quiescence debounce and the queue drains, so an armed idle wake fires and
+/// an owed sweep is retried (space-reclamation contract §3.1, slice 13).
+const RECLAIM_CADENCE_TICK_MS: u64 = 1_000;
+/// The close-time reclaim budget under the sim: effectively unbounded, so the
+/// close drive runs to its fixed point (debt gone or a sweep deferred) and never
+/// depends on wall-clock time.
+const SIM_CLOSE_RECLAIM_BUDGET: Duration = Duration::from_secs(3_600);
 /// Every filesystem persistence model, for seeded epoch endings.
 const FS_MODELS: [FsModel; 4] = [
     FsModel::OrderedAtomic,
@@ -85,6 +95,9 @@ enum DbAction {
     EnqueueCheckpoint,
     /// Advance the manual maintenance clock by a seeded jitter (ms).
     AdvanceClock(u64),
+    /// One idle tick of the reclaim cadence: the clock advances past the
+    /// quiescence debounce and the queue drains (slice 13).
+    ReclaimCadence,
 }
 
 impl DbAction {
@@ -99,6 +112,7 @@ impl DbAction {
             DbAction::EnqueueFlush => "enqueue_flush",
             DbAction::EnqueueCheckpoint => "enqueue_checkpoint",
             DbAction::AdvanceClock(_) => "advance_clock",
+            DbAction::ReclaimCadence => "reclaim_cadence",
         }
     }
 }
@@ -119,7 +133,7 @@ pub(super) fn reopen_version_domain_bound(
 }
 
 fn draw_action(rng: &mut SplitMix64) -> DbAction {
-    match rng.gen_u8_below(16) {
+    match rng.gen_u8_below(17) {
         // Commits dominate so every other action races real write load.
         0..=6 => DbAction::Commit,
         7 => DbAction::ForkCurrent,
@@ -129,30 +143,45 @@ fn draw_action(rng: &mut SplitMix64) -> DbAction {
         11 => DbAction::DrainMaintenance,
         12 => DbAction::EnqueueFlush,
         13 => DbAction::EnqueueCheckpoint,
-        _ => DbAction::AdvanceClock(u64::from(rng.gen_u8_below(50))),
+        14 | 15 => DbAction::AdvanceClock(u64::from(rng.gen_u8_below(50))),
+        _ => DbAction::ReclaimCadence,
     }
 }
 
 /// How a seeded epoch ends.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum EpochEnding {
+    /// The runtime is dropped without a close: nothing reclaims; the next
+    /// open reconciles (space-reclamation contract §3.1).
     CleanDrop,
+    /// A clean close: the close-time reclaim drive runs to its fixed point
+    /// before the runtime goes (slice 13; contract §3.1 "Close").
+    CleanClose,
+    /// The #3612 shape: the runtime is dropped and a snapshot object appears
+    /// at the next id with the manifest still attesting the previous one —
+    /// what a crash between a checkpoint's snapshot publish and its manifest
+    /// re-point leaves behind. The next open's reconcile prune owns it.
+    OrphanedSnapshot,
     Crash(FsModel),
 }
 
 impl EpochEnding {
     fn draw(rng: &mut SplitMix64) -> Self {
-        // Crashes dominate: the clean drop keeps the zero-loss reopen
+        // Crashes dominate: the clean endings keep the zero-loss reopen
         // direction covered without dominating the sweep.
-        match rng.gen_u8_below(6) {
+        match rng.gen_u8_below(8) {
             0 => EpochEnding::CleanDrop,
-            n => EpochEnding::Crash(FS_MODELS[usize::from((n - 1) % 4)]),
+            1 => EpochEnding::CleanClose,
+            2 => EpochEnding::OrphanedSnapshot,
+            n => EpochEnding::Crash(FS_MODELS[usize::from((n - 3) % 4)]),
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
             EpochEnding::CleanDrop => "clean_drop",
+            EpochEnding::CleanClose => "clean_close",
+            EpochEnding::OrphanedSnapshot => "crash_orphaned_snapshot",
             EpochEnding::Crash(FsModel::OrderedAtomic) => "crash_ordered_atomic",
             EpochEnding::Crash(FsModel::ReorderedAppends) => "crash_reordered_appends",
             EpochEnding::Crash(FsModel::GarbageUnsyncedTail) => "crash_garbage_tail",
@@ -191,9 +220,75 @@ pub(super) struct WholeDbFacts {
     fail_loud_epochs: usize,
     final_live_branches: Vec<String>,
     final_states: Vec<(String, RecoveredState)>,
+    /// Every footprint audit the oracle took, in order (slice 13).
+    footprint_audits: Vec<FootprintAudit>,
+    /// Bytes every session's reclaim ledger reported released, summed.
+    bytes_reclaimed: u64,
+    /// Reclaim passes every session's ledger recorded, summed.
+    reclaim_passes: u64,
+    /// Orphaned snapshots the `OrphanedSnapshot` endings actually planted.
+    orphaned_snapshots_planted: usize,
+}
+
+/// One Audit-tier footprint reading (space-reclamation contract §3.5), a
+/// bit-exact function of the trajectory on the deterministic local fs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FootprintAudit {
+    epoch: usize,
+    phase: &'static str,
+    unreferenced_objects: u64,
+    unreferenced_bytes: u64,
+    quarantined_objects: u64,
+    snapshot_objects: u64,
+    superseded_snapshots: u64,
+    wal_reclaimable_bytes: u64,
+    /// The ledger explained the remaining debt (a deferred mark or sweep).
+    debt_deferred: bool,
+}
+
+/// What a footprint audit must find; each expectation names the contract
+/// phase that guarantees it.
+#[derive(Clone, Copy, Debug)]
+struct FootprintExpectation {
+    /// No unreferenced or quarantined table object — unless the ledger
+    /// recorded why the sweep could not run (a documented deferral).
+    no_object_debt: bool,
+    /// No snapshot beside the attested one (the open reconcile pruned).
+    no_superseded: bool,
+}
+
+impl FootprintExpectation {
+    const NONE: Self = Self {
+        no_object_debt: false,
+        no_superseded: false,
+    };
+    const CLEAN: Self = Self {
+        no_object_debt: true,
+        no_superseded: true,
+    };
 }
 
 impl WholeDbFacts {
+    pub(super) fn bytes_reclaimed(&self) -> u64 {
+        self.bytes_reclaimed
+    }
+    #[cfg(test)]
+    pub(super) fn reclaim_passes(&self) -> u64 {
+        self.reclaim_passes
+    }
+    #[cfg(test)]
+    pub(super) fn footprint_audits(&self) -> &[FootprintAudit] {
+        &self.footprint_audits
+    }
+    pub(super) fn orphaned_snapshots_planted(&self) -> usize {
+        self.orphaned_snapshots_planted
+    }
+    pub(super) fn clean_closes(&self) -> usize {
+        self.epoch_endings
+            .iter()
+            .filter(|label| **label == "clean_close")
+            .count()
+    }
     pub(super) fn forks(&self) -> usize {
         self.forks
     }
@@ -237,6 +332,9 @@ struct WholeDbSim {
     workload: Vec<Vec<RecordedMutation>>,
     commit_index: usize,
     facts: WholeDbFacts,
+    /// The orphaned snapshot the last epoch planted, until a reopen proves
+    /// the open reconcile pruned it.
+    planted_orphan: Option<std::path::PathBuf>,
 }
 
 impl WholeDbSim {
@@ -267,6 +365,7 @@ impl WholeDbSim {
             workload: generate_workload(seed, total_steps.max(1)),
             commit_index: 0,
             facts: WholeDbFacts::default(),
+            planted_orphan: None,
         }
     }
 
@@ -487,6 +586,14 @@ impl WholeDbSim {
             DbAction::AdvanceClock(ms) => {
                 let _ = runtime.advance_maintenance_clock_for_test(Duration::from_millis(ms));
             }
+            DbAction::ReclaimCadence => {
+                let _ = runtime.advance_maintenance_clock_for_test(Duration::from_millis(
+                    RECLAIM_CADENCE_TICK_MS,
+                ));
+                runtime
+                    .drain_maintenance()
+                    .map_err(|err| self.error(step, format!("reclaim cadence drain: {err:?}")))?;
+            }
         }
 
         // Per-step safety on the touched surface: every live branch's visible
@@ -663,7 +770,7 @@ impl WholeDbSim {
     )]
     fn reconcile_after_reopen(
         &mut self,
-        runtime: &StorageRuntime<'_>,
+        runtime: &mut StorageRuntime<'_>,
         family: CrashFamily,
         epoch: usize,
         recovered_visible: Option<CommitVersion>,
@@ -801,8 +908,204 @@ impl WholeDbSim {
                 ));
             }
         }
+
+        // The footprint oracle (space-reclamation contract §3.1/§3.5, slice 13).
+        // The inline scheduler runs the open's reclaim wake before the open
+        // returns; the drain settles anything it chained. A zero-loss reopen
+        // then holds no table-object debt and no snapshot beside the attested
+        // one; a damaged reopen may legitimately defer, so it is only recorded.
+        // (The close-time half of the contract is observed by the post-close
+        // probe, before any open wake can run.)
+        runtime
+            .drain_maintenance()
+            .map_err(|err| self.error(epoch, format!("open-wake drain: {err:?}")))?;
+        // A snapshot the manifest never attested is pure garbage: a lossless
+        // open's reconcile prune must have removed the one the last epoch
+        // planted (contract §3.4, `ReconcileToAttested`).
+        if let Some(planted) = self.planted_orphan.take() {
+            if matches!(family, CrashFamily::ZeroLoss) && planted.exists() {
+                return Err(self.error(
+                    epoch,
+                    format!(
+                        "planted orphaned snapshot survived the open reconcile: {}",
+                        planted.display()
+                    ),
+                ));
+            }
+        }
+        let expectation = if matches!(family, CrashFamily::ZeroLoss) {
+            FootprintExpectation::CLEAN
+        } else {
+            FootprintExpectation::NONE
+        };
+        self.audit_footprint(runtime, epoch, "reopen", expectation)
+    }
+
+    /// The close-time contract, observed on its own: after a clean close the
+    /// store is reopened under the evaluate-and-enqueue policy, which queues
+    /// the open's reclaim wake without running it, so the audit sees exactly
+    /// what the close drive left behind. A healthy session whose ledger
+    /// recorded no deferral must have left no table-object debt and no
+    /// superseded snapshot.
+    fn probe_post_close(
+        &mut self,
+        root: &Path,
+        epoch: usize,
+        expect_no_debt: bool,
+    ) -> Result<(), TestkitError> {
+        let backend = StorageBackend::write_ordering_reordering_local_fs(root.to_path_buf());
+        let runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(self.durability)
+                .with_maintenance_scheduling_policy(
+                    StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                )
+                .with_strict_recovery(false),
+            &backend,
+        )
+        .map_err(|err| self.error(epoch, format!("post-close probe open: {err:?}")))?
+        .into_runtime();
+        self.audit_footprint(
+            &runtime,
+            epoch,
+            "post_close",
+            FootprintExpectation {
+                no_object_debt: expect_no_debt,
+                // A completed checkpoint chains its `Superseded` prune, and a
+                // clean close drains the prune before it stops; the open's
+                // reconcile would hide a missed prune, so it is judged here.
+                no_superseded: expect_no_debt,
+            },
+        )?;
+        drop(runtime);
         Ok(())
     }
+
+    /// One Audit-tier reading of the footprint, recorded into the facts and
+    /// held against `expectation`.
+    fn audit_footprint(
+        &mut self,
+        runtime: &StorageRuntime<'_>,
+        epoch: usize,
+        phase: &'static str,
+        expectation: FootprintExpectation,
+    ) -> Result<(), TestkitError> {
+        let outcome = runtime
+            .diagnostics(
+                DiagnosticsRequest::new(DiagnosticsScope::Global)
+                    .with_detail(DiagnosticsDetail::Audit),
+            )
+            .map_err(|err| self.error(epoch, format!("footprint audit ({phase}): {err:?}")))?;
+        let footprint = outcome.footprint();
+        let quarantine = outcome.quarantine();
+        let reclaim = outcome.reclaim();
+        if footprint.state() != DiagnosticsFactState::Known {
+            return Err(self.error(
+                epoch,
+                format!("footprint audit ({phase}): state {:?}", footprint.state()),
+            ));
+        }
+        let count = |value: Option<usize>| value.map_or(u64::MAX, |v| v as u64);
+        let debt_deferred = reclaim
+            .last_sweep()
+            .is_some_and(|pass| pass.deferral().is_some())
+            || reclaim
+                .last_mark()
+                .is_some_and(|pass| pass.deferral().is_some());
+        let audit = FootprintAudit {
+            epoch,
+            phase,
+            unreferenced_objects: count(footprint.unreferenced_objects()),
+            unreferenced_bytes: footprint.unreferenced_bytes().unwrap_or(u64::MAX),
+            quarantined_objects: count(quarantine.quarantined_objects()),
+            snapshot_objects: count(footprint.snapshot_objects()),
+            superseded_snapshots: count(footprint.superseded_snapshots()),
+            wal_reclaimable_bytes: footprint.wal_reclaimable_bytes().unwrap_or(u64::MAX),
+            debt_deferred,
+        };
+        self.facts.footprint_audits.push(audit);
+        let object_debt = audit.unreferenced_objects > 0 || audit.quarantined_objects > 0;
+        if expectation.no_object_debt && object_debt && !audit.debt_deferred {
+            return Err(self.error(
+                epoch,
+                format!(
+                    "footprint audit ({phase}): {} unreferenced and {} quarantined table objects \
+                     remain with no deferral recorded — reclaim did not run: {audit:?}",
+                    audit.unreferenced_objects, audit.quarantined_objects
+                ),
+            ));
+        }
+        if expectation.no_superseded && audit.superseded_snapshots > 0 {
+            return Err(self.error(
+                epoch,
+                format!(
+                    "footprint audit ({phase}): {} superseded snapshots survive: {audit:?}",
+                    audit.superseded_snapshots
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fold a session's reclaim ledger into the trajectory's totals, just
+    /// before the session ends; reports whether the ledger recorded a deferral.
+    fn fold_session_reclaim(
+        &mut self,
+        runtime: &StorageRuntime<'_>,
+        epoch: usize,
+    ) -> Result<bool, TestkitError> {
+        let outcome = runtime
+            .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+            .map_err(|err| self.error(epoch, format!("session ledger: {err:?}")))?;
+        let reclaim = outcome.reclaim();
+        self.facts.bytes_reclaimed = self
+            .facts
+            .bytes_reclaimed
+            .saturating_add(reclaim.total_bytes_reclaimed());
+        self.facts.reclaim_passes = self
+            .facts
+            .reclaim_passes
+            .saturating_add(reclaim.total_passes());
+        Ok(reclaim
+            .last_sweep()
+            .is_some_and(|pass| pass.deferral().is_some())
+            || reclaim
+                .last_mark()
+                .is_some_and(|pass| pass.deferral().is_some()))
+    }
+}
+
+/// Plant the #3612 on-disk shape after a drop: a snapshot object at the next
+/// id beside the attested one, exactly what a crash between the snapshot
+/// publish and the manifest re-point leaves. Returns whether one was planted
+/// (a store that never checkpointed has nothing to orphan).
+fn plant_orphaned_snapshot(root: &Path) -> Result<Option<std::path::PathBuf>, TestkitError> {
+    let prefix = crate::layout::ObjectLayout::snapshot_prefix()
+        .map_err(|err| TestkitError::new(format!("snapshot layout: {err:?}")))?;
+    let dir = root.join(prefix.as_str().trim_end_matches('/'));
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(None);
+    };
+    let mut highest: Option<u64> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".object@")) else {
+            continue;
+        };
+        if let Ok(id) = u64::from_str_radix(stem, 16) {
+            highest = Some(highest.map_or(id, |h| h.max(id)));
+        }
+    }
+    let Some(highest) = highest else {
+        return Ok(None);
+    };
+    let source = crate::layout::ObjectLayout::snapshot(highest)
+        .map_err(|err| TestkitError::new(format!("snapshot layout: {err:?}")))?;
+    let orphan = crate::layout::ObjectLayout::snapshot(highest + 1)
+        .map_err(|err| TestkitError::new(format!("snapshot layout: {err:?}")))?;
+    let planted = root.join(format!("{}.object@", orphan.as_str()));
+    std::fs::copy(root.join(format!("{}.object@", source.as_str())), &planted)
+        .map_err(|err| TestkitError::new(format!("plant orphaned snapshot: {err}")))?;
+    Ok(Some(planted))
 }
 
 /// The fail-closed contract after a LOSSY crash: recovery health goes
@@ -857,9 +1160,10 @@ pub(super) fn run_whole_db_sim(
         };
         super::faults::require_manual_clock(&runtime, seed)?;
 
+        let session_family = family_next_open;
         if epoch > 0 {
             sim.reconcile_after_reopen(
-                &runtime,
+                &mut runtime,
                 family_next_open,
                 epoch,
                 open_summary.and_then(StorageOpenSummary::recovered_visible_version),
@@ -885,9 +1189,35 @@ pub(super) fn run_whole_db_sim(
 
         let ending = EpochEnding::draw(&mut rng);
         sim.facts.epoch_endings.push(ending.label());
+        let deferred = sim.fold_session_reclaim(&runtime, epoch)?;
         match ending {
             EpochEnding::CleanDrop => {
                 drop(runtime);
+                family_next_open = CrashFamily::ZeroLoss;
+            }
+            EpochEnding::CleanClose => {
+                runtime
+                    .close_with_options(
+                        StorageCloseOptions::graceful()
+                            .with_reclaim_budget(ReclaimBudget::Bounded(SIM_CLOSE_RECLAIM_BUDGET)),
+                    )
+                    .map_err(|err| {
+                        TestkitError::new(format!("[seed={seed} epoch={epoch}] close: {err:?}"))
+                    })?;
+                drop(runtime);
+                sim.probe_post_close(
+                    root,
+                    epoch,
+                    matches!(session_family, CrashFamily::ZeroLoss) && !deferred,
+                )?;
+                family_next_open = CrashFamily::ZeroLoss;
+            }
+            EpochEnding::OrphanedSnapshot => {
+                drop(runtime);
+                if let Some(planted) = plant_orphaned_snapshot(root)? {
+                    sim.facts.orphaned_snapshots_planted += 1;
+                    sim.planted_orphan = Some(planted);
+                }
                 family_next_open = CrashFamily::ZeroLoss;
             }
             EpochEnding::Crash(model) => {
@@ -917,7 +1247,7 @@ pub(super) fn run_whole_db_sim(
             .with_strict_recovery(false),
         &backend,
     );
-    let (runtime, open_summary) = match opened {
+    let (mut runtime, open_summary) = match opened {
         Ok(outcome) => {
             let (runtime, summary) = outcome.into_parts();
             (runtime, Some(summary))
@@ -934,11 +1264,12 @@ pub(super) fn run_whole_db_sim(
         }
     };
     sim.reconcile_after_reopen(
-        &runtime,
+        &mut runtime,
         family_next_open,
         epochs,
         open_summary.and_then(StorageOpenSummary::recovered_visible_version),
     )?;
+    sim.fold_session_reclaim(&runtime, epochs)?;
     for branch in sim.live_branches() {
         let state = scan_recovered(
             &runtime,
@@ -979,6 +1310,10 @@ mod tests {
         let mut forks = 0;
         let mut crashes = 0;
         let mut probes = 0;
+        let mut bytes_reclaimed = 0;
+        let mut clean_closes = 0;
+        let mut orphans_planted = 0;
+        let mut audits = 0;
         for seed in 0..6u64 {
             let dir = tempfile::tempdir().expect("tmp");
             let facts = run_whole_db_sim(dir.path(), seed, 3, 24)
@@ -986,10 +1321,21 @@ mod tests {
             forks += facts.forks();
             crashes += facts.crashed_epochs();
             probes += facts.temporal_probes_ok();
+            bytes_reclaimed += facts.bytes_reclaimed();
+            clean_closes += facts.clean_closes();
+            orphans_planted += facts.orphaned_snapshots_planted();
+            audits += facts.footprint_audits().len();
         }
         assert!(forks > 0, "no fork ever happened across the sweep");
         assert!(crashes > 0, "no epoch ever crashed across the sweep");
         assert!(probes > 0, "no temporal probe ever succeeded");
+        // Space-reclamation contract (slice 13): the oracle is not vacuous —
+        // reclaim released bytes, clean closes happened, orphaned snapshots
+        // were planted for the open reconcile, and audits were taken.
+        assert!(bytes_reclaimed > 0, "no reclaim pass ever released bytes");
+        assert!(clean_closes > 0, "no epoch ever closed cleanly");
+        assert!(orphans_planted > 0, "no orphaned snapshot was ever planted");
+        assert!(audits > 0, "no footprint audit was taken");
     }
 
     /// Promoted from the #2820 gate-7 pin (DUR-008): a trajectory where the
@@ -1005,7 +1351,9 @@ mod tests {
             facts.deletes_refused, 1,
             "the DUR-008 refusal never fired on the pinned trajectory: {facts:?}"
         );
-        assert_eq!(facts.deletes, 3, "legal deletes must still work: {facts:?}");
+        // Re-pinned for slice 13: the reclaim-cadence action and the
+        // clean-close / orphaned-snapshot endings shift every rng draw.
+        assert_eq!(facts.deletes, 1, "legal deletes must still work: {facts:?}");
     }
 
     /// Promoted from the #2823 gate-7 pin: the trajectory that once refused
@@ -1042,6 +1390,151 @@ mod tests {
     fn fork_object_publishes_survive_power_loss_models() {
         let dir = tempfile::tempdir().expect("tmp");
         run_whole_db_sim(dir.path(), 10, 3, 24).expect("the once-bricked seed completes cleanly");
+    }
+
+    /// Sabotage twin for the footprint oracle: table-object debt no reclaim
+    /// pass touched (two flushed tables a compaction superseded, the chained
+    /// mark never drained) must fail a clean-footprint audit — the ledger
+    /// recorded no deferral, so the oracle must say reclaim did not run.
+    #[test]
+    fn sabotage_unreclaimed_debt_is_caught() {
+        use crate::api::{
+            CommitBatch, CommitOptions, MaintenanceRequest, MaintenanceScope, MaintenanceTask,
+            StorageBackend, StorageDurabilityPolicy, StorageMaintenanceSchedulingPolicy,
+            StorageOpenOptions, StorageRuntime,
+        };
+        use crate::testkit::recovery_oracle::workload::to_commit_mutation;
+
+        // Evaluate-and-enqueue: the compaction's chained mark is queued and
+        // never run (the inline scheduler would reclaim it at once — slice 8).
+        let dir = tempfile::tempdir().expect("tmp");
+        let backend = StorageBackend::local_fs(dir.path().to_path_buf());
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+                .with_maintenance_scheduling_policy(
+                    StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                ),
+            &backend,
+        )
+        .expect("open")
+        .into_runtime();
+        let mut sim = super::WholeDbSim::new(0, 4);
+        for index in 0..2 {
+            let mutations = sim.workload[index].clone();
+            let batch = CommitBatch::new(
+                super::default_branch(),
+                mutations.iter().map(to_commit_mutation).collect(),
+                CommitOptions::default(),
+            )
+            .expect("batch");
+            runtime.commit(&batch).expect("commit");
+            runtime
+                .flush_default_branch_for_test()
+                .expect("flush one table");
+        }
+        runtime
+            .maintenance(&MaintenanceRequest::new(
+                MaintenanceTask::Compact,
+                MaintenanceScope::Branch(super::default_branch()),
+            ))
+            .expect("compaction supersedes both tables");
+
+        // Clean expectations against undrained debt: the audit must fail.
+        let verdict = sim.audit_footprint(&runtime, 0, "twin", super::FootprintExpectation::CLEAN);
+        assert!(
+            verdict.is_err(),
+            "unreclaimed table-object debt passed the footprint oracle — it is vacuous: {:?}",
+            sim.facts.footprint_audits().last()
+        );
+        // The same reading under no expectation is recorded, not failed.
+        sim.audit_footprint(&runtime, 0, "twin", super::FootprintExpectation::NONE)
+            .expect("recording only");
+        let last = sim.facts.footprint_audits().last().expect("recorded");
+        assert!(last.unreferenced_objects >= 2, "{last:?}");
+    }
+
+    /// Sabotage twin for the superseded-snapshot half of the oracle: a
+    /// snapshot below the manifest-live one that no prune removed must fail a
+    /// clean audit. (The sweep's trajectories rarely end a checkpointed
+    /// session cleanly, so this twin is what proves the check can fire.)
+    #[test]
+    fn sabotage_superseded_snapshot_is_caught() {
+        use crate::api::{
+            CommitBatch, CommitOptions, MaintenanceRequest, MaintenanceScope, MaintenanceTask,
+            StorageBackend, StorageDurabilityPolicy, StorageRuntime,
+        };
+        use crate::layout::ObjectLayout;
+        use crate::testkit::recovery_oracle::workload::to_commit_mutation;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let backend = StorageBackend::local_fs(dir.path().to_path_buf());
+        let mut runtime = StorageRuntime::open_with_backend(
+            crate::testkit::simulation::faults::deterministic_options(
+                StorageDurabilityPolicy::Standard,
+            ),
+            &backend,
+        )
+        .expect("open")
+        .into_runtime();
+        let mut sim = super::WholeDbSim::new(0, 4);
+        // Two checkpoints: the second supersedes the first, and its chained
+        // `Superseded` prune removes it.
+        for index in 0..2 {
+            let batch = CommitBatch::new(
+                super::default_branch(),
+                sim.workload[index].iter().map(to_commit_mutation).collect(),
+                CommitOptions::default(),
+            )
+            .expect("batch");
+            runtime.commit(&batch).expect("commit");
+            runtime
+                .maintenance(&MaintenanceRequest::new(
+                    MaintenanceTask::Checkpoint,
+                    MaintenanceScope::Global,
+                ))
+                .expect("checkpoint");
+            runtime
+                .drain_maintenance()
+                .expect("drain the chained prune");
+        }
+        sim.audit_footprint(&runtime, 0, "twin", super::FootprintExpectation::CLEAN)
+            .expect("the chained prune left one snapshot");
+
+        // Re-create the superseded predecessor of the live snapshot.
+        let snapshots = dir.path().join(
+            ObjectLayout::snapshot_prefix()
+                .expect("prefix")
+                .as_str()
+                .trim_end_matches('/'),
+        );
+        let live = std::fs::read_dir(&snapshots)
+            .expect("snapshot family")
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.strip_suffix(".object@"))
+                    .and_then(|stem| u64::from_str_radix(stem, 16).ok())
+            })
+            .max()
+            .expect("a live snapshot");
+        assert!(live >= 2, "the second checkpoint superseded the first");
+        let object = |id: u64| {
+            dir.path().join(format!(
+                "{}.object@",
+                ObjectLayout::snapshot(id).expect("layout").as_str()
+            ))
+        };
+        std::fs::copy(object(live), object(live - 1)).expect("plant a superseded snapshot");
+
+        let verdict = sim.audit_footprint(&runtime, 0, "twin", super::FootprintExpectation::CLEAN);
+        assert!(
+            verdict.is_err(),
+            "a superseded snapshot passed the footprint oracle — it is vacuous"
+        );
+        let last = sim.facts.footprint_audits().last().expect("recorded");
+        assert_eq!(last.superseded_snapshots, 1, "{last:?}");
     }
 
     /// Sabotage twin: a fork whose model seeding is SKIPPED must fire the
@@ -1115,6 +1608,7 @@ mod tests {
             (DbAction::EnqueueFlush, "enqueue_flush"),
             (DbAction::EnqueueCheckpoint, "enqueue_checkpoint"),
             (DbAction::AdvanceClock(7), "advance_clock"),
+            (DbAction::ReclaimCadence, "reclaim_cadence"),
         ];
         for (action, label) in expected {
             assert_eq!(action.label(), label);
@@ -1137,16 +1631,18 @@ mod tests {
         // Re-pinned for #2853: previously-refused fork-at-version calls now
         // succeed inside trajectories, changing live-branch sets and the
         // conditional rng draws downstream (a deliberate semantic change).
+        // Re-pinned for slice 13: `reclaim_cadence` joins the grammar and the
+        // epoch endings draw from a wider range (a deliberate change).
         let expected: std::collections::BTreeMap<&str, usize> = [
-            ("advance_clock", 11),
-            ("commit", 37),
-            ("delete_branch", 5),
-            ("drain_maintenance", 2),
-            ("enqueue_checkpoint", 3),
-            ("enqueue_flush", 5),
-            ("fork_at_version", 4),
+            ("advance_clock", 6),
+            ("commit", 32),
+            ("delete_branch", 6),
+            ("drain_maintenance", 7),
+            ("enqueue_checkpoint", 5),
+            ("fork_at_version", 3),
             ("fork_current", 2),
-            ("recreate_branch", 3),
+            ("reclaim_cadence", 3),
+            ("recreate_branch", 8),
         ]
         .into_iter()
         .collect();
@@ -1163,11 +1659,13 @@ mod tests {
                 facts.forks_unavailable,
                 facts.temporal_probes_unavailable,
             ),
-            // Re-pinned for #2853: two previously-refused fork-at-version
-            // calls and two temporal probes now succeed on surviving coverage.
-            (1, 5, 0, 0, 0, 3),
+            // Re-pinned for slice 13 (the grammar and endings changed).
+            (2, 3, 2, 0, 0, 0),
             "per-run facts drifted: (deletes, forks, recreates, deletes_refused, forks_unavailable, probes_unavailable)",
         );
+        // The session reclaim ledgers, folded across epochs: a constant of
+        // the seed like every other counter.
+        assert_eq!(facts.reclaim_passes(), 16, "{facts:?}");
     }
 
     /// Pool ids and branch labels are stable identifiers.
@@ -1183,19 +1681,22 @@ mod tests {
     }
 
     /// The facts accessors at values a constant cannot fake: seed 4 counts
-    /// two deletes and seed 5 zero — a `-> 1` accessor mutant survived
+    /// three deletes and seed 5 one (re-pinned for slice 13; seed 0 counts
+    /// two) — a `-> 1` accessor mutant survived
     /// three rounds because every other pinned config truly had one delete
     /// (and the sweep sum coincidentally matched three ones).
     #[test]
     fn facts_accessors_report_distinct_pinned_values() {
         let dir_a = tempfile::tempdir().expect("tmp");
         let four = run_whole_db_sim(dir_a.path(), 4, 3, 24).expect("seed 4");
-        assert_eq!(four.deletes(), 2, "{four:?}");
+        assert_eq!(four.deletes(), 3, "{four:?}");
+        // Seed 4 ends two epochs by planting an orphaned snapshot.
+        assert_eq!(four.orphaned_snapshots_planted, 2, "{four:?}");
         // Seed 4 recreates once — the counter's only >0 pin (seed 0 is 0).
         assert_eq!(four.recreates, 1, "{four:?}");
         let dir_b = tempfile::tempdir().expect("tmp");
         let five = run_whole_db_sim(dir_b.path(), 5, 3, 24).expect("seed 5");
-        assert_eq!(five.deletes(), 0, "{five:?}");
+        assert_eq!(five.deletes(), 1, "{five:?}");
     }
 
     /// Distinct seeds diverge (the explorer is not degenerate).

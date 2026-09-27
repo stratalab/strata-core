@@ -37,9 +37,28 @@ pub struct WholeDbOutcome {
     forks: usize,
     deletes: usize,
     temporal_probes_ok: usize,
+    bytes_reclaimed: u64,
+    clean_closes: usize,
+    orphaned_snapshots_planted: usize,
 }
 
 impl WholeDbOutcome {
+    /// Bytes the reclaim ledgers reported released across the sweep
+    /// (non-vacuity for the footprint oracle, space-reclamation contract §3.5).
+    #[must_use]
+    pub const fn bytes_reclaimed(&self) -> u64 {
+        self.bytes_reclaimed
+    }
+    /// Epochs that ended in a clean close (the close-time reclaim drive ran).
+    #[must_use]
+    pub const fn clean_closes(&self) -> usize {
+        self.clean_closes
+    }
+    /// Orphaned snapshots planted for the open reconcile to reclaim.
+    #[must_use]
+    pub const fn orphaned_snapshots_planted(&self) -> usize {
+        self.orphaned_snapshots_planted
+    }
     #[must_use]
     pub const fn seeds_executed(&self) -> usize {
         self.seeds_executed
@@ -102,6 +121,11 @@ pub fn run_whole_db_harness(
                 outcome.forks += facts.forks();
                 outcome.deletes += facts.deletes();
                 outcome.temporal_probes_ok += facts.temporal_probes_ok();
+                outcome.bytes_reclaimed = outcome
+                    .bytes_reclaimed
+                    .saturating_add(facts.bytes_reclaimed());
+                outcome.clean_closes += facts.clean_closes();
+                outcome.orphaned_snapshots_planted += facts.orphaned_snapshots_planted();
             }
             Err(error) => return Err(whole_db_replay_error(seed, epochs, steps_per_epoch, &error)),
         }
@@ -197,6 +221,9 @@ pub fn replay_whole_db_seed(root: &Path, seed: u64) -> Result<WholeDbOutcome, Te
         forks: facts.forks(),
         deletes: facts.deletes(),
         temporal_probes_ok: facts.temporal_probes_ok(),
+        bytes_reclaimed: facts.bytes_reclaimed(),
+        clean_closes: facts.clean_closes(),
+        orphaned_snapshots_planted: facts.orphaned_snapshots_planted(),
     })
 }
 
@@ -355,11 +382,17 @@ mod tests {
         // coverage now succeed, shifting the trajectories' live sets and rng
         // draws (a deliberate semantic change).
         assert_eq!(outcome.seeds_executed(), 4, "{outcome:?}");
-        assert_eq!(outcome.epochs_executed(), 11, "{outcome:?}");
-        assert_eq!(outcome.crashed_epochs(), 7, "{outcome:?}");
-        assert_eq!(outcome.forks(), 18, "{outcome:?}");
-        assert_eq!(outcome.deletes(), 5, "{outcome:?}");
-        assert_eq!(outcome.temporal_probes_ok(), 21, "{outcome:?}");
+        // Re-pinned for slice 13: the reclaim-cadence action and the new
+        // epoch endings (clean close, orphaned snapshot) shift every draw.
+        assert_eq!(outcome.epochs_executed(), 12, "{outcome:?}");
+        assert_eq!(outcome.crashed_epochs(), 9, "{outcome:?}");
+        assert_eq!(outcome.forks(), 12, "{outcome:?}");
+        assert_eq!(outcome.deletes(), 3, "{outcome:?}");
+        assert_eq!(outcome.temporal_probes_ok(), 22, "{outcome:?}");
+        // The footprint oracle's own counters (slice 13).
+        assert_eq!(outcome.bytes_reclaimed(), 1068, "{outcome:?}");
+        assert_eq!(outcome.clean_closes(), 1, "{outcome:?}");
+        assert_eq!(outcome.orphaned_snapshots_planted(), 0, "{outcome:?}");
     }
 
     /// #2859 family B regression pin: seed 289 at the 6x48 deep shape crosses
