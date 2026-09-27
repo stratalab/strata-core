@@ -9,7 +9,7 @@ use common::{
     assert_no_storage_leak, assert_status, branch, key, open_cache_database, open_durable_database,
     space, value,
 };
-use strata_engine::{Database, EngineErrorClass, FootprintDetail};
+use strata_engine::{Database, EngineErrorClass, FootprintDetail, ReclaimOutcome};
 
 fn write_rows(db: &mut Database, branch_name: &str, prefix: &str, rows: u32) {
     let mut kv = db.kv(branch(branch_name), space("app")).expect("kv opens");
@@ -69,6 +69,40 @@ fn storage_footprint_requires_a_known_branch() {
         "not_found.engine.branch",
         false,
     );
+}
+
+/// A reopened database's reclaim wake reaches the engine's ledger view on the
+/// production (background) scheduler: the open's reconcile prune is reported
+/// as a typed pass. The worker runs it off the caller's thread, so the read
+/// polls with a generous bound rather than assuming it has already run.
+#[test]
+fn storage_footprint_reports_the_open_wake_prune_on_the_background_scheduler() {
+    let dir = tempfile::tempdir().expect("tmp");
+    {
+        let mut db = open_durable_database(dir.path()).expect("durable open");
+        write_rows(&mut db, "default", "wake", 8);
+        db.close().expect("clean close");
+    }
+    let mut db = open_durable_database(dir.path()).expect("reopen");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let prune = loop {
+        let footprint = db
+            .storage_footprint(None, FootprintDetail::Live)
+            .expect("footprint");
+        if let Some(prune) = footprint.reclaim.last_snapshot_prune {
+            break prune;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the open wake's reconcile prune never reached the ledger: {footprint:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    // One attested snapshot and nothing beside it: the prune had nothing to
+    // remove, and said so.
+    assert_eq!(prune.outcome, ReclaimOutcome::Nothing, "{prune:?}");
+    assert_eq!(prune.deferral, None, "{prune:?}");
+    assert_eq!(prune.bytes_reclaimed, 0, "{prune:?}");
 }
 
 /// The live tier costs no backend I/O and carries no audit fact.
