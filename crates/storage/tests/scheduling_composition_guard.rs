@@ -67,4 +67,19 @@ fn scheduling_sites_consult_the_registry_not_raw_predicates() {
             >= 2,
         "the synchronous checkpoint path must consult the registry"
     );
+
+    // Space-reclamation contract §3.1 (slice 7): the close-time checkpoint is
+    // a scheduling site too.
+    let close = source("src/lifecycle/durable/close.rs");
+    for predicate in PREDICATES {
+        assert!(
+            !close.contains(&format!("{predicate}(")),
+            "durable/close.rs calls raw predicate {predicate} — route it \
+             through checkpoint_structural_deferral instead"
+        );
+    }
+    assert!(
+        close.matches("checkpoint_structural_deferral(").count() >= 1,
+        "the close-time checkpoint must consult the registry"
+    );
 }

@@ -3585,11 +3585,13 @@ fn api_close_reclaim_defers_behind_a_held_read_view() {
     assert_eq!(table_data_object_files(&root), expected);
 }
 
-/// The drive reclaims objects only: the WAL tail is untouched by a clean
-/// close in this slice (the close-time checkpoint is slice 7).
+/// Space-reclamation contract §3.1 (slice 7): after the object drive the
+/// close checkpoints and truncates the WAL behind the snapshot — every
+/// pre-close segment goes, at most the fresh active segment remains, and the
+/// unflushed tail row reads back from the snapshot on the next open.
 #[cfg(feature = "localfs")]
 #[test]
-fn api_close_reclaim_leaves_the_wal_tail() {
+fn api_close_reclaim_truncates_the_wal_behind_the_close_checkpoint() {
     let root = temp_dir_for_api_test("maintenance-close-drain-wal-tail");
     let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
     let (mut runtime, superseded, before_close) = plant_reclaim_debt(backend, &root);
@@ -3603,10 +3605,22 @@ fn api_close_reclaim_leaves_the_wal_tail() {
 
     runtime.close().expect("close");
     assert_eq!(table_data_object_files(&root), expected);
+    let wal_after = wal_segment_files(&root);
+    assert!(
+        wal_after.is_disjoint(&wal_before),
+        "the close checkpoint covers every pre-close segment and truncates it: \
+         before={wal_before:?} after={wal_after:?}"
+    );
+    assert!(
+        wal_after.len() <= 1,
+        "at most the fresh active segment remains: {wal_after:?}"
+    );
+
+    let reopened = reopen_and_drain(backend);
     assert_eq!(
-        wal_segment_files(&root),
-        wal_before,
-        "the close-time drive never touches WAL segments"
+        read_value(&reopened, b"tail").as_deref(),
+        Some(b"unflushed".as_slice()),
+        "the tail row reads back from the close checkpoint's snapshot"
     );
 }
 

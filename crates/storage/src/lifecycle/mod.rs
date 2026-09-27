@@ -144,16 +144,16 @@ pub(crate) use config::{
     reason = "durable lifecycle assembly exports define the local surface for recovery slices"
 )]
 pub(crate) use durable::{
-    classify_wal_segment, close_reclaim_should_continue, combine_non_seeded_checkpoint_rows,
-    descriptor_version_anchor, parentless_content_predates_generation,
-    record_predates_current_generation, DurableBackgroundMaintenanceBuild,
-    DurableBackgroundMaintenanceBuilt, DurableBackgroundMaintenanceStep, DurableGroupApplyDone,
-    DurableGroupApplyWork, DurableGroupInFlight, DurableGroupMemberResult,
-    LifecycleCloseReclaimBudget, LifecycleDurableAssemblyFacts, LifecycleDurableLocalOpenRequest,
-    LifecycleDurableLocalRuntime, LifecycleDurableLocalServices, LifecycleDurableLocalShell,
-    LifecycleFootprintAuditFacts, LifecycleFootprintLiveFacts, LifecycleFootprintWatermark,
-    LifecycleRecoveryBootstrapReport, PreparedPublishStep, WalSegmentClass,
-    TABLE_OBJECT_SWEEP_MAX_OBJECTS,
+    classify_wal_segment, close_checkpoint_decision, close_reclaim_should_continue,
+    combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
+    parentless_content_predates_generation, record_predates_current_generation,
+    DurableBackgroundMaintenanceBuild, DurableBackgroundMaintenanceBuilt,
+    DurableBackgroundMaintenanceStep, DurableGroupApplyDone, DurableGroupApplyWork,
+    DurableGroupInFlight, DurableGroupMemberResult, LifecycleCloseReclaimBudget,
+    LifecycleDurableAssemblyFacts, LifecycleDurableLocalOpenRequest, LifecycleDurableLocalRuntime,
+    LifecycleDurableLocalServices, LifecycleDurableLocalShell, LifecycleFootprintAuditFacts,
+    LifecycleFootprintLiveFacts, LifecycleFootprintWatermark, LifecycleRecoveryBootstrapReport,
+    PreparedPublishStep, WalSegmentClass, TABLE_OBJECT_SWEEP_MAX_OBJECTS,
 };
 #[allow(
     unused_imports,
@@ -205,9 +205,10 @@ pub(crate) use maintenance::{
     reason = "lifecycle scaffold exports define the local surface for later slices"
 )]
 pub(crate) use outcome::{
-    CloseOutcome, CloseOutcomeEffects, CloseOutcomeStatus, MaintenanceDeferralReason,
-    MaintenanceOutcome, MaintenanceOutcomeReasonClass, MaintenanceOutcomeStatus,
-    StorageOpenDisposition, StorageOpenOutcome, WalTruncationFollowUp,
+    CloseCheckpointDecision, CloseCheckpointReport, CloseCheckpointSkip, CloseOutcome,
+    CloseOutcomeEffects, CloseOutcomeStatus, MaintenanceDeferralReason, MaintenanceOutcome,
+    MaintenanceOutcomeReasonClass, MaintenanceOutcomeStatus, StorageOpenDisposition,
+    StorageOpenOutcome, WalTruncationFollowUp,
 };
 #[allow(
     unused_imports,

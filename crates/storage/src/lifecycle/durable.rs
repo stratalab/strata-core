@@ -39,7 +39,9 @@ mod footprint;
 mod inflight;
 mod maintenance;
 
-pub(crate) use close::{close_reclaim_should_continue, LifecycleCloseReclaimBudget};
+pub(crate) use close::{
+    close_checkpoint_decision, close_reclaim_should_continue, LifecycleCloseReclaimBudget,
+};
 pub(crate) use footprint::{
     classify_wal_segment, LifecycleFootprintAuditFacts, LifecycleFootprintLiveFacts,
     LifecycleFootprintWatermark, WalSegmentClass,

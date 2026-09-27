@@ -447,3 +447,72 @@ fn close_reclaim_should_continue_truth_table() {
         "a zero budget runs no round"
     );
 }
+
+/// Space-reclamation contract §3.1 (slice 7): the close-time checkpoint
+/// decision — the budget gate first, then the registry's structural
+/// deferral, then whether anything sits above the retention watermark.
+#[test]
+fn close_checkpoint_decision_truth_table() {
+    use crate::lifecycle::checkpoint::CheckpointStructuralDeferral;
+    use std::time::Duration;
+    let bounded = LifecycleCloseReclaimBudget::Bounded(Duration::from_millis(500));
+    let disabled = LifecycleCloseReclaimBudget::Disabled;
+    let base = CheckpointStructuralDeferral::NonSeededDurableBase;
+    let fork = CheckpointStructuralDeferral::UnmaterializedInheritedLayers;
+    for (budget, structural, commits, expected) in [
+        (
+            disabled,
+            None,
+            0,
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Disabled),
+        ),
+        (
+            disabled,
+            None,
+            7,
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Disabled),
+        ),
+        (
+            disabled,
+            Some(base),
+            7,
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Disabled),
+        ),
+        (
+            bounded,
+            Some(base),
+            7,
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Structural(base)),
+        ),
+        (
+            bounded,
+            Some(fork),
+            0,
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::Structural(fork)),
+        ),
+        (
+            bounded,
+            None,
+            0,
+            CloseCheckpointDecision::Skip(CloseCheckpointSkip::NothingNew),
+        ),
+        (bounded, None, 1, CloseCheckpointDecision::Publish),
+        (bounded, None, u64::MAX, CloseCheckpointDecision::Publish),
+    ] {
+        assert_eq!(
+            close_checkpoint_decision(budget, structural, commits),
+            expected,
+            "budget={budget:?} structural={structural:?} commits={commits}"
+        );
+    }
+    // The checkpoint is not time-bounded: a zero object-reclaim budget still
+    // admits it (the budget's only role here is the on/off gate).
+    assert_eq!(
+        close_checkpoint_decision(
+            LifecycleCloseReclaimBudget::Bounded(Duration::ZERO),
+            None,
+            1
+        ),
+        CloseCheckpointDecision::Publish
+    );
+}
