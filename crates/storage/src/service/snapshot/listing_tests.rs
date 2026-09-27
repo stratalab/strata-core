@@ -404,6 +404,8 @@ fn prune_snapshots_requires_delete_capability_before_listing() {
 struct ListingBackend {
     names: Vec<ObjectName>,
     list_error: Option<BackendError>,
+    /// `object_metadata` fails with this kind instead of `NotFound`.
+    stat_error: Option<BackendErrorKind>,
     delete_failures: BTreeSet<ObjectName>,
     deleted: Mutex<Vec<ObjectName>>,
     reads: Mutex<u64>,
@@ -471,6 +473,12 @@ impl ListingBackend {
         )
     }
 
+    fn with_stat_error(names: Vec<ObjectName>, kind: BackendErrorKind) -> Self {
+        let mut backend = Self::with_names(names);
+        backend.stat_error = Some(kind);
+        backend
+    }
+
     fn with_list_error(source: BackendError) -> Self {
         Self::new(
             Vec::new(),
@@ -525,6 +533,7 @@ impl ListingBackend {
             reads: Mutex::new(0),
             lists: Mutex::new(0),
             capabilities,
+            stat_error: None,
         }
     }
 
@@ -585,7 +594,10 @@ impl Backend for ListingBackend {
     }
 
     fn object_metadata(&self, _name: &ObjectName) -> BackendResult<BackendMetadata> {
-        Err(BackendError::new(BackendErrorKind::NotFound, "not found"))
+        match self.stat_error {
+            Some(kind) => Err(BackendError::new(kind, "injected stat failure")),
+            None => Err(BackendError::new(BackendErrorKind::NotFound, "not found")),
+        }
     }
 }
 
@@ -728,4 +740,57 @@ fn prune_snapshots_proof_driven_modes_ignore_the_newest_window() {
 
     assert_snapshot_ids(report.deleted(), &[1, 2]);
     assert_snapshot_ids(report.protected(), &[3]);
+}
+
+#[test]
+fn list_snapshot_sizes_reports_each_objects_bytes_in_id_order() {
+    let backend = DurableMemoryBackend::new();
+    write_placeholder_snapshot(&backend, 3);
+    write_placeholder_snapshot(&backend, 1);
+    let service = SnapshotService::new(&backend);
+
+    let sizes = service.list_snapshot_sizes().expect("snapshot sizes");
+
+    let ids: Vec<u64> = sizes
+        .iter()
+        .map(|(snapshot, _)| snapshot.snapshot_id())
+        .collect();
+    assert_eq!(ids, [1, 3]);
+    for (snapshot, bytes) in &sizes {
+        let stored = backend
+            .read_object(snapshot.object())
+            .expect("placeholder bytes");
+        assert_eq!(*bytes, stored.len() as u64);
+    }
+}
+
+/// The tolerance is for `NotFound` only: any other stat failure is the
+/// listing's error, never a silently smaller family.
+#[test]
+fn list_snapshot_sizes_propagates_a_stat_failure_other_than_not_found() {
+    let backend =
+        ListingBackend::with_stat_error(vec![snapshot_object(1)], BackendErrorKind::Unavailable);
+    let service = SnapshotService::new(&backend);
+
+    let error = service
+        .list_snapshot_sizes()
+        .expect_err("an unavailable stat propagates");
+
+    assert!(
+        matches!(error, SnapshotServiceError::List { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn list_snapshot_sizes_drops_a_snapshot_that_vanishes_before_its_stat() {
+    // Listed, but gone by the stat (a concurrent prune): dropped, not an error.
+    let backend = ListingBackend::with_names(vec![snapshot_object(1), snapshot_object(2)]);
+    let service = SnapshotService::new(&backend);
+
+    let sizes = service
+        .list_snapshot_sizes()
+        .expect("a vanished snapshot is tolerated");
+
+    assert!(sizes.is_empty());
 }

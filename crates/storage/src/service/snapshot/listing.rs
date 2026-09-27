@@ -158,6 +158,22 @@ impl SnapshotService<'_> {
         Ok(self.list_snapshots()?.into_iter().next_back())
     }
 
+    /// Space-reclamation contract §3.5 (slice 2, audit tier): every listed
+    /// snapshot object with its on-disk size. An object that vanishes between
+    /// the listing and its stat (a concurrent prune) is dropped.
+    pub(crate) fn list_snapshot_sizes(&self) -> SnapshotServiceResult<Vec<(SnapshotObject, u64)>> {
+        require_capability(&self.backend, BackendCapability::ObjectMetadata)?;
+        let mut sizes = Vec::new();
+        for snapshot in self.list_snapshots()? {
+            match self.backend.object_metadata(snapshot.object()) {
+                Ok(metadata) => sizes.push((snapshot, metadata.size_bytes())),
+                Err(source) if source.kind() == BackendErrorKind::NotFound => {}
+                Err(source) => return Err(SnapshotServiceError::List { source }),
+            }
+        }
+        Ok(sizes)
+    }
+
     /// The explicit caller verb: newest-N with live protection. The mode-aware
     /// entry `prune_snapshots_with_mode` is the single implementation.
     pub(crate) fn prune_snapshots(

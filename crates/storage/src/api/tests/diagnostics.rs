@@ -780,3 +780,370 @@ fn diagnostics_branch_generation_summary_ignores_deleted_branches() {
         Some(BranchGeneration::new(5))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Space-reclamation contract §3.5 (slice 2): the footprint and reclaim tiers.
+// ---------------------------------------------------------------------------
+
+fn diagnostics_with(runtime: &StorageRuntime<'_>, detail: DiagnosticsDetail) -> DiagnosticsOutcome {
+    runtime
+        .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global).with_detail(detail))
+        .expect("diagnostics")
+}
+
+/// A durable runtime on a backend that records every operation, opened
+/// enqueue-only so nothing runs unless the test drains it.
+#[cfg(feature = "localfs")]
+fn open_counting_durable_runtime(name: &str) -> (&'static StorageBackend, StorageRuntime<'static>) {
+    let backend = crate::testkit::leak_static(StorageBackend::faulting_local_fs(
+        temp_dir_for_api_test(name),
+        crate::testkit::FaultScript::empty(),
+    ));
+    let runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_maintenance_scheduling_policy(
+                StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+            ),
+        backend,
+    )
+    .expect("open durable runtime")
+    .into_runtime();
+    (backend, runtime)
+}
+
+#[cfg(feature = "localfs")]
+fn operations_since(
+    backend: &StorageBackend,
+    start: usize,
+) -> Vec<crate::testkit::BackendOperation> {
+    backend
+        .fault_calls()
+        .iter()
+        .skip(start)
+        .copied()
+        .map(crate::testkit::BackendCall::operation)
+        .collect()
+}
+
+#[cfg(feature = "localfs")]
+fn checkpoint_completed(runtime: &mut StorageRuntime<'static>) {
+    let outcome = runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Checkpoint,
+            MaintenanceScope::Global,
+        ))
+        .expect("checkpoint");
+    assert_eq!(outcome.status(), MaintenanceSummaryStatus::Completed);
+}
+
+#[test]
+fn diagnostics_request_defaults_to_the_live_tier() {
+    let request = DiagnosticsRequest::new(DiagnosticsScope::Global);
+
+    assert_eq!(request.detail(), DiagnosticsDetail::Live);
+    assert_eq!(
+        request.with_detail(DiagnosticsDetail::Audit).detail(),
+        DiagnosticsDetail::Audit
+    );
+    assert_eq!(DiagnosticsDetail::default(), DiagnosticsDetail::Live);
+}
+
+#[test]
+fn footprint_for_detail_truth_table() {
+    use crate::api::diagnostics::{footprint_for_detail, DiagnosticsFootprintAudit};
+
+    let live = DiagnosticsFootprintReport::known_live(1, 2, Some(3), Some(4), Some(5), None);
+    let audit = DiagnosticsFootprintAudit {
+        unreferenced_objects: Some(6),
+        unreferenced_bytes: Some(7),
+        snapshot_objects: 8,
+        snapshot_bytes: 9,
+        superseded_snapshots: 10,
+        superseded_snapshot_bytes: 11,
+        wal_reclaimable_bytes: 12,
+        wal_tail_bytes: 13,
+    };
+    for (case, detail, facts, expect_audit) in [
+        ("live without facts", DiagnosticsDetail::Live, None, false),
+        (
+            "live with stray facts",
+            DiagnosticsDetail::Live,
+            Some(audit),
+            false,
+        ),
+        ("audit without facts", DiagnosticsDetail::Audit, None, false),
+        (
+            "audit with facts",
+            DiagnosticsDetail::Audit,
+            Some(audit),
+            true,
+        ),
+    ] {
+        let report = footprint_for_detail(detail, live, facts);
+
+        assert_eq!(report.detail(), detail, "{case}");
+        assert_eq!(report.state(), DiagnosticsFactState::Known, "{case}");
+        assert_eq!(report.live_table_objects(), Some(1), "{case}");
+        assert_eq!(report.live_table_bytes(), Some(2), "{case}");
+        assert_eq!(report.wal_retained_bytes(), Some(3), "{case}");
+        assert_eq!(report.wal_active_bytes(), Some(4), "{case}");
+        assert_eq!(report.wal_retained_segments(), Some(5), "{case}");
+        assert_eq!(report.wal_retention_watermark(), None, "{case}");
+        let count = |value: usize| if expect_audit { Some(value) } else { None };
+        let bytes = |value: u64| if expect_audit { Some(value) } else { None };
+        assert_eq!(report.unreferenced_objects(), count(6), "{case}");
+        assert_eq!(report.unreferenced_bytes(), bytes(7), "{case}");
+        assert_eq!(report.snapshot_objects(), count(8), "{case}");
+        assert_eq!(report.snapshot_bytes(), bytes(9), "{case}");
+        assert_eq!(report.superseded_snapshots(), count(10), "{case}");
+        assert_eq!(report.superseded_snapshot_bytes(), bytes(11), "{case}");
+        assert_eq!(report.wal_reclaimable_bytes(), bytes(12), "{case}");
+        assert_eq!(report.wal_tail_bytes(), bytes(13), "{case}");
+    }
+}
+
+#[test]
+fn footprint_cache_runtime_reports_unsupported() {
+    let runtime = open_runtime();
+
+    for detail in [DiagnosticsDetail::Live, DiagnosticsDetail::Audit] {
+        let report = diagnostics_with(&runtime, detail);
+
+        assert_eq!(
+            report.footprint().state(),
+            DiagnosticsFactState::Unsupported
+        );
+        assert_eq!(report.footprint().live_table_bytes(), None);
+        assert_eq!(report.reclaim().state(), DiagnosticsFactState::Unsupported);
+        assert_eq!(report.reclaim().pending_reclaim_tasks(), None);
+        assert_eq!(
+            report.quarantine().state(),
+            DiagnosticsFactState::Unsupported
+        );
+    }
+}
+
+#[test]
+fn footprint_closed_runtime_reports_unknown() {
+    let mut runtime = open_runtime();
+    runtime.close().expect("close");
+
+    let report = diagnostics_with(&runtime, DiagnosticsDetail::Audit);
+
+    assert_eq!(report.footprint().state(), DiagnosticsFactState::Unknown);
+    assert_eq!(report.reclaim().state(), DiagnosticsFactState::Unknown);
+}
+
+#[cfg(feature = "localfs")]
+#[test]
+fn footprint_live_tier_does_no_listing_or_metadata_io() {
+    use crate::testkit::BackendOperation;
+
+    let (backend, mut runtime) = open_counting_durable_runtime("footprint-live-no-io");
+    runtime
+        .commit(&put_batch(b"live", b"value"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush gives the catalog a table object");
+    let start = backend.fault_calls().len();
+
+    let report = diagnostics_with(&runtime, DiagnosticsDetail::Live);
+
+    let operations = operations_since(backend, start);
+    assert!(
+        operations.iter().all(|operation| {
+            !matches!(
+                operation,
+                BackendOperation::ListPrefix | BackendOperation::ObjectMetadata
+            )
+        }),
+        "the live tier lists and stats nothing: {operations:?}"
+    );
+    let footprint = report.footprint();
+    assert_eq!(footprint.state(), DiagnosticsFactState::Known);
+    assert_eq!(footprint.detail(), DiagnosticsDetail::Live);
+    assert_eq!(footprint.live_table_objects(), Some(1));
+    assert!(footprint.live_table_bytes().is_some_and(|bytes| bytes > 0));
+    assert!(footprint
+        .wal_retained_bytes()
+        .is_some_and(|bytes| bytes > 0));
+    assert!(footprint.wal_active_bytes().is_some());
+    assert_eq!(footprint.unreferenced_objects(), None);
+    assert_eq!(footprint.snapshot_objects(), None);
+    assert_eq!(footprint.superseded_snapshots(), None);
+    assert_eq!(footprint.wal_reclaimable_bytes(), None);
+    assert_eq!(report.quarantine().state(), DiagnosticsFactState::Unknown);
+    assert_eq!(report.reclaim().state(), DiagnosticsFactState::Known);
+    assert!(report.reclaim().pending_reclaim_tasks().is_some());
+
+    // The count follows the catalog: a second flushed table makes two.
+    runtime
+        .commit(&put_batch(b"live-2", b"value"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("second flush");
+    assert_eq!(
+        diagnostics_with(&runtime, DiagnosticsDetail::Live)
+            .footprint()
+            .live_table_objects(),
+        Some(2)
+    );
+}
+
+#[cfg(feature = "localfs")]
+#[test]
+fn footprint_audit_tier_reports_quarantine_snapshots_and_what_the_prune_reclaims() {
+    let (backend, mut runtime) = open_counting_durable_runtime("footprint-audit");
+    super::maintenance::stage_quarantine_object(backend, branch(), "footprint-q1", &[1u8; 300]);
+    super::maintenance::stage_quarantine_object(backend, branch(), "footprint-q2", &[2u8; 200]);
+    for key in [b"audit-a" as &[u8], b"audit-b"] {
+        runtime.commit(&put_batch(key, b"value")).expect("commit");
+        checkpoint_completed(&mut runtime);
+    }
+
+    let live = diagnostics_with(&runtime, DiagnosticsDetail::Live);
+    assert_eq!(live.quarantine().state(), DiagnosticsFactState::Unknown);
+    assert_eq!(live.footprint().snapshot_objects(), None);
+
+    let audit = diagnostics_with(&runtime, DiagnosticsDetail::Audit);
+
+    let footprint = audit.footprint();
+    assert_eq!(footprint.detail(), DiagnosticsDetail::Audit);
+    assert_eq!(audit.quarantine().state(), DiagnosticsFactState::Known);
+    assert_eq!(audit.quarantine().quarantined_objects(), Some(2));
+    assert_eq!(audit.quarantine().quarantined_bytes(), Some(500));
+    assert_eq!(footprint.unreferenced_objects(), Some(0));
+    assert_eq!(footprint.unreferenced_bytes(), Some(0));
+    assert_eq!(footprint.snapshot_objects(), Some(2));
+    assert_eq!(footprint.superseded_snapshots(), Some(1));
+    let superseded_bytes = footprint
+        .superseded_snapshot_bytes()
+        .expect("superseded bytes");
+    let snapshot_bytes = footprint.snapshot_bytes().expect("snapshot bytes");
+    assert!(superseded_bytes > 0 && superseded_bytes < snapshot_bytes);
+    assert!(footprint.wal_tail_bytes().is_some_and(|bytes| bytes > 0));
+    assert_eq!(
+        audit.reclaim().pending_reclaim_tasks(),
+        Some(1),
+        "the checkpoints' chained prune is queued"
+    );
+
+    runtime
+        .drain_maintenance()
+        .expect("drain the chained prune");
+    let after = diagnostics_with(&runtime, DiagnosticsDetail::Audit);
+
+    assert_eq!(after.footprint().snapshot_objects(), Some(1));
+    assert_eq!(after.footprint().superseded_snapshots(), Some(0));
+    assert_eq!(
+        after.footprint().snapshot_bytes(),
+        Some(snapshot_bytes - superseded_bytes),
+        "the prune reclaimed exactly the superseded bytes"
+    );
+    let prune = after
+        .reclaim()
+        .last_snapshot_prune()
+        .expect("the prune is on the ledger");
+    assert_eq!(prune.outcome(), DiagnosticsReclaimOutcome::Reclaimed);
+    assert_eq!(prune.state_changes(), 1);
+    assert_eq!(after.reclaim().pending_reclaim_tasks(), Some(0));
+    assert!(after.reclaim().total_passes() >= 1);
+}
+
+/// The reclaim report carries a deferred pass's typed reason: a sweep held
+/// off by a retired read view reports `ReaderPinned` (never prose), and the
+/// pass that reclaims once the reader is gone reports no deferral.
+#[cfg(feature = "localfs")]
+#[test]
+fn reclaim_report_carries_the_typed_deferral_of_a_reader_pinned_sweep() {
+    let mut runtime = open_durable_runtime("diagnostics-reclaim-deferral");
+    runtime
+        .commit(&put_batch(b"deferral-a", b"one"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime
+        .commit(&put_batch(b"deferral-a", b"two"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    // An off-lock reader holds the pre-compaction view across the sweep.
+    let held_view = runtime
+        .load_snapshot_for_test(branch())
+        .expect("published snapshot");
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&compact).expect("compact");
+    super::maintenance::drain_maintenance_to_idle(&mut runtime);
+
+    let deferred = diagnostics_with(&runtime, DiagnosticsDetail::Live)
+        .reclaim()
+        .last_sweep()
+        .expect("the deferred sweep is on the report");
+    assert_eq!(deferred.outcome(), DiagnosticsReclaimOutcome::Deferred);
+    assert_eq!(
+        deferred.deferral(),
+        Some(DiagnosticsReclaimDeferral::ReaderPinned)
+    );
+    assert_eq!(deferred.bytes_reclaimed(), 0);
+
+    drop(held_view);
+    let reclaim =
+        MaintenanceRequest::new(MaintenanceTask::Reclaim, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&reclaim).expect("reclaim");
+    super::maintenance::drain_maintenance_to_idle(&mut runtime);
+
+    let report = diagnostics_with(&runtime, DiagnosticsDetail::Live).reclaim();
+    let sweep = report.last_sweep().expect("the sweep is on the report");
+    assert_eq!(sweep.outcome(), DiagnosticsReclaimOutcome::Reclaimed);
+    assert_eq!(sweep.deferral(), None);
+    assert!(sweep.bytes_reclaimed() > 0, "{sweep:?}");
+    assert_eq!(sweep.objects_affected(), 2, "{sweep:?}");
+    assert_eq!(
+        sweep.state_changes(),
+        2,
+        "both superseded objects were staged"
+    );
+    assert_eq!(report.deferred_passes(), 1);
+    assert_eq!(
+        report.reclaimed_passes(),
+        2,
+        "the sweep and its purge both reclaimed: {report:?}"
+    );
+}
+
+/// The live tier reports the retention watermark the runtime's cache holds:
+/// cold right after a checkpoint invalidates it, the checkpoint's version once
+/// the next commit has warmed it.
+#[cfg(feature = "localfs")]
+#[test]
+fn footprint_live_tier_reports_the_warm_retention_watermark() {
+    let mut runtime = open_durable_runtime("diagnostics-live-watermark");
+    runtime
+        .commit(&put_batch(b"watermark-a", b"value"))
+        .expect("commit");
+    checkpoint_completed(&mut runtime);
+    // The checkpoint invalidated the cache: cold, never warmed by a live call.
+    assert_eq!(
+        diagnostics_with(&runtime, DiagnosticsDetail::Live)
+            .footprint()
+            .wal_retention_watermark(),
+        None
+    );
+
+    runtime
+        .commit(&put_batch(b"watermark-b", b"value"))
+        .expect("commit warms the retention watermark cache");
+
+    assert_eq!(
+        diagnostics_with(&runtime, DiagnosticsDetail::Live)
+            .footprint()
+            .wal_retention_watermark(),
+        Some(CommitVersion::new(1)),
+        "the checkpoint's watermark"
+    );
+}

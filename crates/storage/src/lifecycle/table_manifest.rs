@@ -367,6 +367,15 @@ impl LifecycleDurableTableCatalog {
         self.objects.len()
     }
 
+    /// Space-reclamation contract §3.5 (slice 2): the bytes of every table
+    /// object this catalog records — a fold over facts the catalog already
+    /// holds, so the Live footprint tier never touches the backend.
+    pub(crate) fn total_object_bytes(&self) -> u64 {
+        self.entries.values().fold(0u64, |total, entry| {
+            total.saturating_add(entry.object_facts.byte_count())
+        })
+    }
+
     /// The durable object backing `identity`, if the catalog knows it. Used by the table-object
     /// sweep to map in-memory branch state (owned + inherited tables) onto inventory object names
     /// so in-memory-reachable objects are pinned against reclaim.

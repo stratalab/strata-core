@@ -105,7 +105,7 @@ fn fork_branch(runtime: &mut StorageRuntime<'_>, child: BranchId) {
 }
 
 #[cfg(feature = "localfs")]
-fn stage_quarantine_object(
+pub(super) fn stage_quarantine_object(
     backend: &StorageBackend,
     branch_id: BranchId,
     table_id: &str,
@@ -2187,7 +2187,7 @@ fn table_data_object_files(root: &std::path::Path) -> std::collections::BTreeSet
 /// Drain the maintenance queue to a fixed point: each drain runs the queued tasks (including the
 /// GC chain's self-enqueued follow-ups); repeat until a drain finds nothing.
 #[cfg(feature = "localfs")]
-fn drain_maintenance_to_idle(runtime: &mut StorageRuntime<'static>) {
+pub(super) fn drain_maintenance_to_idle(runtime: &mut StorageRuntime<'static>) {
     for _ in 0..8 {
         let drain = runtime.drain_maintenance().expect("drain maintenance");
         if drain.drained_tasks() == 0 {

@@ -231,6 +231,12 @@ impl LifecycleTableObjectRetentionRequest {
         self
     }
 
+    /// The table-object inventory the mark classified, with each object's
+    /// on-disk size (the audit footprint joins candidates against it).
+    pub(crate) fn inventory(&self) -> &[LifecycleTableObjectInventoryEntry] {
+        &self.inventory
+    }
+
     pub(crate) const fn branch_id(&self) -> BranchId {
         self.branch_id
     }

@@ -40,7 +40,7 @@ pub(crate) enum ReclaimOutcome {
     Reclaimed,
     /// The pass completed and found nothing to reclaim.
     Nothing,
-    /// The pass deferred; `ReclaimEvent::deferral` says why when the runner
+    /// The pass deferred; `ReclaimPass::deferral` says why when the runner
     /// classified it.
     Deferred,
     Failed,
@@ -49,7 +49,7 @@ pub(crate) enum ReclaimOutcome {
 
 /// One recorded reclaim pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ReclaimEvent {
+pub(crate) struct ReclaimPass {
     outcome: ReclaimOutcome,
     deferral: Option<MaintenanceDeferralReason>,
     bytes_reclaimed: u64,
@@ -57,7 +57,7 @@ pub(crate) struct ReclaimEvent {
     state_changes: usize,
 }
 
-impl ReclaimEvent {
+impl ReclaimPass {
     pub(crate) const fn outcome(self) -> ReclaimOutcome {
         self.outcome
     }
@@ -82,15 +82,15 @@ impl ReclaimEvent {
 /// Running totals over every recorded pass.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReclaimTotals {
-    events: u64,
+    passes: u64,
     bytes_reclaimed: u64,
     reclaimed_passes: u64,
     deferred_passes: u64,
 }
 
 impl ReclaimTotals {
-    pub(crate) const fn events(self) -> u64 {
-        self.events
+    pub(crate) const fn passes(self) -> u64 {
+        self.passes
     }
 
     pub(crate) const fn bytes_reclaimed(self) -> u64 {
@@ -110,16 +110,16 @@ impl ReclaimTotals {
 /// empty ledger of a runtime that has run no reclaim pass yet.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReclaimLedger {
-    last_mark: Option<ReclaimEvent>,
-    last_sweep: Option<ReclaimEvent>,
-    last_purge: Option<ReclaimEvent>,
-    last_snapshot_prune: Option<ReclaimEvent>,
-    last_wal_truncation: Option<ReclaimEvent>,
+    last_mark: Option<ReclaimPass>,
+    last_sweep: Option<ReclaimPass>,
+    last_purge: Option<ReclaimPass>,
+    last_snapshot_prune: Option<ReclaimPass>,
+    last_wal_truncation: Option<ReclaimPass>,
     totals: ReclaimTotals,
 }
 
 impl ReclaimLedger {
-    pub(crate) fn record(&mut self, family: ReclaimFamily, event: ReclaimEvent) {
+    pub(crate) fn record(&mut self, family: ReclaimFamily, event: ReclaimPass) {
         let slot = match family {
             ReclaimFamily::TableObjectMark => &mut self.last_mark,
             ReclaimFamily::TableObjectSweep => &mut self.last_sweep,
@@ -128,7 +128,7 @@ impl ReclaimLedger {
             ReclaimFamily::WalTruncation => &mut self.last_wal_truncation,
         };
         *slot = Some(event);
-        self.totals.events = self.totals.events.saturating_add(1);
+        self.totals.passes = self.totals.passes.saturating_add(1);
         self.totals.bytes_reclaimed = self
             .totals
             .bytes_reclaimed
@@ -144,7 +144,7 @@ impl ReclaimLedger {
         }
     }
 
-    pub(crate) const fn last(&self, family: ReclaimFamily) -> Option<ReclaimEvent> {
+    pub(crate) const fn last(&self, family: ReclaimFamily) -> Option<ReclaimPass> {
         match family {
             ReclaimFamily::TableObjectMark => self.last_mark,
             ReclaimFamily::TableObjectSweep => self.last_sweep,
@@ -213,7 +213,7 @@ pub(crate) const fn classify_reclaim_outcome(
 /// or `None` when the outcome carries no follow-up.
 pub(crate) fn classify_reclaim_follow_up(
     outcome: &MaintenanceOutcome,
-) -> Option<(ReclaimFamily, ReclaimEvent)> {
+) -> Option<(ReclaimFamily, ReclaimPass)> {
     let follow_up = outcome.wal_truncation_follow_up()?;
     let status = if follow_up.completed() {
         MaintenanceOutcomeStatus::Completed
@@ -222,7 +222,7 @@ pub(crate) fn classify_reclaim_follow_up(
     };
     Some((
         ReclaimFamily::WalTruncation,
-        ReclaimEvent {
+        ReclaimPass {
             outcome: classify_reclaim_outcome(status, 0, follow_up.deleted_segments()),
             deferral: None,
             bytes_reclaimed: 0,
@@ -236,9 +236,9 @@ pub(crate) fn classify_reclaim_follow_up(
 /// is not a reclaim family.
 pub(crate) fn classify_reclaim(
     outcome: &MaintenanceOutcome,
-) -> Option<(ReclaimFamily, ReclaimEvent)> {
+) -> Option<(ReclaimFamily, ReclaimPass)> {
     let family = reclaim_family(outcome.task_kind(), outcome.task_scope())?;
-    let event = ReclaimEvent {
+    let event = ReclaimPass {
         outcome: classify_reclaim_outcome(
             outcome.status(),
             outcome.bytes_reclaimed(),
@@ -502,21 +502,21 @@ mod tests {
     fn ledger_keeps_the_last_event_per_family_and_running_totals() {
         let mut ledger = ReclaimLedger::default();
         assert_eq!(ledger, ReclaimLedger::default());
-        let reclaimed = ReclaimEvent {
+        let reclaimed = ReclaimPass {
             outcome: ReclaimOutcome::Reclaimed,
             deferral: None,
             bytes_reclaimed: 10,
             objects_affected: 1,
             state_changes: 1,
         };
-        let deferred = ReclaimEvent {
+        let deferred = ReclaimPass {
             outcome: ReclaimOutcome::Deferred,
             deferral: Some(MaintenanceDeferralReason::IncompleteProof),
             bytes_reclaimed: 0,
             objects_affected: 0,
             state_changes: 0,
         };
-        let nothing = ReclaimEvent {
+        let nothing = ReclaimPass {
             outcome: ReclaimOutcome::Nothing,
             deferral: None,
             bytes_reclaimed: 0,
@@ -526,7 +526,7 @@ mod tests {
         // The empty ledger reports zero everywhere (a constant-returning
         // accessor would be caught here and by the counts below).
         let empty = ledger.totals();
-        assert_eq!(empty.events(), 0);
+        assert_eq!(empty.passes(), 0);
         assert_eq!(empty.bytes_reclaimed(), 0);
         assert_eq!(empty.reclaimed_passes(), 0);
         assert_eq!(empty.deferred_passes(), 0);
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(ledger.last(ReclaimFamily::SnapshotPrune), Some(deferred));
         assert_eq!(ledger.last(ReclaimFamily::TableObjectMark), None);
         let totals = ledger.totals();
-        assert_eq!(totals.events(), 5);
+        assert_eq!(totals.passes(), 5);
         assert_eq!(totals.bytes_reclaimed(), 20);
         assert_eq!(totals.reclaimed_passes(), 2);
         assert_eq!(totals.deferred_passes(), 2);

@@ -5,19 +5,25 @@ use super::{
     CommitBranchGenerationGuard, CommitVersion, DiagnosticsBranchCatalogReport,
     DiagnosticsBudgetAccuracy, DiagnosticsBudgetPool, DiagnosticsBudgetPressure,
     DiagnosticsBudgetReport, DiagnosticsBudgetUsage, DiagnosticsCheckpointReport,
-    DiagnosticsRecoveryClass, DiagnosticsRecoveryFault, DiagnosticsRecoveryFaultKind,
-    DiagnosticsRecoveryReport, DiagnosticsScope, DiagnosticsSourceLayoutReport,
-    DiagnosticsSourceLevelTableCount, DiagnosticsStoragePressureReason,
-    DiagnosticsStoragePressureReport, DiagnosticsStoragePressureSeverity,
-    DiagnosticsWalGrowthReport, LifecycleBranchCatalog, LifecycleBranchDescriptor,
-    LifecycleBranchStatus, LifecycleDurableLocalRuntime, LifecycleStorageMode,
-    LifecycleStoragePressureReason, LifecycleStoragePressureSeverity, LifecycleWalGrowthPolicy,
-    MaintenanceExecutorStatus, MaintenanceWalGrowthSummary, ModeLifecyclePolicy,
-    RecoveryDegradationClass, RecoveryFaultKind, RecoveryHealth, RecoveryHealthSummary,
-    StorageApiError, StorageApiResult, StorageBudgetPool, StorageBudgetPressureSeverity,
-    StorageBudgetSnapshot, StorageDurabilityPolicy, StorageMode, StorageOpenPlan,
-    StorageOpenSummary, StorageRuntime, StorageRuntimeBudget, StorageRuntimeInner, WalGrowthFacts,
-    DEFAULT_BRANCH_ID,
+    DiagnosticsDetail, DiagnosticsFootprintReport, DiagnosticsQuarantineReport,
+    DiagnosticsReclaimDeferral, DiagnosticsReclaimOutcome, DiagnosticsReclaimPass,
+    DiagnosticsReclaimReport, DiagnosticsRecoveryClass, DiagnosticsRecoveryFault,
+    DiagnosticsRecoveryFaultKind, DiagnosticsRecoveryReport, DiagnosticsScope,
+    DiagnosticsSourceLayoutReport, DiagnosticsSourceLevelTableCount,
+    DiagnosticsStoragePressureReason, DiagnosticsStoragePressureReport,
+    DiagnosticsStoragePressureSeverity, DiagnosticsWalGrowthReport, LifecycleBranchCatalog,
+    LifecycleBranchDescriptor, LifecycleBranchStatus, LifecycleDurableLocalRuntime,
+    LifecycleStorageMode, LifecycleStoragePressureReason, LifecycleStoragePressureSeverity,
+    LifecycleWalGrowthPolicy, MaintenanceExecutorStatus, MaintenanceWalGrowthSummary,
+    ModeLifecyclePolicy, RecoveryDegradationClass, RecoveryFaultKind, RecoveryHealth,
+    RecoveryHealthSummary, StorageApiError, StorageApiResult, StorageBudgetPool,
+    StorageBudgetPressureSeverity, StorageBudgetSnapshot, StorageDurabilityPolicy, StorageMode,
+    StorageOpenPlan, StorageOpenSummary, StorageRuntime, StorageRuntimeBudget, StorageRuntimeInner,
+    WalGrowthFacts, DEFAULT_BRANCH_ID,
+};
+use crate::lifecycle::{
+    LifecycleFootprintAuditFacts, LifecycleFootprintWatermark, MaintenanceDeferralReason,
+    ReclaimFamily, ReclaimLedger, ReclaimOutcome, ReclaimPass,
 };
 
 pub(super) fn map_generation_guard(
@@ -469,4 +475,303 @@ pub(super) fn map_branch_cleanup(release_plan: &BranchReleasePlan) -> BranchClea
         release_plan.releasable_tables().len(),
         release_plan.protected_tables().len(),
     )
+}
+
+/// Space-reclamation contract §3.5 (slice 2): the footprint, reclaim and
+/// quarantine reports of a durable runtime. The live tier reads only state the
+/// runtime holds; the audit tier performs the reclaim runners' listings and
+/// stats, and populates the quarantine report from the inventories it read.
+pub(super) fn durable_footprint_report<S>(
+    runtime: &LifecycleDurableLocalRuntime<'_, S>,
+    detail: DiagnosticsDetail,
+) -> (
+    DiagnosticsFootprintReport,
+    DiagnosticsReclaimReport,
+    DiagnosticsQuarantineReport,
+) {
+    let live = runtime.footprint_live_facts();
+    let live_report = DiagnosticsFootprintReport::known_live(
+        live.live_table_objects(),
+        live.live_table_bytes(),
+        live.wal().map(WalGrowthFacts::retained_bytes),
+        live.wal().map(WalGrowthFacts::active_segment_size),
+        live.wal().map(WalGrowthFacts::retained_segments),
+        match live.wal_retention_watermark() {
+            LifecycleFootprintWatermark::Known(watermark) => watermark,
+            LifecycleFootprintWatermark::Cold => None,
+        },
+    );
+    let audit = match detail {
+        // Rationale: an audit that fails mid-listing degrades to "audit facts
+        // unknown" on an otherwise complete report, the same partial-report
+        // contract the checkpoint report follows on a manifest read failure.
+        DiagnosticsDetail::Audit => runtime.footprint_audit_facts().ok(),
+        DiagnosticsDetail::Live => None,
+    };
+    let quarantine = audit
+        .as_ref()
+        .map_or_else(DiagnosticsQuarantineReport::unknown, |audit| {
+            DiagnosticsQuarantineReport::known(
+                audit.quarantined_objects(),
+                audit.quarantined_bytes(),
+            )
+        });
+    let footprint = crate::api::diagnostics::footprint_for_detail(
+        detail,
+        live_report,
+        audit.map(map_footprint_audit),
+    );
+    let reclaim = map_reclaim_report(runtime.reclaim_ledger(), live.pending_reclaim_tasks());
+    (footprint, reclaim, quarantine)
+}
+
+pub(super) fn map_footprint_audit(
+    audit: LifecycleFootprintAuditFacts,
+) -> crate::api::diagnostics::DiagnosticsFootprintAudit {
+    let (unreferenced_objects, unreferenced_bytes) = match audit.unreferenced() {
+        Some((objects, bytes)) => (Some(objects), Some(bytes)),
+        None => (None, None),
+    };
+    crate::api::diagnostics::DiagnosticsFootprintAudit {
+        unreferenced_objects,
+        unreferenced_bytes,
+        snapshot_objects: audit.snapshot_objects(),
+        snapshot_bytes: audit.snapshot_bytes(),
+        superseded_snapshots: audit.superseded_snapshots(),
+        superseded_snapshot_bytes: audit.superseded_snapshot_bytes(),
+        wal_reclaimable_bytes: audit.wal_reclaimable_bytes(),
+        wal_tail_bytes: audit.wal_tail_bytes(),
+    }
+}
+
+pub(super) fn map_reclaim_report(
+    ledger: &ReclaimLedger,
+    pending_reclaim_tasks: usize,
+) -> DiagnosticsReclaimReport {
+    let last = crate::api::diagnostics::DiagnosticsReclaimPasses {
+        mark: ledger
+            .last(ReclaimFamily::TableObjectMark)
+            .map(map_reclaim_pass),
+        sweep: ledger
+            .last(ReclaimFamily::TableObjectSweep)
+            .map(map_reclaim_pass),
+        purge: ledger
+            .last(ReclaimFamily::QuarantinePurge)
+            .map(map_reclaim_pass),
+        snapshot_prune: ledger
+            .last(ReclaimFamily::SnapshotPrune)
+            .map(map_reclaim_pass),
+        wal_truncation: ledger
+            .last(ReclaimFamily::WalTruncation)
+            .map(map_reclaim_pass),
+    };
+    let totals = ledger.totals();
+    DiagnosticsReclaimReport::known(
+        last,
+        totals.passes(),
+        totals.bytes_reclaimed(),
+        totals.reclaimed_passes(),
+        totals.deferred_passes(),
+        pending_reclaim_tasks,
+    )
+}
+
+pub(super) fn map_reclaim_pass(pass: ReclaimPass) -> DiagnosticsReclaimPass {
+    DiagnosticsReclaimPass::new(
+        map_reclaim_outcome(pass.outcome()),
+        pass.deferral().map(map_reclaim_deferral),
+        pass.bytes_reclaimed(),
+        pass.objects_affected(),
+        pass.state_changes(),
+    )
+}
+
+pub(super) const fn map_reclaim_outcome(outcome: ReclaimOutcome) -> DiagnosticsReclaimOutcome {
+    match outcome {
+        ReclaimOutcome::Reclaimed => DiagnosticsReclaimOutcome::Reclaimed,
+        ReclaimOutcome::Nothing => DiagnosticsReclaimOutcome::Nothing,
+        ReclaimOutcome::Deferred => DiagnosticsReclaimOutcome::Deferred,
+        ReclaimOutcome::Failed => DiagnosticsReclaimOutcome::Failed,
+        ReclaimOutcome::Canceled => DiagnosticsReclaimOutcome::Canceled,
+    }
+}
+
+pub(super) const fn map_reclaim_deferral(
+    reason: MaintenanceDeferralReason,
+) -> DiagnosticsReclaimDeferral {
+    match reason {
+        MaintenanceDeferralReason::ReaderPinned => DiagnosticsReclaimDeferral::ReaderPinned,
+        MaintenanceDeferralReason::Referenced => DiagnosticsReclaimDeferral::Referenced,
+        MaintenanceDeferralReason::IncompleteProof => DiagnosticsReclaimDeferral::IncompleteProof,
+        MaintenanceDeferralReason::StaleProof => DiagnosticsReclaimDeferral::StaleProof,
+        MaintenanceDeferralReason::RecoveryHealth => DiagnosticsReclaimDeferral::RecoveryHealth,
+        MaintenanceDeferralReason::InventoryAdvanced => {
+            DiagnosticsReclaimDeferral::InventoryAdvanced
+        }
+        MaintenanceDeferralReason::UnsupportedScope => DiagnosticsReclaimDeferral::UnsupportedScope,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::DiagnosticsFactState;
+    use crate::lifecycle::{
+        classify_reclaim, MaintenanceOutcome, MaintenanceOutcomeStatus, MaintenanceTaskKind,
+        MaintenanceTaskScope,
+    };
+
+    #[test]
+    fn map_reclaim_outcome_truth_table() {
+        for (outcome, expected) in [
+            (
+                ReclaimOutcome::Reclaimed,
+                DiagnosticsReclaimOutcome::Reclaimed,
+            ),
+            (ReclaimOutcome::Nothing, DiagnosticsReclaimOutcome::Nothing),
+            (
+                ReclaimOutcome::Deferred,
+                DiagnosticsReclaimOutcome::Deferred,
+            ),
+            (ReclaimOutcome::Failed, DiagnosticsReclaimOutcome::Failed),
+            (
+                ReclaimOutcome::Canceled,
+                DiagnosticsReclaimOutcome::Canceled,
+            ),
+        ] {
+            assert_eq!(map_reclaim_outcome(outcome), expected, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn map_reclaim_deferral_truth_table() {
+        for (reason, expected) in [
+            (
+                MaintenanceDeferralReason::ReaderPinned,
+                DiagnosticsReclaimDeferral::ReaderPinned,
+            ),
+            (
+                MaintenanceDeferralReason::Referenced,
+                DiagnosticsReclaimDeferral::Referenced,
+            ),
+            (
+                MaintenanceDeferralReason::IncompleteProof,
+                DiagnosticsReclaimDeferral::IncompleteProof,
+            ),
+            (
+                MaintenanceDeferralReason::StaleProof,
+                DiagnosticsReclaimDeferral::StaleProof,
+            ),
+            (
+                MaintenanceDeferralReason::RecoveryHealth,
+                DiagnosticsReclaimDeferral::RecoveryHealth,
+            ),
+            (
+                MaintenanceDeferralReason::InventoryAdvanced,
+                DiagnosticsReclaimDeferral::InventoryAdvanced,
+            ),
+            (
+                MaintenanceDeferralReason::UnsupportedScope,
+                DiagnosticsReclaimDeferral::UnsupportedScope,
+            ),
+        ] {
+            assert_eq!(map_reclaim_deferral(reason), expected, "{reason:?}");
+        }
+    }
+
+    fn recorded(
+        kind: MaintenanceTaskKind,
+        scope: MaintenanceTaskScope,
+        bytes: u64,
+    ) -> ReclaimLedger {
+        let outcome = MaintenanceOutcome::new(kind, MaintenanceOutcomeStatus::Completed)
+            .with_task_scope(scope)
+            .with_effects(2, bytes, true)
+            .with_state_changes(1);
+        let (family, pass) = classify_reclaim(&outcome).expect("a reclaim family");
+        let mut ledger = ReclaimLedger::default();
+        ledger.record(family, pass);
+        ledger
+    }
+
+    #[test]
+    fn map_reclaim_report_places_each_family_in_its_slot_with_the_totals() {
+        let branch = strata_core::BranchId::from_bytes([0x33; 16]);
+        for (case, kind, scope, pick) in [
+            (
+                "mark",
+                MaintenanceTaskKind::Retention,
+                MaintenanceTaskScope::Branch(branch),
+                DiagnosticsReclaimReport::last_mark
+                    as fn(DiagnosticsReclaimReport) -> Option<DiagnosticsReclaimPass>,
+            ),
+            (
+                "sweep",
+                MaintenanceTaskKind::Quarantine,
+                MaintenanceTaskScope::Global,
+                DiagnosticsReclaimReport::last_sweep,
+            ),
+            (
+                "purge",
+                MaintenanceTaskKind::Purge,
+                MaintenanceTaskScope::Branch(branch),
+                DiagnosticsReclaimReport::last_purge,
+            ),
+            (
+                "snapshot prune",
+                MaintenanceTaskKind::SnapshotPruning,
+                MaintenanceTaskScope::Retention,
+                DiagnosticsReclaimReport::last_snapshot_prune,
+            ),
+            (
+                "wal truncation",
+                MaintenanceTaskKind::WalTruncation,
+                MaintenanceTaskScope::Global,
+                DiagnosticsReclaimReport::last_wal_truncation,
+            ),
+        ] {
+            let ledger = recorded(kind, scope, 4096);
+
+            let report = map_reclaim_report(&ledger, 3);
+
+            assert_eq!(report.state(), DiagnosticsFactState::Known, "{case}");
+            let pass = pick(report).unwrap_or_else(|| panic!("{case} is in its slot"));
+            assert_eq!(
+                pass.outcome(),
+                DiagnosticsReclaimOutcome::Reclaimed,
+                "{case}"
+            );
+            assert_eq!(pass.deferral(), None, "{case}");
+            assert_eq!(pass.bytes_reclaimed(), 4096, "{case}");
+            assert_eq!(pass.objects_affected(), 2, "{case}");
+            assert_eq!(pass.state_changes(), 1, "{case}");
+            assert_eq!(report.total_passes(), 1, "{case}");
+            assert_eq!(report.total_bytes_reclaimed(), 4096, "{case}");
+            assert_eq!(report.reclaimed_passes(), 1, "{case}");
+            assert_eq!(report.deferred_passes(), 0, "{case}");
+            assert_eq!(report.pending_reclaim_tasks(), Some(3), "{case}");
+            let others = [
+                report.last_mark(),
+                report.last_sweep(),
+                report.last_purge(),
+                report.last_snapshot_prune(),
+                report.last_wal_truncation(),
+            ]
+            .iter()
+            .filter(|slot| slot.is_some())
+            .count();
+            assert_eq!(others, 1, "{case}: only its own slot is filled");
+        }
+    }
+
+    #[test]
+    fn map_reclaim_report_of_an_empty_ledger_is_known_and_empty() {
+        let report = map_reclaim_report(&ReclaimLedger::default(), 0);
+
+        assert_eq!(report.state(), DiagnosticsFactState::Known);
+        assert_eq!(report.last_mark(), None);
+        assert_eq!(report.last_wal_truncation(), None);
+        assert_eq!(report.total_passes(), 0);
+        assert_eq!(report.pending_reclaim_tasks(), Some(0));
+    }
 }

@@ -56,8 +56,10 @@ pub use commit::{
 pub use diagnostics::{
     DiagnosticsBranchCatalogReport, DiagnosticsBudgetAccuracy, DiagnosticsBudgetPool,
     DiagnosticsBudgetPressure, DiagnosticsBudgetReport, DiagnosticsBudgetUsage,
-    DiagnosticsCheckpointReport, DiagnosticsFactState, DiagnosticsOutcome,
-    DiagnosticsQuarantineReport, DiagnosticsReadActivityReport, DiagnosticsRecoveryClass,
+    DiagnosticsCheckpointReport, DiagnosticsDetail, DiagnosticsFactState,
+    DiagnosticsFootprintReport, DiagnosticsOutcome, DiagnosticsQuarantineReport,
+    DiagnosticsReadActivityReport, DiagnosticsReclaimDeferral, DiagnosticsReclaimOutcome,
+    DiagnosticsReclaimPass, DiagnosticsReclaimReport, DiagnosticsRecoveryClass,
     DiagnosticsRecoveryFault, DiagnosticsRecoveryFaultKind, DiagnosticsRecoveryReport,
     DiagnosticsRequest, DiagnosticsRetentionReport, DiagnosticsScope,
     DiagnosticsSourceLayoutReport, DiagnosticsSourceLevelTableCount,

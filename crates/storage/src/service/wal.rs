@@ -668,6 +668,26 @@ impl WalAppend {
     }
 }
 
+/// Space-reclamation contract §3.5 (slice 2, audit tier): one listed WAL
+/// segment, its on-disk size, and — for a sealed segment below the active
+/// one — the highest commit it holds, the fact `delete_covered_segments`
+/// decides on. `None` marks the active segment and anything above it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WalSegmentCoverage {
+    bytes: u64,
+    sealed_max_commit: Option<CommitVersion>,
+}
+
+impl WalSegmentCoverage {
+    pub(crate) const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    pub(crate) const fn sealed_max_commit(&self) -> Option<CommitVersion> {
+        self.sealed_max_commit
+    }
+}
+
 impl WalGrowthFacts {
     const fn new(
         retained_segments: usize,
@@ -1783,6 +1803,88 @@ impl<'a> WalService<'a> {
     /// backend scan when the cache has been invalidated (open, repair, or a
     /// retention deletion). The active segment is excluded here — its live size
     /// is added by `growth_facts` — so steady-state appends never invalidate it.
+    /// Space-reclamation contract §3.5 (slice 2, live tier): the growth facts
+    /// as far as the sealed-retention cache already knows them — never a scan.
+    /// `None` while the cache is cold (not yet sampled, or invalidated by a
+    /// truncation), so a live footprint reports the WAL as unknown instead of
+    /// paying a listing for it.
+    pub(crate) fn cached_growth_facts(&self) -> Option<WalGrowthFacts> {
+        let sealed = self.sealed_retention.get()?;
+        let retained_bytes = sealed.bytes.checked_add(self.active_segment_size)?;
+        Some(WalGrowthFacts::new(
+            sealed.segments.saturating_add(1),
+            retained_bytes,
+            self.active_segment_id,
+            self.active_segment_size,
+            self.dirty_bytes,
+            self.dirty_records,
+        ))
+    }
+
+    /// Space-reclamation contract §3.5 (slice 2, audit tier): every listed WAL
+    /// segment with the facts a covered-segment delete pass decides on. A
+    /// sealed segment below the active one is read for its highest commit
+    /// (the pass reads it the same way); the active segment and anything
+    /// above it is only sized. A segment that vanishes between the listing
+    /// and its read (a concurrent truncation) is dropped — the same tolerance
+    /// the delete pass and the sealed-retention scan apply.
+    pub(crate) fn segment_coverage(&self) -> WalServiceResult<Vec<WalSegmentCoverage>> {
+        let mut coverage = Vec::new();
+        for (segment_id, object) in list_segments(&self.backend)? {
+            if segment_id >= self.active_segment_id {
+                let metadata = match self.backend.object_metadata(&object) {
+                    Ok(metadata) => metadata,
+                    Err(source) if source.kind() == BackendErrorKind::NotFound => continue,
+                    Err(source) => {
+                        return Err(WalServiceError::Backend {
+                            operation: WalOperation::List,
+                            object,
+                            source,
+                        });
+                    }
+                };
+                coverage.push(WalSegmentCoverage {
+                    bytes: metadata.size_bytes(),
+                    sealed_max_commit: None,
+                });
+                continue;
+            }
+            let bytes = match self.backend.read_object(&object) {
+                Ok(bytes) => bytes,
+                Err(source) if source.kind() == BackendErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(WalServiceError::Backend {
+                        operation: WalOperation::Read,
+                        object,
+                        source,
+                    });
+                }
+            };
+            let read = decode_segment_bytes(
+                self.database_id,
+                segment_id,
+                &object,
+                &bytes,
+                false,
+                self.codec_id,
+                WalOperation::Read,
+            )?;
+            // An empty sealed segment is covered by any proof (the delete
+            // pass's `all` over no records), so it reads as the zero commit.
+            let sealed_max_commit = read
+                .records
+                .iter()
+                .map(WalRecord::commit_version)
+                .max()
+                .unwrap_or(CommitVersion::ZERO);
+            coverage.push(WalSegmentCoverage {
+                bytes: bytes.len() as u64,
+                sealed_max_commit: Some(sealed_max_commit),
+            });
+        }
+        Ok(coverage)
+    }
+
     fn sealed_retention_facts(&self) -> WalServiceResult<SealedRetention> {
         if let Some(sealed) = self.sealed_retention.get() {
             return Ok(sealed);
