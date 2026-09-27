@@ -636,6 +636,8 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             // Table-object GC: the foreground compaction dropped its input refs; enqueue the
             // coalescing mark (best-effort — a rejected enqueue defers reclaim to the next cycle).
             if !compaction.retained_input_objects().is_empty() {
+                self.maintenance
+                    .note_reclaim_debt(compaction.retained_input_objects().len() as u64);
                 let _ = self
                     .enqueue_maintenance(MaintenanceTaskRequest::table_object_retention(branch_id));
             }
@@ -706,12 +708,13 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         self.note_cache_preheat_trigger();
         // Table-object GC: a fixed-point drain that ran passes dropped input refs; enqueue the
         // coalescing mark (best-effort — a rejected enqueue defers reclaim to the next cycle).
-        if outcome
-            .as_ref()
-            .is_ok_and(|drain| drain.input_tables_removed() > 0)
-        {
-            let _ =
-                self.enqueue_maintenance(MaintenanceTaskRequest::table_object_retention(branch_id));
+        if let Ok(drain) = outcome.as_ref() {
+            if drain.input_tables_removed() > 0 {
+                self.maintenance
+                    .note_reclaim_debt(drain.input_tables_removed() as u64);
+                let _ = self
+                    .enqueue_maintenance(MaintenanceTaskRequest::table_object_retention(branch_id));
+            }
         }
         outcome
     }
@@ -784,6 +787,8 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         // otherwise withhold from the worker, and the first commit could
         // never be admitted.
         self.reclaim_only_scope = crate::lifecycle::ReclaimOnlyScope::Inactive;
+        // Slice 8: a write is the activity edge that ends a quiet period.
+        self.maintenance.note_activity();
         self.last_write_admission = None;
         let pressure = self.storage_pressure_for_branch(branch_id);
         let mut outcome = evaluate_mutating_write_admission(
@@ -1378,12 +1383,10 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 .with_pinned_objects(pinned_objects);
             let outcome = table_object_retention_outcome(&table_request)?;
             // The public Reclaim verb performs reclaim, not just a report: chain the sweep
-            // (Quarantine → Purge) for the marked candidates. Best-effort, coalescing.
-            if outcome.decisions().iter().any(|decision| {
-                decision.decision() == crate::lifecycle::RetentionDecision::QuarantineCandidate
-            }) {
-                let _ = self.enqueue_maintenance(MaintenanceTaskRequest::quarantine());
-            }
+            // (Quarantine → Purge) for the marked candidates. Unconditional like the queued
+            // mark's chain (slice 8): a sweep with no candidates completes trivially and is
+            // the one pass that settles `reclaim_owed`. Best-effort, coalescing.
+            let _ = self.enqueue_maintenance(MaintenanceTaskRequest::quarantine());
             // Inline verb: not a queued task, so record the mark into the
             // reclaim ledger here (branch scope = the table-object mark).
             self.maintenance.record_reclaim(
@@ -1523,6 +1526,51 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
 
     /// The per-runtime reclaim ledger (space-reclamation contract §3.5): the
     /// last outcome of every reclaim family this runtime has run.
+    /// Space-reclamation contract §3.1 (slice 8): whether a table-object sweep is
+    /// still owed.
+    pub(crate) const fn reclaim_owed(&self) -> bool {
+        self.maintenance.reclaim_owed()
+    }
+
+    pub(crate) const fn suspected_debt_objects(&self) -> u64 {
+        self.maintenance.suspected_debt_objects()
+    }
+
+    pub(crate) fn quiescence_debounce_millis(&self) -> u64 {
+        self.open_plan
+            .lifecycle_config()
+            .quiescence_debounce_millis()
+    }
+
+    pub(crate) fn low_tier_debt_threshold_objects(&self) -> u64 {
+        self.open_plan
+            .lifecycle_config()
+            .low_tier_debt_threshold_objects()
+    }
+
+    /// Whether the drain round ending now should arm the idle wake.
+    pub(crate) const fn idle_wake_pending(&self) -> bool {
+        self.maintenance.idle_wake_pending()
+    }
+
+    /// Record what woke the drain round that is starting (slice 8).
+    pub(crate) fn record_background_wake(&mut self, origin: crate::lifecycle::ReclaimWakeOrigin) {
+        let at_version = self.visible.visible_version();
+        self.maintenance.record_wake(origin, at_version);
+    }
+
+    /// The idle wake's one action: with a sweep still owed, queue the sweep (it
+    /// marks afresh inside, so a clean pass clears the debt; a sweep already
+    /// queued coalesces). Debt settled since the wake was armed queues nothing.
+    /// Returns whether it queued one.
+    pub(crate) fn enqueue_idle_reclaim_sweep(&mut self) -> bool {
+        if !self.reclaim_owed() {
+            return false;
+        }
+        self.enqueue_maintenance(MaintenanceTaskRequest::quarantine())
+            .is_ok()
+    }
+
     pub(crate) const fn reclaim_ledger(&self) -> &crate::lifecycle::ReclaimLedger {
         self.maintenance.reclaim_ledger()
     }
@@ -2778,6 +2826,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         // The publish slot is released only after the catalog record above, so no concurrent
         // publish for this branch can interleave between persist and record.
         drop(guard);
+        // Slice 8: the objects this rewrite's publish dropped refs to, as the
+        // outcome counts them (at least one when a rewrite published at all).
+        let dropped_refs = (outcome.affected_objects() as u64).max(1);
         let finished = self.maintenance.finish_started(task, outcome, false);
         let result = self.record_publish_phase_health(finished);
         // Flush-driven WAL reclaim: advance the flush watermark to the just-published L0
@@ -2790,6 +2841,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         // enqueue the coalescing mark so the superseded objects are reclaimed. Best-effort — a
         // rejected enqueue only defers reclaim to the next cycle.
         if let Some(branch_id) = rewrite_branch {
+            self.maintenance.note_reclaim_debt(dropped_refs);
             let _ =
                 self.enqueue_maintenance(MaintenanceTaskRequest::table_object_retention(branch_id));
         }
@@ -3636,10 +3688,12 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         }
         // Table-object GC: a completed foreground compaction dropped its input refs; enqueue the
         // coalescing mark (best-effort — a rejected enqueue defers reclaim to the next cycle).
-        if outcome
+        if let Some(completed) = outcome
             .as_ref()
-            .is_some_and(|completed| completed.status() == MaintenanceOutcomeStatus::Completed)
+            .filter(|completed| completed.status() == MaintenanceOutcomeStatus::Completed)
         {
+            self.maintenance
+                .note_reclaim_debt((completed.affected_objects() as u64).max(1));
             let _ =
                 self.enqueue_maintenance(MaintenanceTaskRequest::table_object_retention(branch_id));
         }
@@ -3897,10 +3951,12 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         }
         // Table-object GC: a completed materialization replaced inherited-layer refs; enqueue the
         // coalescing mark (best-effort — a rejected enqueue defers reclaim to the next cycle).
-        if outcome
+        if let Some(completed) = outcome
             .as_ref()
-            .is_some_and(|completed| completed.status() == MaintenanceOutcomeStatus::Completed)
+            .filter(|completed| completed.status() == MaintenanceOutcomeStatus::Completed)
         {
+            self.maintenance
+                .note_reclaim_debt((completed.affected_objects() as u64).max(1));
             let _ =
                 self.enqueue_maintenance(MaintenanceTaskRequest::table_object_retention(branch_id));
         }
@@ -6155,6 +6211,7 @@ pub(super) fn table_object_retention_request(
     let database_id = *services.assembly_facts().database_id();
     let codec_id = services.assembly_facts().codec_id();
     let mut quarantined_objects: Vec<crate::object::ObjectName> = Vec::new();
+    let mut own_quarantined_objects: Vec<crate::object::ObjectName> = Vec::new();
     let mut quarantine_inventory_bytes: u64 = 0;
     for branch in quarantine_branches {
         let load = services
@@ -6162,23 +6219,29 @@ pub(super) fn table_object_retention_request(
             .load_inventory(branch, database_id, codec_id)
             .map_err(durable_quarantine_service_error)?;
         quarantine_inventory_bytes = quarantine_inventory_bytes.saturating_add(load.byte_count());
-        quarantined_objects.extend(
-            load.inventory()
-                .entries()
-                .iter()
-                .map(|entry| entry.source_object().clone()),
-        );
+        let sources = load
+            .inventory()
+            .entries()
+            .iter()
+            .map(|entry| entry.source_object().clone());
+        if branch == branch_id {
+            // #3608: this branch's own entries — a source still on disk is a
+            // retry candidate, not a delegated skip.
+            own_quarantined_objects.extend(sources.clone());
+        }
+        quarantined_objects.extend(sources);
     }
     let epochs =
         table_object_proof_epochs(&manifests, &inventory, quarantine_inventory_bytes, health)?;
-    LifecycleTableObjectRetentionRequest::new(
+    Ok(LifecycleTableObjectRetentionRequest::new(
         branch_id,
         health.clone(),
         epochs,
         manifests,
         inventory,
         quarantined_objects,
-    )
+    )?
+    .with_own_quarantined_objects(own_quarantined_objects))
 }
 
 fn table_object_proof_epochs(

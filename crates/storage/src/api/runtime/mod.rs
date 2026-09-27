@@ -35,11 +35,11 @@ use crate::lifecycle::{
     MaintenanceTaskPriority as LifecycleMaintenanceTaskPriority,
     MaintenanceTaskRequest as LifecycleMaintenanceTaskRequest,
     MaintenanceTaskScope as LifecycleMaintenanceTaskScope, ManualMaintenanceClock,
-    ModeLifecyclePolicy, PreparedPublishStep, RealMaintenanceClock, RecoveryDegradationClass,
-    RecoveryFaultKind, RecoveryHealth, RecoveryStrictness, StorageBudgetPool,
-    StorageBudgetPressureSeverity, StorageBudgetSnapshot, StorageMode as LifecycleStorageMode,
-    StorageOpenOutcome as LifecycleStorageOpenOutcome, StorageOpenPlan, StorageRuntimeBudget,
-    ThreadedMaintenanceExecutor,
+    ModeLifecyclePolicy, PreparedPublishStep, RealMaintenanceClock, ReclaimWakeOrigin,
+    RecoveryDegradationClass, RecoveryFaultKind, RecoveryHealth, RecoveryStrictness,
+    StorageBudgetPool, StorageBudgetPressureSeverity, StorageBudgetSnapshot,
+    StorageMode as LifecycleStorageMode, StorageOpenOutcome as LifecycleStorageOpenOutcome,
+    StorageOpenPlan, StorageRuntimeBudget, ThreadedMaintenanceExecutor,
 };
 use crate::observability::perf_trace;
 use crate::row::{PhysicalKey, StorageRow, StorageSpaceId as RowStorageSpaceId};
@@ -698,7 +698,10 @@ fn open_durable_with_owned_backend_handle<'runtime>(
     // here. Arm, never inline: the drain runs on the worker (or, under the
     // inline executor, on the next progress wait), never inside `open`.
     if summary.disposition() == StorageOpenDisposition::OpenedExisting {
-        runtime.notify_background_drain_for_current_runtime(BackgroundTaskPriority::Low);
+        runtime.notify_background_drain_for_current_runtime_from(
+            BackgroundTaskPriority::Low,
+            ReclaimWakeOrigin::Open,
+        );
     }
     Ok(StorageOpenOutcome::new(runtime, summary))
 }
@@ -1002,7 +1005,7 @@ impl<'a> StorageRuntime<'a> {
     ) -> StorageApiResult<MaintenanceSummary> {
         self.require_open("maintenance requires an open runtime")?;
         validate_maintenance_request(request)?;
-        match request.task() {
+        let summary = match request.task() {
             MaintenanceTask::Checkpoint => self.checkpoint_maintenance(request),
             MaintenanceTask::Flush => self.flush_maintenance(request),
             MaintenanceTask::Compact => self.compaction_maintenance(request),
@@ -1014,7 +1017,16 @@ impl<'a> StorageRuntime<'a> {
             MaintenanceTask::Purge => self.purge_maintenance(request),
             MaintenanceTask::Repair => self.repair_maintenance(request),
             MaintenanceTask::WalGrowth => self.wal_growth_maintenance(request),
+        }?;
+        // Space-reclamation contract §3.1 (slice 8): the follow-ups a foreground
+        // verb queues (the mark a compaction chains, the sweep the Reclaim verb
+        // queues) used to wait for the next commit's wake — under an idle
+        // writer, forever. Wake the worker for them now; a runtime without a
+        // worker (manual scheduling) drains them on its next explicit drain.
+        if self.maintenance_status()?.pending_tasks() > 0 {
+            self.notify_background_drain_for_current_runtime(BackgroundTaskPriority::Low);
         }
+        Ok(summary)
     }
 
     /// The durable runtime's reclaim ledger (space-reclamation contract §3.5);
@@ -2616,54 +2628,68 @@ impl<'a> StorageRuntime<'a> {
         let runtime_timer = perf_trace::start_timer();
         let mut pressure_wait_deadline = None;
         loop {
-            let (outcome_result, admission, pending_tasks, wal_growth, throttle_delay_millis) =
-                match &self.inner {
-                    StorageRuntimeInner::Cache(slot) => {
-                        let mut runtime = slot.lock_for_commit();
-                        let result =
-                            runtime.execute_cache_commit(runtime_batch.clone(), generation_guard);
-                        (
-                            result,
-                            runtime.last_write_admission(),
-                            runtime.maintenance_status().pending_tasks(),
-                            None,
-                            // Cache mode neutralizes throttle pressure to 0; never throttles.
-                            0,
-                        )
-                    }
-                    StorageRuntimeInner::DurableOwned(slot) => {
-                        let clone_timer = perf_trace::start_timer();
-                        let exec_batch = runtime_batch.clone();
-                        perf_trace::record_commit_api_batch_clone_elapsed(clone_timer);
-                        // BS5.1 write groups: uncontended callers take the exact
-                        // solo path; contended callers join a group led by
-                        // whichever caller holds the runtime lock.
-                        let dispatch_timer = perf_trace::start_timer();
-                        let response = execute_durable_commit_grouped(
-                            slot,
-                            exec_batch,
-                            &runtime_batch,
-                            generation_guard,
-                        );
-                        perf_trace::record_commit_group_dispatch_elapsed(dispatch_timer);
-                        (
-                            response.outcome,
-                            response.admission,
-                            response.pending_tasks,
-                            response.wal_growth,
-                            response.throttle_delay_millis,
-                        )
-                    }
-                    StorageRuntimeInner::Closed => {
-                        return Err(StorageApiError::InvalidRuntimeState {
-                            reason: "commit requires an open runtime",
-                        });
-                    }
-                };
+            let (
+                outcome_result,
+                admission,
+                pending_tasks,
+                idle_wake_pending,
+                wal_growth,
+                throttle_delay_millis,
+            ) = match &self.inner {
+                StorageRuntimeInner::Cache(slot) => {
+                    let mut runtime = slot.lock_for_commit();
+                    let result =
+                        runtime.execute_cache_commit(runtime_batch.clone(), generation_guard);
+                    (
+                        result,
+                        runtime.last_write_admission(),
+                        runtime.maintenance_status().pending_tasks(),
+                        false,
+                        None,
+                        // Cache mode neutralizes throttle pressure to 0; never throttles.
+                        0,
+                    )
+                }
+                StorageRuntimeInner::DurableOwned(slot) => {
+                    let clone_timer = perf_trace::start_timer();
+                    let exec_batch = runtime_batch.clone();
+                    perf_trace::record_commit_api_batch_clone_elapsed(clone_timer);
+                    // BS5.1 write groups: uncontended callers take the exact
+                    // solo path; contended callers join a group led by
+                    // whichever caller holds the runtime lock.
+                    let dispatch_timer = perf_trace::start_timer();
+                    let response = execute_durable_commit_grouped(
+                        slot,
+                        exec_batch,
+                        &runtime_batch,
+                        generation_guard,
+                    );
+                    perf_trace::record_commit_group_dispatch_elapsed(dispatch_timer);
+                    (
+                        response.outcome,
+                        response.admission,
+                        response.pending_tasks,
+                        response.idle_wake_pending,
+                        response.wal_growth,
+                        response.throttle_delay_millis,
+                    )
+                }
+                StorageRuntimeInner::Closed => {
+                    return Err(StorageApiError::InvalidRuntimeState {
+                        reason: "commit requires an open runtime",
+                    });
+                }
+            };
             if pending_tasks > 0 {
                 let notify_timer = perf_trace::start_timer();
                 self.notify_background_drain_for_current_runtime(BackgroundTaskPriority::High);
                 perf_trace::record_commit_drain_notify_elapsed(notify_timer);
+            } else if idle_wake_pending {
+                // Space-reclamation contract §3.1 (slice 8): nothing is queued,
+                // but a sweep is owed and this commit started a new quiet
+                // period — one Low wake lets a (cheap, empty) round arm the
+                // debounced idle wake that retries the sweep.
+                self.notify_background_drain_for_current_runtime(BackgroundTaskPriority::Low);
             }
             match outcome_result {
                 Ok(outcome) => {
@@ -2697,12 +2723,23 @@ impl<'a> StorageRuntime<'a> {
     }
 
     fn notify_background_drain_for_current_runtime(&self, priority: BackgroundTaskPriority) {
+        self.notify_background_drain_for_current_runtime_from(
+            priority,
+            ReclaimWakeOrigin::Ordinary,
+        );
+    }
+
+    fn notify_background_drain_for_current_runtime_from(
+        &self,
+        priority: BackgroundTaskPriority,
+        origin: ReclaimWakeOrigin,
+    ) {
         match &self.inner {
             StorageRuntimeInner::Cache(slot) => {
-                slot.notify_background_drain(priority);
+                slot.notify_background_drain_from(priority, origin);
             }
             StorageRuntimeInner::DurableOwned(slot) => {
-                slot.notify_background_drain(priority);
+                slot.notify_background_drain_from(priority, origin);
             }
             StorageRuntimeInner::Closed => {}
         }
@@ -3558,6 +3595,53 @@ impl<'a> StorageRuntime<'a> {
         }
     }
 
+    /// Space-reclamation contract §3.1 (slice 8): whether a table-object sweep
+    /// is still owed (durable runtimes only).
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn reclaim_owed_for_test(&self) -> bool {
+        match &self.inner {
+            StorageRuntimeInner::DurableOwned(slot) => slot.lock().reclaim_owed(),
+            StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => false,
+        }
+    }
+
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn suspected_debt_objects_for_test(&self) -> u64 {
+        match &self.inner {
+            StorageRuntimeInner::DurableOwned(slot) => slot.lock().suspected_debt_objects(),
+            StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => 0,
+        }
+    }
+
+    /// Run exactly one queued background round (deterministic inline
+    /// executor): the fairness scenarios observe which task a single round
+    /// picks. Returns whether a round ran.
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn run_one_background_round_for_test(&self) -> bool {
+        let StorageRuntimeInner::DurableOwned(slot) = &self.inner else {
+            return false;
+        };
+        let completed_before = slot
+            .background_stats()
+            .map_or(0, |stats| stats.tasks_completed);
+        let Some(now) = slot.background_now() else {
+            return false;
+        };
+        slot.wait_background_progress_until(
+            completed_before,
+            now.saturating_add(std::time::Duration::from_secs(1)),
+        )
+    }
+
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn visible_version_for_test(&self) -> CommitVersion {
+        match &self.inner {
+            StorageRuntimeInner::DurableOwned(slot) => slot.lock().visible_version(),
+            StorageRuntimeInner::Cache(slot) => slot.lock().visible_version(),
+            StorageRuntimeInner::Closed => CommitVersion::ZERO,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn rotate_branch_for_test(&mut self, branch_id: BranchId) -> StorageApiResult<()> {
         match &mut self.inner {
@@ -3799,6 +3883,7 @@ where
                     }),
                     admission: None,
                     pending_tasks: 0,
+                    idle_wake_pending: false,
                     wal_growth: None,
                     throttle_delay_millis: 0,
                 },
@@ -3890,6 +3975,7 @@ where
         outcome: result,
         admission: runtime.last_write_admission(),
         pending_tasks: runtime.maintenance_status().pending_tasks(),
+        idle_wake_pending: runtime.idle_wake_pending(),
         wal_growth: runtime.last_wal_growth_outcome().cloned(),
         throttle_delay_millis,
     };
@@ -3924,6 +4010,7 @@ where
                 }),
                 admission: None,
                 pending_tasks: 0,
+                idle_wake_pending: false,
                 wal_growth: None,
                 throttle_delay_millis: 0,
             };
@@ -4065,6 +4152,7 @@ where
     S: CommitTimestampSource,
 {
     let pending_tasks = runtime.maintenance_status().pending_tasks();
+    let idle_wake_pending = runtime.idle_wake_pending();
     let wal_growth = runtime.last_wal_growth_outcome().cloned();
     let mut responses: Vec<commit_group::CommitGroupResponse> = results
         .into_iter()
@@ -4078,6 +4166,7 @@ where
             outcome: result.outcome,
             admission: result.admission,
             pending_tasks,
+            idle_wake_pending,
             wal_growth: wal_growth.clone(),
         })
         .collect();
@@ -4091,6 +4180,7 @@ where
             }),
             admission: None,
             pending_tasks,
+            idle_wake_pending,
             wal_growth,
             throttle_delay_millis: 0,
         });

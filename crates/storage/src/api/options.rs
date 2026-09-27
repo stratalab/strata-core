@@ -140,6 +140,10 @@ pub struct StorageOpenOptions {
     maintenance_scheduling_policy: StorageMaintenanceSchedulingPolicy,
     background_maintenance: StorageBackgroundMaintenanceOptions,
     wal_segment_size_for_test: Option<u64>,
+    /// Space-reclamation contract §3.1 (slice 8) test knobs: the idle wake's
+    /// debounce and the debt-aware fairness threshold.
+    quiescence_debounce_millis_for_test: Option<u64>,
+    low_tier_debt_threshold_objects_for_test: Option<u64>,
     data_block_bytes: Option<u32>,
     /// #3499: compression codec for durable lifecycle-built tables (Zstd by
     /// default). Cache mode ignores it (its in-memory tables stay uncompressed).
@@ -260,6 +264,8 @@ impl StorageOpenOptions {
             maintenance_scheduling_policy: StorageMaintenanceSchedulingPolicy::Background,
             background_maintenance: StorageBackgroundMaintenanceOptions::product_default(),
             wal_segment_size_for_test: None,
+            quiescence_debounce_millis_for_test: None,
+            low_tier_debt_threshold_objects_for_test: None,
             data_block_bytes: None,
             table_compression: crate::format::TableCompression::Zstd,
             version_retention: crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
@@ -289,6 +295,8 @@ impl StorageOpenOptions {
             maintenance_scheduling_policy: StorageMaintenanceSchedulingPolicy::Background,
             background_maintenance: StorageBackgroundMaintenanceOptions::product_default(),
             wal_segment_size_for_test: None,
+            quiescence_debounce_millis_for_test: None,
+            low_tier_debt_threshold_objects_for_test: None,
             data_block_bytes: None,
             table_compression: crate::format::TableCompression::Zstd,
             version_retention: crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
@@ -309,6 +317,8 @@ impl StorageOpenOptions {
             maintenance_scheduling_policy: StorageMaintenanceSchedulingPolicy::Background,
             background_maintenance: StorageBackgroundMaintenanceOptions::product_default(),
             wal_segment_size_for_test: None,
+            quiescence_debounce_millis_for_test: None,
+            low_tier_debt_threshold_objects_for_test: None,
             data_block_bytes: None,
             table_compression: crate::format::TableCompression::Zstd,
             version_retention: crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
@@ -329,6 +339,8 @@ impl StorageOpenOptions {
             maintenance_scheduling_policy: StorageMaintenanceSchedulingPolicy::Background,
             background_maintenance: StorageBackgroundMaintenanceOptions::product_default(),
             wal_segment_size_for_test: None,
+            quiescence_debounce_millis_for_test: None,
+            low_tier_debt_threshold_objects_for_test: None,
             data_block_bytes: None,
             table_compression: crate::format::TableCompression::Zstd,
             version_retention: crate::lifecycle::StorageVersionRetentionPolicy::KeepAll,
@@ -504,6 +516,22 @@ impl StorageOpenOptions {
         self
     }
 
+    /// Space-reclamation contract §3.1 (slice 8): the idle wake's debounce.
+    #[cfg(any(test, feature = "testkit"))]
+    #[must_use]
+    pub const fn with_quiescence_debounce_millis_for_test(mut self, millis: u64) -> Self {
+        self.quiescence_debounce_millis_for_test = Some(millis);
+        self
+    }
+
+    /// Space-reclamation contract §3.1 (slice 8): the debt-aware fairness threshold.
+    #[cfg(any(test, feature = "testkit"))]
+    #[must_use]
+    pub const fn with_low_tier_debt_threshold_objects_for_test(mut self, objects: u64) -> Self {
+        self.low_tier_debt_threshold_objects_for_test = Some(objects);
+        self
+    }
+
     #[cfg(any(test, feature = "testkit"))]
     #[must_use]
     pub(crate) const fn with_storage_budget_for_test(
@@ -592,6 +620,16 @@ impl StorageOpenOptions {
 
     pub(crate) const fn wal_segment_size_for_test(&self) -> Option<u64> {
         self.wal_segment_size_for_test
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) const fn quiescence_debounce_millis_for_test(&self) -> Option<u64> {
+        self.quiescence_debounce_millis_for_test
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) const fn low_tier_debt_threshold_objects_for_test(&self) -> Option<u64> {
+        self.low_tier_debt_threshold_objects_for_test
     }
 
     #[cfg(any(test, feature = "testkit"))]

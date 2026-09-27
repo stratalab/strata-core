@@ -6,12 +6,13 @@
 )]
 
 use super::{
-    classify_reclaim, classify_reclaim_follow_up, LifecycleAdmissionEffect, LifecycleError,
-    LifecycleMaintenanceSchedulingPolicy, LifecycleOperationAdmission, LifecycleOperationKind,
-    LifecycleResult, LifecycleStateMachine, LifecycleStats, LifecycleStoragePressure,
-    LifecycleStoragePressureSeverity, MaintenanceOutcome, MaintenanceOutcomeStatus,
-    MaintenanceTaskKind, ReclaimLedger, RecoveryDegradationClass, RecoveryFault, RecoveryFaultKind,
-    RecoveryHealth,
+    classify_reclaim, classify_reclaim_follow_up, reclaim_owed_transition,
+    LifecycleAdmissionEffect, LifecycleError, LifecycleMaintenanceSchedulingPolicy,
+    LifecycleOperationAdmission, LifecycleOperationKind, LifecycleResult, LifecycleStateMachine,
+    LifecycleStats, LifecycleStoragePressure, LifecycleStoragePressureSeverity, MaintenanceOutcome,
+    MaintenanceOutcomeStatus, MaintenanceTaskKind, ReclaimFamily, ReclaimLedger, ReclaimOutcome,
+    ReclaimOwedTransition, ReclaimWakeOrigin, RecoveryDegradationClass, RecoveryFault,
+    RecoveryFaultKind, RecoveryHealth,
 };
 use crate::branch::state::materialization::BranchMaterializationHandle;
 use crate::observability::perf_trace;
@@ -249,6 +250,19 @@ pub(crate) struct LifecycleMaintenanceExecutor {
     /// point every task completion passes through (foreground runs, off-lock stage
     /// completions, close drains).
     reclaim_ledger: ReclaimLedger,
+    /// Space-reclamation contract §3.1 (slice 8): whether a table-object sweep is
+    /// still due — set when a publish drops table refs, when a mark runs, and when
+    /// a sweep defers, faults or stages; cleared only by a sweep that proves the
+    /// family clean (`reclaim_owed_transition`).
+    reclaim_owed: bool,
+    /// Table objects publishes have dropped refs to since the last clean sweep, minus
+    /// what the purge has since deleted. A cheap, monotone-until-clean estimate of
+    /// the debt the low tier is holding; the fairness predicate reads it.
+    suspected_debt_objects: u64,
+    /// One idle wake per quiet period: set when an idle-origin round starts, reset
+    /// by any other wake. Keeps the quiescence wake edge-triggered — a sweep still
+    /// deferred at the idle wake waits for the next activity edge, never for time.
+    idle_wake_spent: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1263,7 +1277,45 @@ impl LifecycleMaintenanceExecutor {
             failure_sequence: 0,
             rewrite_lane_cap: 1,
             reclaim_ledger: ReclaimLedger::default(),
+            reclaim_owed: false,
+            suspected_debt_objects: 0,
+            idle_wake_spent: false,
         })
+    }
+
+    /// A publish dropped `objects` table refs (slice 8): a sweep is now owed and the
+    /// low tier's suspected debt grows by that many objects.
+    pub(crate) fn note_reclaim_debt(&mut self, objects: u64) {
+        self.reclaim_owed = true;
+        self.suspected_debt_objects = self.suspected_debt_objects.saturating_add(objects);
+    }
+
+    pub(crate) const fn reclaim_owed(&self) -> bool {
+        self.reclaim_owed
+    }
+
+    pub(crate) const fn suspected_debt_objects(&self) -> u64 {
+        self.suspected_debt_objects
+    }
+
+    /// Whether a drain round ending now should arm the quiescence wake: debt is
+    /// owed and this quiet period has not spent its one idle wake yet.
+    pub(crate) const fn idle_wake_pending(&self) -> bool {
+        self.reclaim_owed && !self.idle_wake_spent
+    }
+
+    /// Record what woke the drain round that is starting: the ledger keeps the
+    /// open and idle wakes, and an idle wake spends this quiet period's one shot
+    /// while any other wake starts a new period.
+    pub(crate) fn record_wake(&mut self, origin: ReclaimWakeOrigin, at_version: CommitVersion) {
+        self.reclaim_ledger.record_wake(origin, at_version);
+        self.idle_wake_spent = matches!(origin, ReclaimWakeOrigin::Idle);
+    }
+
+    /// A mutating commit was admitted: the writer is active again, so the
+    /// quiet period that spent its idle wake is over.
+    pub(crate) fn note_activity(&mut self) {
+        self.idle_wake_spent = false;
     }
 
     /// The per-runtime reclaim ledger (space-reclamation contract §3.5).
@@ -1283,6 +1335,26 @@ impl LifecycleMaintenanceExecutor {
             .chain(classify_reclaim_follow_up(outcome))
         {
             self.reclaim_ledger.record(family, event);
+            match reclaim_owed_transition(
+                family,
+                event.outcome(),
+                outcome.stats().recovery_faults(),
+            ) {
+                ReclaimOwedTransition::Owed => self.reclaim_owed = true,
+                ReclaimOwedTransition::Clear => {
+                    self.reclaim_owed = false;
+                    self.suspected_debt_objects = 0;
+                }
+                ReclaimOwedTransition::Unchanged => {}
+            }
+            if family == ReclaimFamily::QuarantinePurge
+                && event.outcome() == ReclaimOutcome::Reclaimed
+            {
+                // Purged copies are debt the estimate no longer suspects.
+                self.suspected_debt_objects = self
+                    .suspected_debt_objects
+                    .saturating_sub(event.objects_affected() as u64);
+            }
         }
     }
 

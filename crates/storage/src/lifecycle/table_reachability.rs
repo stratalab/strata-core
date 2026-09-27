@@ -47,6 +47,10 @@ pub(crate) struct LifecycleTableObjectRetentionRequest {
     manifests: Vec<TableManifest>,
     inventory: Vec<LifecycleTableObjectInventoryEntry>,
     quarantined_objects: Vec<ObjectName>,
+    /// The subset of `quarantined_objects` named by THIS branch's own quarantine
+    /// inventory (#3608): a source still on disk with an entry here is a retry
+    /// candidate; one named only by another branch's inventory is delegated.
+    own_quarantined_objects: Vec<ObjectName>,
     /// In-memory-reachable table objects (every catalog branch's owned levels + inherited
     /// layers) that must be treated as live even when no durable manifest references them.
     /// COW invariant: an object is deletable only when unreachable from EVERY branch, and a
@@ -196,6 +200,7 @@ impl LifecycleTableObjectRetentionRequest {
             manifests,
             inventory,
             quarantined_objects,
+            own_quarantined_objects: Vec::new(),
             pinned_objects: Vec::new(),
             completeness: LifecycleTableObjectProofCompleteness::complete(),
             allow_telemetry_degraded_recovery: true,
@@ -208,6 +213,12 @@ impl LifecycleTableObjectRetentionRequest {
     /// alongside the durable-manifest reachability set.
     pub(crate) fn with_pinned_objects(mut self, pinned_objects: Vec<ObjectName>) -> Self {
         self.pinned_objects = pinned_objects;
+        self
+    }
+
+    /// #3608: the sources this branch's own quarantine inventory names.
+    pub(crate) fn with_own_quarantined_objects(mut self, objects: Vec<ObjectName>) -> Self {
+        self.own_quarantined_objects = objects;
         self
     }
 
@@ -428,6 +439,8 @@ fn table_object_decisions(
     Vec<LifecycleTableObjectProofToken>,
 ) {
     let quarantined: BTreeSet<ObjectName> = request.quarantined_objects.iter().cloned().collect();
+    let own_quarantined: BTreeSet<ObjectName> =
+        request.own_quarantined_objects.iter().cloned().collect();
     let mut decisions = Vec::new();
     let mut tokens = Vec::new();
     for entry in sorted_inventory(&request.inventory) {
@@ -449,6 +462,20 @@ fn table_object_decisions(
                     (
                         RetentionDecision::Retain,
                         retention_reason_for_live_table(*reason),
+                    )
+                } else if own_quarantined.contains(&object) {
+                    // #3608: quarantined by this branch, yet still on disk — the
+                    // source delete was refused or failed. Candidate again; the
+                    // sweep's existing-entry path retries the delete.
+                    tokens.push(LifecycleTableObjectProofToken {
+                        object: object.clone(),
+                        branch_id: context.branch_id,
+                        epochs: context.epochs,
+                        fingerprint: context.fingerprint,
+                    });
+                    (
+                        RetentionDecision::QuarantineCandidate,
+                        LifecycleRetentionDecisionReason::QuarantinedSourceStillPresent,
                     )
                 } else if quarantined.contains(&object) {
                     (

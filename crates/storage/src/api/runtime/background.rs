@@ -16,7 +16,7 @@ use strata_core::BranchId;
 
 use crate::branch::read::BranchReadView;
 use crate::branch::snapshot::{load_from_registry, BranchSnapshotRegistry};
-use crate::lifecycle::RuntimeReadHandles;
+use crate::lifecycle::{ReclaimWakeOrigin, RuntimeReadHandles};
 
 pub(super) struct RuntimeSlot<R> {
     runtime: Arc<ParkingMutex<R>>,
@@ -44,13 +44,20 @@ pub(super) struct RuntimeSlot<R> {
 }
 
 pub(super) type BackgroundDrainFn = Arc<
-    dyn Fn(BackgroundDrainLimits, Arc<dyn MaintenanceClock>) -> BackgroundDrainRound + Send + Sync,
+    dyn Fn(
+            BackgroundDrainLimits,
+            Arc<dyn MaintenanceClock>,
+            ReclaimWakeOrigin,
+        ) -> BackgroundDrainRound
+        + Send
+        + Sync,
 >;
 pub(super) type BackgroundArcDrain<R> = fn(
     &Arc<ParkingMutex<R>>,
     &AtomicUsize,
     BackgroundDrainLimits,
     &Arc<dyn MaintenanceClock>,
+    ReclaimWakeOrigin,
 ) -> BackgroundDrainRound;
 
 impl<R> fmt::Debug for RuntimeSlot<R>
@@ -87,6 +94,10 @@ pub(super) struct BackgroundRuntimeController {
     max_tasks_per_wake: usize,
     max_runtime_per_wake: Duration,
     drain_immediately: bool,
+    /// Space-reclamation contract §3.1 (slice 8): the armed idle wake's deadline
+    /// on the maintenance clock; `None` while no idle wake is pending. One at a
+    /// time (arms coalesce), cleared when it fires or when close is requested.
+    quiescence_armed: Arc<ParkingMutex<Option<MaintenanceInstant>>>,
 }
 
 impl fmt::Debug for BackgroundRuntimeController {
@@ -110,6 +121,29 @@ pub(super) struct BackgroundDrainRound {
     pub(super) tasks_completed: usize,
     pub(super) pending_tasks: usize,
     pub(super) made_progress: bool,
+    /// Space-reclamation contract §3.1 (slice 8): the round ended with a
+    /// table-object sweep owed and this quiet period's idle wake unspent.
+    pub(super) arm_idle_wake: bool,
+    /// The runtime's idle-wake debounce (zero for a runtime without one).
+    pub(super) quiescence_debounce: Duration,
+}
+
+/// Space-reclamation contract §3.1 (slice 8): arm the one idle wake? Only when
+/// the round asks for it, no close is in flight, and the ordinary re-arm (work
+/// pending after progress) is not already kicking the next round.
+pub(super) const fn quiescence_should_arm(
+    round: BackgroundDrainRound,
+    close_requested: bool,
+) -> bool {
+    round.arm_idle_wake && !close_requested && !(round.pending_tasks > 0 && round.made_progress)
+}
+
+/// When the armed idle wake fires: the debounce after the round ended.
+pub(super) fn quiescence_deadline(
+    now: MaintenanceInstant,
+    debounce: Duration,
+) -> MaintenanceInstant {
+    now.saturating_add(debounce)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -304,8 +338,18 @@ impl<R> RuntimeSlot<R> {
     }
 
     pub(super) fn notify_background_drain(&self, priority: BackgroundTaskPriority) {
+        self.notify_background_drain_from(priority, ReclaimWakeOrigin::Ordinary);
+    }
+
+    /// A wake whose origin the drain round records (slice 8): the open-time
+    /// reclaim wake and the idle wake are the two the ledger keeps.
+    pub(super) fn notify_background_drain_from(
+        &self,
+        priority: BackgroundTaskPriority,
+        origin: ReclaimWakeOrigin,
+    ) {
         if let (Some(background), Some(drain)) = (&self.background, &self.background_drain) {
-            background.notify_drain(priority, Arc::clone(drain));
+            background.notify_drain(priority, origin, Arc::clone(drain));
         }
     }
 
@@ -330,6 +374,13 @@ impl<R> RuntimeSlot<R> {
         match self.background.as_ref() {
             Some(background) => {
                 background.advance_clock(by);
+                // Space-reclamation contract §3.1 (slice 8): under the manual
+                // clock the armed idle wake fires when time passes its deadline.
+                if background.quiescence_due() {
+                    if let Some(drain) = &self.background_drain {
+                        background.fire_quiescence(Arc::clone(drain));
+                    }
+                }
                 true
             }
             None => false,
@@ -466,7 +517,7 @@ where
         let background_drain = background.as_ref().map(|_| {
             let runtime = Arc::clone(&runtime);
             let waiters = Arc::clone(&commit_waiters);
-            Arc::new(move |limits, clock| drain(&runtime, &waiters, limits, &clock))
+            Arc::new(move |limits, clock, origin| drain(&runtime, &waiters, limits, &clock, origin))
                 as BackgroundDrainFn
         });
         Self {
@@ -547,6 +598,7 @@ impl BackgroundRuntimeController {
             max_tasks_per_wake: background_config.max_tasks_per_wake(),
             max_runtime_per_wake: background_config.max_runtime_per_wake(),
             drain_immediately,
+            quiescence_armed: Arc::new(ParkingMutex::new(None)),
         }
     }
 
@@ -605,7 +657,12 @@ impl BackgroundRuntimeController {
         self.executor.wait_for_idle();
     }
 
-    fn notify_drain(&self, priority: BackgroundTaskPriority, drain: BackgroundDrainFn) {
+    fn notify_drain(
+        &self,
+        priority: BackgroundTaskPriority,
+        origin: ReclaimWakeOrigin,
+        drain: BackgroundDrainFn,
+    ) {
         if self.close_requested.load(Ordering::Acquire) {
             perf_trace::record_lifecycle_background_submit_after_shutdown_rejected();
             perf_trace::record_lifecycle_background_wake_rejected();
@@ -630,10 +687,15 @@ impl BackgroundRuntimeController {
             perf_trace::record_lifecycle_background_wake_coalesced();
             return;
         }
-        self.submit_drain(priority, drain);
+        self.submit_drain(priority, origin, drain);
     }
 
-    fn submit_drain(&self, priority: BackgroundTaskPriority, drain: BackgroundDrainFn) {
+    fn submit_drain(
+        &self,
+        priority: BackgroundTaskPriority,
+        origin: ReclaimWakeOrigin,
+        drain: BackgroundDrainFn,
+    ) {
         let controller = self.clone();
         let capture_enabled = perf_trace::test_capture_enabled_for_current_thread();
         let submit = self.executor.submit(
@@ -644,7 +706,7 @@ impl BackgroundRuntimeController {
                         max_tasks: controller.max_tasks_per_wake,
                         max_runtime: controller.max_runtime_per_wake,
                     };
-                    let round = drain(limits, Arc::clone(&controller.clock));
+                    let round = drain(limits, Arc::clone(&controller.clock), origin);
                     perf_trace::record_lifecycle_background_drain_round(round.tasks_completed);
                     if round.tasks_completed > 0 {
                         perf_trace::record_lifecycle_pressure_clear_wake();
@@ -657,7 +719,21 @@ impl BackgroundRuntimeController {
                     controller.active_drains.fetch_sub(1, Ordering::AcqRel);
                     let requested = controller.wake_requested_mask.swap(0, Ordering::AcqRel) != 0;
                     if (round.pending_tasks > 0 && round.made_progress) || requested {
-                        controller.notify_drain(priority, drain);
+                        controller.notify_drain(
+                            priority,
+                            ReclaimWakeOrigin::Ordinary,
+                            Arc::clone(&drain),
+                        );
+                    }
+                    // Space-reclamation contract §3.1 (slice 8): a round that ends
+                    // with reclaim owed and nothing else to wake the worker arms
+                    // ONE idle wake after the debounce (edge-triggered: the round
+                    // asks at most once per quiet period).
+                    if quiescence_should_arm(
+                        round,
+                        controller.close_requested.load(Ordering::Acquire),
+                    ) {
+                        controller.arm_quiescence(round.quiescence_debounce, &drain);
                     }
                 });
             }),
@@ -678,7 +754,59 @@ impl BackgroundRuntimeController {
         }
     }
 
+    /// Arm the idle wake `debounce` from now. Coalesces while one is armed. Under
+    /// the manual clock (inline executor) the wake fires from `advance_clock`;
+    /// under the real clock the clock's one-shot timer fires it. The timer holds
+    /// only a weak drain handle, so it never keeps a dropped runtime — and its
+    /// backend writer lock — alive, and it is never load-bearing (DUR-006): a
+    /// lost wake costs idle latency, the next commit's drain still reclaims.
+    fn arm_quiescence(&self, debounce: Duration, drain: &BackgroundDrainFn) {
+        let deadline = quiescence_deadline(self.clock.now(), debounce);
+        {
+            let mut armed = self.quiescence_armed.lock();
+            if armed.is_some() {
+                return;
+            }
+            *armed = Some(deadline);
+        }
+        let controller = self.clone();
+        let drain = Arc::downgrade(drain);
+        self.clock.schedule(
+            debounce,
+            Box::new(move || {
+                if let Some(drain) = drain.upgrade() {
+                    controller.fire_quiescence(drain);
+                }
+            }),
+        );
+    }
+
+    /// Whether an armed idle wake's deadline has passed on the maintenance clock.
+    #[cfg(all(any(test, feature = "fault-injection"), feature = "localfs"))]
+    fn quiescence_due(&self) -> bool {
+        self.quiescence_armed
+            .lock()
+            .is_some_and(|deadline| self.clock.now() >= deadline)
+    }
+
+    /// Fire the armed idle wake (once): a Low-priority drain of idle origin. A
+    /// wake that is no longer armed (fired, or cancelled by close) is a no-op,
+    /// and `notify_drain` refuses it after close regardless.
+    fn fire_quiescence(&self, drain: BackgroundDrainFn) {
+        if self.quiescence_armed.lock().take().is_none() {
+            return;
+        }
+        self.notify_drain(BackgroundTaskPriority::Low, ReclaimWakeOrigin::Idle, drain);
+    }
+
+    #[cfg(all(test, feature = "localfs"))]
+    fn quiescence_armed_for_test(&self) -> bool {
+        self.quiescence_armed.lock().is_some()
+    }
+
     fn shutdown(&self, timeout: Option<Duration>) -> BackgroundShutdownStats {
+        // Cancel a pending idle wake: close owns the rest of the reclaim story.
+        self.quiescence_armed.lock().take();
         let first_shutdown = !self.close_requested.swap(true, Ordering::AcqRel);
         if first_shutdown {
             self.executor.shutdown(timeout);
@@ -707,6 +835,7 @@ impl Clone for BackgroundRuntimeController {
             max_tasks_per_wake: self.max_tasks_per_wake,
             max_runtime_per_wake: self.max_runtime_per_wake,
             drain_immediately: self.drain_immediately,
+            quiescence_armed: Arc::clone(&self.quiescence_armed),
         }
     }
 }
@@ -747,31 +876,43 @@ mod background_controller_tests {
         let normal_drain: BackgroundDrainFn = {
             let normal_started = TestArc::clone(&normal_started);
             let normal_release = TestArc::clone(&normal_release);
-            TestArc::new(move |_limits, _clock| {
+            TestArc::new(move |_limits, _clock, _origin| {
                 normal_started.wait();
                 normal_release.wait();
                 BackgroundDrainRound {
                     tasks_completed: 1,
                     pending_tasks: 0,
                     made_progress: true,
+                    arm_idle_wake: false,
+                    quiescence_debounce: Duration::ZERO,
                 }
             })
         };
-        controller.notify_drain(BackgroundTaskPriority::Normal, normal_drain);
+        controller.notify_drain(
+            BackgroundTaskPriority::Normal,
+            ReclaimWakeOrigin::Ordinary,
+            normal_drain,
+        );
         normal_started.wait();
 
         let high_drain: BackgroundDrainFn = {
             let high_ran = TestArc::clone(&high_ran);
-            TestArc::new(move |_limits, _clock| {
+            TestArc::new(move |_limits, _clock, _origin| {
                 high_ran.store(true, TestOrdering::Release);
                 BackgroundDrainRound {
                     tasks_completed: 1,
                     pending_tasks: 0,
                     made_progress: true,
+                    arm_idle_wake: false,
+                    quiescence_debounce: Duration::ZERO,
                 }
             })
         };
-        controller.notify_drain(BackgroundTaskPriority::High, high_drain);
+        controller.notify_drain(
+            BackgroundTaskPriority::High,
+            ReclaimWakeOrigin::Ordinary,
+            high_drain,
+        );
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while !high_ran.load(TestOrdering::Acquire) && Instant::now() < deadline {
@@ -806,7 +947,7 @@ mod background_controller_tests {
             let active = TestArc::clone(&active);
             let peak = TestArc::clone(&peak);
             let release = TestArc::clone(&release);
-            TestArc::new(move |_limits, _clock| {
+            TestArc::new(move |_limits, _clock, _origin| {
                 let now_active = active.fetch_add(1, TestOrdering::AcqRel) + 1;
                 peak.fetch_max(now_active, TestOrdering::AcqRel);
                 let deadline = Instant::now() + Duration::from_secs(2);
@@ -818,12 +959,22 @@ mod background_controller_tests {
                     tasks_completed: 1,
                     pending_tasks: 0,
                     made_progress: true,
+                    arm_idle_wake: false,
+                    quiescence_debounce: Duration::ZERO,
                 }
             })
         };
 
-        controller.notify_drain(BackgroundTaskPriority::Normal, make_drain());
-        controller.notify_drain(BackgroundTaskPriority::Normal, make_drain());
+        controller.notify_drain(
+            BackgroundTaskPriority::Normal,
+            ReclaimWakeOrigin::Ordinary,
+            make_drain(),
+        );
+        controller.notify_drain(
+            BackgroundTaskPriority::Normal,
+            ReclaimWakeOrigin::Ordinary,
+            make_drain(),
+        );
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while peak.load(TestOrdering::Acquire) < 2 && Instant::now() < deadline {
@@ -837,5 +988,242 @@ mod background_controller_tests {
             observed_peak, 2,
             "two same-priority drains must run concurrently under the worker pool"
         );
+    }
+
+    fn round(
+        arm_idle_wake: bool,
+        pending_tasks: usize,
+        made_progress: bool,
+    ) -> BackgroundDrainRound {
+        BackgroundDrainRound {
+            tasks_completed: 1,
+            pending_tasks,
+            made_progress,
+            arm_idle_wake,
+            quiescence_debounce: Duration::from_millis(100),
+        }
+    }
+
+    /// Space-reclamation contract §3.1 (slice 8): the idle wake arms only when
+    /// the round asks, no close is in flight, and the ordinary re-arm is not
+    /// already kicking the next round.
+    #[test]
+    fn quiescence_should_arm_truth_table() {
+        for (arm, pending, progress, close_requested, expected) in [
+            (true, 0, false, false, true),
+            (true, 0, true, false, true),
+            (true, 3, false, false, true),
+            (true, 3, true, false, false),
+            (true, 0, false, true, false),
+            (false, 0, false, false, false),
+            (false, 3, false, false, false),
+            (false, 0, false, true, false),
+        ] {
+            assert_eq!(
+                quiescence_should_arm(round(arm, pending, progress), close_requested),
+                expected,
+                "arm={arm} pending={pending} progress={progress} close={close_requested}"
+            );
+        }
+    }
+
+    #[test]
+    fn quiescence_deadline_is_the_debounce_after_now() {
+        let now = MaintenanceInstant::from_elapsed(Duration::from_millis(250));
+        assert_eq!(
+            quiescence_deadline(now, Duration::from_millis(100)),
+            MaintenanceInstant::from_elapsed(Duration::from_millis(350))
+        );
+        assert_eq!(quiescence_deadline(now, Duration::ZERO), now);
+    }
+
+    /// A drain closure that records every wake's origin and asks to arm the
+    /// idle wake on its first `arm_rounds` rounds.
+    #[cfg(feature = "localfs")]
+    fn recording_drain(
+        origins: &TestArc<std::sync::Mutex<Vec<ReclaimWakeOrigin>>>,
+        arm_rounds: usize,
+    ) -> BackgroundDrainFn {
+        let origins = TestArc::clone(origins);
+        let rounds = TestArc::new(TestAtomicUsize::new(0));
+        TestArc::new(move |_limits, _clock, origin| {
+            origins.lock().expect("origins").push(origin);
+            let index = rounds.fetch_add(1, TestOrdering::AcqRel);
+            round(index < arm_rounds, 0, false)
+        })
+    }
+
+    /// Under the manual clock the armed idle wake fires exactly once, when
+    /// time passes its deadline, as a Low drain of idle origin; a second arm
+    /// while one is pending coalesces onto the first deadline.
+    #[cfg(feature = "localfs")]
+    #[test]
+    fn armed_idle_wake_fires_once_on_the_manual_clock_with_idle_origin() {
+        let controller = BackgroundRuntimeController::new(
+            StorageBackgroundMaintenanceOptions::product_default().with_scheduler_queue_depth(8),
+            BackgroundExecutorMode::Inline,
+        );
+        let origins = TestArc::new(std::sync::Mutex::new(Vec::new()));
+        let drain = recording_drain(&origins, 2);
+
+        controller.notify_drain(
+            BackgroundTaskPriority::Normal,
+            ReclaimWakeOrigin::Ordinary,
+            TestArc::clone(&drain),
+        );
+        assert_eq!(
+            *origins.lock().expect("origins"),
+            vec![ReclaimWakeOrigin::Ordinary]
+        );
+        assert!(
+            controller.quiescence_armed_for_test(),
+            "the round armed the idle wake"
+        );
+
+        controller.advance_clock(Duration::from_millis(50));
+        assert!(!controller.quiescence_due());
+        // A second ordinary round while armed coalesces: the deadline stays put.
+        controller.notify_drain(
+            BackgroundTaskPriority::Normal,
+            ReclaimWakeOrigin::Ordinary,
+            TestArc::clone(&drain),
+        );
+        controller.advance_clock(Duration::from_millis(49));
+        assert!(
+            !controller.quiescence_due(),
+            "coalesced arm keeps the first deadline"
+        );
+        controller.advance_clock(Duration::from_millis(1));
+        assert!(controller.quiescence_due());
+
+        controller.fire_quiescence(TestArc::clone(&drain));
+        assert_eq!(
+            *origins.lock().expect("origins"),
+            vec![
+                ReclaimWakeOrigin::Ordinary,
+                ReclaimWakeOrigin::Ordinary,
+                ReclaimWakeOrigin::Idle
+            ]
+        );
+        assert!(
+            !controller.quiescence_armed_for_test(),
+            "the idle round did not ask to arm again"
+        );
+        controller.fire_quiescence(TestArc::clone(&drain));
+        assert_eq!(
+            origins.lock().expect("origins").len(),
+            3,
+            "a fired wake is spent"
+        );
+        controller.shutdown(Some(Duration::from_secs(1)));
+    }
+
+    /// Close cancels a pending idle wake: shutdown clears the arm, and a fire
+    /// after it is a no-op.
+    #[cfg(feature = "localfs")]
+    #[test]
+    fn shutdown_cancels_an_armed_idle_wake() {
+        let controller = BackgroundRuntimeController::new(
+            StorageBackgroundMaintenanceOptions::product_default().with_scheduler_queue_depth(8),
+            BackgroundExecutorMode::Inline,
+        );
+        let origins = TestArc::new(std::sync::Mutex::new(Vec::new()));
+        let drain = recording_drain(&origins, 1);
+        controller.notify_drain(
+            BackgroundTaskPriority::Normal,
+            ReclaimWakeOrigin::Ordinary,
+            TestArc::clone(&drain),
+        );
+        assert!(controller.quiescence_armed_for_test());
+
+        controller.shutdown(Some(Duration::from_secs(1)));
+
+        assert!(!controller.quiescence_armed_for_test());
+        controller.advance_clock(Duration::from_secs(1));
+        controller.fire_quiescence(TestArc::clone(&drain));
+        assert_eq!(
+            *origins.lock().expect("origins"),
+            vec![ReclaimWakeOrigin::Ordinary]
+        );
+    }
+
+    /// Under the real clock the one-shot timer fires the idle wake after the
+    /// debounce; it holds the drain weakly, so a drain dropped before the
+    /// deadline (a closed runtime) is never woken.
+    #[test]
+    fn armed_idle_wake_fires_after_the_debounce_under_the_real_clock() {
+        let controller = BackgroundRuntimeController::new(
+            StorageBackgroundMaintenanceOptions::product_default()
+                .with_worker_count(1)
+                .with_scheduler_queue_depth(8),
+            BackgroundExecutorMode::Threaded,
+        );
+        let origins = TestArc::new(std::sync::Mutex::new(Vec::new()));
+        let arm_once = {
+            let origins = TestArc::clone(&origins);
+            let rounds = TestArc::new(TestAtomicUsize::new(0));
+            TestArc::new(move |_limits, _clock, origin| {
+                origins.lock().expect("origins").push(origin);
+                let index = rounds.fetch_add(1, TestOrdering::AcqRel);
+                BackgroundDrainRound {
+                    tasks_completed: 1,
+                    pending_tasks: 0,
+                    made_progress: false,
+                    arm_idle_wake: index == 0,
+                    quiescence_debounce: Duration::from_millis(20),
+                }
+            }) as BackgroundDrainFn
+        };
+        controller.notify_drain(
+            BackgroundTaskPriority::Normal,
+            ReclaimWakeOrigin::Ordinary,
+            TestArc::clone(&arm_once),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !origins
+            .lock()
+            .expect("origins")
+            .contains(&ReclaimWakeOrigin::Idle)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            *origins.lock().expect("origins"),
+            vec![ReclaimWakeOrigin::Ordinary, ReclaimWakeOrigin::Idle]
+        );
+
+        // A drain dropped before the timer fires is never woken.
+        let dropped_origins = TestArc::new(std::sync::Mutex::new(Vec::new()));
+        let dropped = {
+            let origins = TestArc::clone(&dropped_origins);
+            TestArc::new(move |_limits, _clock, origin| {
+                origins.lock().expect("origins").push(origin);
+                BackgroundDrainRound {
+                    tasks_completed: 1,
+                    pending_tasks: 0,
+                    made_progress: false,
+                    arm_idle_wake: true,
+                    quiescence_debounce: Duration::from_millis(40),
+                }
+            }) as BackgroundDrainFn
+        };
+        controller.notify_drain(
+            BackgroundTaskPriority::Normal,
+            ReclaimWakeOrigin::Ordinary,
+            dropped,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while dropped_origins.lock().expect("origins").is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The round ran and armed; our only strong handle went with the drain
+        // task, so the timer's weak handle cannot upgrade.
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(
+            *dropped_origins.lock().expect("origins"),
+            vec![ReclaimWakeOrigin::Ordinary]
+        );
+        controller.shutdown(Some(Duration::from_secs(1)));
     }
 }

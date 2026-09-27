@@ -88,6 +88,10 @@ pub(super) struct CommitGroupResponse {
     pub(super) outcome: Result<CommitOutcome, LifecycleError>,
     pub(super) admission: Option<LifecycleWriteAdmissionOutcome>,
     pub(super) pending_tasks: usize,
+    /// Space-reclamation contract §3.1 (slice 8): a table-object sweep is owed
+    /// and this quiet period's idle wake is unspent — the commit is the
+    /// activity edge that lets a drain round arm the wake.
+    pub(super) idle_wake_pending: bool,
     pub(super) wal_growth: Option<LifecycleWalGrowthOutcome>,
     pub(super) throttle_delay_millis: u64,
 }
@@ -686,6 +690,7 @@ mod tests {
             }),
             admission: None,
             pending_tasks: 0,
+            idle_wake_pending: false,
             wal_growth: None,
             throttle_delay_millis: 0,
         }

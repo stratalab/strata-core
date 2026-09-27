@@ -13,6 +13,62 @@ use super::{
     MaintenanceDeferralReason, MaintenanceOutcome, MaintenanceOutcomeStatus, MaintenanceTaskKind,
     MaintenanceTaskScope,
 };
+use strata_core::CommitVersion;
+
+/// What woke the background worker for a drain round (space-reclamation
+/// contract §3.1, slice 8). The reclaim ledger records the open-time and
+/// idle-time wakes; ordinary wakes (commits, enqueues, growth triggers) are
+/// the steady state and are not recorded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReclaimWakeOrigin {
+    /// A commit, an enqueue, a growth trigger or a drain's own re-arm.
+    Ordinary,
+    /// The reclaim-only wake armed at open (slice 4).
+    Open,
+    /// The quiescence wake armed after a drain round ended with reclaim owed.
+    Idle,
+}
+
+/// How a reclaim pass moves the runtime's "reclaim owed" fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReclaimOwedTransition {
+    /// Debt remains (or was just discovered): a sweep is still due.
+    Owed,
+    /// A sweep proved the table-object family clean: nothing is owed.
+    Clear,
+    /// The pass says nothing about table-object debt.
+    Unchanged,
+}
+
+/// The single rule that moves `reclaim_owed`. A mark always chains a sweep
+/// (owed until the sweep proves otherwise); a sweep that completes with no
+/// candidates and no faults is the one clean signal; a deferred, failed,
+/// capped or faulting sweep leaves the debt owed. The purge, the snapshot
+/// prune and the WAL truncation are not table-object evidence.
+pub(crate) const fn reclaim_owed_transition(
+    family: ReclaimFamily,
+    outcome: ReclaimOutcome,
+    faults: usize,
+) -> ReclaimOwedTransition {
+    match (family, outcome) {
+        (ReclaimFamily::TableObjectSweep, ReclaimOutcome::Nothing) => {
+            if faults == 0 {
+                ReclaimOwedTransition::Clear
+            } else {
+                ReclaimOwedTransition::Owed
+            }
+        }
+        (ReclaimFamily::TableObjectMark | ReclaimFamily::TableObjectSweep, _) => {
+            ReclaimOwedTransition::Owed
+        }
+        (
+            ReclaimFamily::QuarantinePurge
+            | ReclaimFamily::SnapshotPrune
+            | ReclaimFamily::WalTruncation,
+            _,
+        ) => ReclaimOwedTransition::Unchanged,
+    }
+}
 
 /// One space-reclamation family. Each has exactly one slot in the ledger.
 #[non_exhaustive]
@@ -116,9 +172,75 @@ pub(crate) struct ReclaimLedger {
     last_snapshot_prune: Option<ReclaimPass>,
     last_wal_truncation: Option<ReclaimPass>,
     totals: ReclaimTotals,
+    /// The visible version when the open-time reclaim wake's round started.
+    last_open_wake: Option<CommitVersion>,
+    /// The visible version when the last idle (quiescence) wake's round started.
+    last_idle_wake: Option<CommitVersion>,
+    open_wakes: u64,
+    idle_wakes: u64,
 }
 
 impl ReclaimLedger {
+    /// Record a drain round's wake origin (slice 8). Ordinary wakes are the
+    /// steady state and leave the ledger untouched.
+    pub(crate) fn record_wake(&mut self, origin: ReclaimWakeOrigin, at_version: CommitVersion) {
+        match origin {
+            ReclaimWakeOrigin::Ordinary => {}
+            ReclaimWakeOrigin::Open => {
+                self.last_open_wake = Some(at_version);
+                self.open_wakes = self.open_wakes.saturating_add(1);
+            }
+            ReclaimWakeOrigin::Idle => {
+                self.last_idle_wake = Some(at_version);
+                self.idle_wakes = self.idle_wakes.saturating_add(1);
+            }
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the footprint surface (slice 9) reports the wakes"
+        )
+    )]
+    pub(crate) const fn last_open_wake(&self) -> Option<CommitVersion> {
+        self.last_open_wake
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the footprint surface (slice 9) reports the wakes"
+        )
+    )]
+    pub(crate) const fn last_idle_wake(&self) -> Option<CommitVersion> {
+        self.last_idle_wake
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the footprint surface (slice 9) reports the wakes"
+        )
+    )]
+    pub(crate) const fn open_wakes(&self) -> u64 {
+        self.open_wakes
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the footprint surface (slice 9) reports the wakes"
+        )
+    )]
+    pub(crate) const fn idle_wakes(&self) -> u64 {
+        self.idle_wakes
+    }
+
     pub(crate) fn record(&mut self, family: ReclaimFamily, event: ReclaimPass) {
         let slot = match family {
             ReclaimFamily::TableObjectMark => &mut self.last_mark,
@@ -547,5 +669,124 @@ mod tests {
         assert_eq!(totals.bytes_reclaimed(), 20);
         assert_eq!(totals.reclaimed_passes(), 2);
         assert_eq!(totals.deferred_passes(), 2);
+    }
+
+    /// Space-reclamation contract §3.1 (slice 8): the one rule that moves
+    /// `reclaim_owed`.
+    #[test]
+    fn reclaim_owed_transition_truth_table() {
+        use ReclaimOwedTransition::{Clear, Owed, Unchanged};
+        for (family, outcome, faults, expected) in [
+            (
+                ReclaimFamily::TableObjectMark,
+                ReclaimOutcome::Nothing,
+                0,
+                Owed,
+            ),
+            (
+                ReclaimFamily::TableObjectMark,
+                ReclaimOutcome::Reclaimed,
+                0,
+                Owed,
+            ),
+            (
+                ReclaimFamily::TableObjectMark,
+                ReclaimOutcome::Deferred,
+                0,
+                Owed,
+            ),
+            (
+                ReclaimFamily::TableObjectSweep,
+                ReclaimOutcome::Nothing,
+                0,
+                Clear,
+            ),
+            (
+                ReclaimFamily::TableObjectSweep,
+                ReclaimOutcome::Nothing,
+                1,
+                Owed,
+            ),
+            (
+                ReclaimFamily::TableObjectSweep,
+                ReclaimOutcome::Reclaimed,
+                0,
+                Owed,
+            ),
+            (
+                ReclaimFamily::TableObjectSweep,
+                ReclaimOutcome::Deferred,
+                0,
+                Owed,
+            ),
+            (
+                ReclaimFamily::TableObjectSweep,
+                ReclaimOutcome::Failed,
+                0,
+                Owed,
+            ),
+            (
+                ReclaimFamily::TableObjectSweep,
+                ReclaimOutcome::Canceled,
+                0,
+                Owed,
+            ),
+            (
+                ReclaimFamily::QuarantinePurge,
+                ReclaimOutcome::Reclaimed,
+                0,
+                Unchanged,
+            ),
+            (
+                ReclaimFamily::QuarantinePurge,
+                ReclaimOutcome::Nothing,
+                0,
+                Unchanged,
+            ),
+            (
+                ReclaimFamily::SnapshotPrune,
+                ReclaimOutcome::Reclaimed,
+                0,
+                Unchanged,
+            ),
+            (
+                ReclaimFamily::WalTruncation,
+                ReclaimOutcome::Deferred,
+                0,
+                Unchanged,
+            ),
+        ] {
+            assert_eq!(
+                reclaim_owed_transition(family, outcome, faults),
+                expected,
+                "family={family:?} outcome={outcome:?} faults={faults}"
+            );
+        }
+    }
+
+    /// Only the open and idle wakes are ledger facts; an ordinary wake leaves
+    /// the ledger untouched.
+    #[test]
+    fn record_wake_keeps_the_open_and_idle_wakes_only() {
+        let mut ledger = ReclaimLedger::default();
+        assert_eq!(ledger.last_open_wake(), None);
+        assert_eq!(ledger.last_idle_wake(), None);
+
+        ledger.record_wake(ReclaimWakeOrigin::Ordinary, CommitVersion::new(3));
+        assert_eq!(ledger.last_open_wake(), None);
+        assert_eq!(ledger.last_idle_wake(), None);
+        assert_eq!((ledger.open_wakes(), ledger.idle_wakes()), (0, 0));
+
+        ledger.record_wake(ReclaimWakeOrigin::Open, CommitVersion::new(4));
+        assert_eq!(ledger.last_open_wake(), Some(CommitVersion::new(4)));
+        assert_eq!(ledger.last_idle_wake(), None);
+        assert_eq!((ledger.open_wakes(), ledger.idle_wakes()), (1, 0));
+
+        ledger.record_wake(ReclaimWakeOrigin::Idle, CommitVersion::new(5));
+        ledger.record_wake(ReclaimWakeOrigin::Idle, CommitVersion::new(6));
+        assert_eq!(ledger.last_open_wake(), Some(CommitVersion::new(4)));
+        assert_eq!(ledger.last_idle_wake(), Some(CommitVersion::new(6)));
+        assert_eq!((ledger.open_wakes(), ledger.idle_wakes()), (1, 2));
+        assert_eq!(ledger.totals().passes(), 0, "wakes are not reclaim passes");
     }
 }

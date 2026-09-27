@@ -2189,8 +2189,19 @@ fn table_data_object_files(root: &std::path::Path) -> std::collections::BTreeSet
 #[cfg(feature = "localfs")]
 pub(super) fn drain_maintenance_to_idle(runtime: &mut StorageRuntime<'static>) {
     for _ in 0..8 {
+        // Slice 8: a foreground verb wakes the worker for the follow-ups it
+        // queued, so the worker may hold part of the chain; settle it before
+        // and after each foreground drain so "idle" means both are empty.
+        runtime.wait_background_idle_for_test();
         let drain = runtime.drain_maintenance().expect("drain maintenance");
-        if drain.drained_tasks() == 0 {
+        runtime.wait_background_idle_for_test();
+        if drain.drained_tasks() == 0
+            && runtime
+                .maintenance_status()
+                .expect("status")
+                .pending_tasks()
+                == 0
+        {
             return;
         }
     }
@@ -3106,6 +3117,12 @@ fn api_open_existing_wakes_the_worker_and_reclaims_prior_debt() {
     );
     assert_eq!(read_value(&runtime, b"gc-a"), Some(b"two".to_vec()));
     assert_eq!(read_value(&runtime, b"tail"), Some(b"unflushed".to_vec()));
+    // Slice 8: the open wake is a ledger fact.
+    let ledger = runtime
+        .reclaim_ledger_for_test()
+        .expect("durable runtime has a reclaim ledger");
+    assert!(ledger.last_open_wake().is_some(), "{ledger:?}");
+    assert_eq!(ledger.open_wakes(), 1, "{ledger:?}");
     runtime.close().expect("close");
 }
 
@@ -3641,11 +3658,35 @@ fn api_close_reclaim_fault_leaves_the_debt_for_the_next_open() {
         "refused deletes leave the debt on disk"
     );
 
-    // What the refused deletes leave behind — source-delete-retried
-    // quarantine entries that neither the reopen chain nor an explicit repair
-    // revisits — is #3608, not this slice: the close stayed clean and the
-    // objects are still there for whoever fixes that.
-    let _ = expected;
+    // #3608 (slice 8): the refused deletes left this branch's quarantine
+    // entries with their sources still on disk. The next open's mark names
+    // them retry candidates, the sweep retries the delete through the existing
+    // entries, and the chained purge removes the copies.
+    let healthy = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut reopened = reopen_and_drain(healthy);
+    assert_eq!(
+        table_data_object_files(&root),
+        expected,
+        "the reopen retries the refused source deletes"
+    );
+    assert!(
+        quarantine_object_files(&root).is_empty(),
+        "the purge removed the quarantine copies"
+    );
+    let ledger = reopened
+        .reclaim_ledger_for_test()
+        .expect("durable runtime has a reclaim ledger");
+    let sweep = ledger
+        .last(ReclaimFamily::TableObjectSweep)
+        .expect("the reopen's sweep is recorded");
+    assert_eq!(sweep.outcome(), ReclaimOutcome::Reclaimed, "{sweep:?}");
+    assert_eq!(
+        sweep.objects_affected(),
+        superseded.len(),
+        "every refused source was retried: {sweep:?}"
+    );
+    assert_eq!(read_value(&reopened, b"gc-a"), Some(b"two".to_vec()));
+    reopened.close().expect("close");
 }
 
 /// More superseded objects than one sweep stages: the drive runs the extra
@@ -3689,4 +3730,431 @@ fn api_close_reclaim_runs_multiple_rounds_within_the_budget() {
         .expect("close");
     assert_eq!(table_data_object_files(&root), expected);
     assert!(quarantine_object_files(&root).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Space-reclamation contract §3.1 (slice 8): the idle (quiescence) wake, the
+// one-wake-per-quiet-period rule, and debt-aware low-tier fairness.
+// ---------------------------------------------------------------------------
+
+/// The idle-wake debounce the slice-8 scenarios open with (manual clock).
+#[cfg(feature = "localfs")]
+const IDLE_WAKE_DEBOUNCE_MILLIS: u64 = 100;
+
+#[cfg(feature = "localfs")]
+fn open_inline_durable_runtime(
+    name: &str,
+    options: StorageOpenOptions,
+) -> (StorageRuntime<'static>, std::path::PathBuf) {
+    let root = temp_dir_for_api_test(name);
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let runtime = StorageRuntime::open_with_backend(
+        options
+            .with_maintenance_scheduling_policy(
+                StorageMaintenanceSchedulingPolicy::DeterministicInline,
+            )
+            .with_quiescence_debounce_millis_for_test(IDLE_WAKE_DEBOUNCE_MILLIS),
+        backend,
+    )
+    .expect("open durable runtime")
+    .into_runtime();
+    (runtime, root)
+}
+
+/// Two flushed L0 tables superseded by a compaction while an off-lock reader
+/// holds the pre-compaction view: the chain runs on the inline executor and
+/// the sweep defers `ReaderPinned`. Returns the superseded object files.
+#[cfg(feature = "localfs")]
+fn plant_reader_deferred_debt(
+    runtime: &mut StorageRuntime<'static>,
+    root: &std::path::Path,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::sync::Arc<crate::branch::read::BranchReadView>,
+) {
+    runtime
+        .commit(&put_batch(b"idle-a", b"one"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime
+        .commit(&put_batch(b"idle-a", b"two"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    let superseded = table_data_object_files(root);
+    let held_view = runtime
+        .load_snapshot_for_test(branch())
+        .expect("published snapshot");
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&compact).expect("compact");
+    runtime.wait_background_idle_for_test();
+    let deferred = runtime
+        .reclaim_ledger_for_test()
+        .expect("ledger")
+        .last(ReclaimFamily::TableObjectSweep)
+        .expect("the sweep ran");
+    assert_eq!(deferred.outcome(), ReclaimOutcome::Deferred, "{deferred:?}");
+    assert_eq!(
+        deferred.deferral(),
+        Some(MaintenanceDeferralReason::ReaderPinned)
+    );
+    assert!(
+        superseded
+            .iter()
+            .all(|object| table_data_object_files(root).contains(object)),
+        "the deferred sweep left every superseded object"
+    );
+    (superseded, held_view)
+}
+
+/// The reader drops during a quiet period: no commit, no publish, no explicit
+/// verb — the idle wake alone retries the sweep after the debounce, and the
+/// superseded objects go.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_idle_wake_retries_a_reader_deferred_sweep_without_any_commit() {
+    let (mut runtime, root) = open_inline_durable_runtime(
+        "maintenance-idle-wake-retries",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let (superseded, held_view) = plant_reader_deferred_debt(&mut runtime, &root);
+    let visible_before = runtime.visible_version_for_test();
+    assert!(
+        runtime.reclaim_owed_for_test(),
+        "the deferred sweep left debt owed"
+    );
+
+    drop(held_view);
+    // Short of the debounce: nothing fires.
+    assert!(
+        runtime.advance_maintenance_clock_for_test(std::time::Duration::from_millis(
+            IDLE_WAKE_DEBOUNCE_MILLIS - 1
+        ))
+    );
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime
+            .reclaim_ledger_for_test()
+            .expect("ledger")
+            .idle_wakes(),
+        0
+    );
+    assert!(superseded
+        .iter()
+        .all(|object| table_data_object_files(&root).contains(object)));
+
+    // The debounce elapses: the one idle wake runs the sweep and its purge.
+    assert!(runtime.advance_maintenance_clock_for_test(std::time::Duration::from_millis(1)));
+    runtime.wait_background_idle_for_test();
+
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(ledger.idle_wakes(), 1, "{ledger:?}");
+    assert_eq!(ledger.last_idle_wake(), Some(visible_before), "{ledger:?}");
+    let sweep = ledger
+        .last(ReclaimFamily::TableObjectSweep)
+        .expect("sweep recorded");
+    assert_eq!(sweep.outcome(), ReclaimOutcome::Reclaimed, "{sweep:?}");
+    assert!(
+        superseded
+            .iter()
+            .all(|object| !table_data_object_files(&root).contains(object)),
+        "the idle wake's sweep reclaimed the superseded objects"
+    );
+    assert_eq!(
+        runtime.visible_version_for_test(),
+        visible_before,
+        "no commit was needed"
+    );
+    // Only a sweep that finds nothing proves the family clean: the debt stays
+    // owed past the purge, and the next quiet period's wake settles it.
+    assert!(runtime.reclaim_owed_for_test(), "{ledger:?}");
+    runtime
+        .commit(&put_batch(b"idle-b", b"three"))
+        .expect("commit");
+    runtime.wait_background_idle_for_test();
+    assert!(
+        runtime.advance_maintenance_clock_for_test(std::time::Duration::from_millis(
+            IDLE_WAKE_DEBOUNCE_MILLIS
+        ))
+    );
+    runtime.wait_background_idle_for_test();
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(ledger.idle_wakes(), 2, "{ledger:?}");
+    assert_eq!(
+        ledger
+            .last(ReclaimFamily::TableObjectSweep)
+            .map(crate::lifecycle::ReclaimPass::outcome),
+        Some(ReclaimOutcome::Nothing)
+    );
+    assert!(
+        !runtime.reclaim_owed_for_test(),
+        "the clean sweep settled the debt"
+    );
+    assert_eq!(runtime.suspected_debt_objects_for_test(), 0);
+}
+
+/// A runtime with nothing owed arms no idle wake: time passing runs nothing.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_clean_idle_runtime_arms_no_idle_wake() {
+    let (runtime, _root) = open_inline_durable_runtime(
+        "maintenance-idle-wake-clean",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    runtime
+        .commit(&put_batch(b"clean-a", b"one"))
+        .expect("commit");
+    runtime.wait_background_idle_for_test();
+    assert!(!runtime.reclaim_owed_for_test());
+    let started_before = runtime.maintenance_status().expect("status").started();
+
+    assert!(
+        runtime.advance_maintenance_clock_for_test(std::time::Duration::from_millis(
+            IDLE_WAKE_DEBOUNCE_MILLIS * 10
+        ))
+    );
+    runtime.wait_background_idle_for_test();
+
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(ledger.idle_wakes(), 0, "{ledger:?}");
+    assert_eq!(
+        runtime.maintenance_status().expect("status").started(),
+        started_before,
+        "no task started on the passage of time"
+    );
+}
+
+/// One idle wake per quiet period: a sweep still deferred at the wake waits
+/// for the next activity edge (a commit's drain), which arms a fresh wake.
+/// Never a periodic poll against a long-held reader.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_idle_wake_fires_once_per_quiet_period_and_rearms_on_activity() {
+    let (mut runtime, root) = open_inline_durable_runtime(
+        "maintenance-idle-wake-once",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let (superseded, held_view) = plant_reader_deferred_debt(&mut runtime, &root);
+    let debounce = std::time::Duration::from_millis(IDLE_WAKE_DEBOUNCE_MILLIS);
+
+    // Wake 1: the reader is still held, the sweep defers again.
+    assert!(runtime.advance_maintenance_clock_for_test(debounce));
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime
+            .reclaim_ledger_for_test()
+            .expect("ledger")
+            .idle_wakes(),
+        1
+    );
+    assert!(runtime.reclaim_owed_for_test());
+    // Time alone never wakes again in the same quiet period.
+    for _ in 0..3 {
+        assert!(runtime.advance_maintenance_clock_for_test(debounce));
+        runtime.wait_background_idle_for_test();
+    }
+    assert_eq!(
+        runtime
+            .reclaim_ledger_for_test()
+            .expect("ledger")
+            .idle_wakes(),
+        1,
+        "the quiet period's one idle wake is spent"
+    );
+    assert!(superseded
+        .iter()
+        .all(|object| table_data_object_files(&root).contains(object)));
+
+    // Activity (a commit's ordinary drain) starts a new quiet period.
+    runtime
+        .commit(&put_batch(b"idle-b", b"three"))
+        .expect("commit");
+    runtime.wait_background_idle_for_test();
+    assert!(runtime.advance_maintenance_clock_for_test(debounce));
+    runtime.wait_background_idle_for_test();
+    assert_eq!(
+        runtime
+            .reclaim_ledger_for_test()
+            .expect("ledger")
+            .idle_wakes(),
+        2
+    );
+
+    // The reader goes; the next period's wake reclaims.
+    drop(held_view);
+    runtime
+        .commit(&put_batch(b"idle-c", b"four"))
+        .expect("commit");
+    runtime.wait_background_idle_for_test();
+    assert!(runtime.advance_maintenance_clock_for_test(debounce));
+    runtime.wait_background_idle_for_test();
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(ledger.idle_wakes(), 3, "{ledger:?}");
+    assert!(
+        superseded
+            .iter()
+            .all(|object| !table_data_object_files(&root).contains(object)),
+        "the third wake's sweep reclaimed the superseded objects"
+    );
+    // The debt stays owed until a sweep proves the family clean (the next
+    // quiet period's wake); see the retry scenario for that settle.
+    assert!(runtime.reclaim_owed_for_test(), "{ledger:?}");
+}
+
+/// Debt settled between arming and firing: the idle wake finds nothing owed
+/// and queues no sweep — the ledger records the wake and no new pass.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_idle_wake_after_the_debt_settled_queues_no_sweep() {
+    let (mut runtime, root) = open_inline_durable_runtime(
+        "maintenance-idle-wake-settled",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let (superseded, held_view) = plant_reader_deferred_debt(&mut runtime, &root);
+    drop(held_view);
+    // Two explicit reclaims: the first stages and purges, the second's sweep
+    // finds nothing and settles the debt — all before the debounce elapses.
+    let reclaim =
+        MaintenanceRequest::new(MaintenanceTask::Reclaim, MaintenanceScope::Branch(branch()));
+    for _ in 0..2 {
+        runtime.maintenance(&reclaim).expect("reclaim");
+        runtime.wait_background_idle_for_test();
+    }
+    assert!(superseded
+        .iter()
+        .all(|object| !table_data_object_files(&root).contains(object)));
+    assert!(
+        !runtime.reclaim_owed_for_test(),
+        "the second sweep settled the debt"
+    );
+    let passes_before = runtime
+        .reclaim_ledger_for_test()
+        .expect("ledger")
+        .totals()
+        .passes();
+
+    assert!(
+        runtime.advance_maintenance_clock_for_test(std::time::Duration::from_millis(
+            IDLE_WAKE_DEBOUNCE_MILLIS
+        ))
+    );
+    runtime.wait_background_idle_for_test();
+
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(
+        ledger.idle_wakes(),
+        1,
+        "the armed wake still fires: {ledger:?}"
+    );
+    assert_eq!(
+        ledger.totals().passes(),
+        passes_before,
+        "a wake with nothing owed runs no pass: {ledger:?}"
+    );
+}
+
+/// Close with an idle wake armed: the close completes (its own drive tries the
+/// sweep once more and yields to the held reader) and the armed wake is
+/// cancelled with the workers — it never fires into a closed runtime.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_cancels_an_armed_idle_wake() {
+    let (mut runtime, root) = open_inline_durable_runtime(
+        "maintenance-idle-wake-close",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let (superseded, held_view) = plant_reader_deferred_debt(&mut runtime, &root);
+    assert!(runtime.reclaim_owed_for_test());
+
+    let close = runtime.close().expect("close");
+    assert!(close.maintenance_drained());
+    // A closed runtime has no clock to advance and no worker to wake.
+    assert!(!runtime.advance_maintenance_clock_for_test(std::time::Duration::from_secs(1)));
+    assert!(superseded
+        .iter()
+        .all(|object| table_data_object_files(&root).contains(object)));
+    drop(held_view);
+}
+
+/// Debt-aware fairness: with suspected debt at the threshold a round services
+/// the low tier ahead of an upper-tier task even before the fairness floor;
+/// below the threshold the ladder runs the upper tier first.
+#[cfg(feature = "localfs")]
+fn fairness_scenario(name: &str, threshold_objects: u64) -> (bool, bool) {
+    let (mut runtime, _root) = open_inline_durable_runtime(
+        name,
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_background_max_tasks_per_wake(1)
+            .with_low_tier_debt_threshold_objects_for_test(threshold_objects),
+    );
+    runtime
+        .commit(&put_batch(b"fair-a", b"one"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime
+        .commit(&put_batch(b"fair-a", b"two"))
+        .expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    // The compaction drops two input refs: debt 2, the mark queued and run by
+    // the notified single-task round; the sweep it chains stays queued.
+    let compact =
+        MaintenanceRequest::new(MaintenanceTask::Compact, MaintenanceScope::Branch(branch()));
+    runtime.maintenance(&compact).expect("compact");
+    assert!(runtime.reclaim_owed_for_test());
+    assert!(runtime.suspected_debt_objects_for_test() >= 2);
+    let sweep_ran_before = runtime
+        .reclaim_ledger_for_test()
+        .expect("ledger")
+        .last(ReclaimFamily::TableObjectSweep)
+        .is_some();
+    // An upper-tier task (a checkpoint of the two commits) joins the queue; the
+    // enqueue's wake runs exactly one round of one task.
+    runtime
+        .commit(&put_batch(b"fair-b", b"three"))
+        .expect("commit");
+    runtime
+        .enqueue_lifecycle_maintenance_for_test(
+            crate::lifecycle::MaintenanceTaskRequest::checkpoint(),
+        )
+        .expect("enqueue checkpoint");
+    // The enqueue's wake coalesces onto the round the mark's chain queued;
+    // run exactly that one round of one task.
+    assert!(runtime.run_one_background_round_for_test());
+    let sweep_ran_after = runtime
+        .reclaim_ledger_for_test()
+        .expect("ledger")
+        .last(ReclaimFamily::TableObjectSweep)
+        .is_some();
+    runtime.wait_background_idle_for_test();
+    (sweep_ran_before, sweep_ran_after)
+}
+
+#[cfg(feature = "localfs")]
+#[test]
+fn api_debt_at_the_threshold_services_reclaim_before_the_fairness_floor() {
+    let (before, after) = fairness_scenario("maintenance-fairness-debt", 2);
+    assert!(!before, "the sweep was still queued behind the mark");
+    assert!(
+        after,
+        "with debt at the threshold the round ran the sweep, not the checkpoint"
+    );
+}
+
+#[cfg(feature = "localfs")]
+#[test]
+fn api_debt_below_the_threshold_keeps_the_upper_tier_first() {
+    let (before, after) = fairness_scenario("maintenance-fairness-floor", 1_000);
+    assert!(!before, "the sweep was still queued behind the mark");
+    assert!(
+        !after,
+        "below the threshold the ladder ran the checkpoint first; the sweep waits for the floor"
+    );
 }
