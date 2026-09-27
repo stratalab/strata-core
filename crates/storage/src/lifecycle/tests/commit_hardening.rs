@@ -317,8 +317,11 @@ fn checkpoint_reports_the_unmaterialized_inherited_layers_deferral_distinctly() 
     );
 }
 
+/// Space-reclamation contract §3.2 (slice 12): a non-seeded branch holding a
+/// durable table base no longer defers checkpoint scheduling — the snapshot
+/// records the durable-base set and recovery decides per branch.
 #[test]
-fn wal_growth_policy_defers_while_a_non_seeded_branch_holds_a_durable_base() {
+fn wal_growth_policy_enqueues_a_checkpoint_while_a_non_seeded_branch_holds_a_durable_base() {
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let initial = branch_id(0x71);
@@ -342,8 +345,8 @@ fn wal_growth_policy_defers_while_a_non_seeded_branch_holds_a_durable_base() {
         )
         .expect("create extra");
 
-    // Latch the multi-branch checkpoint guard: the non-seeded branch gains a
-    // durable table base (base commit -> rotate -> flush).
+    // The non-seeded branch gains a durable table base (base commit ->
+    // rotate -> flush) — the shape the lifted multi-branch guard deferred on.
     runtime
         .execute_durable_commit(
             durable_batch(extra, b"extra-base", b"extra-base-value"),
@@ -366,10 +369,8 @@ fn wal_growth_policy_defers_while_a_non_seeded_branch_holds_a_durable_base() {
         .expect("flush extra");
     assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
 
-    // These commits cross the trigger. The checkpoint the policy would
-    // enqueue is structurally deferred by the multi-branch guard, so the
-    // evaluation must defer instead of feeding the executor tasks that can
-    // only churn.
+    // These commits cross the trigger: the checkpoint is enqueued exactly as
+    // it would be with no durable base anywhere, and it completes.
     runtime
         .execute_durable_commit(
             durable_batch(extra, b"extra-delta", b"extra-delta-value"),
@@ -385,8 +386,26 @@ fn wal_growth_policy_defers_while_a_non_seeded_branch_holds_a_durable_base() {
     let outcome = runtime
         .last_wal_growth_outcome()
         .expect("automatic policy outcome");
-    assert_eq!(outcome.status(), LifecycleWalGrowthStatus::Deferred);
-    assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
+    assert_eq!(
+        outcome.status(),
+        LifecycleWalGrowthStatus::MaintenanceEnqueued
+    );
+    assert!(runtime
+        .pending_maintenance_kinds_for_test()
+        .contains(&MaintenanceTaskKind::Checkpoint));
+    let completed = runtime
+        .run_next_checkpoint_maintenance()
+        .expect("checkpoint runner")
+        .expect("checkpoint outcome");
+    assert_eq!(
+        completed.status(),
+        MaintenanceOutcomeStatus::Completed,
+        "{completed:?}"
+    );
+    assert!(
+        !backend.snapshot_objects().is_empty(),
+        "the checkpoint published"
+    );
 }
 
 #[test]
@@ -1655,12 +1674,12 @@ fn explicit_checkpoint_over_cap_defers_with_measured_delta_and_chains_flush() {
 }
 
 /// The common engine shape (a tiny never-flushed non-seeded branch beside a
-/// bloated seeded branch): the seeded-branch flush is enough — the retry
-/// deltas over the seeded base plus the small non-seeded tail and completes,
-/// and the non-seeded branch gains no durable base (so the multi-branch
-/// structural guard stays clear).
+/// bloated seeded branch): the chain flushes every branch — the retry deltas
+/// over each branch's fresh base and completes. The small branch gaining a
+/// durable base is no longer a structural concern (space-reclamation
+/// contract §3.2, slice 12): the snapshot records it.
 #[test]
-fn delta_cap_chain_flushes_the_seeded_branch_and_completes_beside_a_small_non_seeded_branch() {
+fn delta_cap_chain_flushes_every_branch_and_completes_beside_a_small_non_seeded_branch() {
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let initial = branch_id(0xc9);
@@ -1708,10 +1727,12 @@ fn delta_cap_chain_flushes_the_seeded_branch_and_completes_beside_a_small_non_se
         .expect("checkpoint runner")
         .expect("deferred outcome");
     assert_eq!(deferred.status(), MaintenanceOutcomeStatus::Deferred);
-    runtime
-        .run_next_flush_maintenance()
-        .expect("flush runner")
-        .expect("flush outcome");
+    for _ in 0..2 {
+        runtime
+            .run_next_flush_maintenance()
+            .expect("flush runner")
+            .expect("flush outcome");
+    }
     let completed = runtime
         .run_next_checkpoint_maintenance()
         .expect("checkpoint runner")
@@ -1731,19 +1752,17 @@ fn delta_cap_chain_flushes_the_seeded_branch_and_completes_beside_a_small_non_se
             .branch_state(extra)
             .expect("extra branch state")
             .owned_table_count(),
-        0,
-        "the seeded-branch flush must not give the non-seeded branch a durable base"
+        1,
+        "the chain flushes the small non-seeded branch too"
     );
 }
 
-/// Bloat on a NON-seeded branch stays deferred: the chain flushes only the
-/// seeded branch (a global flush would give the non-seeded branch a durable
-/// base and latch the structural guard), so the retry defers again on the
-/// cap, chains nothing more at this version, and the branch gains no base.
-/// The per-branch orphan-recovery slice flips this to the completing
-/// behaviour with a global flush (space-reclamation contract §3.3, slice 12).
+/// Bloat on a NON-seeded branch: the chain flushes every active branch
+/// (space-reclamation contract §3.3, slice 12), so the non-seeded branch's
+/// memtable drains to a durable base, the retried checkpoint deltas over a
+/// bounded tail and completes.
 #[test]
-fn delta_cap_chain_flushes_only_the_seeded_branch_while_the_multi_branch_guard_stands() {
+fn delta_cap_chain_flushes_every_branch_so_non_seeded_bloat_completes_the_retry() {
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let initial = branch_id(0xcb);
@@ -1787,36 +1806,40 @@ fn delta_cap_chain_flushes_only_the_seeded_branch_while_the_multi_branch_guard_s
     assert_eq!(first.status(), MaintenanceOutcomeStatus::Deferred);
     assert_eq!(
         runtime.pending_maintenance_kinds_for_test(),
-        vec![MaintenanceTaskKind::Flush, MaintenanceTaskKind::Checkpoint]
+        vec![
+            MaintenanceTaskKind::Flush,
+            MaintenanceTaskKind::Flush,
+            MaintenanceTaskKind::Checkpoint
+        ],
+        "one flush per active branch, then the retried checkpoint"
     );
-    runtime
-        .run_next_flush_maintenance()
-        .expect("flush runner")
-        .expect("flush outcome");
+    for _ in 0..2 {
+        runtime
+            .run_next_flush_maintenance()
+            .expect("flush runner")
+            .expect("flush outcome");
+    }
     let second = runtime
         .run_next_checkpoint_maintenance()
         .expect("checkpoint runner")
         .expect("second outcome");
     assert_eq!(
         second.status(),
-        MaintenanceOutcomeStatus::Deferred,
+        MaintenanceOutcomeStatus::Completed,
         "{second:?}"
     );
-    let kinds = runtime.pending_maintenance_kinds_for_test();
     assert!(
-        !kinds.contains(&MaintenanceTaskKind::Flush)
-            && !kinds.contains(&MaintenanceTaskKind::Checkpoint),
-        "{kinds:?}"
+        !backend.snapshot_objects().is_empty(),
+        "the retry published over the flushed bloat"
     );
-    assert!(backend.snapshot_objects().is_empty(), "nothing published");
-    assert_eq!(
+    assert!(
         runtime
             .branch_catalog()
             .branch_state(extra)
             .expect("extra branch state")
-            .owned_table_count(),
-        0,
-        "the non-seeded branch keeps no durable base"
+            .owned_table_count()
+            > 0,
+        "the per-branch flush gave the non-seeded branch its durable base"
     );
 }
 

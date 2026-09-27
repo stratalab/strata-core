@@ -2610,15 +2610,21 @@ fn durable_close_after_failed_maintenance_reports_health_debt() {
         )
         .expect("durable commit");
     runtime
-        .enqueue_maintenance(drain_checkpoint_task())
-        .expect("enqueue checkpoint");
+        .rotate_active_for_maintenance()
+        .expect("freeze the memtable the drained flush publishes");
+    runtime
+        .enqueue_maintenance(drain_flush_task(branch))
+        .expect("enqueue flush");
     backend.set_publish_failure(Some(PublishFailureKind::FailedBeforeVisibility));
 
-    let error = runtime.close().expect_err("checkpoint failure");
+    let error = runtime.close().expect_err("flush failure");
 
     assert_eq!(error.code(), "failed_precondition.lifecycle.service");
     assert_eq!(runtime.state(), LifecycleState::Closing);
-    assert_eq!(runtime.maintenance_status().pending_tasks(), 1);
+    // The failed drain is recorded as maintenance debt; the frozen rows it
+    // could not publish stay in the WAL for the retry's close checkpoint.
+    assert_eq!(runtime.maintenance_status().stats().failed(), 1);
+    assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
 }
 
 #[test]
@@ -2708,14 +2714,13 @@ fn close_failure_during_guard_release_preserves_sync_fact() {
 
 #[test]
 fn close_acquires_commit_quiesce_after_maintenance_drain() {
-    // Enqueue a drain-required checkpoint task. The close path must
-    // execute drain (which produces a snapshot Publish operation against
-    // the backend) BEFORE issuing the WAL sync that close performs.
+    // Enqueue a drain-required flush task over a frozen memtable. The close
+    // path must execute the drain (which produces a table-object Publish
+    // against the backend) BEFORE issuing the WAL sync that close performs.
     // We assert temporal ordering on the recorded backend operation log:
-    // every checkpoint-driven Publish must appear before the WAL SyncObject
-    // that close itself issues at the end of the sequence. If a refactor
-    // ever inverts these phases (quiesce/sync before drain), the
-    // assertion below catches it.
+    // the drain-driven Publish must appear before the first WAL SyncObject
+    // the close itself issues. If a refactor ever inverts these phases
+    // (quiesce/sync before drain), the assertion below catches it.
     let backend: &'static DurableTestBackend =
         crate::testkit::leak_static(DurableTestBackend::new());
     let branch = branch_id(0x3e);
@@ -2727,8 +2732,11 @@ fn close_acquires_commit_quiesce_after_maintenance_drain() {
         )
         .expect("commit before close");
     runtime
-        .enqueue_maintenance(drain_checkpoint_task())
-        .expect("enqueue drain-required checkpoint");
+        .rotate_active_for_maintenance()
+        .expect("freeze the memtable the drained flush publishes");
+    runtime
+        .enqueue_maintenance(drain_flush_task(branch))
+        .expect("enqueue drain-required flush");
 
     let operations_before_close = backend.operations().len();
     let close = runtime.close().expect("close");
@@ -2738,14 +2746,14 @@ fn close_acquires_commit_quiesce_after_maintenance_drain() {
     assert!(close.commits_quiesced());
     assert_eq!(runtime.state(), LifecycleState::Closed);
 
-    // The drained checkpoint task issued at least one snapshot Publish
-    // before close itself ran the WAL sync. Pick the first Publish index
+    // The drained flush task issued at least one table-object Publish
+    // before close itself ran a WAL sync. Pick the first Publish index
     // (drain output) and the first SyncObject index (WAL close) — drain
     // must strictly precede sync.
     let first_publish = close_operations
         .iter()
         .position(|operation| matches!(operation, Operation::Publish(_, _)))
-        .expect("drained checkpoint produced no Publish");
+        .expect("drained flush produced no Publish");
     let first_sync = close_operations
         .iter()
         .position(|operation| matches!(operation, Operation::SyncObject(_)))
@@ -3105,6 +3113,10 @@ fn durable_close_drains_stale_active_maintenance_before_closing() {
     assert!(!backend.lock_is_held());
 }
 
+/// A drain-required checkpoint task drained at close defers to the close's own
+/// checkpoint (space-reclamation contract §3.1). A close the commit quiesce
+/// refuses publishes nothing; the retry, once the guard drops, publishes the
+/// close checkpoint and completes.
 #[test]
 fn durable_close_preserves_drain_required_checkpoint_when_quiesce_is_unavailable() {
     let backend: &'static DurableTestBackend =
@@ -3112,20 +3124,19 @@ fn durable_close_preserves_drain_required_checkpoint_when_quiesce_is_unavailable
     let branch = branch_id(0x23);
     let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
     runtime
-        .enqueue_maintenance(
-            MaintenanceTaskRequest::new(
-                MaintenanceTaskKind::Checkpoint,
-                MaintenanceTaskPriority::High,
-                MaintenanceTaskScope::Checkpoint,
-                MaintenanceTaskPolicy::drain_before_close(),
-            )
-            .expect("drain-required checkpoint"),
+        .execute_durable_commit(
+            durable_put_batch(branch, b"quiesce-blocked", b"value"),
+            generation_guard(),
         )
+        .expect("durable commit");
+    runtime
+        .enqueue_maintenance(drain_checkpoint_task())
         .expect("enqueue checkpoint");
     let guard = runtime
         .guard_set()
         .try_acquire_branch_guard(branch)
         .expect("active commit guard");
+    let operations_before = backend.operations().len();
 
     let error = runtime
         .close()
@@ -3133,13 +3144,30 @@ fn durable_close_preserves_drain_required_checkpoint_when_quiesce_is_unavailable
 
     assert_eq!(error.code(), "failed_precondition.lifecycle.close_timeout");
     assert_eq!(runtime.state(), LifecycleState::Closing);
-    assert_eq!(runtime.maintenance_status().pending_tasks(), 1);
     assert!(backend.lock_is_held());
+    assert!(
+        !backend.operations()[operations_before..]
+            .iter()
+            .any(|operation| matches!(operation, Operation::Publish(_, _))),
+        "neither the drained task nor the close checkpoint publishes under a held guard"
+    );
+    assert_eq!(
+        runtime.maintenance_status().pending_tasks(),
+        0,
+        "the drained checkpoint task deferred to the close's own checkpoint"
+    );
 
     drop(guard);
-    let close = runtime.close().expect("retry drains checkpoint and closes");
+    let close = runtime
+        .close()
+        .expect("retry publishes the close checkpoint and closes");
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
-    assert_eq!(close.stats().maintenance_tasks(), 2);
+    assert_eq!(
+        close.checkpoint(),
+        crate::lifecycle::CloseCheckpointReport::Attempted(
+            crate::lifecycle::LifecycleCheckpointStatus::Completed
+        )
+    );
     assert_eq!(runtime.maintenance_status().pending_tasks(), 0);
     assert_eq!(runtime.state(), LifecycleState::Closed);
     assert!(!backend.lock_is_held());
@@ -3473,6 +3501,17 @@ fn drain_checkpoint_task() -> MaintenanceTaskRequest {
     drain_task(
         MaintenanceTaskKind::Checkpoint,
         MaintenanceTaskScope::Checkpoint,
+        MaintenanceTaskPriority::High,
+    )
+}
+
+/// A drain-required flush: the drain-at-close kind that PUBLISHES (a drained
+/// checkpoint defers to the close's own checkpoint instead, space-reclamation
+/// contract §3.1), so it is the kind whose publish a close-time fault can fail.
+fn drain_flush_task(branch: BranchId) -> MaintenanceTaskRequest {
+    drain_task(
+        MaintenanceTaskKind::Flush,
+        MaintenanceTaskScope::Branch(branch),
         MaintenanceTaskPriority::High,
     )
 }

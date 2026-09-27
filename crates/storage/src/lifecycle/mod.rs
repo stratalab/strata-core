@@ -239,7 +239,8 @@ pub(crate) use reclaim_scope::{
     reason = "lifecycle recovery exports define the local surface for bootstrap"
 )]
 pub(crate) use recovery::{
-    encode_checkpoint_row_section, LifecycleRecoveredCheckpoint, LifecycleRecoveredQuarantine,
+    branch_recovery_disposition, encode_checkpoint_row_section, seeded_branch_is_orphaned_delta,
+    BranchRecoveryDisposition, LifecycleRecoveredCheckpoint, LifecycleRecoveredQuarantine,
     LifecycleRecoveredTables, LifecycleRecoveredWal, LifecycleRecoveryOutcome,
     LifecycleRecoveryRequest, LifecycleRecoveryRuntime,
 };

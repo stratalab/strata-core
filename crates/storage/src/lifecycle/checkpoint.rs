@@ -101,15 +101,10 @@ pub(crate) fn should_retry_checkpoint_after_delta_cap(
 pub(crate) enum LifecycleCheckpointStatus {
     Completed,
     DeferredNoVisibleRows,
-    /// Deferred by the multi-branch durability guard: a branch other than the recovery-seeded
-    /// branch holds a durable table-manifest base, so recording a snapshot would risk a
-    /// non-contiguous recovery gap for that branch (see `non_seeded_branch_has_durable_base`).
-    DeferredNonSeededBranchBase,
     /// Deferred because a branch still carries unmaterialized COW inherited layers — the
     /// fresh-fork window before materialization or a first flush. `checkpoint_rows` cannot
     /// serialize such a branch, and the state is structural, not a task failure: the fork
-    /// either materializes (gaining owned tables, which latches
-    /// [`Self::DeferredNonSeededBranchBase`]) or stays COW, and either way a checkpoint
+    /// either materializes (gaining owned tables) or stays COW, and until it does a checkpoint
     /// cannot proceed (#2798).
     DeferredUnmaterializedInheritedLayers,
     /// Deferred because the delta (active + frozen rows of every branch, plus
@@ -350,13 +345,6 @@ impl LifecycleCheckpointOutcome {
         }
     }
 
-    fn deferred_non_seeded_branch_base(request: &LifecycleCheckpointRequest) -> Self {
-        Self {
-            status: LifecycleCheckpointStatus::DeferredNonSeededBranchBase,
-            ..Self::deferred(request)
-        }
-    }
-
     fn deferred_unmaterialized_inherited_layers(request: &LifecycleCheckpointRequest) -> Self {
         Self {
             status: LifecycleCheckpointStatus::DeferredUnmaterializedInheritedLayers,
@@ -502,7 +490,6 @@ impl LifecycleCheckpointOutcome {
         let status = match self.status {
             LifecycleCheckpointStatus::Completed => MaintenanceOutcomeStatus::Completed,
             LifecycleCheckpointStatus::DeferredNoVisibleRows
-            | LifecycleCheckpointStatus::DeferredNonSeededBranchBase
             | LifecycleCheckpointStatus::DeferredUnmaterializedInheritedLayers
             | LifecycleCheckpointStatus::DeferredDeltaExceedsCap => {
                 MaintenanceOutcomeStatus::Deferred
@@ -548,9 +535,6 @@ impl LifecycleCheckpointOutcome {
             LifecycleCheckpointStatus::Completed => None,
             LifecycleCheckpointStatus::DeferredNoVisibleRows => {
                 Some("checkpoint has no visible rows to publish")
-            }
-            LifecycleCheckpointStatus::DeferredNonSeededBranchBase => {
-                Some("checkpoint deferred: non-seeded branch holds a durable table base")
             }
             LifecycleCheckpointStatus::DeferredUnmaterializedInheritedLayers => {
                 Some("checkpoint deferred: branch holds unmaterialized inherited layers")
@@ -1269,13 +1253,12 @@ pub(crate) fn branch_durable_commit_versions_in_interval(
 /// owned rows under the watermark (a full, self-contained snapshot needs no base). Recorded
 /// with the snapshot facts so recovery can require the table-manifest base.
 ///
-/// Callers fold this into a single global `flushed_through` (max across branches) — correct for a
-/// single flushing branch. Multiple branches can flush, and combined with the seeded-branch-only
-/// orphan check in `recovery.rs` a crash dropping a non-seeded branch's table manifest would
-/// recover a gap. That is guarded upstream: the checkpoint defers while any non-seeded branch holds
-/// a durable base (`non_seeded_branch_has_durable_base`), so no such snapshot is recorded. The
-/// per-branch fix that lifts the guard (a durable per-branch flushed-branch set + per-branch
-/// recovery, re-enabling the global fold) is tracked in multi-branch-orphaned-delta-recovery-gap.md.
+/// Callers fold this into a single global `flushed_through` (max across branches). Multiple
+/// branches can flush: the snapshot records which branches hold a durable base (section kind 4,
+/// space-reclamation contract §3.2) and recovery decides per branch — a member whose manifest
+/// survives combines, a member whose manifest is gone is an orphaned delta (its rows are
+/// discarded and only its WAL-contiguous prefix is replayed, under `DataLoss` health), a non-member
+/// is a self-contained full snapshot.
 pub(crate) fn branch_checkpoint_flush_boundary(
     owned_levels: &[Vec<BranchOwnedTable>],
     inherited_layers: &[BranchInheritedLayer],
@@ -1866,11 +1849,6 @@ pub(crate) fn checkpoint_durable_runtime_with_budget(
 ) -> LifecycleResult<LifecycleCheckpointOutcome> {
     request.validate()?;
     match checkpoint_structural_deferral(branch_catalog, seeded_branch_id)? {
-        Some(CheckpointStructuralDeferral::NonSeededDurableBase) => {
-            return Ok(LifecycleCheckpointOutcome::deferred_non_seeded_branch_base(
-                request,
-            ));
-        }
         Some(CheckpointStructuralDeferral::UnmaterializedInheritedLayers) => {
             return Ok(
                 LifecycleCheckpointOutcome::deferred_unmaterialized_inherited_layers(request),
@@ -1921,9 +1899,6 @@ pub(crate) fn checkpoint_durable_runtime_with_budget(
 /// predicate; consumers map variants to their surface's status/reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CheckpointStructuralDeferral {
-    /// A non-seeded branch holds a durable table base — a snapshot now would
-    /// risk a non-contiguous recovery gap for that branch.
-    NonSeededDurableBase,
     /// A branch still carries unmaterialized COW inherited layers — the
     /// fresh-fork window `checkpoint_rows` refuses to serialize (#2798).
     UnmaterializedInheritedLayers,
@@ -1936,18 +1911,14 @@ pub(crate) enum CheckpointStructuralDeferral {
 /// so a new scheduling site cannot consult a divergent subset (#2792 and
 /// #2798 were both the fork lifecycle and checkpoint scheduling disagreeing
 /// about the same state). The close path's own checkpoint (space-reclamation
-/// contract §3.1, slice 7) consults this registry too; only the close
-/// runner's arm for a DRAINED checkpoint task keeps the stricter
-/// any-non-seeded-branch predicate (see `durable/close.rs`), because that arm
-/// publishes through the single-branch collector — a different decision with
-/// its own documented rationale, not a registry bypass.
+/// contract §3.1, slice 7) consults this registry too. The multi-branch
+/// durable-base guard that once lived here is gone (§3.2, slice 12): every
+/// checkpoint records which branches hold a durable base and recovery decides
+/// per branch, so a flushed non-seeded branch no longer defers anything.
 pub(crate) fn checkpoint_structural_deferral(
     branch_catalog: &crate::lifecycle::LifecycleBranchCatalog,
-    seeded_branch_id: BranchId,
+    _seeded_branch_id: BranchId,
 ) -> LifecycleResult<Option<CheckpointStructuralDeferral>> {
-    if non_seeded_branch_has_durable_base(branch_catalog, seeded_branch_id)? {
-        return Ok(Some(CheckpointStructuralDeferral::NonSeededDurableBase));
-    }
     if any_branch_holds_unmaterialized_inherited_layers(branch_catalog)? {
         return Ok(Some(
             CheckpointStructuralDeferral::UnmaterializedInheritedLayers,
@@ -1969,33 +1940,6 @@ fn any_branch_holds_unmaterialized_inherited_layers(
             .branch_state(descriptor.branch_id())?
             .inherited_layers()
             .is_empty()
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// A checkpoint must defer when a branch other than the recovery-seeded branch holds a durable
-/// table-manifest base. Recovery rebuilds non-seeded branches from a global snapshot delta plus
-/// their per-branch table manifest, and never replays the WAL below the snapshot watermark for
-/// them, so a snapshot taken while such a branch has a base would recover a non-contiguous gap if
-/// a crash later dropped that branch's manifest — the seeded-only orphan detector cannot see it.
-/// Deferring leaves those rows in the WAL/memtable until the configuration is recoverable again.
-/// The per-branch fix that lifts this guard (a durable per-branch flushed-branch set + per-branch
-/// recovery) is tracked in multi-branch-orphaned-delta-recovery-gap.md.
-fn non_seeded_branch_has_durable_base(
-    branch_catalog: &crate::lifecycle::LifecycleBranchCatalog,
-    seeded_branch_id: BranchId,
-) -> LifecycleResult<bool> {
-    for descriptor in branch_catalog.list_branches(false) {
-        if descriptor.branch_id() == seeded_branch_id {
-            continue;
-        }
-        if branch_catalog
-            .branch_state(descriptor.branch_id())?
-            .owned_table_count()
-            > 0
         {
             return Ok(true);
         }

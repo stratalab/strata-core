@@ -87,6 +87,15 @@ impl RecoveryHealth {
             Self::Failed { .. } => 1,
         }
     }
+
+    /// Every fault this health carries (none when healthy).
+    pub(crate) fn faults(&self) -> &[RecoveryFault] {
+        match self {
+            Self::Healthy => &[],
+            Self::Degraded { faults, .. } => faults,
+            Self::Failed { fault } => std::slice::from_ref(fault),
+        }
+    }
 }
 
 impl RecoveryFault {
