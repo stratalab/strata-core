@@ -4219,6 +4219,68 @@ fn api_compaction_that_removes_no_input_queues_no_mark() {
     );
 }
 
+/// The per-task runners share the rule: only a `Completed` rewrite dropped
+/// input refs, so a compaction or materialization that finds nothing to do
+/// notes no debt and queues no mark (direction control for the debt note at
+/// each runner's completion site).
+#[cfg(feature = "localfs")]
+#[test]
+fn api_noop_compaction_and_materialization_runners_owe_nothing() {
+    let (mut runtime, _root) = open_inline_durable_runtime(
+        "maintenance-noop-runners",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    runtime.commit(&put_batch(b"solo", b"one")).expect("commit");
+    runtime.wait_background_idle_for_test();
+    assert!(!runtime.reclaim_owed_for_test());
+
+    // No durable table: the compaction runner itself finds nothing to rewrite.
+    runtime
+        .force_branch_compaction_for_test(branch())
+        .expect("forced compaction");
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0,
+        "a no-op compaction queues no mark"
+    );
+    assert!(
+        !runtime.reclaim_owed_for_test(),
+        "a no-op compaction notes no debt"
+    );
+
+    // A root branch holds no inherited layers: nothing to materialize.
+    let materialize = MaintenanceRequest::new(
+        MaintenanceTask::Materialize,
+        MaintenanceScope::Branch(branch()),
+    );
+    let summary = runtime.maintenance(&materialize).expect("materialize");
+    assert_eq!(summary.status(), MaintenanceSummaryStatus::Deferred);
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0,
+        "a no-op materialization queues no mark"
+    );
+    assert!(
+        !runtime.reclaim_owed_for_test(),
+        "a no-op materialization notes no debt"
+    );
+    // The inline scheduler would run a wrongly queued mark at once, leaving
+    // nothing pending; the ledger is where it would show.
+    runtime.wait_background_idle_for_test();
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(
+        ledger.last(ReclaimFamily::TableObjectMark),
+        None,
+        "neither no-op runner queued a mark: {ledger:?}"
+    );
+}
+
 /// Close with an idle wake armed: the close completes (its own drive tries the
 /// sweep once more and yields to the held reader) and the armed wake is
 /// cancelled with the workers — it never fires into a closed runtime.
