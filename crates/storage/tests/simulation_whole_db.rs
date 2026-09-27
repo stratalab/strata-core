@@ -51,6 +51,21 @@ fn whole_db_simulation_holds_oracles_across_seeds() {
         outcome.temporal_probes_ok() > 0 || case_limit == Some(0),
         "no temporal probe succeeded across the sweep: {outcome:?}"
     );
+    // Space-reclamation contract §3.5 (slice 13): the footprint oracle is
+    // non-vacuous — reclaim released bytes, epochs closed cleanly, and
+    // orphaned snapshots were planted for the open reconcile to prune.
+    assert!(
+        outcome.bytes_reclaimed() > 0 || case_limit == Some(0),
+        "no reclaim pass released bytes across the sweep: {outcome:?}"
+    );
+    assert!(
+        outcome.clean_closes() > 0 || case_limit == Some(0),
+        "no epoch closed cleanly across the sweep: {outcome:?}"
+    );
+    assert!(
+        outcome.orphaned_snapshots_planted() > 0 || case_limit == Some(0),
+        "no orphaned snapshot was planted across the sweep: {outcome:?}"
+    );
 }
 
 /// Soak: a deep sweep over many seeds — the genuine bug-hunt run (this is the
