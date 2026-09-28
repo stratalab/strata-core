@@ -1,6 +1,6 @@
 # #3643: sealed timeline segments
 
-Status: **IMPLEMENTING, 2026-09-28** (slice 1 #3654; slice 2 in review) (milestone 1.2.6; follows #3596, and is the P1 finding of the external #3596 review). Direction chosen with the user on 2026-09-28: sealed segment objects. The rejected alternative was a separate, larger timeline decode bound. Every symbol below was verified on `main` @ `551bb800`.
+Status: **IMPLEMENTING, 2026-09-28** (slice 1 #3654 merged; slices 2 and 3 in review, amended after the second external #3596 review; see §2.8) (milestone 1.2.6; follows #3596, and is the P1 finding of the external #3596 review). Direction chosen with the user on 2026-09-28: sealed segment objects. The rejected alternative was a separate, larger timeline decode bound. Every symbol below was verified on `main` @ `551bb800`.
 
 ## 1. Problem
 
@@ -16,7 +16,7 @@ Three defects follow.
    - The section counts against `MAX_MATERIALIZED_SNAPSHOT_PAYLOAD_BYTES` (64 MiB, DUR-017), and flushing cannot shrink it.
    - At about 2.8 M retained commits across branches, every checkpoint defers with `DeferredDeltaExceedsCap`, and the flush-and-retry chain never converges.
    - The snapshot watermark then freezes, the WAL is never truncated, and a clean close cannot checkpoint.
-   - For scale: the field database behind #3596 holds 1.89 M events, which is about two thirds of the way to the ceiling.
+   - The ceiling counts **commits**, not events. The field database behind #3596 holds 1.89 M events but only about 45,693 commits, because it was loaded with batched `append-many` calls, so it was about 2% of the way to the ceiling. The ceiling binds workloads that commit often, such as one event or one key per commit. That is the SDK's default shape.
 2. **Rewrite cost.** Every checkpoint re-encodes the whole timeline: O(history) bytes written per checkpoint, however small the delta.
 3. **Fork duplication.** A forked child copies its parent's pre-fork entries into its own index (`seed_child_timeline_from_parent`), and every checkpoint writes each copy again. A fork chain repeats the shared prefix once per descendant.
 
@@ -47,7 +47,10 @@ The timeline is stored as immutable, independently bounded **segment objects**. 
 - **Rules.** Within a group, refs are contiguous and strictly ascending. Every ref except the last covers exactly `N` entries, and the last ref (the tail) covers `1..=N`. Groups are ascending and unique by `branch_id`, like kind 4.
 - **Size.** At 40 bytes per 65,536 commits, a billion retained commits cost about 600 KiB of references.
 - **Kind 3.** It is no longer written. It stays decodable (as kind 2 already is), so a database checkpointed by an earlier build recovers from its kind-3 section and writes segments at its next checkpoint. No migration step is needed.
-- **Cap.** The payload gate counts the reference section like any other. The timeline can no longer push a checkpoint over the cap.
+- **Cap.** The payload gate counts the reference section like any other. References are bounded, not free:
+  - The section costs `4 + Σ_branches (20 + 40 · ⌈entries_b / 65,536⌉)` bytes. Each branch lists its own refs, so a fork's inherited prefix is referenced once per descendant even though its segments are shared.
+  - Against the 64 MiB cap, which the row delta also shares, that allows about 1.7 M refs. That is on the order of 10¹¹ retained entries summed over branches, or about a million branches with timelines.
+  - Segmentation moves the ceiling by roughly five orders of magnitude, but it does not remove it. A checkpoint beyond it still defers with `DeferredDeltaExceedsCap`, and the refusal stays typed. It is never a format error.
 
 ### 2.4 Checkpoint writer
 
@@ -67,7 +70,7 @@ A checkpoint that defers or fails leaves its freshly written segments unreferenc
 ### 2.5 Recovery
 
 1. The manifest-attested snapshot's kind-5 section yields each branch's refs.
-2. Segments load one at a time. Each is checked against its ref (`entry_count`, the version range, the CRC) and for contiguity with the previous ref. The last entry must not exceed the snapshot watermark. A segment shared by several branches is read once.
+2. Segments load one at a time. Each is checked against its ref (`entry_count`, the version range, the CRC) and for contiguity with the previous ref. The last entry must not exceed the snapshot watermark. A segment shared by several branches is read once: recovery keeps a load cache keyed by the reference for the duration of one recovery (added after the second review found each branch re-reading it).
 3. The branch index is seeded exactly as from a kind-3 group, and `sealed` is set to the full-chunk refs so the next checkpoint reuses them. WAL replay then appends entries above the watermark, unchanged.
 4. **A missing or corrupt segment** mirrors the table-object pattern (`table_read_error`):
    - Under `AllowExplicitLossyFallback`, it records `RecoveryFaultKind::MissingSnapshotObject` for the branch (DataLoss health). The segment is part of the snapshot family, and reusing the existing kind keeps the fault vocabulary, and everything that maps it, unchanged. The branch index stays **incomplete**, so timestamp and wall-clock `as_of` refuse instead of resolving against a hole (DUR-015: never a wrong answer). Version-addressed reads are unaffected.
@@ -82,7 +85,9 @@ Segments join the snapshot prune, under the same `Complete` retention proof (`bu
   - This is the snapshot rule verbatim. A checkpoint in flight seals under an id above the live one, so its new segments are never candidates.
   - Chunks shared across branches, and chunks re-referenced from older checkpoints, stay live because the live snapshot references them. Reachability is over every branch's refs in one snapshot, which satisfies the COW reachability requirement across all branches.
 - **`ReconcileToAttested`**, at open, when no publish is in flight: delete every segment the attested snapshot does not reference. This reclaims crash orphans (segments whose snapshot never became live).
-- **Footprint.** No wire change. The Audit tier counts live segments inside the live-snapshot family bytes, and unreferenced segments inside `superseded_snapshot_bytes`. Documented as "snapshot family = snapshot objects + timeline segments".
+  - **No attested snapshot** (a first checkpoint that died after publishing segments and before its snapshot): nothing references any segment, so the reconcile deletes them all. The open reconcile is enqueued on every `OpenedExisting`, not only when a snapshot is attested, and the prune treats a proof incomplete *only* because no snapshot exists as this case (`snapshotless_segment_reconcile`). A read-only reopen therefore reclaims them. Under any other missing fact, or a health block, the prune deletes nothing.
+- **Reachability source.** The references a prune spares come from the snapshot the manifest attests *at that prune's proof*, never from a cache of some other snapshot. The in-memory live set is keyed by the snapshot id it describes (`timeline_segments_referenced_by`). On a mismatch it is reloaded from the attested snapshot itself, and if that cannot be read the prune deletes no segment. This matters after a checkpoint whose manifest publication reported uncertainty but did become visible: the cache still describes the previous snapshot, and trusting it would let `ReconcileToAttested` delete the new snapshot's live segments. Fork dedup (§2.4) and the Audit footprint resolve through the same keyed accessor.
+- **Footprint.** Segments are reported in their own fields, so the snapshot fields keep their meaning: `timeline_segment_objects`, `timeline_segment_bytes`, `superseded_timeline_segments` and `superseded_timeline_segment_bytes`, carried through storage diagnostics, the engine `StorageFootprint` and `admin.storage`. `total_bytes` includes segments. This supersedes this document's first draft, which folded segments into the snapshot fields with no wire change. The engine ratchet caught that folding as a changed meaning.
 
 ### 2.7 What does not change
 
@@ -93,6 +98,13 @@ Segments join the snapshot prune, under the same `Complete` retention proof (`bu
 - The payload cap's value.
 
 The residual unbounded quantity is the in-memory index, about 24 bytes per retained commit. It is the same as today and is inherent to a never-pruned timeline under `KeepAll`. It is not a decode-bound violation: each object's decode is bounded, and the index is the runtime's own state.
+
+### 2.8 Second-review amendments (2026-09-28)
+
+The second external #3596 review (artifacts in the #3642 addendum) confirmed the original P1 fixed, and found two reclamation defects in slice 2 before it merged. Both were fixed in slice 2 itself:
+
+1. **P1, a live segment deleted after an uncertain manifest publication.** The live-set cache was updated only on `Completed`, so after `FinalManifestUncertain` with the manifest actually re-pointed it described the previous snapshot. The open `ReconcileToAttested`, which has no sealing-id bound, then deleted the new snapshot's segment. Fix: the snapshot-keyed resolution in §2.6. Regression: a checkpoint test whose backend installs the manifest and then reports `VisibilityUnknown`, followed by the queued reconcile and a strict reopen.
+2. **P2, a first-checkpoint crash stranded segments.** Both the open enqueue and the prune required an attested snapshot. Fix: the no-attested-snapshot case in §2.6. Regressions: an API test that reopens read-only twice, plus a truth table over the proof shapes.
 
 ## 3. Invariants
 
