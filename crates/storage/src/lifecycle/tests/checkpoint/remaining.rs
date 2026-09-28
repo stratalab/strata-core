@@ -100,12 +100,15 @@ fn checkpoint_debug_output_does_not_include_payload_bytes() {
     assert!(debug.contains("Completed"));
 }
 
+/// #3629 (contract flipped): a checkpoint carrying a section kind recovery
+/// does not interpret refuses recovery with typed corruption. It used to be
+/// skipped, which would silently drop a newer format's state — and a clean
+/// close truncates the WAL behind its snapshot, so nothing else holds it.
 #[test]
-fn checkpoint_recovery_ignores_opaque_snapshot_sections() {
+fn checkpoint_recovery_refuses_an_unknown_snapshot_section_kind() {
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let branch = branch_id(0x38);
-    let key = physical_key(branch, b"unsupported-section");
     let mut runtime = open_runtime(branch, backend);
     runtime
         .execute_durable_commit(
@@ -115,9 +118,7 @@ fn checkpoint_recovery_ignores_opaque_snapshot_sections() {
         .expect("commit");
     let request = LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(16))
         .expect("request")
-        // Kind 0x7F is unassigned: recovery must ignore sections it does not
-        // understand (kind 2 became the retained-timeline section in W3.1b —
-        // a malformed ASSIGNED kind now fails recovery closed instead).
+        // Kind 0x7F is unassigned.
         .with_extra_sections(vec![crate::format::SnapshotSection::new(
             0x7F,
             b"unsupported".to_vec(),
@@ -130,23 +131,15 @@ fn checkpoint_recovery_ignores_opaque_snapshot_sections() {
     let recovery_request =
         LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
 
-    let outcome = LifecycleRecoveryRuntime::new(&mut shell)
+    let error = LifecycleRecoveryRuntime::new(&mut shell)
         .recover(&recovery_request)
-        .expect("recovery ignores opaque section");
-    let reopened = shell.complete_recovery(&outcome).expect("open runtime");
-
-    // Rows, retained timeline, durable-base branch set, and the opaque extra.
-    assert_eq!(outcome.checkpoint().section_count(), 4);
-    assert_eq!(
-        reopened
-            .read_view()
-            .expect("read view")
-            .latest(&key)
-            .expect("latest read")
-            .expect("row")
-            .row()
-            .value(),
-        b"value"
+        .expect_err("an unknown section kind refuses recovery");
+    assert!(
+        matches!(
+            error,
+            crate::lifecycle::LifecycleError::RecoveryCorruption { .. }
+        ),
+        "{error:?}"
     );
 }
 

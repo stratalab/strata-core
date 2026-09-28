@@ -347,6 +347,7 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
                 reason: "snapshot section count exceeds lifecycle recovery limit",
             });
         }
+        validate_known_section_kinds(container.sections())?;
         require_checkpoint_decode_budget(self.shell.budget(), container.sections())?;
         let rows = decode_checkpoint_rows(container.sections())?;
         validate_checkpoint_rows(watermark, &rows)?;
@@ -1543,6 +1544,38 @@ fn quarantine_error_object(source: &QuarantineServiceError) -> Option<ObjectName
         | QuarantineServiceError::BranchMismatch { object, .. }
         | QuarantineServiceError::CodecMismatch { object, .. } => Some(object.clone()),
         _ => None,
+    }
+}
+
+/// #3629: whether recovery interprets snapshot sections of `kind`. The
+/// section walkers below each pick out their own kind and pass over the rest,
+/// so a kind this build does not know would otherwise be dropped in silence —
+/// and a clean close truncates the WAL behind its snapshot, so whatever such a
+/// section carried would exist nowhere else. Spec §13 rule 6: unknown
+/// storage-owned section kinds are rejected.
+pub(crate) const fn known_snapshot_section_kind(kind: u8) -> bool {
+    matches!(
+        kind,
+        SNAPSHOT_ROW_SECTION_KIND
+            | SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY
+            | SNAPSHOT_TIMELINE_SECTION_KIND
+            | SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND
+    )
+}
+
+/// Refuse a snapshot that carries a section kind this build cannot interpret:
+/// it was written by a newer format, and opening past it would lose its state.
+fn validate_known_section_kinds(sections: &[SnapshotSection]) -> LifecycleResult<()> {
+    match sections
+        .iter()
+        .find(|section| !known_snapshot_section_kind(section.section_kind()))
+    {
+        Some(unknown) => Err(format_error(FormatError::FutureFormat {
+            format: "snapshot section kind",
+            version: u32::from(unknown.section_kind()),
+            max_supported: u32::from(SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND),
+        })),
+        None => Ok(()),
     }
 }
 
