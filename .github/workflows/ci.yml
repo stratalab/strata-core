@@ -69,6 +69,12 @@ jobs:
             cargo clippy --locked $spec --all-targets -- -D warnings
             echo "::endgroup::"
           done
+      - name: Strict rustdoc for the published crates
+        # A broken or private intra-doc link in public docs renders as a dead
+        # link on docs.rs; nothing else catches it (#3633).
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps -p strata-core -p strata-storage -p strata-engine -p strata-executor -p stratadb -p strata-cli
       - name: Lockfile consistency
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Advisory + license + source check
