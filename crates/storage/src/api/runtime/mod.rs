@@ -3605,6 +3605,29 @@ impl<'a> StorageRuntime<'a> {
         }
     }
 
+    /// #3645: the view release signal of a durable runtime (shared with every
+    /// view it published).
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn view_release_signal_for_test(
+        &self,
+    ) -> Option<Arc<crate::branch::snapshot::ViewReleaseSignal>> {
+        use crate::lifecycle::RuntimeReadHandles as _;
+        match &self.inner {
+            StorageRuntimeInner::DurableOwned(slot) => slot.lock().view_release_signal(),
+            StorageRuntimeInner::Cache(slot) => slot.lock().view_release_signal(),
+            StorageRuntimeInner::Closed => None,
+        }
+    }
+
+    /// #3645: whether a view this durable runtime retired is still held.
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn retired_readers_alive_for_test(&self) -> bool {
+        match &self.inner {
+            StorageRuntimeInner::DurableOwned(slot) => slot.lock().retired_readers_alive(),
+            StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => false,
+        }
+    }
+
     #[cfg(all(test, feature = "localfs"))]
     pub(crate) fn suspected_debt_objects_for_test(&self) -> u64 {
         match &self.inner {

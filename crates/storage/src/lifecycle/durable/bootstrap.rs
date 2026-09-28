@@ -726,6 +726,10 @@ impl<S> RuntimeReadHandles for LifecycleDurableLocalRuntime<'_, S> {
     fn snapshot_registry(&self) -> Arc<BranchSnapshotRegistry> {
         self.snapshot_publisher.registry_handle()
     }
+
+    fn view_release_signal(&self) -> Option<Arc<crate::branch::snapshot::ViewReleaseSignal>> {
+        Some(Arc::clone(self.snapshot_publisher.release_signal()))
+    }
 }
 
 impl<S> LifecycleDurableLocalRuntime<'_, S> {

@@ -1,4 +1,4 @@
-use super::background::{BackgroundDrainLimits, BackgroundDrainRound};
+use super::background::{round_asks_idle_wake, BackgroundDrainLimits, BackgroundDrainRound};
 use super::diagnostics::require_valid_branch_identifier;
 use super::error::{map_lifecycle_error, map_recovery_health};
 use super::{
@@ -1024,13 +1024,22 @@ pub(super) fn drain_durable_background_round(
         }
     }
     let (mut pending_tasks, arm_idle_wake, quiescence_debounce) = {
-        let runtime = runtime.lock();
+        let mut runtime = runtime.lock();
+        // #3645: tell the view release signal whether reclaim now waits on a
+        // held reader, so the reader's release re-arms the idle wake. A reader
+        // released before this sync would have nothing to fire, so a round that
+        // leaves reclaim waiting with no retired reader left arms the wake itself.
+        let waits_on_reader = runtime.sync_view_release_signal();
         // C2: the armed preheat flag counts as pending work so an idle
         // runtime keeps re-arming drain rounds until the fill chain ends.
         (
             runtime.maintenance_status().pending_tasks()
                 + usize::from(runtime.cache_preheat_work_pending()),
-            runtime.idle_wake_pending(),
+            round_asks_idle_wake(
+                runtime.idle_wake_pending(),
+                waits_on_reader,
+                runtime.retired_readers_alive(),
+            ),
             Duration::from_millis(runtime.quiescence_debounce_millis()),
         )
     };

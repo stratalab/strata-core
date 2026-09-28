@@ -4416,6 +4416,167 @@ fn api_idle_wake_fires_once_per_quiet_period_and_rearms_on_activity() {
     assert!(runtime.reclaim_owed_for_test(), "{ledger:?}");
 }
 
+/// #3645: a reader released AFTER the quiet period spent its one idle wake
+/// still gets its debt reclaimed with no further write — the last release of a
+/// retired view re-arms the idle wake while reclaim waits on a reader. Only the
+/// LAST handle's release counts: dropping one of two clones wakes nothing.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_reader_release_after_the_idle_retry_rearms_reclaim() {
+    let (mut runtime, root) = open_inline_durable_runtime(
+        "maintenance-late-reader-release",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let (superseded, held_view) = plant_reader_deferred_debt(&mut runtime, &root);
+    let debounce = std::time::Duration::from_millis(IDLE_WAKE_DEBOUNCE_MILLIS);
+    let visible_before = runtime.visible_version_for_test();
+
+    // The quiet period's one idle wake runs while the reader is held: it
+    // defers again and spends the wake.
+    assert!(runtime.advance_maintenance_clock_for_test(debounce));
+    runtime.wait_background_idle_for_test();
+    let idle_wakes = |runtime: &StorageRuntime<'static>| {
+        runtime
+            .reclaim_ledger_for_test()
+            .expect("ledger")
+            .idle_wakes()
+    };
+    assert_eq!(idle_wakes(&runtime), 1);
+
+    // Releasing one of two handles is not a release of the view.
+    let second_handle = std::sync::Arc::clone(&held_view);
+    drop(held_view);
+    for _ in 0..3 {
+        assert!(runtime.advance_maintenance_clock_for_test(debounce));
+        runtime.wait_background_idle_for_test();
+    }
+    assert_eq!(idle_wakes(&runtime), 1, "a live handle still pins the view");
+    assert!(superseded
+        .iter()
+        .all(|object| table_data_object_files(&root).contains(object)));
+
+    // The last handle goes: one debounce later the re-armed wake reclaims.
+    drop(second_handle);
+    assert!(runtime.advance_maintenance_clock_for_test(debounce));
+    runtime.wait_background_idle_for_test();
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(ledger.idle_wakes(), 2, "{ledger:?}");
+    assert!(
+        superseded
+            .iter()
+            .all(|object| !table_data_object_files(&root).contains(object)),
+        "the released reader's debt was reclaimed without another write"
+    );
+    assert_eq!(runtime.visible_version_for_test(), visible_before);
+
+    // Nothing waits on a reader now: time alone wakes nothing further.
+    let settled = idle_wakes(&runtime);
+    for _ in 0..3 {
+        assert!(runtime.advance_maintenance_clock_for_test(debounce));
+        runtime.wait_background_idle_for_test();
+    }
+    assert_eq!(idle_wakes(&runtime), settled);
+}
+
+/// #3645: close removes the release waker, so a reader holding a view past the
+/// close carries no scheduler state and its release fires nothing.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_removes_the_view_release_waker() {
+    let (mut runtime, root) = open_inline_durable_runtime(
+        "maintenance-close-removes-release-waker",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    let (_superseded, held_view) = plant_reader_deferred_debt(&mut runtime, &root);
+    let signal = runtime
+        .view_release_signal_for_test()
+        .expect("a durable runtime has a release signal");
+    assert!(signal.waker_installed_for_test());
+    assert!(signal.reclaim_waits_on_reader());
+
+    runtime
+        .close_with_options(
+            StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+        )
+        .expect("close");
+    assert!(
+        !signal.waker_installed_for_test(),
+        "close removed the waker"
+    );
+    drop(held_view);
+}
+
+/// #3645: only a durable runtime has a release signal — cache mode runs no
+/// reclaim, so nothing can wait on a reader there.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_only_a_durable_runtime_has_a_view_release_signal() {
+    assert!(open_manual_runtime()
+        .view_release_signal_for_test()
+        .is_none());
+    let (runtime, _root) = open_inline_durable_runtime(
+        "maintenance-durable-has-release-signal",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    assert!(runtime.view_release_signal_for_test().is_some());
+    // The runtime's debug form carries the slot, including its release signal.
+    let rendered = format!("{runtime:?}");
+    for fact in [
+        "RuntimeSlot",
+        "published_branches",
+        "commit_waiters",
+        "release_signal: Some(ViewReleaseSignal",
+    ] {
+        assert!(
+            rendered.contains(fact),
+            "{fact} missing from the runtime debug form"
+        );
+    }
+}
+
+/// #3645 direction control: releasing a retired reader when no reclaim waits on
+/// a reader arms nothing — the release signal is not a periodic poll.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_reader_release_with_nothing_owed_arms_no_wake() {
+    let (mut runtime, _root) = open_inline_durable_runtime(
+        "maintenance-release-nothing-owed",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    runtime
+        .commit(&put_batch(b"release-a", b"one"))
+        .expect("commit");
+    let held_view = runtime
+        .load_snapshot_for_test(branch())
+        .expect("published snapshot");
+    // A structural change (the flush install) republishes, retiring the view.
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush retires the held view");
+    runtime.wait_background_idle_for_test();
+    assert!(!runtime.reclaim_owed_for_test());
+    let started_before = runtime.maintenance_status().expect("status").started();
+
+    assert!(
+        runtime.retired_readers_alive_for_test(),
+        "the flush retired the held view"
+    );
+    drop(held_view);
+    assert!(!runtime.retired_readers_alive_for_test());
+    assert!(
+        runtime.advance_maintenance_clock_for_test(std::time::Duration::from_millis(
+            IDLE_WAKE_DEBOUNCE_MILLIS * 10
+        ))
+    );
+    runtime.wait_background_idle_for_test();
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(ledger.idle_wakes(), 0, "{ledger:?}");
+    assert_eq!(
+        runtime.maintenance_status().expect("status").started(),
+        started_before
+    );
+}
+
 /// Debt settled between arming and firing: the idle wake finds nothing owed
 /// and queues no sweep — the ledger records the wake and no new pass.
 #[cfg(feature = "localfs")]

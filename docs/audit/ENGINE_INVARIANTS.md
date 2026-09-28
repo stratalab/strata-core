@@ -1856,6 +1856,10 @@ ARCH-009, CMP-004, MVCC-009, DUR-016); this contract fixes WHEN they run.
 - **Idle**: while reclaim is owed, one delayed low-tier wake arms after the
   writer goes quiet (`quiescence_should_arm`). It also re-runs a sweep a held
   reader deferred. It fires once per quiet period and is cancelled at close.
+  When a sweep deferred on a held reader, the release of the last retired view
+  re-arms it (`ViewReleaseSignal`, #3645), so a reader released after the quiet
+  period's wake still gets its debt reclaimed without another write; the waker
+  only schedules the debounced wake, never a drain inline.
 - **Clean close**: the workers stop, then a bounded reclaim drive runs mark,
   sweep and purge (`ReclaimBudget`, default 500 ms; reclaim-kind tasks are
   drain-before-close via `close_policy_for_kind`). Next, any branch whose
@@ -1875,7 +1879,8 @@ every reclaim pass reports what it freed (#3622).
 `close_reclaim_should_continue_truth_table`, `close_checkpoint_decision_truth_table`,
 `close_flushes_branch_truth_table`, `quiescence_should_arm_truth_table`,
 `should_service_low_tier_truth_table`, `reopen_owes_quarantine_purge_truth_table`,
-`family_frees_disk_truth_table`. Call sites (`crates/storage/src/api/tests/maintenance.rs`):
+`family_frees_disk_truth_table`, `reclaim_waits_on_reader_truth_table`,
+`round_asks_idle_wake_truth_table`. Call sites (`crates/storage/src/api/tests/maintenance.rs`):
 `api_close_reclaim_is_bounded_by_the_budget`,
 `api_close_reclaim_truncates_the_wal_behind_the_close_checkpoint`,
 `api_close_flushes_a_large_delta_into_tables_before_its_checkpoint`,
@@ -1884,6 +1889,8 @@ every reclaim pass reports what it freed (#3622).
 `api_reopen_reconciles_snapshots_to_the_attested_id`,
 `api_reopen_purges_quarantine_a_prior_session_left_unpurged`,
 `api_idle_wake_retries_a_reader_deferred_sweep_without_any_commit`,
+`api_reader_release_after_the_idle_retry_rearms_reclaim`,
+`api_reader_release_with_nothing_owed_arms_no_wake`,
 `api_close_cancels_an_armed_idle_wake`. Engine:
 `clean_close_checkpoints_every_branch_and_truncates_the_wal`,
 `clean_close_then_reopen_replays_nothing`,

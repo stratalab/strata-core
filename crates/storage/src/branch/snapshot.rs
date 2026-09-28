@@ -9,12 +9,130 @@
 //! [`load_from_registry`].
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+
+use parking_lot::Mutex as ParkingMutex;
 
 use arc_swap::ArcSwap;
 use strata_core::BranchId;
 
 use crate::branch::read::BranchReadView;
+
+/// #3645: how a retired view's release reaches the maintenance scheduler.
+///
+/// The table-object sweep defers while any retired view is held. If it
+/// deferred and reclaim is still owed, the release of the LAST retired view is
+/// the event that can unblock it — so each published view carries this shared
+/// signal, which counts the retired views still held and, when that count
+/// reaches zero, runs the installed waker (which re-arms the debounced idle
+/// wake). A retired view nobody held (a republish's predecessor) comes and goes
+/// without firing while another retired view is still pinned. The
+/// waker only touches atomics and schedules a timer: a view can be dropped
+/// while the runtime lock is held, so it must never run a drain inline.
+#[derive(Default)]
+pub(crate) struct ViewReleaseSignal {
+    /// A sweep deferred on a held reader and reclaim is still owed.
+    reclaim_waits_on_reader: AtomicBool,
+    /// Retired views some handle still holds (the count `retired_views_alive`
+    /// tests, kept here so the release path needs no runtime lock).
+    retired_alive: AtomicUsize,
+    /// Installed by the runtime slot while it has a background scheduler and
+    /// removed when the slot shuts it down, so a view that outlives its runtime
+    /// holds no scheduler state.
+    waker: ParkingMutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for ViewReleaseSignal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ViewReleaseSignal")
+            .field(
+                "reclaim_waits_on_reader",
+                &self.reclaim_waits_on_reader.load(Ordering::Acquire),
+            )
+            .field("retired_alive", &self.retired_alive.load(Ordering::SeqCst))
+            .field("waker_installed", &self.waker.lock().is_some())
+            .finish()
+    }
+}
+
+impl ViewReleaseSignal {
+    /// Record whether reclaim is waiting on a held reader (synced by the
+    /// runtime after each maintenance round).
+    pub(crate) fn set_reclaim_waits_on_reader(&self, waiting: bool) {
+        // SeqCst pairs with the release path's load and the round's
+        // retired-reader check (a store-then-check vs decrement-then-load pair).
+        self.reclaim_waits_on_reader
+            .store(waiting, Ordering::SeqCst);
+    }
+
+    pub(crate) fn reclaim_waits_on_reader(&self) -> bool {
+        self.reclaim_waits_on_reader.load(Ordering::SeqCst)
+    }
+
+    /// Install the waker (the runtime slot does, when it has a background
+    /// scheduler).
+    pub(crate) fn install_waker(&self, waker: Box<dyn Fn() + Send + Sync>) {
+        *self.waker.lock() = Some(waker);
+    }
+
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn waker_installed_for_test(&self) -> bool {
+        self.waker.lock().is_some()
+    }
+
+    /// Remove the waker (the runtime slot does, when it shuts its scheduler
+    /// down): later releases fire nothing.
+    pub(crate) fn uninstall_waker(&self) {
+        *self.waker.lock() = None;
+    }
+
+    fn view_retired(&self) {
+        self.retired_alive.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn retired_view_released(&self) {
+        let was_last = self.retired_alive.fetch_sub(1, Ordering::SeqCst) == 1;
+        if was_last && self.reclaim_waits_on_reader() {
+            if let Some(waker) = self.waker.lock().as_ref() {
+                waker();
+            }
+        }
+    }
+}
+
+/// #3645: one published view's link to the release signal. Shared by every
+/// clone of the view; when the last clone drops after the publisher retired
+/// the view, the signal fires.
+#[derive(Debug)]
+pub(crate) struct ViewRelease {
+    signal: Arc<ViewReleaseSignal>,
+    retired: AtomicBool,
+}
+
+impl ViewRelease {
+    pub(crate) fn new(signal: Arc<ViewReleaseSignal>) -> Self {
+        Self {
+            signal,
+            retired: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn mark_retired(&self) {
+        if !self.retired.swap(true, Ordering::AcqRel) {
+            self.signal.view_retired();
+        }
+    }
+}
+
+impl Drop for ViewRelease {
+    fn drop(&mut self) {
+        if self.retired.load(Ordering::Acquire) {
+            self.signal.retired_view_released();
+        }
+    }
+}
 
 /// The per-branch published snapshot map. Shared as `Arc<BranchSnapshotRegistry>` so the same map is
 /// reachable from both the publish path (under the lock) and the off-lock read path.
@@ -65,6 +183,9 @@ pub(crate) struct BranchSnapshotPublisher {
     /// superseded table object breaks any reader still pinned to a retired view — the table-object
     /// sweep defers while one is alive. Pruned opportunistically on publish and on query.
     retired_views: Vec<Weak<BranchReadView>>,
+    /// #3645: attached to every published view; fires when a retired one is
+    /// released.
+    release_signal: Arc<ViewReleaseSignal>,
 }
 
 impl BranchSnapshotPublisher {
@@ -74,7 +195,12 @@ impl BranchSnapshotPublisher {
 
     /// Publish a freshly captured view, creating the branch's slot on first publish. Publishing into
     /// an existing slot is a single `ArcSwap` store with no map rebuild.
-    pub(crate) fn publish_view(&mut self, branch_id: BranchId, view: Arc<BranchReadView>) {
+    pub(crate) fn publish_view(&mut self, branch_id: BranchId, mut view: Arc<BranchReadView>) {
+        // A freshly captured view is uniquely owned here; attach the release
+        // signal before any reader can load it.
+        if let Some(fresh) = Arc::get_mut(&mut view) {
+            fresh.attach_release(Arc::clone(&self.release_signal));
+        }
         let map = self.read_slots.load();
         if let Some(slot) = map.get(&branch_id) {
             let retired = slot.load();
@@ -111,6 +237,11 @@ impl BranchSnapshotPublisher {
             .collect()
     }
 
+    /// #3645: the release signal every published view carries.
+    pub(crate) fn release_signal(&self) -> &Arc<ViewReleaseSignal> {
+        &self.release_signal
+    }
+
     /// A shared handle to the registry so the runtime slot can load snapshots off-lock (BS2.4).
     pub(crate) fn registry_handle(&self) -> Arc<BranchSnapshotRegistry> {
         Arc::clone(&self.read_slots)
@@ -120,6 +251,7 @@ impl BranchSnapshotPublisher {
     /// the registry's, already swapped out) is the only strong handle when no reader holds one, so
     /// the weak goes dead as soon as `retired` drops at the caller.
     fn retire_view(&mut self, retired: &Arc<BranchReadView>) {
+        retired.mark_retired();
         self.retired_views.retain(|weak| weak.strong_count() > 0);
         self.retired_views.push(Arc::downgrade(retired));
     }
@@ -141,4 +273,27 @@ pub(crate) fn load_from_registry(
     branch_id: BranchId,
 ) -> Option<Arc<BranchReadView>> {
     registry.load().get(&branch_id).map(|slot| slot.load())
+}
+
+#[cfg(test)]
+mod release_signal_tests {
+    use super::ViewReleaseSignal;
+
+    /// #3645: the signal's debug form carries its three facts.
+    #[test]
+    fn view_release_signal_debug_reports_its_facts() {
+        let signal = ViewReleaseSignal::default();
+        signal.set_reclaim_waits_on_reader(true);
+        let rendered = format!("{signal:?}");
+        for fact in [
+            "ViewReleaseSignal",
+            "reclaim_waits_on_reader: true",
+            "retired_alive: 0",
+            "waker_installed: false",
+        ] {
+            assert!(rendered.contains(fact), "{fact} missing from {rendered}");
+        }
+        signal.install_waker(Box::new(|| {}));
+        assert!(format!("{signal:?}").contains("waker_installed: true"));
+    }
 }

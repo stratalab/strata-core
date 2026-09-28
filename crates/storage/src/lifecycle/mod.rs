@@ -51,6 +51,11 @@ pub(crate) trait RuntimeReadHandles {
     fn visible_handle(&self) -> Arc<AtomicU64>;
     /// The shared per-branch published-snapshot registry.
     fn snapshot_registry(&self) -> Arc<BranchSnapshotRegistry>;
+    /// #3645: the signal a retired view's release fires, for runtimes whose
+    /// reclaim can wait on a held reader (durable only).
+    fn view_release_signal(&self) -> Option<Arc<crate::branch::snapshot::ViewReleaseSignal>> {
+        None
+    }
 }
 
 #[allow(
@@ -227,9 +232,9 @@ pub(crate) use quarantine::{
     reason = "reclaim ledger exports define the local surface the footprint diagnostics slice consumes"
 )]
 pub(crate) use reclaim_ledger::{
-    classify_reclaim, classify_reclaim_follow_up, reclaim_owed_transition, ReclaimFamily,
-    ReclaimLedger, ReclaimOutcome, ReclaimOwedTransition, ReclaimPass, ReclaimTotals,
-    ReclaimWakeOrigin,
+    classify_reclaim, classify_reclaim_follow_up, reclaim_owed_transition, reclaim_waits_on_reader,
+    ReclaimFamily, ReclaimLedger, ReclaimOutcome, ReclaimOwedTransition, ReclaimPass,
+    ReclaimTotals, ReclaimWakeOrigin,
 };
 pub(crate) use reclaim_scope::{
     drain_scope_admits_upper_tier, reclaim_only_scope_after_open, ReclaimOnlyScope,
