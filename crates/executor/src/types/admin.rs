@@ -341,7 +341,8 @@ pub struct AdminReclaimPass {
     /// Why it deferred, when it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferral: Option<AdminReclaimDeferralReason>,
-    /// Bytes the pass released.
+    /// Bytes the pass reported: for a sweep, the bytes it moved into
+    /// quarantine; for every other family, the bytes it removed from disk.
     pub bytes_reclaimed: u64,
     /// Objects the pass touched.
     pub objects_affected: u64,
@@ -372,9 +373,11 @@ pub struct AdminStorageReclaim {
     pub last_wal_truncation: Option<AdminReclaimPass>,
     /// Passes recorded since the database opened.
     pub total_passes: u64,
-    /// Bytes released since the database opened.
+    /// Bytes removed from disk since the database opened: purges, snapshot
+    /// prunes and WAL truncations. A sweep only moves bytes into quarantine,
+    /// so they are counted once, when the purge deletes them.
     pub total_bytes_reclaimed: u64,
-    /// Passes that released bytes.
+    /// Passes that reclaimed something.
     pub reclaimed_passes: u64,
     /// Passes that deferred.
     pub deferred_passes: u64,
@@ -391,7 +394,9 @@ pub struct AdminStorageReclaim {
 pub struct AdminStorage {
     /// True when the audit tier gathered the listing-backed facts.
     pub audit: bool,
-    /// Durable table objects the runtime catalogues.
+    /// Table objects in the table family: everything a manifest or a live
+    /// branch uses, plus any a compaction superseded that the reclaim sweep
+    /// has not yet moved to quarantine.
     pub live_table_objects: u64,
     /// Bytes of those table objects.
     pub live_table_bytes: u64,
@@ -402,7 +407,7 @@ pub struct AdminStorage {
     /// Bytes of the active WAL segment, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_active_bytes: Option<u64>,
-    /// Retained WAL segments, when known.
+    /// Retained WAL segments, including the active one, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_retained_segments: Option<u64>,
     /// The commit version at and below which the WAL is reclaimable, when known.
@@ -438,9 +443,9 @@ pub struct AdminStorage {
     /// WAL bytes above the retention watermark (audit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_tail_bytes: Option<u64>,
-    /// Every byte the database holds on disk — catalogued tables, unreferenced
-    /// and quarantined objects, snapshots and the retained WAL — when every
-    /// part is known (audit, with warm WAL facts).
+    /// Every byte the database holds on disk — table objects, quarantined
+    /// objects, snapshots and the WAL (from the audit's own listing) — when
+    /// every part is known (audit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_bytes: Option<u64>,
     /// The reclaim ledger.

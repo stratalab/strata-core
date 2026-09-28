@@ -72,7 +72,8 @@ pub struct ReclaimPass {
     pub outcome: ReclaimOutcome,
     /// Why it deferred, when it did.
     pub deferral: Option<ReclaimDeferralReason>,
-    /// Bytes the pass released.
+    /// Bytes the pass reported: for a sweep, the bytes it moved into
+    /// quarantine; for every other family, the bytes it removed from disk.
     pub bytes_reclaimed: u64,
     /// Objects the pass touched.
     pub objects_affected: u64,
@@ -97,9 +98,11 @@ pub struct StorageReclaimStatus {
     pub last_wal_truncation: Option<ReclaimPass>,
     /// Passes recorded since the database opened.
     pub total_passes: u64,
-    /// Bytes released since the database opened.
+    /// Bytes removed from disk since the database opened: purges, snapshot
+    /// prunes and WAL truncations. A sweep only moves bytes into quarantine,
+    /// so they are counted once, when the purge deletes them.
     pub total_bytes_reclaimed: u64,
-    /// Passes that released bytes.
+    /// Passes that reclaimed something.
     pub reclaimed_passes: u64,
     /// Passes that deferred.
     pub deferred_passes: u64,
@@ -114,18 +117,19 @@ pub struct StorageReclaimStatus {
 pub struct StorageFootprint {
     /// The tier the facts were gathered at.
     pub detail: FootprintDetail,
-    /// Durable table objects the runtime catalogues. An object a compaction
-    /// superseded stays catalogued until the reclaim chain purges it; the
-    /// audit counts it under `unreferenced_*` meanwhile.
+    /// Table objects in the table family: every object a manifest or a live
+    /// branch still uses, plus any a compaction superseded that the reclaim
+    /// sweep has not yet moved to quarantine (the audit counts those under
+    /// `unreferenced_*` as well).
     pub live_table_objects: u64,
     /// Bytes of those table objects.
     pub live_table_bytes: u64,
-    /// Bytes of the sealed WAL segments still retained, when the runtime's
-    /// growth facts are warm.
+    /// Bytes of the retained WAL segments, including the active one, when the
+    /// runtime's growth facts are warm.
     pub wal_retained_bytes: Option<u64>,
     /// Bytes of the active WAL segment, when known.
     pub wal_active_bytes: Option<u64>,
-    /// Sealed WAL segments still retained, when known.
+    /// Retained WAL segments, including the active one, when known.
     pub wal_retained_segments: Option<u64>,
     /// The version at and below which the WAL is reclaimable, when known.
     pub wal_retention_watermark: Option<CommitVersion>,
@@ -149,12 +153,12 @@ pub struct StorageFootprint {
     pub wal_reclaimable_bytes: Option<u64>,
     /// WAL bytes above the retention watermark (audit).
     pub wal_tail_bytes: Option<u64>,
-    /// Every byte the database holds on disk — catalogued tables, unreferenced
-    /// and quarantined objects, snapshots and the WAL — when every part is
-    /// known (audit; the WAL from the audit's own listing, so a read-only
-    /// open with cold live facts still totals). Between a compaction and the
-    /// purge that follows it, a superseded object counts both as catalogued
-    /// and as unreferenced.
+    /// Every byte the database holds on disk — table objects, quarantined
+    /// objects, snapshots and the WAL — when every part is known (audit; the
+    /// WAL from the audit's own listing, so a read-only open with cold live
+    /// facts still totals). Between a compaction and the sweep that follows
+    /// it, a superseded object counts both as a table object and as
+    /// unreferenced.
     pub total_bytes: Option<u64>,
     /// The reclaim ledger.
     pub reclaim: StorageReclaimStatus,

@@ -1,6 +1,6 @@
 # #3596 — Space reclamation contract: root cause, design, and paired implementation + test slices
 
-Status: **APPROVED 2026-09-26 — implementation in progress** (milestone 1.2.6, issues #3591–#3600; evidence on #3493). This document is slice 0 of the plan it describes; every slice PR links back here and updates the ledger in §4.
+Status: **APPROVED 2026-09-26 — IMPLEMENTED 2026-09-28** (milestone 1.2.6, issues #3591–#3600; evidence on #3493). Every slice has merged; the ledger at the top of §4 records each PR and the follow-up fixes the slices surfaced. The catalog entry is DUR-019 (`docs/audit/ENGINE_INVARIANTS.md`).
 
 Provenance: three read-only exploration passes (maintenance executor and session lifecycle; the three reclaim proofs and branch topology; test harnesses and diagnostics) and three design passes (scheduling contract; multi-branch proofs and snapshot lifecycle; observability and tests), reconciled against measurements of the failing database. Every symbol below was verified on `main` @ `e95167d7`. Field tools used for the measurements live outside the repo (`/data2/strata-probe/tools/dbsize.py`); after slice 10 the product reports the same facts itself.
 
@@ -43,10 +43,10 @@ The proofs stay exactly as they are (COW-001, ARCH-005, ARCH-009, CMP-004, MVCC-
 
 | phase | what runs | what must not run | mechanism |
 |---|---|---|---|
-| **Open** (`OpenedExisting`) | after recovery returns, one reclaim-only *wake* (arm, never inline): table-object mark → quarantine sweep → purge; snapshot `ReconcileToAttested` prune | flush, checkpoint, flush-watermark, WAL truncation, rewrite (DUR-018); nothing inline in `open` | `notify_background_drain(Low)` after the runtime slot exists; per-database `ReclaimOnlyScope { Active, Inactive }` (Active until the first commit) consulted by pure `drain_scope_admits_upper_tier` in `start_next_background_step` |
+| **Open** (`OpenedExisting`) | after recovery returns, one reclaim-only *wake* (arm, never inline): table-object mark → quarantine sweep → purge; snapshot `ReconcileToAttested` prune; a purge of quarantine a prior session staged and never purged (#3626) | flush, checkpoint, flush-watermark, WAL truncation, rewrite (DUR-018); nothing inline in `open` | `notify_background_drain(Low)` after the runtime slot exists; per-database `ReclaimOnlyScope { Active, Inactive }` (Active until the first commit) consulted by pure `drain_scope_admits_upper_tier` in `start_next_background_step` |
 | **Operation** | post-publish marks (existing); debt-aware low-tier service; after every `Completed` checkpoint: `Superseded` snapshot prune + WAL truncation (existing follow-up); growth-burst checkpoint with a bounded delta | — | `should_service_low_tier(upper_since_low, floor, debt_bytes, threshold)` replaces the fixed 1-in-4; `snapshot_pruning(Superseded)` enqueued from `run_checkpoint_follow_ups`; `checkpoint_delta_cap_decision` + flush-first |
 | **Idle** | edge-triggered quiescence wake while reclaim is owed; re-arms reader-deferred sweeps | periodic empty polls (BS5.3) | `reclaim_owed` flag on the runtime; `quiescence_should_arm(round, close_requested)`; one delayed Low drain on the `MaintenanceClock` (deterministic under the manual clock), cancelled by `close_requested` |
-| **Close** (clean) | 1 stop workers (250 ms) → 2 cancel non-drainable tasks → 3 bounded object-reclaim drain (fresh mark, inline sweep, purge) → 4 close checkpoint: multi-branch collector under `checkpoint_structural_deferral`, delta bounded by flush-first, WAL truncated with the snapshot proof, `Superseded` prune → 5 quiesce, `wal.close()`, release | — | reclaim kinds get `coalescing_drain_before_close()` via one `close_policy_for_kind`; the close runner gains a real sweep arm reusing `DurableTableObjectSweepRunner`; `StorageCloseOptions::reclaim_budget: ReclaimBudget { Disabled, Bounded(Duration) }` default `Bounded(500 ms)`; close checkpoint = `checkpoint_with_options(truncate_wal_after_checkpoint = true)` |
+| **Close** (clean) | 1 stop workers (250 ms) → 2 cancel non-drainable tasks → 3 bounded object-reclaim drain (fresh mark, inline sweep, purge) → 4 flush every branch whose unflushed delta ≥ 64 KiB into tables (#3625; snapshot rows are uncompressed) → close checkpoint: multi-branch collector under `checkpoint_structural_deferral`, delta bounded by flush-first, WAL truncated with the snapshot proof, `Superseded` prune → 5 quiesce, `wal.close()`, release | — | reclaim kinds get `coalescing_drain_before_close()` via one `close_policy_for_kind`; the close runner gains a real sweep arm reusing `DurableTableObjectSweepRunner`; `StorageCloseOptions::reclaim_budget: ReclaimBudget { Disabled, Bounded(Duration) }` default `Bounded(500 ms)`; close checkpoint = `checkpoint_with_options(truncate_wal_after_checkpoint = true)` |
 | **Crash / drop without close** | nothing; the next open reconciles | — | deliberate boundary: no `Drop`-based reclaim |
 
 Result for the user's shape: a clean close leaves live tables + one small snapshot (the last delta) + an empty-or-tiny WAL, and the next open replays nothing. Every deferral has exactly one retry path (the quiescence wake or one bounded re-mark); nothing spins.
@@ -73,9 +73,42 @@ The bytes the CLI prints, the SDK returns, the DST oracle asserts, the ratchet g
 - **`ReclaimLedger`** (per runtime, `crates/storage/src/lifecycle/reclaim_ledger.rs`): last mark/sweep/purge/prune/truncation as `ReclaimEvent { outcome: ReclaimOutcome, reason: ReclaimDeferralReason, bytes_reclaimed, objects_affected, at_version }` (typed, never text), last-known orphan bytes with `as_of`, last quarantine bytes, pending reclaim tasks, last idle/open wake. Fed by a pure, truth-tabled `classify_reclaim(&MaintenanceSummary)` at each runner's completion site. Replaces the `perf-trace` statics as the product surface (rule 9).
 - **`DiagnosticsDetail { Live, Audit }`** on `DiagnosticsRequest`; `DiagnosticsFootprintReport` (Live, zero I/O: live table bytes via a new `LifecycleDurableTableCatalog::total_object_bytes()`, WAL retained/active bytes + watermark, live snapshot id, ledger last-knowns; Audit, opt-in I/O: fresh orphan mark, per-snapshot bytes and superseded count, quarantine inventory, per-segment WAL reclaimable-vs-tail) and `DiagnosticsReclaimReport`; the never-filled `DiagnosticsQuarantineReport` gets populated; cache mode = unsupported.
 - **Engine:** `PersistenceAdapter::storage_diagnostics` passthrough (Global scope covers both branches) → canonical `AdminService::storage_footprint(branch, FootprintDetail)` → `Database::storage_footprint`. D4 public types (`StorageFootprint`, `StorageFootprintOptions`, `StorageReclaimStatus`, `ReclaimEvent`, `ReclaimOutcome`, `ReclaimDeferralReason`, `FootprintDetail`; `#[non_exhaustive]`) with `stratadb` facade re-exports. Testkit seam `DurableLocalOpenOptions::with_maintenance_scheduling_policy_for_test` (named feature, mutation `exclude_re`).
-- **Wire:** `admin.storage` (`strata . admin storage [--audit]`), `admin.metrics` as the template: `Command::Storage`, `Output::Storage(AdminStorage)` with fields `live_table_bytes, unreferenced_bytes, quarantined_bytes, superseded_snapshot_bytes, wal_reclaimable_bytes, wal_tail_bytes, total_bytes, reclaim_outcome, reclaim_deferral_reason, pending_reclaim_tasks, audit`; `admin.yaml` entry with `as: size` display; prose, example, fixtures, full IDL chain, `admin.txt` golden, Python SDK vendoring.
+- **Wire:** `admin.storage` (`strata . admin storage [--audit]`), `admin.metrics` as the template: `Command::Storage`, `Output::Storage(AdminStorage)` (as shipped: the live and audit byte facts — `live_table_objects/bytes`, the WAL facts, `unreferenced_*`, `quarantined_*`, `snapshot_*`, `superseded_snapshot*`, `wal_reclaimable_bytes`, `wal_tail_bytes`, `total_bytes`, `audit` — and a nested `reclaim` object carrying the last pass of every reclaim family, the running totals and `pending_reclaim_tasks`); `admin.yaml` entry with `as: size` display; prose, example, fixtures, full IDL chain, `admin.txt` golden, Python SDK vendoring.
 
 ## 4. Slices: implementation and tests executed together
+
+### Ledger
+
+| slice | PR | merged |
+|---|---|---|
+| 0 design document | #3601 | `571e65db` |
+| 1 `ReclaimLedger` | #3602 | `b4ecc0b1` |
+| 2 footprint diagnostics | #3613 | `2161d238` |
+| 3 close object-reclaim drain | #3610 | `12c1285d` |
+| 4 open reclaim-only wake | #3606 | `8d49c2a5` |
+| 5 snapshot prune modes | #3611 | `cd895ed9` |
+| 6 bounded checkpoint delta | #3604 | `d0318b08` |
+| 7 close-time checkpoint | #3615 | `c24f1cbd` |
+| 8 quiescence wake and fairness | #3616 | `acb51ba8` |
+| 9 engine surface | #3620 | `d3b84ce7` |
+| 10 `admin.storage` command | #3621 | `ad6461d7` |
+| 11 flushed-branch-set snapshot section | #3605 | `e9e26c90` |
+| 12 per-branch orphan recovery | #3618 | `b6d58f13` |
+| 13 DST footprint oracle | #3624 | `3201aecd` |
+| 14 footprint ratchet | #3628 | `c752cae8` |
+| 15 catalog and docs | this PR | — |
+
+Fixes the slices surfaced, each its own PR:
+
+| issue | found by | PR | merged |
+|---|---|---|---|
+| #3612 reopened checkpoint allocator collides with a crash-orphan snapshot | slice 5 | #3617 | `626ee64d` |
+| #3626 quarantine a prior session left is never purged | slice 14 ratchet | #3627 | `b3171fcf` |
+| #3625 checkpoint snapshots uncompressed (3.5× for a never-flushed database) — the close now flushes a delta ≥ 64 KiB first | slice 14 ratchet | #3630 | `d1a84a9d` |
+| #3622 snapshot prunes reported 0 bytes | slice 13 | #3631 | `930ac6f3` |
+| #3619 live tier kept purged objects; freed bytes counted twice | slice 9 | #3632 | `a6b8fec7` |
+
+Filed for later: #3629 (recovery silently skips unknown snapshot section kinds; the reason #3625 did not add a compressed section), #3047 (reader vs reclaim race, new evidence posted), #3594 / #3595 (event record format).
 
 Every slice is one PR: its implementation and its tests land together, TDD (red first), with the invariant check and review before merge, ≤ 1,500 LOC. Storage-level tests open a **two-branch** runtime (an empty non-seeded root beside the seeded branch, mirroring `_system_`) under `DeterministicInline` with the manual clock; engine-level tests get the real topology for free. Tests assert typed outcomes and byte facts read from `diagnostics()`, never display text and never a directory walk. Every pure decision fn is truth-tabled and has a call-site test (mutation gate). Existing tests that pin the old contract are rewritten in the slice that changes the contract, never deleted. Fault-injection tests (`-p strata-storage --features fault-injection`) ride the slice they cover.
 
@@ -118,7 +151,7 @@ Landing order: 0 → 1 → 2 → {3, 4, 6, 11} in parallel worktrees → 5 → 7
 ### Slice 7 — Close-time checkpoint · #3598 (retitled)
 - **Implementation:** the close runner uses `checkpoint_structural_deferral` + the multi-branch collector `checkpoint_durable_runtime_with_budget` instead of `non_seeded_branches_present`; the close checkpoint request carries `truncate_wal_after_checkpoint = true` (existing follow-up truncates with the snapshot proof) and is followed by the `Superseded` prune; pure `close_checkpoint_decision(deferral, delta_decision)`; ordering: object drain → checkpoint → quiesce; `recovery_budget.rs::phase_seed` exits the process without `close()` (a big WAL tail is the crash scenario), envelope assertions unchanged.
 - **Tests:** `close_checkpoint_decision_truth_table`; `clean_close_checkpoints_multi_branch_and_truncates` (two branches incl. an unflushed empty root: one snapshot covering both, WAL ≤ tail, reopen replays 0 records); `close_checkpoint_defers_in_fresh_fork_window`; `close_checkpoint_defers_with_flushed_non_seeded_branch` (until slice 12, then flipped); `close_checkpoint_deferral_leaves_wal_intact`; fault `fault_during_close_checkpoint_leaves_wal_intact` (new `DuringCloseCheckpoint`: no covered segment deleted before the manifest re-point); `recovery_budget.rs` seeds by crash-exit and stays green; engine-level `clean_close_then_reopen_replays_nothing`.
-- **Exit:** the user's shape (952 MB / 642 MB control) reclaims to ≈ 250 MB live + one small snapshot + near-empty WAL at every clean close. Invariants: DUR-017 (bounded delta), DUR-018 (operation-time), ARCH-008, COW-001 HOLD; the gap doc's guard remains for flushed non-seeded branches.
+- **Exit:** the user's shape (952 MB / 642 MB control) reclaims to ≈ 250 MB live + one small snapshot + near-empty WAL at every clean close. Invariants: DUR-017 (bounded delta), DUR-018 (operation-time), ARCH-008, COW-001 HOLD; the gap doc's guard remained for flushed non-seeded branches until slice 12 lifted it.
 
 ### Slice 8 — Quiescence wake, reader re-arm, debt-aware fairness · #3591
 - **Implementation:** `reclaim_owed` on the runtime (set at post-publish marks, reader-deferred sweeps, capped sweeps; cleared by a clean mark); drain round returns `reclaim_owed`; pure `quiescence_should_arm(round, close_requested)` and `quiescence_deadline(last, debounce)`; one delayed Low drain on the `MaintenanceClock`, cancelled by `close_requested` (`api/runtime/background.rs`); `quiescence_debounce` in `lifecycle/config.rs`; pure `should_service_low_tier(upper_since_low, floor, debt_bytes, threshold)` with a cheap `suspected_debt_bytes` counter at publish/mark/purge sites replacing the fixed interval (still gated by `has_pending_low_tier_maintenance`); ledger `last_idle_wake`.

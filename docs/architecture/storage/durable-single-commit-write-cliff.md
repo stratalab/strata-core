@@ -284,8 +284,9 @@ drive flushing. The commit-count bound remains an explicit opt-in via the public
 `api/options.rs` docs, `api/runtime/diagnostics.rs`.
 
 Correction to the original plan: WAL truncation does **not** ride on size-driven
-rotation — it is enqueued only by the WAL-growth checkpoint path
-(`evaluate_wal_growth_policy`). With the commit-count trigger off, WAL truncation
+rotation — during a session it is enqueued only by the WAL-growth checkpoint path
+(`evaluate_wal_growth_policy`); since 1.2.6 a clean close also checkpoints every
+branch and truncates behind it (DUR-019). With the commit-count trigger off, WAL truncation
 now rests on the byte/segment triggers (256 MiB / 64 segments) + segment rolling.
 At the scales that cliffed, the old commit-count checkpoints were deleting **0**
 WAL segments anyway (single un-rolled segment), so this loses no real truncation;
@@ -362,9 +363,10 @@ Re-run the reproductions and require:
 - Loosening the commit-count bound increases worst-case recovery replay for
   pathological many-tiny-commit workloads; bounded by the 256 MiB byte trigger +
   segment rolling. Covered by the recovery test suites (all green).
-- WAL truncation is coupled to the WAL-growth checkpoint path, so with the
-  commit-count trigger off the WAL is trimmed on the byte/segment triggers +
-  segment rolling rather than at flush cadence. Bounded, but decoupling truncation
+- WAL truncation is coupled to the WAL-growth checkpoint path (and, since
+  1.2.6, the clean-close checkpoint), so with the commit-count trigger off the
+  WAL is trimmed on the byte/segment triggers + segment rolling during a session
+  rather than at flush cadence. Bounded, but decoupling truncation
   to track flush cadence (smaller retained WAL) is a possible follow-up.
 - Residual single-threaded durable throughput is the per-commit base cost
   (~110 µs); raising it needs WAL group commit / writer concurrency, out of scope
