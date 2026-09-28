@@ -883,6 +883,10 @@ fn footprint_for_detail_truth_table() {
         snapshot_bytes: 9,
         superseded_snapshots: 10,
         superseded_snapshot_bytes: 11,
+        timeline_segment_objects: 14,
+        timeline_segment_bytes: 15,
+        superseded_timeline_segments: 16,
+        superseded_timeline_segment_bytes: 17,
         wal_reclaimable_bytes: 12,
         wal_tail_bytes: 13,
     };
@@ -902,7 +906,7 @@ fn footprint_for_detail_truth_table() {
             true,
         ),
     ] {
-        let report = footprint_for_detail(detail, live, facts);
+        let report = footprint_for_detail(detail, &live, facts);
 
         assert_eq!(report.detail(), detail, "{case}");
         assert_eq!(report.state(), DiagnosticsFactState::Known, "{case}");
@@ -920,6 +924,14 @@ fn footprint_for_detail_truth_table() {
         assert_eq!(report.snapshot_bytes(), bytes(9), "{case}");
         assert_eq!(report.superseded_snapshots(), count(10), "{case}");
         assert_eq!(report.superseded_snapshot_bytes(), bytes(11), "{case}");
+        assert_eq!(report.timeline_segment_objects(), count(14), "{case}");
+        assert_eq!(report.timeline_segment_bytes(), bytes(15), "{case}");
+        assert_eq!(report.superseded_timeline_segments(), count(16), "{case}");
+        assert_eq!(
+            report.superseded_timeline_segment_bytes(),
+            bytes(17),
+            "{case}"
+        );
         assert_eq!(report.wal_reclaimable_bytes(), bytes(12), "{case}");
         assert_eq!(report.wal_tail_bytes(), bytes(13), "{case}");
     }
@@ -1041,6 +1053,15 @@ fn footprint_audit_tier_reports_quarantine_snapshots_and_what_the_prune_reclaims
     assert_eq!(footprint.unreferenced_bytes(), Some(0));
     assert_eq!(footprint.snapshot_objects(), Some(2));
     assert_eq!(footprint.superseded_snapshots(), Some(1));
+    // #3643: each checkpoint sealed a timeline tail; the older is superseded
+    // with its snapshot (the newer snapshot references only its own).
+    assert_eq!(footprint.timeline_segment_objects(), Some(2));
+    assert_eq!(footprint.superseded_timeline_segments(), Some(1));
+    let superseded_segment_bytes = footprint
+        .superseded_timeline_segment_bytes()
+        .expect("superseded segment bytes");
+    let segment_bytes = footprint.timeline_segment_bytes().expect("segment bytes");
+    assert!(superseded_segment_bytes > 0 && superseded_segment_bytes < segment_bytes);
     let superseded_bytes = footprint
         .superseded_snapshot_bytes()
         .expect("superseded bytes");
@@ -1060,6 +1081,13 @@ fn footprint_audit_tier_reports_quarantine_snapshots_and_what_the_prune_reclaims
 
     assert_eq!(after.footprint().snapshot_objects(), Some(1));
     assert_eq!(after.footprint().superseded_snapshots(), Some(0));
+    assert_eq!(after.footprint().timeline_segment_objects(), Some(1));
+    assert_eq!(after.footprint().superseded_timeline_segments(), Some(0));
+    assert_eq!(
+        after.footprint().timeline_segment_bytes(),
+        Some(segment_bytes - superseded_segment_bytes),
+        "the prune reclaimed exactly the superseded segment bytes"
+    );
     assert_eq!(
         after.footprint().snapshot_bytes(),
         Some(snapshot_bytes - superseded_bytes),

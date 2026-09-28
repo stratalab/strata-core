@@ -5387,7 +5387,11 @@ fn api_a_reused_timeline_segment_survives_the_superseded_prune() {
     checkpoint_now(&mut runtime);
     let first = live_snapshot_id(&runtime).expect("first checkpoint");
     let first_sealed = timeline_segment_files(&root);
-    assert_eq!(first_sealed.len(), 2, "a tail per branch: {first_sealed:?}");
+    assert_eq!(
+        first_sealed.len(),
+        1,
+        "parent and child share their identical tail (fork dedup): {first_sealed:?}"
+    );
 
     runtime
         .commit_for_test(
@@ -5401,12 +5405,11 @@ fn api_a_reused_timeline_segment_survives_the_superseded_prune() {
     assert_eq!(
         after.len(),
         2,
-        "the parent's stale tail went, its new tail and the child's re-used one stay: {after:?}"
+        "the parent's new tail, and the shared one the child still references: {after:?}"
     );
-    assert_eq!(
-        first_sealed.intersection(&after).count(),
-        1,
-        "exactly the child's first-sealed tail is still referenced: {first_sealed:?} {after:?}"
+    assert!(
+        first_sealed.is_subset(&after),
+        "the first-sealed tail the child re-uses survived the prune: {first_sealed:?} {after:?}"
     );
 
     runtime.close().expect("close");
@@ -5603,4 +5606,42 @@ fn api_a_reopen_without_a_snapshot_reclaims_a_first_checkpoints_orphan_segments(
             )
             .expect("close");
     }
+}
+
+/// #3643 fork dedup across checkpoints: a child forked AFTER its parent's tail
+/// was sealed holds the same history, so the next checkpoint re-references the
+/// parent's segment through the live snapshot's references — nothing new is
+/// written for the child.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_a_child_forked_after_a_checkpoint_shares_its_parents_sealed_tail() {
+    let root = temp_dir_for_api_test("timeline-late-fork-dedup");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    commit_timeline_history(&mut runtime, 3);
+    checkpoint_now(&mut runtime);
+    let sealed = timeline_segment_files(&root);
+    assert_eq!(sealed.len(), 1, "{sealed:?}");
+
+    fork_branch(&mut runtime, branch_with(0x6d));
+    checkpoint_now(&mut runtime);
+    assert_eq!(
+        timeline_segment_files(&root),
+        sealed,
+        "the child re-references the parent's sealed tail"
+    );
+
+    runtime.close().expect("close");
+    let reopened = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("reopen strict");
+    assert_eq!(read_history_at(&reopened, 30).expect("read"), b"v2");
 }

@@ -287,6 +287,10 @@ pub struct DiagnosticsFootprintReport {
     snapshot_bytes: Option<u64>,
     superseded_snapshots: Option<usize>,
     superseded_snapshot_bytes: Option<u64>,
+    timeline_segment_objects: Option<usize>,
+    timeline_segment_bytes: Option<u64>,
+    superseded_timeline_segments: Option<usize>,
+    superseded_timeline_segment_bytes: Option<u64>,
     wal_reclaimable_bytes: Option<u64>,
     wal_tail_bytes: Option<u64>,
 }
@@ -305,6 +309,12 @@ pub(crate) struct DiagnosticsFootprintAudit {
     pub(crate) snapshot_bytes: u64,
     pub(crate) superseded_snapshots: usize,
     pub(crate) superseded_snapshot_bytes: u64,
+    /// #3643: sealed timeline segments, and the part the next `Superseded`
+    /// snapshot prune would delete.
+    pub(crate) timeline_segment_objects: usize,
+    pub(crate) timeline_segment_bytes: u64,
+    pub(crate) superseded_timeline_segments: usize,
+    pub(crate) superseded_timeline_segment_bytes: u64,
     pub(crate) wal_reclaimable_bytes: u64,
     pub(crate) wal_tail_bytes: u64,
 }
@@ -1069,6 +1079,10 @@ impl DiagnosticsFootprintReport {
             snapshot_bytes: None,
             superseded_snapshots: None,
             superseded_snapshot_bytes: None,
+            timeline_segment_objects: None,
+            timeline_segment_bytes: None,
+            superseded_timeline_segments: None,
+            superseded_timeline_segment_bytes: None,
             wal_reclaimable_bytes: None,
             wal_tail_bytes: None,
         }
@@ -1120,6 +1134,10 @@ impl DiagnosticsFootprintReport {
         self.snapshot_bytes = Some(audit.snapshot_bytes);
         self.superseded_snapshots = Some(audit.superseded_snapshots);
         self.superseded_snapshot_bytes = Some(audit.superseded_snapshot_bytes);
+        self.timeline_segment_objects = Some(audit.timeline_segment_objects);
+        self.timeline_segment_bytes = Some(audit.timeline_segment_bytes);
+        self.superseded_timeline_segments = Some(audit.superseded_timeline_segments);
+        self.superseded_timeline_segment_bytes = Some(audit.superseded_timeline_segment_bytes);
         self.wal_reclaimable_bytes = Some(audit.wal_reclaimable_bytes);
         self.wal_tail_bytes = Some(audit.wal_tail_bytes);
         self
@@ -1195,6 +1213,29 @@ impl DiagnosticsFootprintReport {
         self.superseded_snapshot_bytes
     }
 
+    /// #3643: sealed retained-timeline segment objects on disk (audit).
+    #[must_use]
+    pub const fn timeline_segment_objects(self) -> Option<usize> {
+        self.timeline_segment_objects
+    }
+
+    #[must_use]
+    pub const fn timeline_segment_bytes(self) -> Option<u64> {
+        self.timeline_segment_bytes
+    }
+
+    /// #3643: segments the live snapshot no longer references and the next
+    /// `Superseded` prune will delete (audit).
+    #[must_use]
+    pub const fn superseded_timeline_segments(self) -> Option<usize> {
+        self.superseded_timeline_segments
+    }
+
+    #[must_use]
+    pub const fn superseded_timeline_segment_bytes(self) -> Option<u64> {
+        self.superseded_timeline_segment_bytes
+    }
+
     #[must_use]
     pub const fn wal_reclaimable_bytes(self) -> Option<u64> {
         self.wal_reclaimable_bytes
@@ -1233,10 +1274,10 @@ pub(crate) const fn disjoint_live_tables(
 
 pub(crate) const fn footprint_for_detail(
     detail: DiagnosticsDetail,
-    live: DiagnosticsFootprintReport,
+    live: &DiagnosticsFootprintReport,
     audit: Option<DiagnosticsFootprintAudit>,
 ) -> DiagnosticsFootprintReport {
-    let mut report = live;
+    let mut report = *live;
     report.detail = detail;
     match (detail, audit) {
         (DiagnosticsDetail::Audit, Some(audit)) => report.with_audit(audit),

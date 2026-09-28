@@ -85,11 +85,23 @@ pub(crate) struct LifecycleFootprintAuditFacts {
     snapshot_bytes: u64,
     superseded_snapshots: usize,
     superseded_snapshot_bytes: u64,
+    /// #3643: the sealed timeline segments on disk, and the part the next
+    /// `Superseded` snapshot prune would delete.
+    timeline_segments: (usize, u64),
+    superseded_timeline_segments: (usize, u64),
     wal_reclaimable_bytes: u64,
     wal_tail_bytes: u64,
 }
 
 impl LifecycleFootprintAuditFacts {
+    pub(crate) const fn timeline_segments(&self) -> (usize, u64) {
+        self.timeline_segments
+    }
+
+    pub(crate) const fn superseded_timeline_segments(&self) -> (usize, u64) {
+        self.superseded_timeline_segments
+    }
+
     pub(crate) const fn unreferenced(&self) -> Option<(usize, u64)> {
         self.unreferenced
     }
@@ -218,6 +230,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             )
         });
         let (snapshots, superseded) = self.audit_snapshots(attested)?;
+        let (segments, superseded_segments) = self.audit_timeline_segments(attested)?;
         let (reclaimable, tail) = self.audit_wal_segments(covered_through)?;
         Ok(LifecycleFootprintAuditFacts {
             unreferenced: unreferenced.map(|tally| (tally.objects, tally.bytes)),
@@ -228,6 +241,8 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             snapshot_bytes: snapshots.bytes,
             superseded_snapshots: superseded.objects,
             superseded_snapshot_bytes: superseded.bytes,
+            timeline_segments: (segments.objects, segments.bytes),
+            superseded_timeline_segments: (superseded_segments.objects, superseded_segments.bytes),
             wal_reclaimable_bytes: reclaimable,
             wal_tail_bytes: tail,
         })
@@ -306,6 +321,36 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             all.add(bytes);
             if attested.is_some_and(|live| superseded_snapshot(snapshot.snapshot_id(), live)) {
                 superseded.add(bytes);
+            }
+        }
+        Ok((all, superseded))
+    }
+
+    /// #3643: the sealed timeline segments with sizes, and the part the next
+    /// `Superseded` snapshot prune would delete (unreferenced by the live
+    /// snapshot and sealed below it).
+    fn audit_timeline_segments(&self, attested: Option<u64>) -> LifecycleResult<(Tally, Tally)> {
+        let mut all = Tally::default();
+        let mut superseded = Tally::default();
+        // Resolved against the attested snapshot (never a stale cache); when
+        // its references cannot be read, nothing is counted as superseded.
+        let referenced = self.services.timeline_segments_referenced_by(attested);
+        for (segment, bytes) in self
+            .services
+            .snapshot()
+            .list_timeline_segment_sizes()
+            .map_err(snapshot_error)?
+        {
+            all.add(bytes);
+            if let (Some(live), Some(referenced)) = (attested, referenced.as_ref()) {
+                if crate::service::timeline_segment_is_dead(
+                    crate::service::TimelineSegmentPruneMode::Superseded,
+                    segment,
+                    live,
+                    referenced,
+                ) {
+                    superseded.add(bytes);
+                }
             }
         }
         Ok((all, superseded))

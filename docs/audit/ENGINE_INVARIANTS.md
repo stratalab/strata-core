@@ -1776,6 +1776,18 @@ than the cap. `recovery_budget.rs`'s seeding phase exits without `close()` on
 purpose: a large WAL tail is the crash scenario the envelope bounds, and a clean
 close would checkpoint it away.
 
+The retained timeline does not count toward that cap (#3643). It lives in sealed
+segment objects of at most 65,536 entries (`TIMELINE_CHUNK_ENTRIES`), each
+decoded on its own at recovery; the snapshot carries only bounded references
+(kind 5). Every durable decode on the recovery path is therefore bounded per
+object, and a database whose retained history alone exceeds the cap still
+checkpoints (the pre-1.2.6 kind-3 section counted toward it, so past about
+2.8 M retained commits every checkpoint deferred forever). The in-memory index
+stays proportional to the retained commits, as it always was.
+**Audit (#3643)**: `api_timeline_history_above_the_payload_cap_still_checkpoints`
+(`api/tests/maintenance.rs`); `segment_decode_rejects_each_header_defect` and
+the `TIMELINE_CHUNK_ENTRIES` bound in `format/timeline_segment.rs`.
+
 ### DUR-018: Covered WAL is released — a fully-covered active segment seals at truncation
 
 Retained WAL whose every record sits at or below the retention watermark is
@@ -1843,6 +1855,18 @@ a session boundary (the 952 MB field report, #3492 round 2, was reclaim cancelle
 at close and never woken at open). The proofs are unchanged (COW-001, ARCH-005,
 ARCH-009, CMP-004, MVCC-009, DUR-016); this contract fixes WHEN they run.
 
+The snapshot family has two object kinds since #3643: snapshots and the sealed
+timeline segments they reference. A snapshot prune reclaims both under one
+proof. `Superseded` deletes a segment only when the manifest-live snapshot does
+not reference it AND it was sealed below the live id; a checkpoint in flight
+seals under a higher id and re-uses only segments the live snapshot references,
+so nothing live or in flight is ever a candidate. `ReconcileToAttested` deletes
+every unreferenced segment; it runs only where no publish is in flight.
+Newest-N (`RetainNewest`) deletes none. The footprint reports segments as
+their own facts (`timeline_segment_*`, included in the total), superseded
+exactly when the next `Superseded` prune would delete them; the whole-database
+simulation's oracle and the engine ratchet both require none superseded.
+
 - **Open** (reopened databases only): bootstrap queues the table-object mark, a
   `ReconcileToAttested` snapshot prune (every snapshot but the attested one), and
   a quarantine purge whenever the recovered quarantine inventory is non-empty
@@ -1880,7 +1904,8 @@ every reclaim pass reports what it freed (#3622).
 `close_flushes_branch_truth_table`, `quiescence_should_arm_truth_table`,
 `should_service_low_tier_truth_table`, `reopen_owes_quarantine_purge_truth_table`,
 `family_frees_disk_truth_table`, `reclaim_waits_on_reader_truth_table`,
-`round_asks_idle_wake_truth_table`. Call sites (`crates/storage/src/api/tests/maintenance.rs`):
+`round_asks_idle_wake_truth_table`, `timeline_segment_is_dead_truth_table`,
+`timeline_segment_prune_mode_truth_table`. Call sites (`crates/storage/src/api/tests/maintenance.rs`):
 `api_close_reclaim_is_bounded_by_the_budget`,
 `api_close_reclaim_truncates_the_wal_behind_the_close_checkpoint`,
 `api_close_flushes_a_large_delta_into_tables_before_its_checkpoint`,
@@ -1891,12 +1916,15 @@ every reclaim pass reports what it freed (#3622).
 `api_idle_wake_retries_a_reader_deferred_sweep_without_any_commit`,
 `api_reader_release_after_the_idle_retry_rearms_reclaim`,
 `api_reader_release_with_nothing_owed_arms_no_wake`,
-`api_close_cancels_an_armed_idle_wake`. Engine:
+`api_close_cancels_an_armed_idle_wake`,
+`api_reopen_reclaims_timeline_segments_no_snapshot_references`,
+`api_a_reused_timeline_segment_survives_the_superseded_prune`. Engine:
 `clean_close_checkpoints_every_branch_and_truncates_the_wal`,
 `clean_close_then_reopen_replays_nothing`,
 `two_user_branches_with_durable_bases_checkpoint_and_reclaim_wal`. Oracles: the
 whole-database simulation's footprint audits and their sabotage twins
-(`sabotage_unreclaimed_debt_is_caught`, `sabotage_superseded_snapshot_is_caught`), and
+(`sabotage_unreclaimed_debt_is_caught`, `sabotage_superseded_snapshot_is_caught`,
+`sabotage_unreferenced_timeline_segment_is_caught`), and
 the per-PR footprint ratchet (`crates/engine/tests/storage_footprint_ratchet.rs`: per
 primitive, clean at every reopen and under a named total/logical ceiling). A regression
 of any reclaim family must fail the ratchet or the simulation, never only a unit test.

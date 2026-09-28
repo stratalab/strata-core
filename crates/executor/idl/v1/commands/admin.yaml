@@ -109,6 +109,12 @@ commands:
         - field: /data/superseded_snapshots
         - field: /data/superseded_snapshot_bytes
           as: size
+        - field: /data/timeline_segment_objects
+        - field: /data/timeline_segment_bytes
+          as: size
+        - field: /data/superseded_timeline_segments
+        - field: /data/superseded_timeline_segment_bytes
+          as: size
         - field: /data/wal_retained_bytes
           as: size
         - field: /data/wal_active_bytes

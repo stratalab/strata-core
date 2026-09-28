@@ -398,7 +398,9 @@ mod tests {
         // Re-pinned for #3643: the timeline moved out of each snapshot into
         // sealed segments, so a pruned snapshot frees fewer bytes and its
         // superseded tail segment frees the rest (every other fact unchanged).
-        assert_eq!(outcome.bytes_reclaimed(), 24024, "{outcome:?}");
+        // Re-pinned for #3643 slice 3: fork dedup shares identical tails, so
+        // fewer duplicate segments are written and reclaimed.
+        assert_eq!(outcome.bytes_reclaimed(), 23676, "{outcome:?}");
         assert_eq!(outcome.clean_closes(), 1, "{outcome:?}");
         assert_eq!(outcome.orphaned_snapshots_planted(), 1, "{outcome:?}");
     }

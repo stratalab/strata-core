@@ -194,8 +194,44 @@
             "null"
           ]
         },
+        "superseded_timeline_segment_bytes": {
+          "description": "Bytes of those segments (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "superseded_timeline_segments": {
+          "description": "Segments the live snapshot no longer references, which the next\nsnapshot prune deletes (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeline_segment_bytes": {
+          "description": "Bytes of those segments (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeline_segment_objects": {
+          "description": "Sealed retained-timeline segment objects on disk: the commit history\nthe checkpoint snapshots reference (audit).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "total_bytes": {
-          "description": "The bytes of every storage family — table objects in use, unreferenced\nand quarantined objects, snapshots and the WAL (from the audit's own\nlisting) — each file counted once, when every part is known (audit).\nSmall metadata objects (manifests, locks) are outside the families.",
+          "description": "The bytes of every storage family — table objects in use, unreferenced\nand quarantined objects, snapshots, timeline segments and the WAL (from the audit's own\nlisting) — each file counted once, when every part is known (audit).\nSmall metadata objects (manifests, locks) are outside the families.",
           "format": "uint64",
           "minimum": 0,
           "type": [

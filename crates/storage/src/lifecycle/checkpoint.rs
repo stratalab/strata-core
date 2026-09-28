@@ -1871,6 +1871,14 @@ struct TimelineAdoption {
 }
 
 impl TimelineCheckpoint {
+    /// Every reference the snapshot makes (the live set once it completes).
+    fn referenced_refs(&self) -> Vec<crate::format::TimelineSegmentRef> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.refs.iter().copied())
+            .collect()
+    }
+
     /// Every segment the snapshot references (the live set once it completes).
     fn referenced(&self) -> std::collections::BTreeSet<crate::layout::TimelineSegmentId> {
         self.groups
@@ -1888,10 +1896,23 @@ impl TimelineCheckpoint {
 /// kind-5 groups. Each new segment is sealed under `snapshot_id` with the next
 /// ordinal; its reference comes from its encoding, so the snapshot section
 /// (and the payload-cap check) is complete before anything is published.
+///
+/// Fork dedup: a chunk whose reference matches one the live snapshot already
+/// makes, or one this checkpoint already sealed — same version range, entry
+/// count and CRC — is re-referenced, not rewritten. Commit versions are database-global, so a matching range names
+/// the same commits on every branch, and the CRC pins the one field that can
+/// differ (a known versus unknown `committed_at`).
 fn prepare_timeline_checkpoint(
     snapshot_id: u64,
     plans: &[BranchTimelinePlan],
+    live: &[crate::format::TimelineSegmentRef],
 ) -> LifecycleResult<TimelineCheckpoint> {
+    // Chunks the live snapshot references, plus (as they are sealed) the ones
+    // this checkpoint writes, so two branches sharing a chunk share it at once.
+    let mut shared: std::collections::HashMap<_, _> = live
+        .iter()
+        .map(|segment| (timeline_segment_content_key(segment), *segment))
+        .collect();
     let mut plans: Vec<&BranchTimelinePlan> = plans.iter().collect();
     plans.sort_by_key(|plan| *plan.branch_id.as_bytes());
     let mut checkpoint = TimelineCheckpoint {
@@ -1924,6 +1945,11 @@ fn prepare_timeline_checkpoint(
             last_version: last.commit_version,
             crc32: u32::from_le_bytes(crc),
         };
+        let key = timeline_segment_content_key(&expected);
+        if let Some(existing) = shared.get(&key) {
+            return Ok(*existing);
+        }
+        shared.insert(key, expected);
         writes.push(TimelineSegmentWrite {
             id: crate::layout::TimelineSegmentId {
                 sealing_snapshot_id: snapshot_id,
@@ -1967,6 +1993,19 @@ fn prepare_timeline_checkpoint(
         });
     }
     Ok(checkpoint)
+}
+
+/// #3643: what makes two segments interchangeable — their content, not their
+/// name.
+fn timeline_segment_content_key(
+    segment: &crate::format::TimelineSegmentRef,
+) -> (u64, u64, u32, u32) {
+    (
+        segment.first_version.as_u64(),
+        segment.last_version.as_u64(),
+        segment.entry_count,
+        segment.crc32,
+    )
 }
 
 /// #3643: publish a checkpoint's new segments, each before the snapshot that
@@ -2169,14 +2208,19 @@ fn publish_checkpoint_rows(
         u64::try_from(rows.len()).map_err(|_| LifecycleError::CheckpointPublicationFailed {
             reason: "checkpoint row count must fit in u64",
         })?;
-    validate_snapshot_id_advances(services.manifest(), request.snapshot_id())?;
+    let live_snapshot_id =
+        validate_snapshot_id_advances(services.manifest(), request.snapshot_id())?;
     let mut sections = Vec::with_capacity(3 + request.extra_sections().len());
     sections.push(encode_checkpoint_row_section(rows).map_err(format_error)?);
     // #3643: the retained timeline, as references to sealed segment objects
     // (only branches whose index was provably complete at the watermark). The
     // references are bounded, so the timeline never pushes a checkpoint over
     // the payload cap; the segments publish below, before the snapshot.
-    let timeline = prepare_timeline_checkpoint(request.snapshot_id(), &collection.timeline_plans)?;
+    let timeline = prepare_timeline_checkpoint(
+        request.snapshot_id(),
+        &collection.timeline_plans,
+        &services.timeline_segment_refs_of(live_snapshot_id),
+    )?;
     if !timeline.groups.is_empty() {
         sections.push(
             crate::format::encode_snapshot_timeline_segments_section(&timeline.groups)
@@ -2228,7 +2272,7 @@ fn publish_checkpoint_rows(
             perf_trace::record_lifecycle_checkpoint_execution();
             // #3643: the snapshot is live — its segments are what the prune
             // spares, and each index may now re-reference what it sealed.
-            services.set_live_timeline_segments(request.snapshot_id(), timeline.referenced());
+            services.set_live_timeline_segments(request.snapshot_id(), timeline.referenced_refs());
             for adoption in &timeline.adoptions {
                 adoption
                     .index
@@ -2651,17 +2695,17 @@ pub(crate) const fn next_checkpoint_snapshot_id_after_open(
 fn validate_snapshot_id_advances(
     manifest: &DatabaseManifestService<'_>,
     snapshot_id: u64,
-) -> LifecycleResult<()> {
-    let current = manifest.load_required().map_err(manifest_error)?;
-    if current
-        .snapshot_id()
-        .is_some_and(|current| snapshot_id <= current)
-    {
+) -> LifecycleResult<Option<u64>> {
+    let current = manifest
+        .load_required()
+        .map_err(manifest_error)?
+        .snapshot_id();
+    if current.is_some_and(|current| snapshot_id <= current) {
         return Err(LifecycleError::CheckpointPublicationFailed {
             reason: "checkpoint snapshot id must advance",
         });
     }
-    Ok(())
+    Ok(current)
 }
 
 fn checkpoint_error(error: CheckpointServiceError) -> LifecycleError {
@@ -2801,7 +2845,8 @@ mod timeline_checkpoint_tests {
         let sealing = plan_for(0x01, 100, chunk + 2);
         let empty = plan_for(0x03, 1, 0);
 
-        let prepared = prepare_timeline_checkpoint(7, &[reusing, sealing, empty]).expect("prepare");
+        let prepared =
+            prepare_timeline_checkpoint(7, &[reusing, sealing, empty], &[]).expect("prepare");
 
         let branches: Vec<u8> = prepared
             .groups
@@ -2868,5 +2913,53 @@ mod timeline_checkpoint_tests {
         assert_eq!(adoption.tail, Some(sealed[1]));
         assert_eq!(prepared.adoptions[1].tail, Some(reused_tail));
         assert_eq!(prepared.adoptions[2].tail, None);
+    }
+
+    /// #3643 fork dedup: a chunk matching a live reference, or one sealed
+    /// earlier in the same checkpoint, is re-referenced and not rewritten; a
+    /// same-range chunk with different content (its CRC differs) is sealed.
+    #[test]
+    fn prepare_timeline_checkpoint_dedups_chunks_by_content() {
+        let chunk = TIMELINE_CHUNK_ENTRIES as u64;
+        let first =
+            prepare_timeline_checkpoint(7, &[plan_for(0x01, 1, chunk + 2)], &[]).expect("prepare");
+        let sealed_chunk = first.groups[0].refs[0];
+
+        // A later checkpoint's sibling with the same first chunk re-uses it.
+        let second =
+            prepare_timeline_checkpoint(8, &[plan_for(0x02, 1, chunk + 5)], &[sealed_chunk])
+                .expect("prepare");
+        assert_eq!(second.groups[0].refs[0], sealed_chunk);
+        assert_eq!(second.writes.len(), 1, "only the tail is written");
+        assert_eq!(second.writes[0].expected.ordinal, 0);
+
+        // Two branches with the same history in one checkpoint share every
+        // segment, including the tail.
+        let twins = prepare_timeline_checkpoint(
+            9,
+            &[plan_for(0x03, 1, chunk + 2), plan_for(0x04, 1, chunk + 2)],
+            &[],
+        )
+        .expect("prepare");
+        assert_eq!(twins.writes.len(), 2);
+        assert_eq!(twins.groups[0].refs, twins.groups[1].refs);
+
+        // Same versions, different content (timestamps): not shared.
+        let mut other = plan_for(0x05, 1, chunk + 2);
+        let index = RetainedCommitTimeline::new();
+        index.mark_complete_from_birth();
+        for version in 1..=chunk + 2 {
+            index.observe(
+                CommitVersion::new(version),
+                Timestamp::from_micros(version + 1),
+            );
+        }
+        other.plan = index
+            .persist_plan(CommitVersion::new(chunk + 2))
+            .expect("plan");
+        other.index = index;
+        let distinct = prepare_timeline_checkpoint(10, &[other], &[sealed_chunk]).expect("prepare");
+        assert_ne!(distinct.groups[0].refs[0], sealed_chunk);
+        assert_eq!(distinct.writes.len(), 2);
     }
 }

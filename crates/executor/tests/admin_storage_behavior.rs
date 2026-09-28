@@ -89,6 +89,11 @@ fn storage_audit_gathers_the_listing_backed_facts_and_a_total() {
         Some(1),
         "the creation checkpoint is the one snapshot: {audit:?}"
     );
+    // #3643: it references a timeline tail segment for each of the two
+    // branches (`default` and `_system_`, whose histories differ).
+    assert_eq!(audit.timeline_segment_objects, Some(2), "{audit:?}");
+    assert!(audit.timeline_segment_bytes.is_some_and(|bytes| bytes > 0));
+    assert_eq!(audit.superseded_timeline_segments, Some(0));
     assert!(audit.snapshot_bytes.is_some_and(|bytes| bytes > 0));
     assert_eq!(audit.superseded_snapshots, Some(0));
     assert_eq!(audit.wal_reclaimable_bytes, Some(0));
@@ -98,6 +103,7 @@ fn storage_audit_gathers_the_listing_backed_facts_and_a_total() {
         Some(
             audit.live_table_bytes
                 + audit.snapshot_bytes.expect("audit")
+                + audit.timeline_segment_bytes.expect("audit")
                 + audit.wal_reclaimable_bytes.expect("audit")
                 + audit.wal_tail_bytes.expect("audit")
         ),
@@ -112,6 +118,7 @@ fn storage_audit_gathers_the_listing_backed_facts_and_a_total() {
     assert_eq!(json["type"], "storage");
     assert_eq!(json["data"]["audit"], true);
     assert_eq!(json["data"]["snapshot_objects"], 1);
+    assert_eq!(json["data"]["timeline_segment_objects"], 2);
     assert!(json["data"]["reclaim"]["total_passes"].is_u64());
     let round_trip: Output = serde_json::from_value(json).expect("deserialize");
     assert!(matches!(round_trip, Output::Storage(_)));

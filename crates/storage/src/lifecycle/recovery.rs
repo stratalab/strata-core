@@ -431,9 +431,12 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
         // snapshot they describe (a snapshot without the section references
         // nothing).
         let section_groups = decode_timeline_segment_groups(sections)?.unwrap_or_default();
-        self.shell
-            .services()
-            .set_live_timeline_segments(snapshot_id, referenced_timeline_segments(&section_groups));
+        self.shell.services().set_live_timeline_segments(
+            snapshot_id,
+            section_groups
+                .iter()
+                .flat_map(|group| group.refs.iter().copied()),
+        );
         let mut timeline_groups = Vec::with_capacity(section_groups.len());
         let mut loaded_segment_groups = Vec::with_capacity(section_groups.len());
         // A segment shared by several branches (fork dedup) is read once.
@@ -1219,20 +1222,6 @@ fn decode_timeline_segment_groups(
         );
     }
     Ok(recorded)
-}
-
-/// #3643: every segment a snapshot's groups reference.
-pub(crate) fn referenced_timeline_segments(
-    groups: &[SnapshotTimelineSegmentGroup],
-) -> std::collections::BTreeSet<crate::layout::TimelineSegmentId> {
-    groups
-        .iter()
-        .flat_map(|group| group.refs.iter())
-        .map(|segment| crate::layout::TimelineSegmentId {
-            sealing_snapshot_id: segment.sealing_snapshot_id,
-            ordinal: u64::from(segment.ordinal),
-        })
-        .collect()
 }
 
 /// Seed a branch's retained-timeline index from its decoded group, if present,

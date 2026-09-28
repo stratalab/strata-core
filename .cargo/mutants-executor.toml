@@ -46,6 +46,18 @@ exclude_re = [
     # `crates/hub/tests/phase_a_conformance.rs`.
     "replace Executor::execute_hub_list_datasets -> Result<Output, ExecutorError> with Ok\\(Default::default\\(\\)\\)",
 
+    # output_admin_storage (admin_convert): the `admin.storage` field mapping,
+    # same class as the entry above. Its only mutant is the whole-body
+    # `Default::default()` for `OutputAdminStorage` (the wire `AdminStorage`),
+    # which derives no `Default` (a default footprint is a value no command
+    # returns), so any diff
+    # that touches only this mapping leaves lane B with nothing viable to judge
+    # (#3337); #3643 slice 3 added its four timeline-segment fields. Strength
+    # mechanism: `admin_storage_behavior.rs` asserts every mapped field,
+    # including the segment fields and the JSON envelope, through the real
+    # command.
+    "replace output_admin_storage -> OutputAdminStorage with Default::default\\(\\)",
+
     # verify_case (idl_tooling::verify): the fixture-verifier orchestrator — it
     # reads every response fixture, replays it against a scratch executor, and
     # diffs. Its strength mechanism is the `verify-fixtures` CI gate (which runs

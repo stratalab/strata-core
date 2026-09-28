@@ -108,6 +108,7 @@ pub(crate) fn footprint_total_bytes(
     unreferenced_bytes: Option<u64>,
     quarantined_bytes: Option<u64>,
     snapshot_bytes: Option<u64>,
+    timeline_segment_bytes: Option<u64>,
     wal_bytes: Option<u64>,
 ) -> Option<u64> {
     Some(
@@ -115,6 +116,7 @@ pub(crate) fn footprint_total_bytes(
             .saturating_add(unreferenced_bytes?)
             .saturating_add(quarantined_bytes?)
             .saturating_add(snapshot_bytes?)
+            .saturating_add(timeline_segment_bytes?)
             .saturating_add(wal_bytes?),
     )
 }
@@ -140,6 +142,7 @@ pub(crate) fn storage_footprint_from_diagnostics(
     let unreferenced_bytes = footprint.unreferenced_bytes();
     let quarantined_bytes = quarantine.quarantined_bytes();
     let snapshot_bytes = footprint.snapshot_bytes();
+    let timeline_segment_bytes = footprint.timeline_segment_bytes();
     let wal_retained_bytes = footprint.wal_retained_bytes();
     let wal_active_bytes = footprint.wal_active_bytes();
     let wal_reclaimable_bytes = footprint.wal_reclaimable_bytes();
@@ -160,6 +163,10 @@ pub(crate) fn storage_footprint_from_diagnostics(
         snapshot_bytes,
         superseded_snapshots: footprint.superseded_snapshots().map(count),
         superseded_snapshot_bytes: footprint.superseded_snapshot_bytes(),
+        timeline_segment_objects: footprint.timeline_segment_objects().map(count),
+        timeline_segment_bytes,
+        superseded_timeline_segments: footprint.superseded_timeline_segments().map(count),
+        superseded_timeline_segment_bytes: footprint.superseded_timeline_segment_bytes(),
         wal_reclaimable_bytes,
         wal_tail_bytes,
         total_bytes: footprint_total_bytes(
@@ -167,6 +174,7 @@ pub(crate) fn storage_footprint_from_diagnostics(
             unreferenced_bytes,
             quarantined_bytes,
             snapshot_bytes,
+            timeline_segment_bytes,
             footprint_wal_bytes(wal_reclaimable_bytes, wal_tail_bytes, wal_retained_bytes),
         ),
         reclaim: StorageReclaimStatus {
@@ -280,22 +288,22 @@ mod tests {
     #[test]
     fn footprint_total_bytes_truth_table() {
         assert_eq!(
-            footprint_total_bytes(100, Some(20), Some(3), Some(400), Some(5000)),
-            Some(5523)
+            footprint_total_bytes(100, Some(20), Some(3), Some(400), Some(60_000), Some(5000)),
+            Some(65_523)
         );
         assert_eq!(
-            footprint_total_bytes(0, Some(0), Some(0), Some(0), Some(0)),
+            footprint_total_bytes(0, Some(0), Some(0), Some(0), Some(0), Some(0)),
             Some(0)
         );
         assert_eq!(
-            footprint_total_bytes(u64::MAX, Some(1), Some(1), Some(1), Some(1)),
+            footprint_total_bytes(u64::MAX, Some(1), Some(1), Some(1), Some(1), Some(1)),
             Some(u64::MAX),
             "the total saturates"
         );
-        for missing in 0..4 {
+        for missing in 0..5 {
             let part = |index: usize| (index != missing).then_some(7);
             assert_eq!(
-                footprint_total_bytes(1, part(0), part(1), part(2), part(3)),
+                footprint_total_bytes(1, part(0), part(1), part(2), part(3), part(4)),
                 None,
                 "an unknown part {missing} leaves the total unknown"
             );
