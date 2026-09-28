@@ -3614,7 +3614,17 @@ impl<'a> StorageRuntime<'a> {
         use crate::lifecycle::RuntimeReadHandles as _;
         match &self.inner {
             StorageRuntimeInner::DurableOwned(slot) => slot.lock().view_release_signal(),
-            StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => None,
+            StorageRuntimeInner::Cache(slot) => slot.lock().view_release_signal(),
+            StorageRuntimeInner::Closed => None,
+        }
+    }
+
+    /// #3645: whether a view this durable runtime retired is still held.
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn retired_readers_alive_for_test(&self) -> bool {
+        match &self.inner {
+            StorageRuntimeInner::DurableOwned(slot) => slot.lock().retired_readers_alive(),
+            StorageRuntimeInner::Cache(_) | StorageRuntimeInner::Closed => false,
         }
     }
 

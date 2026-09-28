@@ -274,3 +274,26 @@ pub(crate) fn load_from_registry(
 ) -> Option<Arc<BranchReadView>> {
     registry.load().get(&branch_id).map(|slot| slot.load())
 }
+
+#[cfg(test)]
+mod release_signal_tests {
+    use super::ViewReleaseSignal;
+
+    /// #3645: the signal's debug form carries its three facts.
+    #[test]
+    fn view_release_signal_debug_reports_its_facts() {
+        let signal = ViewReleaseSignal::default();
+        signal.set_reclaim_waits_on_reader(true);
+        let rendered = format!("{signal:?}");
+        for fact in [
+            "ViewReleaseSignal",
+            "reclaim_waits_on_reader: true",
+            "retired_alive: 0",
+            "waker_installed: false",
+        ] {
+            assert!(rendered.contains(fact), "{fact} missing from {rendered}");
+        }
+        signal.install_waker(Box::new(|| {}));
+        assert!(format!("{signal:?}").contains("waker_installed: true"));
+    }
+}

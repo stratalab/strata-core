@@ -4911,3 +4911,24 @@ fn record_timestamp(
     *timestamp_max =
         Some((*timestamp_max).map_or(commit_timestamp, |current| current.max(commit_timestamp)));
 }
+
+#[cfg(test)]
+mod view_release_handle_tests {
+    use std::sync::Arc;
+
+    use super::ViewReleaseHandle;
+    use crate::branch::snapshot::{ViewRelease, ViewReleaseSignal};
+
+    /// #3645: a view's release link never takes part in equality, so two views
+    /// with the same data compare equal whatever their links.
+    #[test]
+    fn view_release_handle_is_always_equal() {
+        let linked = ViewReleaseHandle(Some(Arc::new(ViewRelease::new(Arc::new(
+            ViewReleaseSignal::default(),
+        )))));
+        let unlinked = ViewReleaseHandle::default();
+        assert_eq!(linked, unlinked);
+        assert_eq!(unlinked, unlinked.clone());
+        assert_eq!(linked, linked.clone());
+    }
+}

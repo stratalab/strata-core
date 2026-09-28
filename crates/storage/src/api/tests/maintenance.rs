@@ -4506,6 +4506,34 @@ fn api_close_removes_the_view_release_waker() {
     drop(held_view);
 }
 
+/// #3645: only a durable runtime has a release signal — cache mode runs no
+/// reclaim, so nothing can wait on a reader there.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_only_a_durable_runtime_has_a_view_release_signal() {
+    assert!(open_manual_runtime()
+        .view_release_signal_for_test()
+        .is_none());
+    let (runtime, _root) = open_inline_durable_runtime(
+        "maintenance-durable-has-release-signal",
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+    );
+    assert!(runtime.view_release_signal_for_test().is_some());
+    // The runtime's debug form carries the slot, including its release signal.
+    let rendered = format!("{runtime:?}");
+    for fact in [
+        "RuntimeSlot",
+        "published_branches",
+        "commit_waiters",
+        "release_signal: Some(ViewReleaseSignal",
+    ] {
+        assert!(
+            rendered.contains(fact),
+            "{fact} missing from the runtime debug form"
+        );
+    }
+}
+
 /// #3645 direction control: releasing a retired reader when no reclaim waits on
 /// a reader arms nothing — the release signal is not a periodic poll.
 #[cfg(feature = "localfs")]
@@ -4529,7 +4557,12 @@ fn api_reader_release_with_nothing_owed_arms_no_wake() {
     assert!(!runtime.reclaim_owed_for_test());
     let started_before = runtime.maintenance_status().expect("status").started();
 
+    assert!(
+        runtime.retired_readers_alive_for_test(),
+        "the flush retired the held view"
+    );
     drop(held_view);
+    assert!(!runtime.retired_readers_alive_for_test());
     assert!(
         runtime.advance_maintenance_clock_for_test(std::time::Duration::from_millis(
             IDLE_WAKE_DEBOUNCE_MILLIS * 10
