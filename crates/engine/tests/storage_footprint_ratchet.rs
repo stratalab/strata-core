@@ -58,10 +58,11 @@ const JSON_CEILING: f64 = 0.21; // measured 0.196
 const EVENT_CEILING: f64 = 0.66; // measured 0.627
 const VECTOR_CEILING: f64 = 0.73; // measured 0.690
 const GRAPH_CEILING: f64 = 0.35; // measured 0.326
-/// The never-flushed event log on the production scheduler: every row lives in
-/// the close checkpoint's snapshot, which is stored uncompressed (#3625).
-/// Measured 3.473-3.474 across ten runs. Lower it when #3625 lands.
-const NEVER_FLUSHED_EVENT_CEILING: f64 = 3.6;
+/// The never-flushed event log on the production scheduler: its rows reach
+/// tables only through the clean close's flush of a large delta (#3625), so
+/// this ceiling holds that flush. Measured 0.612 (3.47 before #3625, when the
+/// close snapshot carried every row uncompressed).
+const NEVER_FLUSHED_EVENT_CEILING: f64 = 0.65;
 
 #[derive(Clone, Copy, Debug)]
 enum Primitive {

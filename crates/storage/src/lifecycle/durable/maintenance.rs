@@ -478,6 +478,16 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         branch_id: strata_core::BranchId,
     ) -> LifecycleResult<()> {
         require_admitted(self.state, LifecycleOperationKind::OrdinaryMaintenance)?;
+        self.rotate_active_for_flush_unadmitted(branch_id)
+    }
+
+    /// The rotation behind [`Self::rotate_active_for_flush`], without the
+    /// admission check: the close path (#3625) flushes after admission has
+    /// already moved to closing, the way its checkpoint does.
+    pub(super) fn rotate_active_for_flush_unadmitted(
+        &mut self,
+        branch_id: strata_core::BranchId,
+    ) -> LifecycleResult<()> {
         let generation = self
             .branch_catalog
             .registry()
@@ -550,6 +560,15 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         request: &FlushFrozenRequest,
     ) -> LifecycleResult<FlushFrozenOutcome> {
         require_admitted(self.state, LifecycleOperationKind::OrdinaryMaintenance)?;
+        self.flush_frozen_unadmitted(request)
+    }
+
+    /// The flush behind [`Self::flush_frozen`], without the admission check
+    /// (see [`Self::rotate_active_for_flush_unadmitted`]).
+    pub(super) fn flush_frozen_unadmitted(
+        &mut self,
+        request: &FlushFrozenRequest,
+    ) -> LifecycleResult<FlushFrozenOutcome> {
         let branch_id = request.branch_id();
         // Coordinate this foreground publish with the background drain's off-lock fsync via the
         // per-branch publish slot. The slot is busy only while a background publish for this same
