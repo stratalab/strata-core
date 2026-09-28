@@ -14,8 +14,8 @@ use crate::data::vector::{VectorArtifactStore, VectorService};
 use crate::diagnostics::EngineError;
 pub use crate::persistence::MemoryBudgetSource;
 use crate::persistence::{
-    close_summary_is_durable, maintenance_scheduling_for_storage, PersistenceOpenSummary,
-    PersistenceOpenTarget, StoragePersistence,
+    close_summary_is_durable, storage_test_seams, PersistenceOpenSummary, PersistenceOpenTarget,
+    StoragePersistence,
 };
 #[cfg(any(test, feature = "testkit"))]
 use crate::persistence::{
@@ -184,13 +184,9 @@ impl Database {
         // #3502 Slice D2: map the user-facing retention policy to the keep-newer-
         // than window the storage boundary consumes (`None` = KeepAll).
         let version_retention_window = options.version_retention().retained_window();
-        let maintenance_scheduling = maintenance_scheduling_for_storage(&options);
+        let seams = storage_test_seams(&options);
         Self::open(
-            PersistenceOpenTarget::DurableLocal(
-                path.into(),
-                options.durability(),
-                maintenance_scheduling,
-            ),
+            PersistenceOpenTarget::DurableLocal(path.into(), options.durability(), seams),
             DatabaseOpenTarget::DurableLocal,
             options.into_default_branch(),
             memory_budget_bytes,
