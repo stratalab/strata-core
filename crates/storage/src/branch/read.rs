@@ -1031,9 +1031,39 @@ pub(crate) struct BranchReadView {
     /// `max(timeline.min_version, this)` raises `RetainedHistoryUnavailable`
     /// rather than returning a below-floor survivor.
     retained_history_floor: Option<CommitVersion>,
+    /// #3645: the link to the publisher's release signal (absent for a view
+    /// that was never published).
+    release: ViewReleaseHandle,
 }
 
+/// #3645: a view's optional release link. Views compare by their data, so the
+/// handle takes no part in equality.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ViewReleaseHandle(Option<Arc<super::snapshot::ViewRelease>>);
+
+impl PartialEq for ViewReleaseHandle {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ViewReleaseHandle {}
+
 impl BranchReadView {
+    /// #3645: link this (freshly captured, not yet shared) view to the
+    /// publisher's release signal.
+    pub(crate) fn attach_release(&mut self, signal: Arc<super::snapshot::ViewReleaseSignal>) {
+        self.release = ViewReleaseHandle(Some(Arc::new(super::snapshot::ViewRelease::new(signal))));
+    }
+
+    /// #3645: the publisher superseded this view; its last release now fires
+    /// the release signal.
+    pub(crate) fn mark_retired(&self) {
+        if let Some(release) = &self.release.0 {
+            release.mark_retired();
+        }
+    }
+
     pub(crate) fn new(
         branch_id: BranchId,
         active: MutableTable,
@@ -1070,6 +1100,7 @@ impl BranchReadView {
             timestamp_coverage: BranchTimestampCoverage::unknown(),
             retained_timeline: None,
             retained_history_floor: None,
+            release: ViewReleaseHandle::default(),
         })
     }
 
@@ -1099,6 +1130,7 @@ impl BranchReadView {
             timestamp_coverage: BranchTimestampCoverage::unknown(),
             retained_timeline: None,
             retained_history_floor: None,
+            release: ViewReleaseHandle::default(),
         })
     }
 

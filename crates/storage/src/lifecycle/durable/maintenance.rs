@@ -1579,6 +1579,26 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         self.maintenance.idle_wake_pending()
     }
 
+    /// Whether any view the publisher retired is still held by a reader.
+    pub(crate) fn retired_readers_alive(&mut self) -> bool {
+        self.snapshot_publisher.retired_views_alive()
+    }
+
+    /// #3645: publish whether reclaim is waiting on a held reader to the view
+    /// release signal, so a retired view's last release re-arms the idle wake.
+    /// Returns the synced value.
+    pub(crate) fn sync_view_release_signal(&self) -> bool {
+        let waiting = crate::lifecycle::reclaim_waits_on_reader(
+            self.reclaim_owed(),
+            self.reclaim_ledger()
+                .last(crate::lifecycle::ReclaimFamily::TableObjectSweep),
+        );
+        self.snapshot_publisher
+            .release_signal()
+            .set_reclaim_waits_on_reader(waiting);
+        waiting
+    }
+
     /// Record what woke the drain round that is starting (slice 8).
     pub(crate) fn record_background_wake(&mut self, origin: crate::lifecycle::ReclaimWakeOrigin) {
         let at_version = self.visible.visible_version();

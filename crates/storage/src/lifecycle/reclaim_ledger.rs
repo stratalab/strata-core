@@ -70,6 +70,16 @@ pub(crate) const fn reclaim_owed_transition(
     }
 }
 
+/// #3645: whether reclaim is waiting on a held reader — debt is owed and the
+/// last table-object sweep deferred because a reader pinned the manifest. Only
+/// then can a reader's release be the event that unblocks reclaim.
+pub(crate) fn reclaim_waits_on_reader(owed: bool, last_sweep: Option<ReclaimPass>) -> bool {
+    owed && last_sweep.is_some_and(|pass| {
+        pass.outcome() == ReclaimOutcome::Deferred
+            && pass.deferral() == Some(MaintenanceDeferralReason::ReaderPinned)
+    })
+}
+
 /// #3619: whether a family's reported bytes leave the disk. The sweep only
 /// moves an object into quarantine (its bytes are freed later by the purge,
 /// which reports them again), so counting it too would report the same space
@@ -696,6 +706,52 @@ mod tests {
         assert!(family_frees_disk(ReclaimFamily::QuarantinePurge));
         assert!(family_frees_disk(ReclaimFamily::SnapshotPrune));
         assert!(family_frees_disk(ReclaimFamily::WalTruncation));
+    }
+
+    /// #3645: reclaim waits on a reader only when debt is owed and the last
+    /// sweep deferred because a reader pinned the manifest.
+    #[test]
+    fn reclaim_waits_on_reader_truth_table() {
+        let sweep = |status, reason: Option<MaintenanceDeferralReason>| {
+            let outcome = MaintenanceOutcome::new(MaintenanceTaskKind::Quarantine, status)
+                .with_task_scope(MaintenanceTaskScope::Quarantine);
+            let outcome = match reason {
+                Some(reason) => outcome.with_deferral_reason(reason),
+                None => outcome,
+            };
+            classify_reclaim(&outcome)
+                .expect("sweep is a reclaim family")
+                .1
+        };
+        let reader = sweep(
+            MaintenanceOutcomeStatus::Deferred,
+            Some(MaintenanceDeferralReason::ReaderPinned),
+        );
+        let referenced = sweep(
+            MaintenanceOutcomeStatus::Deferred,
+            Some(MaintenanceDeferralReason::Referenced),
+        );
+        let unclassified = sweep(MaintenanceOutcomeStatus::Deferred, None);
+        let completed = sweep(MaintenanceOutcomeStatus::Completed, None);
+        assert_eq!(
+            reader.deferral(),
+            Some(MaintenanceDeferralReason::ReaderPinned)
+        );
+        for (owed, last, expected) in [
+            (true, Some(reader), true),
+            (false, Some(reader), false),
+            (true, Some(referenced), false),
+            (true, Some(unclassified), false),
+            (true, Some(completed), false),
+            (true, None, false),
+            (false, None, false),
+        ] {
+            assert_eq!(
+                super::reclaim_waits_on_reader(owed, last),
+                expected,
+                "owed={owed} last={last:?}"
+            );
+        }
     }
 
     /// Space-reclamation contract §3.1 (slice 8): the one rule that moves

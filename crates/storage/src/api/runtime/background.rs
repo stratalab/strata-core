@@ -39,19 +39,17 @@ pub(super) struct RuntimeSlot<R> {
     /// drains interleave freely. Bounded by the drains' one-task fairness
     /// floor so maintenance never starves into the admission stall wall.
     commit_waiters: Arc<AtomicUsize>,
+    /// #3645: the view release signal this slot installed its waker on, kept so
+    /// shutdown can remove it.
+    release_signal: Option<Arc<crate::branch::snapshot::ViewReleaseSignal>>,
     #[cfg(test)]
     pub(super) background_block_wait: BackgroundBlockWaitConfig,
 }
 
-pub(super) type BackgroundDrainFn = Arc<
-    dyn Fn(
-            BackgroundDrainLimits,
-            Arc<dyn MaintenanceClock>,
-            ReclaimWakeOrigin,
-        ) -> BackgroundDrainRound
-        + Send
-        + Sync,
->;
+pub(super) type BackgroundDrainInner = dyn Fn(BackgroundDrainLimits, Arc<dyn MaintenanceClock>, ReclaimWakeOrigin) -> BackgroundDrainRound
+    + Send
+    + Sync;
+pub(super) type BackgroundDrainFn = Arc<BackgroundDrainInner>;
 pub(super) type BackgroundArcDrain<R> = fn(
     &Arc<ParkingMutex<R>>,
     &AtomicUsize,
@@ -77,7 +75,8 @@ where
             .field(
                 "commit_waiters",
                 &self.commit_waiters.load(Ordering::Relaxed),
-            );
+            )
+            .field("release_signal", &self.release_signal);
         #[cfg(test)]
         debug.field("background_block_wait", &self.background_block_wait);
         debug.finish()
@@ -136,6 +135,18 @@ pub(super) const fn quiescence_should_arm(
     close_requested: bool,
 ) -> bool {
     round.arm_idle_wake && !close_requested && !(round.pending_tasks > 0 && round.made_progress)
+}
+
+/// #3645: whether a round ending now asks for the idle wake. The quiet period's
+/// unspent wake asks as before; so does a round that leaves reclaim waiting on a
+/// held reader when no retired reader is left — that reader was released before
+/// the round synced the view-release signal, so its release had nothing to fire.
+pub(super) const fn round_asks_idle_wake(
+    idle_wake_pending: bool,
+    waits_on_reader: bool,
+    retired_readers_alive: bool,
+) -> bool {
+    idle_wake_pending || (waits_on_reader && !retired_readers_alive)
 }
 
 /// When the armed idle wake fires: the debounce after the round ended.
@@ -401,6 +412,9 @@ impl<R> RuntimeSlot<R> {
         &self,
         timeout: Option<Duration>,
     ) -> Option<BackgroundShutdownStats> {
+        if let Some(signal) = &self.release_signal {
+            signal.uninstall_waker();
+        }
         self.background
             .as_ref()
             .map(|background| background.shutdown(timeout))
@@ -497,6 +511,7 @@ where
     ) -> Self {
         let visible = runtime.visible_handle();
         let snapshot_registry = runtime.snapshot_registry();
+        let release_signal = runtime.view_release_signal();
         let runtime = Arc::new(ParkingMutex::new(runtime));
         // The maintenance scheduling policy selects the executor flavor, but the
         // mode policy is authoritative: volatile modes (cache) never run a
@@ -520,6 +535,22 @@ where
             Arc::new(move |limits, clock, origin| drain(&runtime, &waiters, limits, &clock, origin))
                 as BackgroundDrainFn
         });
+        // #3645: a retired view's release re-arms the idle wake while reclaim
+        // waits on a held reader. The waker holds only the controller (no runtime
+        // handle) and a weak drain, so it never keeps the runtime alive; shutdown
+        // removes it, so a view that outlives the runtime holds no scheduler.
+        let release_signal = match (&background, &background_drain, release_signal) {
+            (Some(controller), Some(drain), Some(signal)) => {
+                let controller = controller.clone();
+                let drain = Arc::downgrade(drain);
+                let debounce = Duration::from_millis(config.quiescence_debounce_millis());
+                signal.install_waker(Box::new(move || {
+                    controller.arm_quiescence_weak(debounce, drain.clone());
+                }));
+                Some(signal)
+            }
+            _ => None,
+        };
         Self {
             runtime,
             visible,
@@ -529,6 +560,7 @@ where
             commit_groups: super::commit_group::CommitGroupQueue::default(),
             wal_sync: super::commit_group::WalSyncChain::default(),
             commit_waiters,
+            release_signal,
             #[cfg(test)]
             background_block_wait: BackgroundBlockWaitConfig::default(),
         }
@@ -761,6 +793,20 @@ impl BackgroundRuntimeController {
     /// backend writer lock — alive, and it is never load-bearing (DUR-006): a
     /// lost wake costs idle latency, the next commit's drain still reclaims.
     fn arm_quiescence(&self, debounce: Duration, drain: &BackgroundDrainFn) {
+        self.arm_quiescence_weak(debounce, Arc::downgrade(drain));
+    }
+
+    /// `arm_quiescence` from a weak drain handle: the form the #3645 view-release
+    /// waker uses, since a view can be released from any thread (including while
+    /// the runtime lock is held) and must never take a strong runtime handle.
+    fn arm_quiescence_weak(
+        &self,
+        debounce: Duration,
+        drain: std::sync::Weak<BackgroundDrainInner>,
+    ) {
+        if self.close_requested.load(Ordering::Acquire) {
+            return;
+        }
         let deadline = quiescence_deadline(self.clock.now(), debounce);
         {
             let mut armed = self.quiescence_armed.lock();
@@ -770,7 +816,6 @@ impl BackgroundRuntimeController {
             *armed = Some(deadline);
         }
         let controller = self.clone();
-        let drain = Arc::downgrade(drain);
         self.clock.schedule(
             debounce,
             Box::new(move || {
@@ -1023,6 +1068,28 @@ mod background_controller_tests {
                 quiescence_should_arm(round(arm, pending, progress), close_requested),
                 expected,
                 "arm={arm} pending={pending} progress={progress} close={close_requested}"
+            );
+        }
+    }
+
+    /// #3645: the round asks for the idle wake when the quiet period's wake is
+    /// unspent, or when reclaim waits on a reader that is already gone.
+    #[test]
+    fn round_asks_idle_wake_truth_table() {
+        for (pending, waits, alive, expected) in [
+            (true, false, false, true),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, true),
+            (false, true, false, true),
+            (false, true, true, false),
+            (false, false, false, false),
+            (false, false, true, false),
+        ] {
+            assert_eq!(
+                super::round_asks_idle_wake(pending, waits, alive),
+                expected,
+                "pending={pending} waits={waits} alive={alive}"
             );
         }
     }
