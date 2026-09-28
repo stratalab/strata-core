@@ -24,7 +24,19 @@ const EVENT_RECORD_FORMAT_VERSION_V1: u8 = 1;
 const EVENT_HASH_BYTES: usize = 32;
 /// Bytes of the raw hash block ahead of a version-2 record's JSON body.
 const EVENT_RECORD_V2_HASH_BYTES: usize = 64;
-const EVENT_METADATA_FORMAT_VERSION: u8 = 1;
+/// The event-log head this build writes (#3595): a fixed 51-byte binary
+/// record — version, `next_sequence` (u64 LE), a last-timestamp presence byte
+/// and value (u64 LE), `hash_version`, then the 32-byte head hash. It is
+/// rewritten on every append commit, so it carries only what an append needs;
+/// the log's event types are read from the type index, which every event
+/// already writes.
+/// Version 1 (a JSON map with one summary per type and the head hash as a
+/// decimal array, ~800 bytes with four types) stays readable.
+const EVENT_METADATA_FORMAT_VERSION: u8 = 2;
+/// The version-1 head: the version byte, then JSON with per-type summaries.
+const EVENT_METADATA_FORMAT_VERSION_V1: u8 = 1;
+/// Bytes of a version-2 head.
+const EVENT_METADATA_V2_LEN: usize = 51;
 
 /// Stored event record.
 #[derive(Clone, Debug, PartialEq)]
@@ -81,8 +93,8 @@ impl EventRecordEnvelope {
     }
 }
 
-/// Per-type event summary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Per-type event summary — the version-1 head's shape, read only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
 pub(crate) struct EventTypeSummary {
     count: u64,
     first_sequence: u64,
@@ -92,26 +104,6 @@ pub(crate) struct EventTypeSummary {
 }
 
 impl EventTypeSummary {
-    pub(crate) const fn new(sequence: u64, timestamp: Timestamp) -> Self {
-        Self {
-            count: 1,
-            first_sequence: sequence,
-            last_sequence: sequence,
-            first_timestamp: timestamp.as_micros(),
-            last_timestamp: timestamp.as_micros(),
-        }
-    }
-
-    pub(crate) fn update(&mut self, sequence: u64, timestamp: Timestamp) {
-        self.count = self.count.saturating_add(1);
-        self.last_sequence = sequence;
-        self.last_timestamp = timestamp.as_micros();
-    }
-
-    pub(crate) const fn last_timestamp(self) -> u64 {
-        self.last_timestamp
-    }
-
     fn validate(self) -> bool {
         self.count > 0
             && self.first_sequence <= self.last_sequence
@@ -119,13 +111,13 @@ impl EventTypeSummary {
     }
 }
 
-/// Stored event log metadata.
+/// Stored event log head.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EventLogMetadata {
     next_sequence: u64,
     head_hash: EventHash,
     hash_version: u8,
-    summaries: BTreeMap<String, EventTypeSummary>,
+    last_timestamp: Option<u64>,
 }
 
 impl Default for EventLogMetadata {
@@ -134,7 +126,7 @@ impl Default for EventLogMetadata {
             next_sequence: 0,
             head_hash: [0; 32],
             hash_version: hash_version(),
-            summaries: BTreeMap::new(),
+            last_timestamp: None,
         }
     }
 }
@@ -148,15 +140,8 @@ impl EventLogMetadata {
         self.head_hash
     }
 
-    pub(crate) fn event_types(&self) -> impl Iterator<Item = &str> {
-        self.summaries.keys().map(String::as_str)
-    }
-
-    pub(crate) fn last_timestamp_micros(&self) -> Option<u64> {
-        self.summaries
-            .values()
-            .map(|summary| summary.last_timestamp())
-            .max()
+    pub(crate) const fn last_timestamp_micros(&self) -> Option<u64> {
+        self.last_timestamp
     }
 
     pub(crate) fn push(&mut self, record: &EventRecordEnvelope) {
@@ -164,22 +149,19 @@ impl EventLogMetadata {
         self.next_sequence = sequence.saturating_add(1);
         self.head_hash = record.hash();
         self.hash_version = hash_version();
-        self.summaries
-            .entry(record.event_type().as_str().to_owned())
-            .and_modify(|summary| summary.update(sequence, record.timestamp()))
-            .or_insert_with(|| EventTypeSummary::new(sequence, record.timestamp()));
+        let timestamp = record.timestamp().as_micros();
+        self.last_timestamp = Some(
+            self.last_timestamp
+                .map_or(timestamp, |last| last.max(timestamp)),
+        );
     }
 
     fn validate(&self) -> bool {
         self.hash_version == hash_version()
-            && self
-                .summaries
-                .values()
-                .all(|summary| summary.validate() && summary.last_sequence < self.next_sequence)
+            && (self.last_timestamp.is_none() || self.next_sequence > 0)
     }
 }
 
-/// The version-1 record body (read only).
 #[derive(Deserialize)]
 struct StoredEventRecordV1 {
     sequence: u64,
@@ -199,8 +181,9 @@ struct StoredEventRecordBody {
     timestamp: u64,
 }
 
-#[derive(Serialize, Deserialize)]
-struct StoredEventMetadata {
+/// The version-1 head (read only).
+#[derive(Deserialize)]
+struct StoredEventMetadataV1 {
     next_sequence: u64,
     head_hash: EventHash,
     hash_version: u8,
@@ -327,49 +310,90 @@ fn validate_event_record(
     ))
 }
 
-pub(crate) fn encode_event_metadata(metadata: &EventLogMetadata) -> Result<Vec<u8>, EngineError> {
-    let stored = StoredEventMetadata {
-        next_sequence: metadata.next_sequence,
-        head_hash: metadata.head_hash,
-        hash_version: metadata.hash_version,
-        summaries: metadata.summaries.clone(),
-    };
-    let mut bytes = vec![EVENT_METADATA_FORMAT_VERSION];
-    bytes.extend(serde_json::to_vec(&stored).map_err(|error| {
-        EngineError::invalid_input(
-            "invalid_argument.engine.event_metadata",
-            format!("event metadata cannot be encoded: {error}"),
-        )
-    })?);
-    Ok(bytes)
+pub(crate) fn encode_event_metadata(metadata: &EventLogMetadata) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(EVENT_METADATA_V2_LEN);
+    bytes.push(EVENT_METADATA_FORMAT_VERSION);
+    bytes.extend_from_slice(&metadata.next_sequence.to_le_bytes());
+    bytes.push(u8::from(metadata.last_timestamp.is_some()));
+    bytes.extend_from_slice(&metadata.last_timestamp.unwrap_or(0).to_le_bytes());
+    bytes.push(metadata.hash_version);
+    bytes.extend_from_slice(&metadata.head_hash);
+    bytes
+}
+
+fn event_metadata_corruption(message: impl Into<String>) -> EngineError {
+    EngineError::corruption("data_loss.engine.event_metadata", message.into())
 }
 
 pub(crate) fn decode_event_metadata(bytes: &[u8]) -> Result<EventLogMetadata, EngineError> {
-    if bytes.first().copied() != Some(EVENT_METADATA_FORMAT_VERSION) {
-        return Err(EngineError::corruption(
-            "data_loss.engine.event_metadata",
-            "stored event metadata has an unknown format version",
-        ));
-    }
-    let stored = serde_json::from_slice::<StoredEventMetadata>(&bytes[1..]).map_err(|error| {
-        EngineError::corruption(
-            "data_loss.engine.event_metadata",
-            format!("stored event metadata cannot be decoded: {error}"),
-        )
-    })?;
-    let metadata = EventLogMetadata {
-        next_sequence: stored.next_sequence,
-        head_hash: stored.head_hash,
-        hash_version: stored.hash_version,
-        summaries: stored.summaries,
+    let metadata = match bytes.split_first() {
+        Some((&EVENT_METADATA_FORMAT_VERSION, _)) => decode_event_metadata_v2(bytes)?,
+        Some((&EVENT_METADATA_FORMAT_VERSION_V1, rest)) => decode_event_metadata_v1(rest)?,
+        _ => {
+            return Err(event_metadata_corruption(
+                "stored event metadata has an unknown format version",
+            ))
+        }
     };
     if !metadata.validate() {
-        return Err(EngineError::corruption(
-            "data_loss.engine.event_metadata",
+        return Err(event_metadata_corruption(
             "stored event metadata violates engine invariants",
         ));
     }
     Ok(metadata)
+}
+
+fn decode_event_metadata_v2(bytes: &[u8]) -> Result<EventLogMetadata, EngineError> {
+    let fixed: &[u8; EVENT_METADATA_V2_LEN] = bytes
+        .try_into()
+        .map_err(|_| event_metadata_corruption("stored event metadata has the wrong length"))?;
+    let (_, rest) = fixed.split_at(1);
+    let (next_sequence, rest) = rest.split_at(8);
+    let (has_timestamp, rest) = rest.split_at(1);
+    let (timestamp, rest) = rest.split_at(8);
+    let (hash_version, head_hash) = rest.split_at(1);
+    let last_timestamp = match has_timestamp[0] {
+        0 => None,
+        1 => Some(u64::from_le_bytes(
+            timestamp.try_into().expect("an eight-byte slice"),
+        )),
+        _ => {
+            return Err(event_metadata_corruption(
+                "stored event metadata has an invalid timestamp flag",
+            ))
+        }
+    };
+    Ok(EventLogMetadata {
+        next_sequence: u64::from_le_bytes(next_sequence.try_into().expect("an eight-byte slice")),
+        head_hash: head_hash.try_into().expect("a 32-byte slice"),
+        hash_version: hash_version[0],
+        last_timestamp,
+    })
+}
+
+fn decode_event_metadata_v1(bytes: &[u8]) -> Result<EventLogMetadata, EngineError> {
+    let stored = serde_json::from_slice::<StoredEventMetadataV1>(bytes).map_err(|error| {
+        event_metadata_corruption(format!("stored event metadata cannot be decoded: {error}"))
+    })?;
+    let summaries_valid = stored
+        .summaries
+        .values()
+        .all(|summary| summary.validate() && summary.last_sequence < stored.next_sequence);
+    if !summaries_valid {
+        return Err(event_metadata_corruption(
+            "stored event metadata violates engine invariants",
+        ));
+    }
+    Ok(EventLogMetadata {
+        next_sequence: stored.next_sequence,
+        head_hash: stored.head_hash,
+        hash_version: stored.hash_version,
+        last_timestamp: stored
+            .summaries
+            .values()
+            .map(|summary| summary.last_timestamp)
+            .max(),
+    })
 }
 
 #[cfg(test)]
@@ -414,7 +438,7 @@ mod tests {
 
         let mut metadata = EventLogMetadata::default();
         metadata.push(&record);
-        let encoded = encode_event_metadata(&metadata).expect("encoded metadata");
+        let encoded = encode_event_metadata(&metadata);
         assert_eq!(
             decode_event_metadata(&encoded).expect("decoded metadata"),
             metadata
@@ -466,7 +490,7 @@ mod tests {
 
     #[test]
     fn event_metadata_decode_rejects_unknown_version_and_invalid_summaries() {
-        let error = decode_event_metadata(&[2]).expect_err("unknown version rejected");
+        let error = decode_event_metadata(&[3]).expect_err("unknown version rejected");
         assert_eq!(error.class(), EngineErrorClass::Corruption);
         assert_eq!(error.code(), "data_loss.engine.event_metadata");
 
@@ -570,6 +594,110 @@ mod tests {
                 .expect_err("tampered hash rejected");
             assert_eq!(error.class(), EngineErrorClass::Corruption);
             assert_eq!(error.code(), "data_loss.engine.event_record");
+        }
+    }
+
+    /// #3595: the head is a fixed 51-byte record that round-trips, far
+    /// smaller than the version-1 JSON map it replaces.
+    #[test]
+    fn a_version_two_head_is_fixed_size_and_round_trips() {
+        let empty = EventLogMetadata::default();
+        let encoded = encode_event_metadata(&empty);
+        assert_eq!(encoded.len(), 51);
+        assert_eq!(encoded[0], 2);
+        assert_eq!(decode_event_metadata(&encoded).expect("decodes"), empty);
+
+        let mut metadata = EventLogMetadata::default();
+        metadata.push(&sample_record());
+        let encoded = encode_event_metadata(&metadata);
+        assert_eq!(encoded.len(), 51);
+        let decoded = decode_event_metadata(&encoded).expect("decodes");
+        assert_eq!(decoded, metadata);
+        assert_eq!(decoded.next_sequence(), 8);
+        assert_eq!(decoded.last_timestamp_micros(), Some(1_700_000_000));
+        assert_eq!(decoded.head_hash(), sample_record().hash());
+    }
+
+    /// A version-2 head fails closed on a wrong length, an invalid timestamp
+    /// flag, and a timestamp on an empty log.
+    #[test]
+    fn a_version_two_head_rejects_malformed_bytes() {
+        let mut metadata = EventLogMetadata::default();
+        metadata.push(&sample_record());
+        let encoded = encode_event_metadata(&metadata);
+        let mut bad_flag = encoded.clone();
+        bad_flag[9] = 2;
+        let mut timestamp_on_empty = encode_event_metadata(&EventLogMetadata::default());
+        timestamp_on_empty[9] = 1;
+        for bytes in [
+            &encoded[..50],
+            &[encoded.as_slice(), &[0]].concat(),
+            &bad_flag,
+            &timestamp_on_empty,
+        ] {
+            let error = decode_event_metadata(bytes).expect_err("malformed head rejected");
+            assert_eq!(error.class(), EngineErrorClass::Corruption);
+            assert_eq!(error.code(), "data_loss.engine.event_metadata");
+        }
+    }
+
+    /// #3595: a version-1 head (a 1.2.x log) still decodes; its last timestamp
+    /// is the summaries' maximum (its types are read from the type index).
+    #[test]
+    fn a_version_one_head_still_decodes() {
+        let stored = json!({
+            "next_sequence": 3,
+            "head_hash": vec![7_u8; 32],
+            "hash_version": 1,
+            "summaries": {
+                "a": {"count": 2, "first_sequence": 0, "last_sequence": 2,
+                      "first_timestamp": 10, "last_timestamp": 30},
+                "b": {"count": 1, "first_sequence": 1, "last_sequence": 1,
+                      "first_timestamp": 20, "last_timestamp": 20}
+            }
+        });
+        let mut v1 = vec![1];
+        v1.extend(serde_json::to_vec(&stored).expect("v1 encodes"));
+        let metadata = decode_event_metadata(&v1).expect("v1 decodes");
+        assert_eq!(metadata.next_sequence(), 3);
+        assert_eq!(metadata.head_hash(), [7_u8; 32]);
+        assert_eq!(metadata.last_timestamp_micros(), Some(30));
+        // The next write replaces it with a version-2 head.
+        let rewritten = decode_event_metadata(&encode_event_metadata(&metadata)).expect("v2");
+        assert_eq!(rewritten, metadata);
+        assert!(v1.len() > 3 * encode_event_metadata(&metadata).len());
+    }
+
+    /// A version-1 head is rejected when one summary alone is wrong, each
+    /// check on its own: a summary ending at or past `next_sequence`, and a
+    /// summary that is internally invalid while its sequence is in range.
+    #[test]
+    fn a_version_one_head_rejects_each_bad_summary_on_its_own() {
+        let head = |summary: serde_json::Value| {
+            let stored = json!({
+                "next_sequence": 2,
+                "head_hash": vec![0_u8; 32],
+                "hash_version": 1,
+                "summaries": {"a": summary}
+            });
+            let mut bytes = vec![1];
+            bytes.extend(serde_json::to_vec(&stored).expect("v1 encodes"));
+            bytes
+        };
+        let valid = head(json!({"count": 1, "first_sequence": 1, "last_sequence": 1,
+                                "first_timestamp": 5, "last_timestamp": 5}));
+        decode_event_metadata(&valid).expect("a valid v1 head decodes");
+        for bad in [
+            // Ends at next_sequence: an event the head says was never written.
+            json!({"count": 1, "first_sequence": 2, "last_sequence": 2,
+                   "first_timestamp": 5, "last_timestamp": 5}),
+            // In range, but a summary of zero events.
+            json!({"count": 0, "first_sequence": 0, "last_sequence": 0,
+                   "first_timestamp": 5, "last_timestamp": 5}),
+        ] {
+            let error = decode_event_metadata(&head(bad)).expect_err("bad summary rejected");
+            assert_eq!(error.class(), EngineErrorClass::Corruption);
+            assert_eq!(error.code(), "data_loss.engine.event_metadata");
         }
     }
 }

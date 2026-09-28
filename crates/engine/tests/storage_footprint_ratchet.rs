@@ -58,6 +58,10 @@ const JSON_CEILING: f64 = 0.21; // measured 0.196
 const EVENT_CEILING: f64 = 0.48; // measured 0.457 (0.627 before #3594)
 const VECTOR_CEILING: f64 = 0.73; // measured 0.690
 const GRAPH_CEILING: f64 = 0.35; // measured 0.326
+/// Events appended one per commit (the `event.append` writer): every commit
+/// also rewrites the event-log head row, and under `KeepAll` every head
+/// version is retained, so the head's size is paid once per event (#3595).
+const SINGLE_APPEND_EVENT_CEILING: f64 = 0.88; // measured 0.842 (1.056 before #3595)
 /// The never-flushed event log on the production scheduler: its rows reach
 /// tables only through the clean close's flush of a large delta (#3625), so
 /// this ceiling holds that flush. Measured 0.445 (3.47 before #3625, when the
@@ -528,6 +532,43 @@ fn flushed_event_load_closed_at_once_settles_on_the_background_scheduler() {
         EVENT_CEILING,
         "flushed load, immediate close, background reopen",
         &footprint,
+        logical,
+    );
+    db.close().expect("clean close");
+}
+
+/// #3595: one event per commit. The head row's retained versions are the
+/// cost this ratchet holds down.
+#[test]
+fn single_event_appends_hold_their_ratchet() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let mut logical = 0u64;
+    {
+        let mut db = open_inline(dir.path());
+        for i in 0..512usize {
+            let payload = json!({"turn": i, "tool": "search", "text": prose(i)});
+            logical +=
+                ("tool_call".len() + serde_json::to_vec(&payload).expect("json").len()) as u64;
+            db.event(branch("default"), space("default"))
+                .expect("event")
+                .append(
+                    EventType::new("tool_call").expect("type"),
+                    EventPayload::new(payload).expect("payload"),
+                )
+                .expect("append");
+            if i % 128 == 127 {
+                db.flush_storage_branch_for_test(&branch("default"))
+                    .expect("flush");
+            }
+        }
+        db.close().expect("clean close");
+    }
+    let mut db = open_inline(dir.path());
+    assert_within_ratchet(
+        Primitive::Event,
+        SINGLE_APPEND_EVENT_CEILING,
+        "one event per commit",
+        &audit(&mut db),
         logical,
     );
     db.close().expect("clean close");
