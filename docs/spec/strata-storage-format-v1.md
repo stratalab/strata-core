@@ -253,7 +253,7 @@ V1 manifest format:
 
 ```text
 magic                         4 bytes   "STRM"
-format_version                u32 LE, MUST be 1
+format_version                u32 LE, 3 when written (1 still read)
 database_id                   16 bytes
 codec_id_len                  u32 LE
 codec_id                      codec_id_len bytes, UTF-8
@@ -268,13 +268,20 @@ V1 manifest constants:
 
 ```text
 MANIFEST_MAGIC                  "STRM"
-MANIFEST_FORMAT_VERSION         1
+MANIFEST_FORMAT_VERSION         3   (written since 1.2.6; 1 = through 1.2.5, still read)
 MAX_CODEC_ID_LEN                256 bytes
 ```
 
 Requirements:
 
-1. The stable V1 manifest format version is `1`.
+1. The manifest format version this build writes is `3`; version `1` (every
+   database through 1.2.5) is still read. The version is the downgrade gate:
+   1.2.6 changed the durable format one way (event records v2; timeline
+   segments, section 13 requirement 14 and section 13a), and a 1.2.5 binary
+   refuses any version above `1` at open without writing. A writable open of a
+   version-`1` database re-publishes its manifest at version `3`, with every
+   fact unchanged, after recovery succeeds and before the first write is
+   admitted; an open that fails leaves the version as it was (#3658).
 2. The manifest MUST identify the database.
 3. The manifest MUST record the configured codec identity.
 4. The manifest MUST record enough WAL and snapshot facts to run recovery.
@@ -291,9 +298,12 @@ Requirements:
    identity and recovery fact. It is not a StrataHub fleet, instance, dataset,
    or bundle identity. StrataHub must compose its own identifiers and
    provenance above the storage format.
-10. Pre-V1 development manifest version `2` is rejected by the normal V1
-   decoder. Strata is pre-launch; old development databases are not a stable
+10. Pre-V1 development manifest versions `0` and `2` are rejected by the normal
+   V1 decoder as pre-V1, and are therefore never reused by a V1 format.
+   Strata is pre-launch; old development databases are not a stable
    migration target.
+11. A version above the highest this build writes is rejected as a future
+   format, and the refused open writes nothing.
 
 ### 8.1 Branch Catalog Manifest Format
 

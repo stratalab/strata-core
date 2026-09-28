@@ -268,6 +268,30 @@ impl ManifestService<'_, DATABASE_MANIFEST_SERVICE> {
         })
     }
 
+    /// #3658: re-publish the current manifest at this build's format version
+    /// when it is still at an older one (the V1 manifest through 1.2.5), with
+    /// every recovery fact unchanged. Returns whether it upgraded. A missing
+    /// manifest upgrades nothing.
+    pub(crate) fn upgrade_format_version(&self) -> ManifestServiceResult<bool> {
+        let object = database_manifest_object()?;
+        let Some(bytes) = read_optional(&self.backend, ManifestRole::Database, &object)? else {
+            return Ok(false);
+        };
+        let (manifest, version) =
+            crate::format::decode_manifest_with_version(&bytes).map_err(|source| {
+                ManifestServiceError::Decode {
+                    role: ManifestRole::Database,
+                    object: object.clone(),
+                    source,
+                }
+            })?;
+        if version == crate::format::DATABASE_MANIFEST_FORMAT_VERSION {
+            return Ok(false);
+        }
+        self.publish_current(&manifest)?;
+        Ok(true)
+    }
+
     pub(crate) fn load_current_for_codec(
         &self,
         expected_codec_id: &str,
@@ -2102,7 +2126,7 @@ mod tests {
                 FormatError::FutureFormat {
                     format: "database_manifest",
                     version: 9,
-                    max_supported: 1,
+                    max_supported: 3,
                 },
             ),
             (

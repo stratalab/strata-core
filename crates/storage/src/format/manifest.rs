@@ -1,8 +1,19 @@
-use super::{ByteReader, FormatError, DATABASE_FORMAT_VERSION, MAX_CODEC_ID_LEN};
+use super::{ByteReader, FormatError, MAX_CODEC_ID_LEN};
 use strata_core::CommitVersion;
 
 const FORMAT: &str = "database_manifest";
 const MAGIC: [u8; 4] = *b"STRM";
+
+/// #3658: the database manifest format this build writes. 1.2.6 changed the
+/// durable format one way (event records v2, #3594/#3595; timeline segments,
+/// #3643), so it writes a version a 1.2.5 binary refuses at open instead of
+/// half-reading. Not 2: 0 and 2 are reserved for pre-V1 development
+/// manifests, which every V1 build reports as pre-V1 (and a retired version
+/// is never reused).
+pub(crate) const DATABASE_MANIFEST_FORMAT_VERSION: u32 = 3;
+/// The V1 manifest version through 1.2.5: still read, upgraded to the current
+/// version by the first open that recovers it (#3658).
+pub(crate) const DATABASE_MANIFEST_FORMAT_VERSION_V1: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DatabaseManifest {
@@ -83,7 +94,7 @@ pub(crate) fn encode_manifest(manifest: &DatabaseManifest) -> Result<Vec<u8>, Fo
 
     let mut bytes = Vec::with_capacity(4 + 4 + 16 + 4 + manifest.codec_id().len() + 32 + 4);
     bytes.extend_from_slice(&MAGIC);
-    bytes.extend_from_slice(&DATABASE_FORMAT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&DATABASE_MANIFEST_FORMAT_VERSION.to_le_bytes());
     bytes.extend_from_slice(manifest.database_id());
     bytes.extend_from_slice(&codec_len.to_le_bytes());
     bytes.extend_from_slice(manifest.codec_id().as_bytes());
@@ -106,6 +117,14 @@ pub(crate) fn encode_manifest(manifest: &DatabaseManifest) -> Result<Vec<u8>, Fo
 }
 
 pub(crate) fn decode_manifest(bytes: &[u8]) -> Result<DatabaseManifest, FormatError> {
+    decode_manifest_with_version(bytes).map(|(manifest, _)| manifest)
+}
+
+/// #3658: decode, also reporting the on-disk format version (current or V1),
+/// so an open can tell whether the manifest still needs its upgrade.
+pub(crate) fn decode_manifest_with_version(
+    bytes: &[u8],
+) -> Result<(DatabaseManifest, u32), FormatError> {
     if bytes.len() < minimum_manifest_len() {
         return Err(FormatError::InsufficientBytes {
             format: FORMAT,
@@ -129,7 +148,7 @@ pub(crate) fn decode_manifest(bytes: &[u8]) -> Result<DatabaseManifest, FormatEr
 
     let version = reader.read_u32_le()?;
     match version {
-        DATABASE_FORMAT_VERSION => {}
+        DATABASE_MANIFEST_FORMAT_VERSION | DATABASE_MANIFEST_FORMAT_VERSION_V1 => {}
         0 | 2 => {
             // Known development manifests are rejected with a distinct error so
             // open-time policy can refuse pre-V1 databases deterministically.
@@ -142,7 +161,7 @@ pub(crate) fn decode_manifest(bytes: &[u8]) -> Result<DatabaseManifest, FormatEr
             return Err(FormatError::FutureFormat {
                 format: FORMAT,
                 version,
-                max_supported: DATABASE_FORMAT_VERSION,
+                max_supported: DATABASE_MANIFEST_FORMAT_VERSION,
             });
         }
     }
@@ -182,14 +201,17 @@ pub(crate) fn decode_manifest(bytes: &[u8]) -> Result<DatabaseManifest, FormatEr
     // snapshot fact is not enough to restart recovery safely.
     validate_recovery_facts(active_wal_segment, snapshot_watermark, snapshot_id)?;
 
-    Ok(DatabaseManifest {
-        database_id,
-        codec_id,
-        active_wal_segment,
-        snapshot_watermark,
-        snapshot_id,
-        flushed_through_commit_id,
-    })
+    Ok((
+        DatabaseManifest {
+            database_id,
+            codec_id,
+            active_wal_segment,
+            snapshot_watermark,
+            snapshot_id,
+            flushed_through_commit_id,
+        },
+        version,
+    ))
 }
 
 const fn minimum_manifest_len() -> usize {
@@ -244,8 +266,11 @@ fn validate_recovery_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_manifest, encode_manifest, DatabaseManifest, FORMAT};
-    use crate::format::{FormatError, DATABASE_FORMAT_VERSION};
+    use super::{
+        decode_manifest, decode_manifest_with_version, encode_manifest, DatabaseManifest,
+        DATABASE_MANIFEST_FORMAT_VERSION, FORMAT,
+    };
+    use crate::format::FormatError;
     use strata_core::CommitVersion;
 
     fn manifest() -> DatabaseManifest {
@@ -269,6 +294,48 @@ mod tests {
             decode_manifest(&encode_manifest(&manifest).expect("encode manifest")),
             Ok(manifest)
         );
+    }
+
+    /// #3658: this build writes format version 3 — not 1, which a 1.2.5 binary
+    /// would open and half-read, and not 2, reserved for pre-V1 manifests.
+    #[test]
+    fn manifest_is_written_at_format_version_3() {
+        let bytes = encode_manifest(&manifest()).expect("encode manifest");
+        assert_eq!(&bytes[4..8], &3u32.to_le_bytes());
+        assert_eq!(decode_manifest_with_version(&bytes), Ok((manifest(), 3)));
+    }
+
+    /// #3658: the version field, value by value: the V1 manifest (1) and the
+    /// current one (3) decode, reporting which; 0 and 2 are pre-V1; anything
+    /// above 3 was written by a newer build.
+    #[test]
+    fn manifest_format_version_truth_table() {
+        for version in [0u32, 1, 2, 3, 4, 9, u32::MAX] {
+            let mut bytes = encode_manifest(&manifest()).expect("encode manifest");
+            bytes[4..8].copy_from_slice(&version.to_le_bytes());
+            refresh_crc(&mut bytes);
+            let decoded = decode_manifest_with_version(&bytes);
+            match version {
+                1 | 3 => assert_eq!(decoded, Ok((manifest(), version)), "version {version}"),
+                0 | 2 => assert_eq!(
+                    decoded,
+                    Err(FormatError::PreV1Format {
+                        format: FORMAT,
+                        version
+                    }),
+                    "version {version}"
+                ),
+                _ => assert_eq!(
+                    decoded,
+                    Err(FormatError::FutureFormat {
+                        format: FORMAT,
+                        version,
+                        max_supported: 3
+                    }),
+                    "version {version}"
+                ),
+            }
+        }
     }
 
     #[test]
@@ -299,14 +366,14 @@ mod tests {
     #[test]
     fn decode_rejects_future_version() {
         let mut bytes = encode_manifest(&manifest()).expect("encode manifest");
-        bytes[4..8].copy_from_slice(&(DATABASE_FORMAT_VERSION + 8).to_le_bytes());
+        bytes[4..8].copy_from_slice(&(DATABASE_MANIFEST_FORMAT_VERSION + 8).to_le_bytes());
 
         assert_eq!(
             decode_manifest(&bytes),
             Err(FormatError::FutureFormat {
                 format: FORMAT,
-                version: DATABASE_FORMAT_VERSION + 8,
-                max_supported: DATABASE_FORMAT_VERSION
+                version: DATABASE_MANIFEST_FORMAT_VERSION + 8,
+                max_supported: DATABASE_MANIFEST_FORMAT_VERSION
             })
         );
     }
@@ -417,7 +484,7 @@ mod tests {
     fn decode_rejects_invalid_codec_utf8() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"STRM");
-        bytes.extend_from_slice(&DATABASE_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&DATABASE_MANIFEST_FORMAT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&[0x11; 16]);
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(0xff);
@@ -438,7 +505,7 @@ mod tests {
     fn decode_rejects_oversized_codec_len_before_allocation() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"STRM");
-        bytes.extend_from_slice(&DATABASE_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&DATABASE_MANIFEST_FORMAT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&[0x11; 16]);
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         bytes.extend_from_slice(&1u64.to_le_bytes());

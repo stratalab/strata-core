@@ -279,6 +279,21 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
                 return Err(error);
             }
         };
+        // #3658: recovery succeeded, and nothing has been written in this
+        // build's format yet — upgrade an older manifest now, before the
+        // runtime admits a single write, so no v2 event record or timeline
+        // segment can ever sit beside a manifest a 1.2.5 binary would open. A
+        // failed open leaves the manifest at its old version (the database
+        // stays openable by the build that wrote it).
+        if let Err(error) = self
+            .services
+            .manifest()
+            .upgrade_format_version()
+            .map_err(super::manifest_error)
+        {
+            self.mark_recovery_bootstrap_failed();
+            return Err(error);
+        }
         if let Err(error) = self
             .state
             .transition(LifecycleTransitionTrigger::RecoveryAccepted)
