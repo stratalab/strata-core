@@ -647,7 +647,10 @@ fn required_durability_policy(
 /// atomic, so any object in these families without a manifest means the
 /// manifest was LOST, not that the store is new. `Locks` (acquired before
 /// the manifest) and `Temporary` (publish scratch a first-create crash can
-/// leave behind) are legitimately pre-manifest and excluded.
+/// leave behind) are legitimately pre-manifest and excluded. `Timeline`
+/// (#3643) is post-manifest too but not listed: a segment is only ever written
+/// beside the WAL and the snapshot that references it, so the families below
+/// already detect the loss, and every open is spared one listing.
 const POST_MANIFEST_FAMILIES: [ObjectFamily; 5] = [
     ObjectFamily::Wal,
     ObjectFamily::Meta,

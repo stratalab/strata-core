@@ -28,6 +28,8 @@ fn format_golden_harness_has_storage_format_directory() {
         "wal-commit-watermark.hex",
         "snapshot-container-single-section.hex",
         "snapshot-flushed-branches-section-two-branches.hex",
+        "snapshot-timeline-segments-section-two-groups.hex",
+        "timeline-segment-two-entries.hex",
         "snapshot-header-identity.hex",
         "snapshot-section-empty.hex",
         "snapshot-watermark-empty.hex",
@@ -217,6 +219,11 @@ fn format_fuzz_targets_cover_storage_owned_manifest_and_extension_codecs() {
             "format_snapshot_flushed_branches_payload",
             "FormatDecoder::SnapshotFlushedBranchesPayload",
         ),
+        (
+            "format_snapshot_timeline_segments_payload",
+            "FormatDecoder::SnapshotTimelineSegmentsPayload",
+        ),
+        ("format_timeline_segment", "FormatDecoder::TimelineSegment"),
     ] {
         let target_path = format!("fuzz_targets/{target}.rs");
         assert!(manifest.contains(&format!("name = \"{target}\"")));

@@ -27,6 +27,7 @@ snapshot-row-section-put-and-tombstone	trunc:175R	flip:1A29R16A8R6A2R24A9R5A9R16
 snapshot-section-empty	trunc:9R	flip:1A8R	ext1:A	ext8:A
 snapshot-timeline-section-one-group-legacy	trunc:65R	flip:13R16A12R24A	ext1:R	ext8:R
 snapshot-timeline-section-one-group	trunc:81R	flip:13R16A12R40A	ext1:R	ext8:R
+snapshot-timeline-segments-section-two-groups	trunc:133R	flip:14R15A4R16A4R12A20R4A4R12A12R12A4R	ext1:R	ext8:R
 snapshot-watermark-empty	trunc:1R	flip:1R	ext1:R	ext8:R
 snapshot-watermark-max	trunc:25R	flip:1R24A	ext1:R	ext8:R
 snapshot-watermark-present	trunc:25R	flip:1R24A	ext1:R	ext8:R
@@ -46,6 +47,7 @@ table-manifest-materialization-provenance	trunc:250R	flip:250R	ext1:R	ext8:R
 table-manifest-owned-levels	trunc:675R	flip:675R	ext1:R	ext8:R
 table-properties-block	unmapped
 table-row-split-payload-two-splits	trunc:16R1A15R	flip:32A	ext1:R	ext8:R
+timeline-segment-two-entries	trunc:84R	flip:84R	ext1:R	ext8:R
 wal-commit-payload-one-put	trunc:91R	flip:21R16A8R6A2R24A9R5A	ext1:R	ext8:R
 wal-commit-payload-put-tombstone	trunc:164R	flip:21R16A8R6A2R24A9R5A9R16A8R5A2R16A17R	ext1:R	ext8:R
 wal-commit-watermark	trunc:20R	flip:20R	ext1:R	ext8:R

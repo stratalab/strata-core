@@ -41,7 +41,7 @@ const GROUP_HEADER_BYTES: usize = BranchId::BYTE_LEN + 4;
 /// Entry width by section kind: legacy is `(commit_version, commit_timestamp)`;
 /// the current kind appends `committed_at`.
 const ENTRY_BYTES_LEGACY: usize = 16;
-const ENTRY_BYTES: usize = 24;
+pub(super) const ENTRY_BYTES: usize = 24;
 /// Fail-closed ceiling mirroring the row section's materialization guard: a
 /// section that decode would reject is never written.
 const MAX_TIMELINE_ENTRIES: usize = 1 << 28;
@@ -83,19 +83,25 @@ pub(crate) fn encode_snapshot_timeline_section(
         payload.extend_from_slice(group.branch_id.as_bytes());
         payload.extend_from_slice(&entry_count.to_le_bytes());
         for entry in &group.entries {
-            payload.extend_from_slice(&entry.commit_version.as_u64().to_le_bytes());
-            payload.extend_from_slice(&entry.commit_timestamp.as_micros().to_le_bytes());
-            // 0 means unknown, matching the format's `optional_nonzero`
-            // convention for optional u64s (#3112 S2c).
-            payload.extend_from_slice(
-                &entry
-                    .committed_at
-                    .map_or(0, Timestamp::as_micros)
-                    .to_le_bytes(),
-            );
+            encode_timeline_entry(&mut payload, entry);
         }
     }
     SnapshotSection::new(SNAPSHOT_TIMELINE_SECTION_KIND, payload)
+}
+
+/// One current-kind entry: `commit_version`, `commit_timestamp`,
+/// `committed_at` (0 = unknown, the format's `optional_nonzero` convention for
+/// optional u64s, #3112 S2c). Shared with the #3643 timeline segment object,
+/// whose entries are byte-identical.
+pub(super) fn encode_timeline_entry(payload: &mut Vec<u8>, entry: &SnapshotTimelineEntry) {
+    payload.extend_from_slice(&entry.commit_version.as_u64().to_le_bytes());
+    payload.extend_from_slice(&entry.commit_timestamp.as_micros().to_le_bytes());
+    payload.extend_from_slice(
+        &entry
+            .committed_at
+            .map_or(0, Timestamp::as_micros)
+            .to_le_bytes(),
+    );
 }
 
 pub(crate) fn decode_snapshot_timeline_payload(
@@ -186,7 +192,7 @@ pub(crate) fn decode_snapshot_timeline_payload(
     Ok(groups)
 }
 
-fn validate_group_entries(entries: &[SnapshotTimelineEntry]) -> Result<(), FormatError> {
+pub(super) fn validate_group_entries(entries: &[SnapshotTimelineEntry]) -> Result<(), FormatError> {
     let ascending = entries
         .windows(2)
         .all(|pair| pair[0].commit_version.as_u64() < pair[1].commit_version.as_u64());

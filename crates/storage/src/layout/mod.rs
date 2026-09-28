@@ -29,6 +29,9 @@ pub(crate) enum ObjectFamily {
     Wal,
     Tables,
     Snapshots,
+    /// #3643: sealed retained-timeline segment objects, referenced from a
+    /// checkpoint snapshot's kind-5 section.
+    Timeline,
     Temporary,
     Quarantine,
     Locks,
@@ -42,6 +45,7 @@ impl ObjectFamily {
             Self::Wal => "wal",
             Self::Tables => "tables",
             Self::Snapshots => "snapshots",
+            Self::Timeline => "timeline",
             Self::Temporary => "tmp",
             Self::Quarantine => "quarantine",
             Self::Locks => "locks",
@@ -56,6 +60,7 @@ impl ObjectFamily {
             "wal" => Some(Self::Wal),
             "tables" => Some(Self::Tables),
             "snapshots" => Some(Self::Snapshots),
+            "timeline" => Some(Self::Timeline),
             "tmp" => Some(Self::Temporary),
             "quarantine" => Some(Self::Quarantine),
             "locks" => Some(Self::Locks),
@@ -148,6 +153,14 @@ pub(crate) enum WalObjectClassification {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotObjectClassification {
     Snapshot { snapshot_id: u64 },
+}
+
+/// #3643: a timeline segment object's identity — the checkpoint snapshot that
+/// sealed it and its ordinal within that checkpoint.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub(crate) struct TimelineSegmentId {
+    pub(crate) sealing_snapshot_id: u64,
+    pub(crate) ordinal: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -377,6 +390,44 @@ impl ObjectLayout {
         let snapshot_id =
             parse_fixed_u64_component(ObjectFamily::Snapshots, "snapshot id", snapshot)?;
         Ok(Some(SnapshotObjectClassification::Snapshot { snapshot_id }))
+    }
+
+    /// #3643: `timeline/`, the sealed retained-timeline segment family.
+    pub(crate) fn timeline_prefix() -> LayoutResult<ObjectPrefix> {
+        Self::family_prefix(ObjectFamily::Timeline)
+    }
+
+    /// #3643: `timeline/<16-hex sealing snapshot id>/<16-hex ordinal>`. Both
+    /// components are fixed-width hex, so a listing orders segments by the
+    /// checkpoint that sealed them.
+    pub(crate) fn timeline_segment(id: TimelineSegmentId) -> LayoutResult<ObjectName> {
+        object_name(&[
+            ObjectFamily::Timeline.as_str(),
+            &fixed_u64(id.sealing_snapshot_id),
+            &fixed_u64(id.ordinal),
+        ])
+    }
+
+    pub(crate) fn classify_timeline_segment_object(
+        object: &ObjectName,
+    ) -> LayoutResult<Option<TimelineSegmentId>> {
+        let Some(components) = components_for_family(object, ObjectFamily::Timeline)? else {
+            return Ok(None);
+        };
+        let [snapshot, ordinal] = components.as_slice() else {
+            return Err(invalid_shape(
+                ObjectFamily::Timeline,
+                "timeline segment objects must have a sealing snapshot id and an ordinal",
+            ));
+        };
+        Ok(Some(TimelineSegmentId {
+            sealing_snapshot_id: parse_fixed_u64_component(
+                ObjectFamily::Timeline,
+                "sealing snapshot id",
+                snapshot,
+            )?,
+            ordinal: parse_fixed_u64_component(ObjectFamily::Timeline, "ordinal", ordinal)?,
+        }))
     }
 
     pub(crate) fn temporary_prefix() -> LayoutResult<ObjectPrefix> {

@@ -23,6 +23,12 @@
 !/corpus/format_snapshot_timeline_payload/
 /corpus/format_snapshot_timeline_payload/*
 !/corpus/format_snapshot_timeline_payload/valid-empty
+!/corpus/format_snapshot_timeline_segments_payload/
+/corpus/format_snapshot_timeline_segments_payload/*
+!/corpus/format_snapshot_timeline_segments_payload/valid-empty
+!/corpus/format_timeline_segment/
+/corpus/format_timeline_segment/*
+!/corpus/format_timeline_segment/valid-two-entries
 !/corpus/format_quarantine/
 /corpus/format_quarantine/*
 !/corpus/format_quarantine/quarantine-inventory-empty

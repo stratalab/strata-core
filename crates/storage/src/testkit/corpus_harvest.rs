@@ -66,6 +66,11 @@ pub(crate) const FORMAT_TARGETS: &[(&str, FormatDecoder)] = &[
     ("format_segment_metadata", FormatDecoder::SegmentMetadata),
     ("format_snapshot_envelope", FormatDecoder::SnapshotEnvelope),
     (
+        "format_snapshot_timeline_segments_payload",
+        FormatDecoder::SnapshotTimelineSegmentsPayload,
+    ),
+    ("format_timeline_segment", FormatDecoder::TimelineSegment),
+    (
         "format_snapshot_flushed_branches_payload",
         FormatDecoder::SnapshotFlushedBranchesPayload,
     ),
@@ -467,7 +472,7 @@ mod tests {
             }
         }
         assert!(
-            verified >= 32,
+            verified >= 34,
             "the format seed grid shrank to {verified} — committed seeds went missing"
         );
     }

@@ -320,6 +320,9 @@ fn reserved_layout_fragments() -> &'static [&'static str] {
         "\"tables/",
         "\"snapshots\"",
         "\"snapshots/",
+        // #3643: only the path form — bare "timeline" is also the commit
+        // timeline KV space name (`COMMIT_TIMELINE_SPACE`).
+        "\"timeline/",
         "\"tmp\"",
         "\"tmp/",
         "\"quarantine\"",

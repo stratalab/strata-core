@@ -20,6 +20,10 @@ pub enum FormatDecoder {
     SnapshotFlushedBranchesPayload,
     SnapshotRowPayload,
     SnapshotTimelinePayload,
+    /// #3643: the snapshot's kind-5 timeline segment-reference section payload.
+    SnapshotTimelineSegmentsPayload,
+    /// #3643: a sealed timeline segment object.
+    TimelineSegment,
     StorageRow,
     TableArtifact,
     TableBlock,
@@ -63,6 +67,10 @@ pub fn decode_format_bytes(decoder: FormatDecoder, bytes: &[u8]) -> FormatDecode
         }
         FormatDecoder::SnapshotRowPayload => fuzzing::decode_snapshot_row_payload(bytes),
         FormatDecoder::SnapshotTimelinePayload => fuzzing::decode_snapshot_timeline_payload(bytes),
+        FormatDecoder::SnapshotTimelineSegmentsPayload => {
+            fuzzing::decode_snapshot_timeline_segments_payload(bytes)
+        }
+        FormatDecoder::TimelineSegment => fuzzing::decode_timeline_segment(bytes),
         FormatDecoder::StorageRow => fuzzing::decode_storage_row(bytes),
         FormatDecoder::TableArtifact => fuzzing::decode_table_artifact(bytes),
         FormatDecoder::TableBlock => fuzzing::decode_table_block(bytes),

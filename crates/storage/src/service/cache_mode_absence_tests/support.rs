@@ -356,6 +356,7 @@ fn is_durable_family(object: &ObjectName) -> bool {
                 | ObjectFamily::Wal
                 | ObjectFamily::Tables
                 | ObjectFamily::Snapshots
+                | ObjectFamily::Timeline
                 | ObjectFamily::Temporary
                 | ObjectFamily::Quarantine
                 | ObjectFamily::Locks

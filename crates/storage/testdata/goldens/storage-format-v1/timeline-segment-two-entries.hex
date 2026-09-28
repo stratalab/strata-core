@@ -1,0 +1,13 @@
+# format: timeline_segment object (#3643, docs/design/3643-timeline-segments.md §2.2)
+# header (32 bytes): magic "TLSG" | format_version 1 | entry_count 2 | reserved 0
+#                    first_version 7 | last_version 9
+# entry 1 (24 bytes): version 7 | commit_timestamp 1000 | committed_at 1700000000000000
+# entry 2 (24 bytes): version 9 | commit_timestamp 1500 | committed_at 0 (unknown)
+# footer: crc32 over every preceding byte
+# hex:
+54 4c 53 47 01 00 00 00 02 00 00 00 00 00 00 00
+07 00 00 00 00 00 00 00 09 00 00 00 00 00 00 00
+07 00 00 00 00 00 00 00 e8 03 00 00 00 00 00 00
+00 40 1e 18 24 0a 06 00 09 00 00 00 00 00 00 00
+dc 05 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+88 a7 27 f2
