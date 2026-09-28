@@ -75,6 +75,10 @@ pub(crate) struct LifecycleFootprintAuditFacts {
     /// `(objects, bytes)` the mark classified as unreferenced; `None` when the
     /// mark's proof was not complete (nothing can be called unreferenced).
     unreferenced: Option<(usize, u64)>,
+    /// #3646: the part of `unreferenced` the table catalogue still records
+    /// (a superseded input the sweep has not moved yet). The Live tier counts
+    /// these too, so the audit subtracts them to keep the families disjoint.
+    catalogued_unreferenced: (usize, u64),
     quarantined_objects: usize,
     quarantined_bytes: u64,
     snapshot_objects: usize,
@@ -88,6 +92,10 @@ pub(crate) struct LifecycleFootprintAuditFacts {
 impl LifecycleFootprintAuditFacts {
     pub(crate) const fn unreferenced(&self) -> Option<(usize, u64)> {
         self.unreferenced
+    }
+
+    pub(crate) const fn catalogued_unreferenced(&self) -> (usize, u64) {
+        self.catalogued_unreferenced
     }
 
     pub(crate) const fn quarantined_objects(&self) -> usize {
@@ -190,6 +198,10 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
     pub(crate) fn footprint_audit_facts(&self) -> LifecycleResult<LifecycleFootprintAuditFacts> {
         let health = self.current_recovery_health.clone();
         let unreferenced = self.audit_unreferenced_table_objects(&health)?;
+        let catalogued_unreferenced = unreferenced.as_ref().map_or((0, 0), |(_, catalogued)| {
+            (catalogued.objects, catalogued.bytes)
+        });
+        let unreferenced = unreferenced.map(|(all, _)| all);
         let quarantined = self.audit_quarantine_inventories()?;
         let manifest = self
             .services
@@ -209,6 +221,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         let (reclaimable, tail) = self.audit_wal_segments(covered_through)?;
         Ok(LifecycleFootprintAuditFacts {
             unreferenced: unreferenced.map(|tally| (tally.objects, tally.bytes)),
+            catalogued_unreferenced,
             quarantined_objects: quarantined.objects,
             quarantined_bytes: quarantined.bytes,
             snapshot_objects: snapshots.objects,
@@ -223,11 +236,12 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
     /// A report-only mark with the sweep's own pins (#2553): without them an
     /// object reachable only from in-memory branch state would count as
     /// unreferenced, and the audit would report debt the sweep never stages.
-    /// `None` when the mark's proof is not complete.
+    /// `None` when the mark's proof is not complete. The second tally is the
+    /// subset the table catalogue still records (#3646).
     fn audit_unreferenced_table_objects(
         &self,
         health: &RecoveryHealth,
-    ) -> LifecycleResult<Option<Tally>> {
+    ) -> LifecycleResult<Option<(Tally, Tally)>> {
         let request =
             table_object_retention_request(&self.services, self.initial_branch_id, health)?
                 .with_pinned_objects(self.reclaim_pinned_table_objects());
@@ -241,6 +255,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             .map(|entry| (entry.object(), entry.byte_count()))
             .collect();
         let mut tally = Tally::default();
+        let mut catalogued = Tally::default();
         for object in outcome
             .decisions()
             .iter()
@@ -249,9 +264,13 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         {
             // Every candidate comes from the inventory the mark listed, so a
             // missing size can only be a listing race.
-            tally.add(sizes.get(object).copied().unwrap_or(0));
+            let bytes = sizes.get(object).copied().unwrap_or(0);
+            tally.add(bytes);
+            if self.table_catalog.contains_object(object) {
+                catalogued.add(bytes);
+            }
         }
-        Ok(Some(tally))
+        Ok(Some((tally, catalogued)))
     }
 
     /// Every branch's quarantine inventory: the staged objects and their

@@ -117,10 +117,10 @@ pub struct StorageReclaimStatus {
 pub struct StorageFootprint {
     /// The tier the facts were gathered at.
     pub detail: FootprintDetail,
-    /// Table objects in the table family: every object a manifest or a live
-    /// branch still uses, plus any a compaction superseded that the reclaim
-    /// sweep has not yet moved to quarantine (the audit counts those under
-    /// `unreferenced_*` as well).
+    /// Table objects in the table family that are still in use. On the Live
+    /// tier this also counts any a compaction superseded that the reclaim
+    /// sweep has not yet moved to quarantine; the Audit tier leaves those out,
+    /// because it counts them under `unreferenced_*` (each file once).
     pub live_table_objects: u64,
     /// Bytes of those table objects.
     pub live_table_bytes: u64,
@@ -153,12 +153,12 @@ pub struct StorageFootprint {
     pub wal_reclaimable_bytes: Option<u64>,
     /// WAL bytes above the retention watermark (audit).
     pub wal_tail_bytes: Option<u64>,
-    /// Every byte the database holds on disk — table objects, quarantined
-    /// objects, snapshots and the WAL — when every part is known (audit; the
-    /// WAL from the audit's own listing, so a read-only open with cold live
-    /// facts still totals). Between a compaction and the sweep that follows
-    /// it, a superseded object counts both as a table object and as
-    /// unreferenced.
+    /// The bytes of every storage family — table objects in use, unreferenced
+    /// and quarantined objects, snapshots and the WAL — when every part is
+    /// known (audit; the WAL from the audit's own listing, so a read-only open
+    /// with cold live facts still totals). The families are disjoint, so each
+    /// file counts once. Small metadata objects (manifests, locks) are outside
+    /// the families.
     pub total_bytes: Option<u64>,
     /// The reclaim ledger.
     pub reclaim: StorageReclaimStatus,

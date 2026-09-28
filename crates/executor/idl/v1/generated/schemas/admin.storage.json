@@ -131,7 +131,7 @@
           "type": "integer"
         },
         "live_table_objects": {
-          "description": "Table objects in the table family: everything a manifest or a live\nbranch uses, plus any a compaction superseded that the reclaim sweep\nhas not yet moved to quarantine.",
+          "description": "Table objects in the table family that are still in use. Without\n`audit` this also counts any a compaction superseded that the reclaim\nsweep has not yet moved; with `audit` those are counted under\n`unreferenced_*` instead (each file once).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -195,7 +195,7 @@
           ]
         },
         "total_bytes": {
-          "description": "Every byte the database holds on disk — table objects, quarantined\nobjects, snapshots and the WAL (from the audit's own listing) — when\nevery part is known (audit).",
+          "description": "The bytes of every storage family — table objects in use, unreferenced\nand quarantined objects, snapshots and the WAL (from the audit's own\nlisting) — each file counted once, when every part is known (audit).\nSmall metadata objects (manifests, locks) are outside the families.",
           "format": "uint64",
           "minimum": 0,
           "type": [

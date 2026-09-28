@@ -4793,3 +4793,31 @@ fn api_debt_below_the_threshold_keeps_the_upper_tier_first() {
         "below the threshold the ladder ran the checkpoint first; the sweep waits for the floor"
     );
 }
+
+/// #3646 (from the external #3596 review): before the sweep moves a
+/// superseded input, the catalogue still records it and the audit counts it
+/// as unreferenced; the Audit tier's table and unreferenced facts must still
+/// add up to the physical table bytes, each file counted once.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_audit_footprint_families_are_disjoint_before_the_sweep() {
+    let root = temp_dir_for_api_test("review-3596-footprint-overlap");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let (runtime, _, _) = plant_reclaim_debt(backend, &root);
+    let footprint = runtime
+        .diagnostics(
+            DiagnosticsRequest::new(DiagnosticsScope::Global).with_detail(DiagnosticsDetail::Audit),
+        )
+        .expect("audit")
+        .footprint();
+    let actual = table_data_object_bytes(&root);
+    assert!(
+        footprint.unreferenced_bytes().unwrap() > 0,
+        "fixture has debt"
+    );
+    assert_eq!(
+        footprint.live_table_bytes().unwrap() + footprint.unreferenced_bytes().unwrap(),
+        actual,
+        "canonical table families must not count a file twice: {footprint:?}"
+    );
+}

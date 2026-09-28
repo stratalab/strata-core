@@ -848,6 +848,27 @@ fn diagnostics_request_defaults_to_the_live_tier() {
     assert_eq!(DiagnosticsDetail::default(), DiagnosticsDetail::Live);
 }
 
+/// #3646: the Audit tier removes catalogued-but-unreferenced objects from the
+/// table facts, so a superseded input the sweep has not moved is counted once
+/// (as unreferenced), not twice. Unknown facts stay unknown; nothing underflows.
+#[test]
+fn disjoint_live_tables_truth_table() {
+    use crate::api::diagnostics::disjoint_live_tables;
+    assert_eq!(
+        disjoint_live_tables(Some(3), Some(1531), 2, 1002),
+        (Some(1), Some(529))
+    );
+    assert_eq!(
+        disjoint_live_tables(Some(3), Some(1531), 0, 0),
+        (Some(3), Some(1531))
+    );
+    assert_eq!(disjoint_live_tables(None, None, 2, 1002), (None, None));
+    assert_eq!(
+        disjoint_live_tables(Some(1), Some(10), 5, 50),
+        (Some(0), Some(0))
+    );
+}
+
 #[test]
 fn footprint_for_detail_truth_table() {
     use crate::api::diagnostics::{footprint_for_detail, DiagnosticsFootprintAudit};
@@ -856,6 +877,8 @@ fn footprint_for_detail_truth_table() {
     let audit = DiagnosticsFootprintAudit {
         unreferenced_objects: Some(6),
         unreferenced_bytes: Some(7),
+        catalogued_unreferenced_objects: 0,
+        catalogued_unreferenced_bytes: 0,
         snapshot_objects: 8,
         snapshot_bytes: 9,
         superseded_snapshots: 10,

@@ -236,10 +236,17 @@ mod inline {
         let debt = db
             .storage_footprint(None, FootprintDetail::Audit)
             .expect("audit footprint");
+        // #3646: the audit counts each file once — the two superseded inputs
+        // as unreferenced, only the output as a table in use. The Live tier,
+        // which does no listing, still counts all three catalogued objects.
         assert_eq!(
-            debt.live_table_objects, 3,
-            "the superseded inputs stay catalogued beside the output until the purge: {debt:?}"
+            debt.live_table_objects, 1,
+            "the audit's table facts exclude what it counts as unreferenced: {debt:?}"
         );
+        let live = db
+            .storage_footprint(None, FootprintDetail::Live)
+            .expect("live footprint");
+        assert_eq!(live.live_table_objects, 3, "{live:?}");
         assert_eq!(
             debt.unreferenced_objects,
             Some(2),

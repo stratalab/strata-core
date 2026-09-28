@@ -394,9 +394,10 @@ pub struct AdminStorageReclaim {
 pub struct AdminStorage {
     /// True when the audit tier gathered the listing-backed facts.
     pub audit: bool,
-    /// Table objects in the table family: everything a manifest or a live
-    /// branch uses, plus any a compaction superseded that the reclaim sweep
-    /// has not yet moved to quarantine.
+    /// Table objects in the table family that are still in use. Without
+    /// `audit` this also counts any a compaction superseded that the reclaim
+    /// sweep has not yet moved; with `audit` those are counted under
+    /// `unreferenced_*` instead (each file once).
     pub live_table_objects: u64,
     /// Bytes of those table objects.
     pub live_table_bytes: u64,
@@ -443,9 +444,10 @@ pub struct AdminStorage {
     /// WAL bytes above the retention watermark (audit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_tail_bytes: Option<u64>,
-    /// Every byte the database holds on disk — table objects, quarantined
-    /// objects, snapshots and the WAL (from the audit's own listing) — when
-    /// every part is known (audit).
+    /// The bytes of every storage family — table objects in use, unreferenced
+    /// and quarantined objects, snapshots and the WAL (from the audit's own
+    /// listing) — each file counted once, when every part is known (audit).
+    /// Small metadata objects (manifests, locks) are outside the families.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_bytes: Option<u64>,
     /// The reclaim ledger.

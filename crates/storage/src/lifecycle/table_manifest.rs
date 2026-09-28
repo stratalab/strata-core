@@ -376,6 +376,11 @@ impl LifecycleDurableTableCatalog {
         }
     }
 
+    /// #3646: whether `object` is one of the catalogued table objects.
+    pub(crate) fn contains_object(&self, object: &ObjectName) -> bool {
+        self.objects.contains_key(object.as_str())
+    }
+
     pub(crate) fn object_count(&self) -> usize {
         self.objects.len()
     }
