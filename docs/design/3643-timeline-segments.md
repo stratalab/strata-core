@@ -1,6 +1,6 @@
 # #3643: sealed timeline segments
 
-Status: **DESIGN, 2026-09-28** (milestone 1.2.6; follows #3596, and is the P1 finding of the external #3596 review). Direction chosen with the user on 2026-09-28: sealed segment objects. The rejected alternative was a separate, larger timeline decode bound. Every symbol below was verified on `main` @ `551bb800`.
+Status: **IMPLEMENTING, 2026-09-28** (slice 1 #3654; slice 2 in review) (milestone 1.2.6; follows #3596, and is the P1 finding of the external #3596 review). Direction chosen with the user on 2026-09-28: sealed segment objects. The rejected alternative was a separate, larger timeline decode bound. Every symbol below was verified on `main` @ `551bb800`.
 
 ## 1. Problem
 
@@ -33,12 +33,12 @@ The timeline is stored as immutable, independently bounded **segment objects**. 
 
 ### 2.2 Segment object (new object family `timeline`)
 
-- **Name.** `timeline/<16-hex sealing snapshot id>/<8-hex ordinal>`: the id of the checkpoint that first wrote it, plus an ordinal within that checkpoint. The naming is what makes garbage collection mirror the snapshot rules (§2.6).
+- **Name.** `timeline/<16-hex sealing snapshot id>/<16-hex ordinal>`: the id of the checkpoint that first wrote it, plus an ordinal within that checkpoint. The naming is what makes garbage collection mirror the snapshot rules (§2.6).
 - **Layout.** A 32-byte header, then the entries, then a CRC32 footer over everything before it. Entry encoding is identical to kind 3.
   - Header fields: magic `TLSG`, format version 1, `entry_count u32`, `first_version u64`, `last_version u64`, and reserved zeroes.
 - **Validation.** Entries must be strictly ascending, nonzero, and bounded by the header, with `entry_count ≤ TIMELINE_CHUNK_ENTRIES`. Decode fails closed on any violation.
 - **Bounded decode.** One segment's decode is bounded by its own size, well under the payload cap. DUR-017 holds per object, which strengthens it.
-- **Write.** Segments are written with `publish_durable_create`: temp file, fsync, a hard-link install that never clobbers, then a directory fsync. All of a checkpoint's segments are durable **before** its snapshot is published.
+- **Write.** Segments are written with `publish_durable_replace`: temp file, fsync, rename, then a directory fsync. Replace is safe because a segment is sealed under an id above the live snapshot (`validate_snapshot_id_advances`), so no live reference can name it yet, and it is required because a checkpoint that failed after writing segments retries under the same id. All of a checkpoint's segments are durable **before** its snapshot is published.
 
 ### 2.3 Snapshot reference section (new kind 5)
 
@@ -56,7 +56,7 @@ For each active branch whose index is complete at the checkpoint's visible versi
 1. The in-memory index carries `sealed: Vec<SegmentRef>`, the refs of its full chunks already durable. A full chunk is sealed **once** and re-referenced by every later checkpoint.
    - The index adopts refs **only after the checkpoint that wrote them completes**, meaning after the manifest re-points to its snapshot. Recovery seeds `sealed` from the attested snapshot.
    - So every ref a checkpoint re-uses is referenced by the live snapshot at that moment. This is what makes the `Superseded` rule of §2.6 safe against a checkpoint that wrote segments and then deferred or failed: those segments are never re-used, and they are reclaimed.
-2. New full chunks since the last checkpoint are written as segments. **Dedup:** before writing a chunk, the writer looks it up in the refs of the manifest-live snapshot, keyed by `(first_version, last_version, entry_count, crc32)`, and re-references a match.
+2. New full chunks since the last checkpoint are written as segments. **Dedup (slice 3):** before writing a chunk, the writer looks it up in the refs of the manifest-live snapshot, keyed by `(first_version, last_version, entry_count, crc32)`, and re-references a match.
    - This is how a fork shares its parent's chunks without tracking lineage.
    - It is sound because commit versions are database-global (l7 §"Commit versions are monotonically increasing"; one runtime-wide counter). An entry with a given version is the same commit fact on every branch. Matching version ranges and counts therefore name the same commits, and the CRC guards the one field that can differ, `committed_at` (known versus unknown).
 3. The tail, if any, is written as a fresh segment on every checkpoint whose tail changed. That bounds the per-branch timeline write to about 1.5 MiB plus new full chunks, where today it is the whole history.
@@ -70,7 +70,7 @@ A checkpoint that defers or fails leaves its freshly written segments unreferenc
 2. Segments load one at a time. Each is checked against its ref (`entry_count`, the version range, the CRC) and for contiguity with the previous ref. The last entry must not exceed the snapshot watermark. A segment shared by several branches is read once.
 3. The branch index is seeded exactly as from a kind-3 group, and `sealed` is set to the full-chunk refs so the next checkpoint reuses them. WAL replay then appends entries above the watermark, unchanged.
 4. **A missing or corrupt segment** mirrors the table-object pattern (`table_read_error`):
-   - Under `AllowExplicitLossyFallback`, it records the new `RecoveryFaultKind::MissingTimelineSegment` (DataLoss health). The branch index stays **incomplete**, so timestamp and wall-clock `as_of` refuse instead of resolving against a hole (DUR-015: never a wrong answer). Version-addressed reads are unaffected.
+   - Under `AllowExplicitLossyFallback`, it records `RecoveryFaultKind::MissingSnapshotObject` for the branch (DataLoss health). The segment is part of the snapshot family, and reusing the existing kind keeps the fault vocabulary, and everything that maps it, unchanged. The branch index stays **incomplete**, so timestamp and wall-clock `as_of` refuse instead of resolving against a hole (DUR-015: never a wrong answer). Version-addressed reads are unaffected.
    - Under strict recovery, it is a corruption error.
 5. Fork recovery (`seed_forked_branch_timelines_from_parents`) is unchanged. A fork with its own group seeds from its refs.
 
@@ -112,7 +112,7 @@ The residual unbounded quantity is the in-memory index, about 24 bytes per retai
    - Behavior change: none.
    - Tests: round trips, adversarial decodes, goldens, and the family and literal guards.
 2. **Write, recover, reclaim.**
-   - Implementation: in-memory `sealed` refs; the checkpoint writer with dedup (§2.4); kind 5 written in place of kind 3; recovery (§2.5), including `MissingTimelineSegment`; the `Superseded` and `ReconcileToAttested` segment prune (§2.6).
+   - Implementation: in-memory `sealed` and `tail` refs; the checkpoint writer (§2.4, without dedup); kind 5 written in place of kind 3; recovery (§2.5), recording `MissingSnapshotObject`; the `Superseded` and `ReconcileToAttested` segment prune (§2.6).
    - GC ships in the same slice as the writer, so `main` never accumulates orphan tails.
    - Tests:
      - The review's `review_3596_fully_flushed_history_can_checkpoint_under_cap`, renamed.
@@ -122,6 +122,7 @@ The residual unbounded quantity is the in-memory index, about 24 bytes per retai
      - Missing and corrupt segments, under lossy and strict recovery.
      - Legacy kind-3 recovery followed by a first segment checkpoint.
      - Truth tables for the chunking and dedup decisions.
-3. **Observability and oracles.**
+3. **Fork dedup, observability and oracles.**
+   - Fork dedup (§2.4 step 2): a chunk matching a live reference is re-referenced, not rewritten.
    - Footprint folding (§2.6), the whole-database DST footprint oracle over segments, and the catalog amendments for DUR-017, DUR-019 and MVCC-009.
    - A CHANGELOG line: a database written by this build cannot be opened by 1.2.5. That is already one-way through the v2 event formats.
