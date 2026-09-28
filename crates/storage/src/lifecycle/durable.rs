@@ -41,6 +41,8 @@ mod maintenance;
 
 #[cfg(test)]
 pub(crate) use close::close_flushes_branch;
+#[cfg(test)]
+pub(crate) use close::close_starts_reclaim;
 pub(crate) use close::{
     close_checkpoint_decision, close_reclaim_should_continue, LifecycleCloseReclaimBudget,
 };

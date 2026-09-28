@@ -527,3 +527,19 @@ fn close_flushes_branch_truth_table() {
     assert!(close_flushes_branch(threshold, threshold));
     assert!(close_flushes_branch(threshold + 1, threshold));
 }
+
+/// #3644: a clean close starts a queued reclaim task only while its reclaim
+/// budget has time left; a disabled budget starts none.
+#[test]
+fn close_starts_reclaim_truth_table() {
+    use crate::lifecycle::durable::close_starts_reclaim;
+    use crate::lifecycle::LifecycleCloseReclaimBudget as Budget;
+    use std::time::Duration;
+    let ms = Duration::from_millis;
+    assert!(!close_starts_reclaim(Budget::Disabled, ms(0)));
+    assert!(!close_starts_reclaim(Budget::Bounded(ms(0)), ms(0)));
+    assert!(close_starts_reclaim(Budget::Bounded(ms(500)), ms(0)));
+    assert!(close_starts_reclaim(Budget::Bounded(ms(500)), ms(499)));
+    assert!(!close_starts_reclaim(Budget::Bounded(ms(500)), ms(500)));
+    assert!(!close_starts_reclaim(Budget::Bounded(ms(500)), ms(501)));
+}
