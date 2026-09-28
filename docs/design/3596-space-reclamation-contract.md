@@ -108,7 +108,17 @@ Fixes the slices surfaced, each its own PR:
 | #3622 snapshot prunes reported 0 bytes | slice 13 | #3631 | `930ac6f3` |
 | #3619 live tier kept purged objects; freed bytes counted twice | slice 9 | #3632 | `a6b8fec7` |
 
-Filed for later: #3629 (recovery silently skips unknown snapshot section kinds; the reason #3625 did not add a compressed section), #3047 (reader vs reclaim race, new evidence posted), #3594 / #3595 (event record format).
+Follow-on work in milestone 1.2.6, after the slices:
+
+| issue | change | PR | merged |
+|---|---|---|---|
+| #3594 event records stored both hashes as JSON number arrays (~230 B/event) | event record format v2: the two hashes as 64 raw bytes ahead of the JSON body; v1 still decodes. Events 0.627× → 0.457× logical on disk | #3635 | `92303baa` |
+| #3595 every append rewrote the ~790 B event-log head (per-type JSON summaries) | event-log head v2: a fixed 51-byte record; `list_types` reads the type index; v1 heads still decode; `put_count` unchanged. One event per commit 1.056× → 0.842× | #3636 | `552c524d` |
+| #3629 recovery silently skipped unknown snapshot section kinds (spec §13 rule 6) | recovery refuses an unknown kind as typed `RecoveryCorruption` | #3638 | open |
+| #3633 public rustdoc linked to private items | three links fixed; the `check` job builds rustdoc strictly for the six published crates | #3637 | open |
+| #3047 an off-lock reader hit a table object reclaim had deleted | defense: the mark also pins every table the current published views reference. The race itself is not reproduced; #3047 stays open with #3048 (loom) | #3639 | open |
+
+Compatibility note for the 1.2.6 release: a 1.2.5 binary cannot read events or event-log heads a 1.2.6 binary writes (#3594, #3595); upgrading is one-way.
 
 Every slice is one PR: its implementation and its tests land together, TDD (red first), with the invariant check and review before merge, ≤ 1,500 LOC. Storage-level tests open a **two-branch** runtime (an empty non-seeded root beside the seeded branch, mirroring `_system_`) under `DeterministicInline` with the manual clock; engine-level tests get the real topology for free. Tests assert typed outcomes and byte facts read from `diagnostics()`, never display text and never a directory walk. Every pure decision fn is truth-tabled and has a call-site test (mutation gate). Existing tests that pin the old contract are rewritten in the slice that changes the contract, never deleted. Fault-injection tests (`-p strata-storage --features fault-injection`) ride the slice they cover.
 
