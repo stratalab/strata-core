@@ -103,6 +103,19 @@ impl Default for LifecycleCloseReclaimBudget {
     }
 }
 
+/// #3644: whether a clean close may START a queued reclaim task after
+/// `elapsed` of its reclaim time: never under a disabled budget, and only
+/// while a bounded budget has time left (so a zero budget starts nothing).
+pub(crate) const fn close_starts_reclaim(
+    budget: LifecycleCloseReclaimBudget,
+    elapsed: Duration,
+) -> bool {
+    match budget {
+        LifecycleCloseReclaimBudget::Disabled => false,
+        LifecycleCloseReclaimBudget::Bounded(limit) => elapsed.as_nanos() < limit.as_nanos(),
+    }
+}
+
 /// Whether the close-time reclaim drive runs another sweep → purge round. It
 /// stops once the budget has elapsed, once the last sweep found nothing left
 /// (`debt_remaining` is false), or once a sweep deferred behind a held read
@@ -249,7 +262,16 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
                 observed_health.push(health.clone());
             }
         }
-        let drain = match self.maintenance.drain_for_close(self.state, &mut runner) {
+        // #3644: one clock for every reclaim task this close may start —
+        // already-queued ones here, and the rounds the drive below seeds.
+        // (Tasks that were already running above always finish: stopping
+        // in-flight work part-way is not safe.)
+        let reclaim_started = Instant::now();
+        let drain = match self
+            .maintenance
+            .drain_for_close_within(self.state, &mut runner, || {
+                close_starts_reclaim(reclaim_budget, reclaim_started.elapsed())
+            }) {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.mark_close_retry_pending()?;
@@ -270,7 +292,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         // reclaim must never turn a clean close into a retry.
         let mut reclaim_drained = 0_usize;
         if let LifecycleCloseReclaimBudget::Bounded(limit) = reclaim_budget {
-            let started = Instant::now();
+            let started = reclaim_started;
             let mut debt_remaining = true;
             let mut sweep_deferred = false;
             while close_reclaim_should_continue(

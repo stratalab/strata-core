@@ -1064,6 +1064,60 @@ fn maintenance_executor_cancel_keeps_only_drain_required_tasks() {
     );
 }
 
+/// #3644: the budgeted close drain runs only drain-before-close tasks, stops
+/// when `may_start` refuses, and cancels exactly the drain-before-close tasks it
+/// did not start — an ordinary task is neither run nor cancelled by it.
+#[test]
+fn maintenance_executor_budgeted_close_drain_runs_and_cancels_only_drain_tasks() {
+    let open = open_state();
+    let closing = closing_state();
+    let mut executor = LifecycleMaintenanceExecutor::new(4).expect("executor");
+    executor
+        .enqueue(open, health_request(MaintenanceTaskPolicy::ordinary()))
+        .expect("ordinary");
+    for priority in [MaintenanceTaskPriority::High, MaintenanceTaskPriority::Low] {
+        executor
+            .enqueue(
+                open,
+                repair_request(priority, MaintenanceTaskPolicy::drain_before_close()),
+            )
+            .expect("drain");
+    }
+
+    let mut starts = 0;
+    let mut runner = RecordingRunner::completed();
+    let drain = executor
+        .drain_for_close_within(closing, &mut runner, || {
+            starts += 1;
+            starts == 1
+        })
+        .expect("budgeted drain");
+
+    assert_eq!(drain.drained_tasks(), 1);
+    assert_eq!(
+        drain
+            .outcomes()
+            .iter()
+            .map(MaintenanceOutcome::task_kind)
+            .collect::<Vec<_>>(),
+        vec![MaintenanceTaskKind::Repair],
+        "only a drain-before-close task runs"
+    );
+    assert_eq!(executor.stats().canceled(), 1, "the unstarted drain task");
+    assert_eq!(
+        executor
+            .pending_tasks()
+            .iter()
+            .map(|task| (task.kind(), task.policy().close_policy()))
+            .collect::<Vec<_>>(),
+        vec![(
+            MaintenanceTaskKind::HealthCollection,
+            MaintenanceClosePolicy::Ordinary
+        )],
+        "the ordinary task is left for the close's own cancel"
+    );
+}
+
 #[test]
 fn close_cancel_sweep_removes_cancel_before_close_tasks() {
     let open = open_state();

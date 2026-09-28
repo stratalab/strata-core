@@ -4852,3 +4852,60 @@ fn api_audit_footprint_does_not_subtract_uncatalogued_orphans() {
         "each file counted once, orphans uncatalogued: {footprint:?}"
     );
 }
+
+/// #3644 (from the external #3596 review): the close's reclaim budget also
+/// governs reclaim tasks that were already queued before the close — a
+/// disabled or zero budget starts none of them, and the debt stays on disk for
+/// the next open to reclaim.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_disabled_close_budget_leaves_an_already_queued_sweep_for_the_next_open() {
+    let root = temp_dir_for_api_test("review-3596-disabled-queued");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let (mut runtime, _, before) = plant_reclaim_debt(backend, &root);
+    runtime
+        .enqueue_maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Quarantine,
+            MaintenanceScope::Global,
+        ))
+        .expect("queue sweep");
+    runtime
+        .close_with_options(
+            StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+        )
+        .expect("close");
+    assert_eq!(
+        table_data_object_files(&root),
+        before,
+        "disabled close must leave already queued reclaim debt intact"
+    );
+}
+
+/// #3644 (from the external #3596 review): the close's reclaim budget also
+/// governs reclaim tasks that were already queued before the close — a
+/// disabled or zero budget starts none of them, and the debt stays on disk for
+/// the next open to reclaim.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_zero_close_budget_leaves_an_already_queued_sweep_for_the_next_open() {
+    let root = temp_dir_for_api_test("review-3596-zero-queued");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let (mut runtime, _, before) = plant_reclaim_debt(backend, &root);
+    runtime
+        .enqueue_maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Quarantine,
+            MaintenanceScope::Global,
+        ))
+        .expect("queue sweep");
+    runtime
+        .close_with_options(
+            StorageCloseOptions::graceful()
+                .with_reclaim_budget(ReclaimBudget::Bounded(std::time::Duration::ZERO)),
+        )
+        .expect("close");
+    assert_eq!(
+        table_data_object_files(&root),
+        before,
+        "zero budget must cover already queued reclaim tasks"
+    );
+}

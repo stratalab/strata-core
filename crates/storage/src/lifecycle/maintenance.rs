@@ -1555,6 +1555,41 @@ impl LifecycleMaintenanceExecutor {
         self.drain_for_close_with_fault(state, runner, &mut NoopMaintenanceFaultHook)
     }
 
+    /// #3644: drain queued drain-before-close tasks (the reclaim kinds) one at
+    /// a time while `may_start` allows, then cancel whichever it did not
+    /// start. The close's reclaim budget governs queued work exactly as it
+    /// governs the reclaim rounds the close seeds itself; the next open
+    /// re-derives whatever is cancelled here.
+    pub(crate) fn drain_for_close_within(
+        &mut self,
+        state: LifecycleStateMachine,
+        runner: &mut impl MaintenanceTaskRunner,
+        mut may_start: impl FnMut() -> bool,
+    ) -> LifecycleResult<MaintenanceDrainOutcome> {
+        require_admitted(state, LifecycleOperationKind::CloseRequiredDrain)?;
+        let mut outcomes = Vec::new();
+        while let Some(index) = self.next_task_index(|task| {
+            task.policy().close_policy() == MaintenanceClosePolicy::DrainBeforeClose
+        }) {
+            if !may_start() {
+                let before = self.queue.len();
+                self.queue.retain(|task| {
+                    task.policy().close_policy() != MaintenanceClosePolicy::DrainBeforeClose
+                });
+                let canceled = before - self.queue.len();
+                self.stats.canceled = self.stats.canceled.saturating_add(canceled);
+                break;
+            }
+            let outcome = self.run_index(index, runner, &mut NoopMaintenanceFaultHook, true)?;
+            outcomes.push(outcome);
+        }
+        Ok(MaintenanceDrainOutcome::new(
+            outcomes.len(),
+            outcomes,
+            self.stats,
+        ))
+    }
+
     pub(crate) fn drain_active_for_close(
         &mut self,
         state: LifecycleStateMachine,
