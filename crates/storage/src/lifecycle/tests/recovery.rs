@@ -1867,6 +1867,70 @@ fn checkpoint_row_section_round_trips_and_rejects_trailing_bytes() {
     assert!(error.source().is_some());
 }
 
+/// #3629: recovery interprets exactly the four section kinds this build
+/// writes or reads; every other kind is unknown.
+#[test]
+fn known_snapshot_section_kind_truth_table() {
+    use crate::lifecycle::recovery::known_snapshot_section_kind;
+    for kind in 1..=4 {
+        assert!(known_snapshot_section_kind(kind), "kind {kind}");
+    }
+    for kind in [0, 5, 6, 0x7f, 0xff] {
+        assert!(!known_snapshot_section_kind(kind), "kind {kind}");
+    }
+}
+
+/// #3629: a snapshot carrying a section kind this build cannot interpret — a
+/// newer format's state — refuses the open with typed recovery corruption,
+/// never opens with that state silently dropped. The same snapshot without
+/// the unknown section recovers.
+#[test]
+fn a_snapshot_with_an_unknown_section_kind_refuses_recovery() {
+    let row = put_row(branch_id(0x37), 11, b"section", b"value");
+    let rows = encode_checkpoint_row_section(std::slice::from_ref(&row)).expect("rows section");
+    let unknown = crate::format::SnapshotSection::new(5, b"a newer format's state".to_vec())
+        .expect("unknown section shape");
+    let recover = |sections: Vec<crate::format::SnapshotSection>| {
+        let backend: &'static RecoveryTestBackend =
+            crate::testkit::leak_static(RecoveryTestBackend::new());
+        let branch = branch_id(0x37);
+        let snapshot = crate::format::SnapshotContainer::new(
+            crate::format::SnapshotHeader::new(
+                8,
+                CommitVersion::new(11),
+                Timestamp::from_micros(1_100),
+                DATABASE_ID,
+                "identity",
+            )
+            .expect("header"),
+            sections,
+        );
+        let snapshot_bytes = crate::format::encode_snapshot_container(&snapshot).expect("snapshot");
+        backend.write_raw(ObjectLayout::snapshot(8).expect("snapshot"), snapshot_bytes);
+        write_manifest(
+            backend,
+            &DatabaseManifest::new(DATABASE_ID, "identity")
+                .expect("database root")
+                .with_recovery_facts(1, Some(11), Some(8), None)
+                .expect("database root facts"),
+        );
+        let mut shell = assemble_shell(open_plan(RecoveryStrictness::Strict), branch, backend)
+            .expect("durable shell");
+        let request =
+            LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+        LifecycleRecoveryRuntime::new(&mut shell)
+            .recover(&request)
+            .map(|_| ())
+    };
+    recover(vec![rows.clone()]).expect("the known sections alone recover");
+    let error = recover(vec![rows, unknown]).expect_err("an unknown section kind refuses");
+    assert!(
+        matches!(error, LifecycleError::RecoveryCorruption { .. }),
+        "{error:?}"
+    );
+    assert!(error.source().is_some());
+}
+
 #[test]
 fn checkpoint_row_section_rejects_declared_rows_without_length_prefixes() {
     let mut payload = Vec::new();
