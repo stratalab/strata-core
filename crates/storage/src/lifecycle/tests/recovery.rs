@@ -2915,6 +2915,16 @@ fn seeded_branch_is_orphaned_delta_truth_table() {
 /// The replay filter over a log offered in order: with an orphan the visit
 /// starts at zero, the orphan's records apply only along the dense prefix
 /// from version 1, other branches' records skip at or below `replay_start`.
+/// #3626: a reopen queues a quarantine purge exactly when the recovered
+/// inventory holds an entry.
+#[test]
+fn reopen_owes_quarantine_purge_truth_table() {
+    use crate::lifecycle::durable::reopen_owes_quarantine_purge;
+    assert!(!reopen_owes_quarantine_purge(0));
+    assert!(reopen_owes_quarantine_purge(1));
+    assert!(reopen_owes_quarantine_purge(5));
+}
+
 #[test]
 fn orphan_replay_filter_truth_table() {
     use crate::lifecycle::durable::OrphanReplayFilter;

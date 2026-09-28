@@ -291,6 +291,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             .lifecycle_config()
             .max_maintenance_queue_depth();
         let attested_snapshot_present = self.assembly_facts().manifest_snapshot_id().is_some();
+        let recovered_quarantine_entries = recovery.quarantine().entry_count();
         // #3612: seed the allocator past any snapshot object already on disk, not
         // just past the attested id — a crash orphan at attested+1 would otherwise
         // collide with every checkpoint until the open-time reconcile removes it.
@@ -421,6 +422,22 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
                 let _ = runtime.enqueue_maintenance(
                     crate::lifecycle::MaintenanceTaskRequest::snapshot_pruning_with_mode(
                         crate::service::SnapshotPruneMode::ReconcileToAttested,
+                    ),
+                );
+            }
+            // #3626: quarantine a prior session staged but never purged (a
+            // crash after the sweep, a close whose reclaim budget ran out
+            // between sweep and purge) is invisible to the mark above — the
+            // objects are no longer in the table family — so no sweep of this
+            // session re-stages them and no purge would ever be chained (the
+            // sweeps chain a purge only when they quarantine something in that
+            // pass). Queue the purge from the recovered inventory; this is also
+            // where a rejected purge enqueue in a prior session is picked up.
+            // Best-effort for the same reason as the mark.
+            if reopen_owes_quarantine_purge(recovered_quarantine_entries) {
+                let _ = runtime.enqueue_maintenance(
+                    crate::lifecycle::MaintenanceTaskRequest::purge_quarantine(
+                        runtime.initial_branch_id,
                     ),
                 );
             }
@@ -3192,6 +3209,13 @@ impl<'a> OrphanReplayFilter<'a> {
             version > self.replay_start
         }
     }
+}
+
+/// #3626: whether a reopen must queue a quarantine purge — exactly when the
+/// recovered quarantine inventory holds an entry a prior session staged and
+/// never purged.
+pub(crate) const fn reopen_owes_quarantine_purge(recovered_entries: usize) -> bool {
+    recovered_entries > 0
 }
 
 /// Install checkpoint rows that did not belong to the seeded branch.
