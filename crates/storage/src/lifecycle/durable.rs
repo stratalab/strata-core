@@ -39,6 +39,8 @@ mod footprint;
 mod inflight;
 mod maintenance;
 
+#[cfg(test)]
+pub(crate) use close::close_flushes_branch;
 pub(crate) use close::{
     close_checkpoint_decision, close_reclaim_should_continue, LifecycleCloseReclaimBudget,
 };

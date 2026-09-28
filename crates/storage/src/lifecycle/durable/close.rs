@@ -58,6 +58,20 @@ pub(crate) enum LifecycleCloseReclaimBudget {
 /// path takes about its checkpoint — the budget gate first (a disabled budget
 /// skips every close-time reclaim), then the registry's structural deferral,
 /// then whether anything sits above the retention watermark.
+/// #3625: the unflushed delta (active plus frozen memtable bytes) at or
+/// above which a clean close flushes a branch into tables before its
+/// checkpoint. Snapshot rows are stored uncompressed while tables are
+/// Zstd-compressed, so a large delta is several times smaller as a table; a
+/// small one stays in the snapshot, where a table's fixed overhead and one
+/// more level-0 table per close would cost more than they save.
+pub(crate) const CLOSE_FLUSH_MIN_DELTA_BYTES: u64 = 64 * 1024;
+
+/// #3625: whether a clean close flushes a branch whose unflushed delta is
+/// `unflushed_bytes` before the close checkpoint.
+pub(crate) const fn close_flushes_branch(unflushed_bytes: u64, threshold: u64) -> bool {
+    unflushed_bytes >= threshold
+}
+
 pub(crate) const fn close_checkpoint_decision(
     budget: LifecycleCloseReclaimBudget,
     structural: Option<CheckpointStructuralDeferral>,
@@ -413,6 +427,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         // the same way) and makes the close's own quiesce report the retry,
         // and that retry must not rotate the log again.
         drop(self.guard_set.try_begin_quiesce().map_err(commit_error)?);
+        self.flush_large_deltas_before_close_checkpoint();
         // Reclaim rotation first (#3494): the snapshot below covers every
         // record in the active segment, so sealing it now lets the
         // checkpoint's own truncation pass release it, leaving an empty
@@ -483,6 +498,36 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             }
         }
         Ok(CloseCheckpointReport::Attempted(outcome.status()))
+    }
+
+    /// #3625: flush every branch whose unflushed delta is large enough to be
+    /// worth a table, so the close checkpoint snapshots only small deltas.
+    /// Best-effort: a branch whose flush is refused or fails keeps its rows in
+    /// the memtable, and the checkpoint below snapshots them as before; the
+    /// failure is health debt, never a close failure.
+    fn flush_large_deltas_before_close_checkpoint(&mut self) {
+        for branch_id in self.branch_catalog.registry().active_branch_ids() {
+            let Ok(branch) = self.branch_catalog.branch_state(branch_id) else {
+                continue;
+            };
+            let unflushed = branch
+                .active_byte_count()
+                .saturating_add(branch.frozen_byte_count());
+            if !close_flushes_branch(unflushed, CLOSE_FLUSH_MIN_DELTA_BYTES) {
+                continue;
+            }
+            let flushed = self
+                .rotate_active_for_flush_unadmitted(branch_id)
+                .and_then(|()| close_flush_request(branch_id))
+                .and_then(|request| self.flush_frozen_unadmitted(&request));
+            if flushed.is_err() {
+                if let Ok(debt) = crate::lifecycle::telemetry_health_debt(
+                    "close-time flush failed; the checkpoint snapshots the delta",
+                ) {
+                    self.record_recovery_health(Some(&debt));
+                }
+            }
+        }
     }
 
     fn mark_close_retry_pending(&mut self) -> LifecycleResult<()> {
@@ -1002,4 +1047,16 @@ fn close_drain_error(error: LifecycleError) -> LifecycleError {
         }
     }
     error
+}
+
+/// The flush request a close-time flush (#3625) issues for `branch_id`.
+fn close_flush_request(
+    branch_id: strata_core::BranchId,
+) -> LifecycleResult<crate::lifecycle::FlushFrozenRequest> {
+    crate::lifecycle::FlushFrozenRequest::new(
+        branch_id,
+        None,
+        crate::lifecycle::FlushTableIdentitySeed::new(format!("close-flush-{branch_id}"))?,
+        crate::lifecycle::FlushTableObjectId::new(format!("close-flush-{branch_id}"))?,
+    )
 }

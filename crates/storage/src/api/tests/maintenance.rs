@@ -3813,6 +3813,120 @@ fn api_close_reclaim_truncates_the_wal_behind_the_close_checkpoint() {
     );
 }
 
+/// #3625: the close-time flush — commit `rows` rows of `value_len` bytes of
+/// ordinary text on the default branch, 32 rows per commit.
+#[cfg(feature = "localfs")]
+fn commit_text_rows(runtime: &mut StorageRuntime<'_>, rows: usize, value_len: usize) {
+    let words = [
+        "branch", "commit", "table", "reclaim", "snapshot", "session", "agent", "tool",
+    ];
+    for chunk in (0..rows).collect::<Vec<_>>().chunks(32) {
+        let mutations = chunk
+            .iter()
+            .map(|i| {
+                let mut text = String::new();
+                let mut w = *i;
+                while text.len() < value_len {
+                    text.push_str(words[w % words.len()]);
+                    text.push(' ');
+                    w = w.wrapping_mul(7).wrapping_add(3);
+                }
+                text.truncate(value_len);
+                CommitMutation::Put {
+                    storage_space: engine_space(),
+                    key: api_key(format!("row-{i:06}").as_bytes()),
+                    value: StorageValue::new(text.into_bytes()),
+                    ttl: None,
+                }
+            })
+            .collect();
+        runtime
+            .commit(
+                &CommitBatch::new(branch(), mutations, CommitOptions::default()).expect("batch"),
+            )
+            .expect("commit");
+    }
+}
+
+#[cfg(feature = "localfs")]
+fn snapshot_bytes_on_disk(root: &std::path::Path) -> u64 {
+    std::fs::read_dir(root.join("snapshots"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.metadata().ok())
+                .map(|metadata| metadata.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// #3625: a clean close flushes a large unflushed delta into (compressed)
+/// tables before its checkpoint, so the snapshot carries only a small delta
+/// instead of every row uncompressed; the rows read back after a reopen.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_flushes_a_large_delta_into_tables_before_its_checkpoint() {
+    let root = temp_dir_for_api_test("maintenance-close-flush-large-delta");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let inline = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(inline, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    commit_text_rows(&mut runtime, 256, 1024);
+    assert!(
+        table_data_object_files(&root).is_empty(),
+        "nothing flushed during the session"
+    );
+    runtime.close().expect("close");
+    assert!(
+        !table_data_object_files(&root).is_empty(),
+        "the close flushed the large delta into a table"
+    );
+    let snapshot = snapshot_bytes_on_disk(&root);
+    assert!(
+        snapshot < 64 * 1024,
+        "the snapshot no longer carries the 256 KiB delta: {snapshot} bytes"
+    );
+    let reopened = reopen_and_drain(backend);
+    assert_eq!(
+        read_value(&reopened, b"row-000255").map(|value| value.len()),
+        Some(1024),
+        "the flushed rows read back"
+    );
+}
+
+/// #3625 direction control: a small delta stays in the close snapshot — no
+/// table (and no level-0 churn) for a short session.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_keeps_a_small_delta_in_the_snapshot() {
+    let root = temp_dir_for_api_test("maintenance-close-flush-small-delta");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let inline = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(inline, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    commit_text_rows(&mut runtime, 8, 256);
+    runtime.close().expect("close");
+    assert!(
+        table_data_object_files(&root).is_empty(),
+        "a small delta is not worth a table"
+    );
+    assert!(snapshot_bytes_on_disk(&root) > 0, "the snapshot holds it");
+    let reopened = reopen_and_drain(backend);
+    assert_eq!(
+        read_value(&reopened, b"row-000007").map(|value| value.len()),
+        Some(256)
+    );
+}
+
 /// A backend that refuses deletes during the close-time sweep must not turn
 /// the clean close into a failure: the close completes and the debt stays on
 /// disk (what reclaims it afterwards is #3608).

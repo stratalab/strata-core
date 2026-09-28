@@ -515,3 +515,15 @@ fn close_checkpoint_decision_truth_table() {
         CloseCheckpointDecision::Publish
     );
 }
+
+/// #3625: a clean close flushes a branch exactly when its unflushed delta
+/// reaches the threshold.
+#[test]
+fn close_flushes_branch_truth_table() {
+    use crate::lifecycle::durable::close_flushes_branch;
+    let threshold = 64 * 1024;
+    assert!(!close_flushes_branch(0, threshold));
+    assert!(!close_flushes_branch(threshold - 1, threshold));
+    assert!(close_flushes_branch(threshold, threshold));
+    assert!(close_flushes_branch(threshold + 1, threshold));
+}
