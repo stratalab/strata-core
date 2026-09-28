@@ -55,14 +55,15 @@ const WAL_SEGMENT_BYTES: u64 = 256 * 1024;
 /// well under 1x.
 const KV_CEILING: f64 = 0.15; // measured 0.140
 const JSON_CEILING: f64 = 0.21; // measured 0.196
-const EVENT_CEILING: f64 = 0.66; // measured 0.627
+const EVENT_CEILING: f64 = 0.48; // measured 0.457 (0.627 before #3594)
 const VECTOR_CEILING: f64 = 0.73; // measured 0.690
 const GRAPH_CEILING: f64 = 0.35; // measured 0.326
 /// The never-flushed event log on the production scheduler: its rows reach
 /// tables only through the clean close's flush of a large delta (#3625), so
-/// this ceiling holds that flush. Measured 0.612 (3.47 before #3625, when the
-/// close snapshot carried every row uncompressed).
-const NEVER_FLUSHED_EVENT_CEILING: f64 = 0.65;
+/// this ceiling holds that flush. Measured 0.445 (3.47 before #3625, when the
+/// close snapshot carried every row uncompressed; 0.612 before #3594 stored
+/// the event hashes as raw bytes).
+const NEVER_FLUSHED_EVENT_CEILING: f64 = 0.47;
 
 #[derive(Clone, Copy, Debug)]
 enum Primitive {
