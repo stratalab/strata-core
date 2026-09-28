@@ -4821,3 +4821,34 @@ fn api_audit_footprint_families_are_disjoint_before_the_sweep() {
         "canonical table families must not count a file twice: {footprint:?}"
     );
 }
+
+/// #3646, the other side of the overlap: after a reopen the table catalog holds
+/// only the tables the manifests reference, so the prior session's orphans are
+/// unreferenced but NOT catalogued — the live figure must not subtract them.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_audit_footprint_does_not_subtract_uncatalogued_orphans() {
+    let (root, backend, superseded, _) =
+        plant_reclaim_debt_and_close("maintenance-footprint-uncatalogued-orphans");
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    let footprint = runtime
+        .diagnostics(
+            DiagnosticsRequest::new(DiagnosticsScope::Global).with_detail(DiagnosticsDetail::Audit),
+        )
+        .expect("audit")
+        .footprint();
+    assert_eq!(
+        footprint.unreferenced_objects(),
+        Some(superseded.len()),
+        "{footprint:?}"
+    );
+    assert_eq!(
+        footprint.live_table_bytes().unwrap() + footprint.unreferenced_bytes().unwrap(),
+        table_data_object_bytes(&root),
+        "each file counted once, orphans uncatalogued: {footprint:?}"
+    );
+}
