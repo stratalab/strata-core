@@ -535,6 +535,8 @@ pub(super) fn map_footprint_audit(
     crate::api::diagnostics::DiagnosticsFootprintAudit {
         unreferenced_objects,
         unreferenced_bytes,
+        catalogued_unreferenced_objects: audit.catalogued_unreferenced().0,
+        catalogued_unreferenced_bytes: audit.catalogued_unreferenced().1,
         snapshot_objects: audit.snapshot_objects(),
         snapshot_bytes: audit.snapshot_bytes(),
         superseded_snapshots: audit.superseded_snapshots(),

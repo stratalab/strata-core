@@ -4793,3 +4793,62 @@ fn api_debt_below_the_threshold_keeps_the_upper_tier_first() {
         "below the threshold the ladder ran the checkpoint first; the sweep waits for the floor"
     );
 }
+
+/// #3646 (from the external #3596 review): before the sweep moves a
+/// superseded input, the catalogue still records it and the audit counts it
+/// as unreferenced; the Audit tier's table and unreferenced facts must still
+/// add up to the physical table bytes, each file counted once.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_audit_footprint_families_are_disjoint_before_the_sweep() {
+    let root = temp_dir_for_api_test("review-3596-footprint-overlap");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let (runtime, _, _) = plant_reclaim_debt(backend, &root);
+    let footprint = runtime
+        .diagnostics(
+            DiagnosticsRequest::new(DiagnosticsScope::Global).with_detail(DiagnosticsDetail::Audit),
+        )
+        .expect("audit")
+        .footprint();
+    let actual = table_data_object_bytes(&root);
+    assert!(
+        footprint.unreferenced_bytes().unwrap() > 0,
+        "fixture has debt"
+    );
+    assert_eq!(
+        footprint.live_table_bytes().unwrap() + footprint.unreferenced_bytes().unwrap(),
+        actual,
+        "canonical table families must not count a file twice: {footprint:?}"
+    );
+}
+
+/// #3646, the other side of the overlap: after a reopen the table catalog holds
+/// only the tables the manifests reference, so the prior session's orphans are
+/// unreferenced but NOT catalogued — the live figure must not subtract them.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_audit_footprint_does_not_subtract_uncatalogued_orphans() {
+    let (root, backend, superseded, _) =
+        plant_reclaim_debt_and_close("maintenance-footprint-uncatalogued-orphans");
+    let options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let runtime = StorageRuntime::open_with_backend(options, backend)
+        .expect("reopen durable runtime")
+        .into_runtime();
+    let footprint = runtime
+        .diagnostics(
+            DiagnosticsRequest::new(DiagnosticsScope::Global).with_detail(DiagnosticsDetail::Audit),
+        )
+        .expect("audit")
+        .footprint();
+    assert_eq!(
+        footprint.unreferenced_objects(),
+        Some(superseded.len()),
+        "{footprint:?}"
+    );
+    assert_eq!(
+        footprint.live_table_bytes().unwrap() + footprint.unreferenced_bytes().unwrap(),
+        table_data_object_bytes(&root),
+        "each file counted once, orphans uncatalogued: {footprint:?}"
+    );
+}

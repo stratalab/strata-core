@@ -297,6 +297,10 @@ pub struct DiagnosticsFootprintReport {
 pub(crate) struct DiagnosticsFootprintAudit {
     pub(crate) unreferenced_objects: Option<usize>,
     pub(crate) unreferenced_bytes: Option<u64>,
+    /// #3646: unreferenced objects the catalogue (and so the Live table
+    /// facts) still counts; subtracted so every file lands in one family.
+    pub(crate) catalogued_unreferenced_objects: usize,
+    pub(crate) catalogued_unreferenced_bytes: u64,
     pub(crate) snapshot_objects: usize,
     pub(crate) snapshot_bytes: u64,
     pub(crate) superseded_snapshots: usize,
@@ -1102,6 +1106,14 @@ impl DiagnosticsFootprintReport {
     }
 
     const fn with_audit(mut self, audit: DiagnosticsFootprintAudit) -> Self {
+        let (live_objects, live_bytes) = disjoint_live_tables(
+            self.live_table_objects,
+            self.live_table_bytes,
+            audit.catalogued_unreferenced_objects,
+            audit.catalogued_unreferenced_bytes,
+        );
+        self.live_table_objects = live_objects;
+        self.live_table_bytes = live_bytes;
         self.unreferenced_objects = audit.unreferenced_objects;
         self.unreferenced_bytes = audit.unreferenced_bytes;
         self.snapshot_objects = Some(audit.snapshot_objects);
@@ -1196,6 +1208,29 @@ impl DiagnosticsFootprintReport {
 
 /// Space-reclamation contract §3.5: the audit facts ride the report only when
 /// the request asked for the audit tier AND the runtime gathered them.
+/// #3646: the Audit tier's table facts, disjoint from its unreferenced facts.
+/// The Live tier counts every catalogued table object, including a superseded
+/// input the sweep has not moved yet; the audit counts that same file as
+/// unreferenced, so it is removed from the table facts here. Unreferenced
+/// orphans the catalogue never held (found after a reopen) are untouched.
+pub(crate) const fn disjoint_live_tables(
+    live_objects: Option<usize>,
+    live_bytes: Option<u64>,
+    catalogued_unreferenced_objects: usize,
+    catalogued_unreferenced_bytes: u64,
+) -> (Option<usize>, Option<u64>) {
+    (
+        match live_objects {
+            Some(objects) => Some(objects.saturating_sub(catalogued_unreferenced_objects)),
+            None => None,
+        },
+        match live_bytes {
+            Some(bytes) => Some(bytes.saturating_sub(catalogued_unreferenced_bytes)),
+            None => None,
+        },
+    )
+}
+
 pub(crate) const fn footprint_for_detail(
     detail: DiagnosticsDetail,
     live: DiagnosticsFootprintReport,
