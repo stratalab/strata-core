@@ -285,12 +285,12 @@ mod inline {
         );
     }
 
-    /// Gate-7 pin for #3619: the durable table catalogue never drops a purged
-    /// object, so the Live tier keeps counting the two compaction inputs the
-    /// chain deleted. Asserts the CURRENT behavior; promote it to
-    /// `live_table_objects == 1` when #3619 is fixed.
+    /// #3619 (promoted from its gate-7 pin): once the reclaim chain moves the
+    /// two compaction inputs out of the table family, the Live tier counts
+    /// only the compaction output, and the ledger's freed total counts their
+    /// bytes once (the purge), not again for the sweep that staged them.
     #[test]
-    fn pin_3619_purged_objects_stay_catalogued() {
+    fn purged_objects_leave_the_live_tier_and_are_counted_once() {
         let dir = tempfile::tempdir().expect("tmp");
         let mut db = open_inline(dir.path());
         write_rows(&mut db, "default", "a", 32);
@@ -308,8 +308,14 @@ mod inline {
         assert_eq!(settled.unreferenced_objects, Some(0), "{settled:?}");
         assert_eq!(settled.quarantined_objects, Some(0), "{settled:?}");
         assert_eq!(
-            settled.live_table_objects, 3,
-            "#3619: purged inputs stay catalogued until reopen: {settled:?}"
+            settled.live_table_objects, 1,
+            "only the compaction output is live: {settled:?}"
+        );
+        let purge = settled.reclaim.last_purge.expect("the purge ran");
+        assert!(purge.bytes_reclaimed > 0, "{settled:?}");
+        assert_eq!(
+            settled.reclaim.total_bytes_reclaimed, purge.bytes_reclaimed,
+            "the inputs' bytes are counted once: {settled:?}"
         );
     }
 

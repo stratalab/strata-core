@@ -2508,10 +2508,28 @@ fn api_background_gc_reclaims_superseded_table_objects_off_lock() {
         .last(ReclaimFamily::QuarantinePurge)
         .expect("purge recorded");
     assert_eq!(purge.outcome(), ReclaimOutcome::Reclaimed, "{purge:?}");
+    let sweep = ledger
+        .last(ReclaimFamily::TableObjectSweep)
+        .expect("sweep recorded");
     assert!(
-        ledger.totals().bytes_reclaimed() > purge.bytes_reclaimed(),
+        sweep.bytes_reclaimed() > 0,
         "the off-lock sweep must report staged bytes: {ledger:?}"
     );
+    // #3619: the staged bytes are released once, by the purge — the total
+    // counts them once.
+    assert_eq!(
+        ledger.totals().bytes_reclaimed(),
+        purge.bytes_reclaimed(),
+        "{ledger:?}"
+    );
+    // #3619: the off-lock sweep's staged objects left the durable table
+    // catalogue, so the Live tier counts exactly the table objects on disk.
+    let live = runtime
+        .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+        .expect("live diagnostics")
+        .footprint()
+        .live_table_objects();
+    assert_eq!(live, Some(table_data_object_files(&root).len()));
     runtime.close().expect("close durable runtime");
 }
 
@@ -3349,6 +3367,70 @@ fn api_background_sweep_that_quarantines_nothing_queues_no_purge() {
         ledger.last(ReclaimFamily::QuarantinePurge),
         None,
         "no purge for a sweep that quarantined nothing: {ledger:?}"
+    );
+    runtime.close().expect("close");
+}
+
+/// #3619 on the foreground sweep verb (the inline sweep runner): the objects it
+/// moves to quarantine leave the durable table catalogue, so the Live tier
+/// counts exactly the table objects still on disk.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_foreground_sweep_drops_staged_objects_from_the_live_tier() {
+    let root = temp_dir_for_api_test("maintenance-foreground-sweep-live-tier");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let manual = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(manual, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    runtime.commit(&put_batch(b"gc-a", b"one")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime.commit(&put_batch(b"gc-a", b"two")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Compact,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("compact");
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Reclaim,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("mark");
+    let live = |runtime: &StorageRuntime<'_>| {
+        runtime
+            .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+            .expect("live diagnostics")
+            .footprint()
+            .live_table_objects()
+    };
+    assert_eq!(
+        live(&runtime),
+        Some(3),
+        "both inputs and the output before the sweep"
+    );
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Quarantine,
+            MaintenanceScope::Global,
+        ))
+        .expect("sweep");
+    assert_eq!(
+        table_data_object_files(&root).len(),
+        1,
+        "the sweep moved both inputs"
+    );
+    assert_eq!(
+        live(&runtime),
+        Some(1),
+        "the Live tier counts only what is on disk"
     );
     runtime.close().expect("close");
 }

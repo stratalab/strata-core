@@ -746,7 +746,14 @@ mod tests {
             assert_eq!(pass.objects_affected(), 2, "{case}");
             assert_eq!(pass.state_changes(), 1, "{case}");
             assert_eq!(report.total_passes(), 1, "{case}");
-            assert_eq!(report.total_bytes_reclaimed(), 4096, "{case}");
+            // #3619: the mark frees nothing and the sweep only moves bytes into
+            // quarantine, so neither counts toward the freed total.
+            let freed = if matches!(case, "mark" | "sweep") {
+                0
+            } else {
+                4096
+            };
+            assert_eq!(report.total_bytes_reclaimed(), freed, "{case}");
             assert_eq!(report.reclaimed_passes(), 1, "{case}");
             assert_eq!(report.deferred_passes(), 0, "{case}");
             assert_eq!(report.pending_reclaim_tasks(), Some(3), "{case}");

@@ -363,6 +363,19 @@ impl LifecycleDurableTableCatalog {
         self.manifest_publish_pending
     }
 
+    /// #3619: drop the catalogue entries of table objects a sweep moved out
+    /// of the table family. The sweep proved each unreachable from every
+    /// manifest and every in-memory branch state before staging it, so no
+    /// identity lookup can still need it; the Live footprint tier then stops
+    /// counting bytes that are no longer in the table family.
+    pub(crate) fn forget_objects(&mut self, objects: &[String]) {
+        for object in objects {
+            if let Some(identity) = self.objects.remove(object) {
+                self.entries.remove(&identity);
+            }
+        }
+    }
+
     pub(crate) fn object_count(&self) -> usize {
         self.objects.len()
     }

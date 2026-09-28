@@ -910,7 +910,11 @@ pub(super) fn drain_durable_background_round(
                 );
                 let finish = {
                     let mut runtime = runtime.lock();
-                    runtime.finish_quarantine_sweep(staged)
+                    let finish = runtime.finish_quarantine_sweep(staged);
+                    if let Ok(swept) = &finish {
+                        runtime.forget_swept_table_objects(swept);
+                    }
+                    finish
                 };
                 perf_trace::record_lifecycle_background_task_total(perf_trace::timer_elapsed(
                     task_start,

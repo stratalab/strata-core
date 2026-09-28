@@ -70,6 +70,19 @@ pub(crate) const fn reclaim_owed_transition(
     }
 }
 
+/// #3619: whether a family's reported bytes leave the disk. The sweep only
+/// moves an object into quarantine (its bytes are freed later by the purge,
+/// which reports them again), so counting it too would report the same space
+/// twice; the mark frees nothing.
+pub(crate) const fn family_frees_disk(family: ReclaimFamily) -> bool {
+    match family {
+        ReclaimFamily::QuarantinePurge
+        | ReclaimFamily::SnapshotPrune
+        | ReclaimFamily::WalTruncation => true,
+        ReclaimFamily::TableObjectMark | ReclaimFamily::TableObjectSweep => false,
+    }
+}
+
 /// One space-reclamation family. Each has exactly one slot in the ledger.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -251,10 +264,12 @@ impl ReclaimLedger {
         };
         *slot = Some(event);
         self.totals.passes = self.totals.passes.saturating_add(1);
-        self.totals.bytes_reclaimed = self
-            .totals
-            .bytes_reclaimed
-            .saturating_add(event.bytes_reclaimed);
+        if family_frees_disk(family) {
+            self.totals.bytes_reclaimed = self
+                .totals
+                .bytes_reclaimed
+                .saturating_add(event.bytes_reclaimed);
+        }
         match event.outcome {
             ReclaimOutcome::Reclaimed => {
                 self.totals.reclaimed_passes = self.totals.reclaimed_passes.saturating_add(1);
@@ -666,9 +681,21 @@ mod tests {
         assert_eq!(ledger.last(ReclaimFamily::TableObjectMark), None);
         let totals = ledger.totals();
         assert_eq!(totals.passes(), 5);
-        assert_eq!(totals.bytes_reclaimed(), 20);
+        // #3619: only the families that free disk count toward the total; the
+        // sweep's staged bytes are counted once, by the purge.
+        assert_eq!(totals.bytes_reclaimed(), 10);
         assert_eq!(totals.reclaimed_passes(), 2);
         assert_eq!(totals.deferred_passes(), 2);
+    }
+
+    /// #3619: which families' bytes leave the disk.
+    #[test]
+    fn family_frees_disk_truth_table() {
+        assert!(!family_frees_disk(ReclaimFamily::TableObjectMark));
+        assert!(!family_frees_disk(ReclaimFamily::TableObjectSweep));
+        assert!(family_frees_disk(ReclaimFamily::QuarantinePurge));
+        assert!(family_frees_disk(ReclaimFamily::SnapshotPrune));
+        assert!(family_frees_disk(ReclaimFamily::WalTruncation));
     }
 
     /// Space-reclamation contract §3.1 (slice 8): the one rule that moves
