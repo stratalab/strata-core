@@ -394,7 +394,8 @@ mod tests {
         // non-seeded branch now complete, so more bytes are reclaimed and an
         // orphaned-snapshot ending finds a snapshot to copy.
         // Re-pinned for #3622: snapshot prunes now report the bytes they free.
-        assert_eq!(outcome.bytes_reclaimed(), 25543, "{outcome:?}");
+        // Re-pinned for #3619: a sweep's staged bytes no longer count twice.
+        assert_eq!(outcome.bytes_reclaimed(), 24408, "{outcome:?}");
         assert_eq!(outcome.clean_closes(), 1, "{outcome:?}");
         assert_eq!(outcome.orphaned_snapshots_planted(), 1, "{outcome:?}");
     }

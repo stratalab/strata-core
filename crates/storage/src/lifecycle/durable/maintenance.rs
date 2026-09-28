@@ -4250,6 +4250,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         });
         let quarantined = runner.quarantined_objects;
         let remaining = runner.remaining_candidates;
+        if let Ok(Some(swept)) = &outcome {
+            self.forget_swept_table_objects(swept);
+        }
         self.record_optional_maintenance_health(&outcome);
         if quarantined > 0 {
             // Best-effort: the staged bytes are reclaimed by the purge; if the enqueue is
@@ -4383,6 +4386,13 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 staged_guard,
             }),
         )))
+    }
+
+    /// #3619: a sweep moved `swept`'s staged objects out of the table family;
+    /// the durable table catalogue forgets them.
+    pub(crate) fn forget_swept_table_objects(&mut self, swept: &MaintenanceOutcome) {
+        self.table_catalog
+            .forget_objects(swept.affected_object_names());
     }
 
     /// Fold the off-lock sweep staging back in under the lock: finish the
