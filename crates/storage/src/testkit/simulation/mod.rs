@@ -393,7 +393,8 @@ mod tests {
         // Re-pinned for slice 12: checkpoints that used to defer on a flushed
         // non-seeded branch now complete, so more bytes are reclaimed and an
         // orphaned-snapshot ending finds a snapshot to copy.
-        assert_eq!(outcome.bytes_reclaimed(), 2270, "{outcome:?}");
+        // Re-pinned for #3622: snapshot prunes now report the bytes they free.
+        assert_eq!(outcome.bytes_reclaimed(), 25543, "{outcome:?}");
         assert_eq!(outcome.clean_closes(), 1, "{outcome:?}");
         assert_eq!(outcome.orphaned_snapshots_planted(), 1, "{outcome:?}");
     }

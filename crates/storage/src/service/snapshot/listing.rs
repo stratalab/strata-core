@@ -83,13 +83,21 @@ pub(crate) struct SnapshotDeleteReport {
     delete_outcomes: Vec<SnapshotDeleteOutcome>,
     protected: Vec<SnapshotObject>,
     failed: Vec<SnapshotDeleteFailure>,
+    /// Bytes the deletes released (#3622): each deleted object's size, read
+    /// just before its delete; an object already missing released nothing.
+    reclaimed_bytes: u64,
 }
 
 impl SnapshotDeleteReport {
-    fn record_deleted(&mut self, snapshot: SnapshotObject, outcome: DeleteOutcome) {
+    fn record_deleted(&mut self, snapshot: SnapshotObject, outcome: DeleteOutcome, bytes: u64) {
         self.delete_outcomes
             .push(SnapshotDeleteOutcome::new(snapshot.clone(), outcome));
         self.deleted.push(snapshot);
+        self.reclaimed_bytes = self.reclaimed_bytes.saturating_add(bytes);
+    }
+
+    pub(crate) const fn reclaimed_bytes(&self) -> u64 {
+        self.reclaimed_bytes
     }
 
     fn record_protected(&mut self, snapshot: SnapshotObject) {
@@ -225,9 +233,15 @@ impl SnapshotService<'_> {
             // Pruning executes caller-supplied retention intent. A per-object
             // delete failure must not hide deletes that already succeeded or
             // snapshots that were explicitly protected.
+            // The size is read only for an object about to be deleted, and a
+            // failed read counts nothing rather than blocking the delete.
+            let size = self
+                .backend
+                .object_metadata(snapshot.object())
+                .map_or(0, |metadata| metadata.size_bytes());
             match self.backend.delete_object(snapshot.object()) {
                 Ok(outcome) if durable_cleanup_succeeded(&outcome) => {
-                    report.record_deleted(snapshot, outcome);
+                    report.record_deleted(snapshot, outcome, size);
                 }
                 Ok(outcome) => report.record_failed(snapshot, durable_cleanup_failure(&outcome)),
                 Err(source) if source.source_error().kind() == BackendErrorKind::NotFound => {
@@ -235,7 +249,7 @@ impl SnapshotService<'_> {
                         snapshot.object().clone(),
                         DeleteDurability::NonDurable,
                     );
-                    report.record_deleted(snapshot, outcome);
+                    report.record_deleted(snapshot, outcome, 0);
                 }
                 Err(source) => report.record_failed(snapshot, source),
             }
