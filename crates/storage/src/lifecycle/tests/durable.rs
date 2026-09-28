@@ -919,16 +919,20 @@ fn durable_close_checkpoints_and_truncates_the_covered_wal_but_purges_nothing_el
         "close listed the quarantine family: {close_operations:?}"
     );
     // Publishes: the snapshot, the manifest re-points, the fresh active WAL
-    // segment the reclaim rotation opened (#3494), and the #2690 durable
-    // commit watermark attesting the sealed log — nothing else.
+    // segment the reclaim rotation opened (#3494), the #2690 durable
+    // commit watermark attesting the sealed log, and (#3643) the checkpoint's
+    // timeline segments — nothing else.
     let manifest_object = ObjectLayout::database_manifest().expect("manifest object");
     let watermark = ObjectLayout::wal_watermark().expect("watermark object");
+    let timeline_prefix = ObjectLayout::timeline_prefix().expect("timeline prefix");
     assert!(
         close_operations.iter().all(|operation| match operation {
             Operation::Publish(object, PublishMode::Create) =>
                 object == &snapshot || object.as_str().starts_with(wal_prefix.as_str()),
             Operation::Publish(object, PublishMode::Replace) =>
-                object == &manifest_object || object == &watermark,
+                object == &manifest_object
+                    || object == &watermark
+                    || object.as_str().starts_with(timeline_prefix.as_str()),
             _ => true,
         }),
         "close published outside the checkpoint, the rotation and the watermark: {close_operations:?}"
@@ -5650,7 +5654,8 @@ fn background_checkpoint_completion_queues_a_superseded_snapshot_prune() {
     };
 
     assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
-    assert_eq!(prune.state_changes(), 1);
+    // The superseded snapshot and (#3643) the timeline tail only it referenced.
+    assert_eq!(prune.state_changes(), 2);
     assert_eq!(snapshot_count(), 1, "only the live snapshot survives");
     assert_eq!(pending_prunes(&runtime), 0);
 }
@@ -5889,10 +5894,16 @@ fn durable_close_drains_a_drain_before_close_snapshot_prune_and_deletes_the_supe
             _ => None,
         })
         .collect();
+    // #3643: with it goes the timeline tail segment only it referenced.
+    let superseded_tail = ObjectLayout::timeline_segment(crate::layout::TimelineSegmentId {
+        sealing_snapshot_id: before[0],
+        ordinal: 0,
+    })
+    .expect("superseded tail segment");
     assert_eq!(
         deleted,
-        vec![superseded],
-        "close deleted exactly the superseded snapshot"
+        vec![superseded, superseded_tail],
+        "close deleted exactly the superseded snapshot and its timeline tail"
     );
     assert_eq!(snapshot_ids(backend), vec![before[1]]);
 }

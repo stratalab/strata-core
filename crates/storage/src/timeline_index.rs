@@ -21,6 +21,8 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use strata_core::{CommitVersion, Timestamp};
 
+use crate::format::{TimelineSegmentRef, TIMELINE_CHUNK_ENTRIES};
+
 /// One retained commit: the same fact a `ts-v1`/`ver-v1` timeline row pair
 /// encodes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +130,63 @@ struct RetainedTimelineState {
     /// construction (pre-open commits are unknown); set by the first
     /// scan-backed seed. In-process observations keep it current after that.
     complete: bool,
+    /// #3643: durable segment refs for the full chunks `[k·N, (k+1)·N)` of
+    /// `entries`, in chunk order — adopted from a COMPLETED checkpoint or
+    /// seeded at recovery, never from one still in flight.
+    sealed: Vec<TimelineSegmentRef>,
+    /// #3643: the durable segment holding the partial chunk after `sealed`.
+    /// Cleared by any in-place rewrite or re-seed, so while present it holds
+    /// exactly the entries its range names; re-used while the tail is that
+    /// range.
+    tail: Option<TimelineSegmentRef>,
+    /// #3643: bumped whenever an existing entry is rewritten in place (a
+    /// `committed_at` upgrade) or the entries are replaced (a seed). Appends
+    /// never bump it: they cannot change a chunk already durable.
+    revision: u64,
+}
+
+/// #3643: what a checkpoint must make durable for one branch's timeline — the
+/// segments it can re-reference, the full chunks it must seal, and the tail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TimelinePersistPlan {
+    /// Full-chunk refs already durable, re-referenced as they are.
+    pub(crate) reused: Vec<TimelineSegmentRef>,
+    /// Full chunks to seal, in chunk order, each exactly one chunk.
+    pub(crate) new_chunks: Vec<Vec<RetainedTimelineEntry>>,
+    /// The partial last chunk: a durable ref to re-reference, or entries to
+    /// write, or nothing when the timeline ends on a chunk boundary.
+    pub(crate) tail: TimelineTailPlan,
+    /// The index revision the plan was cut at (adoption is refused if an entry
+    /// was rewritten since).
+    pub(crate) revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TimelineTailPlan {
+    None,
+    Reuse(TimelineSegmentRef),
+    Write(Vec<RetainedTimelineEntry>),
+}
+
+/// #3643: the chunk arithmetic of a persist plan, in entry indexes. `total`
+/// entries under the bound, `sealed` durable full chunks, chunk size `chunk`:
+/// the full chunks re-used (`reused` of them), the new full chunks to seal
+/// (entry range), and the tail (entry range, possibly empty).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TimelineChunkPlan {
+    pub(crate) reused: usize,
+    pub(crate) new_full: std::ops::Range<usize>,
+    pub(crate) tail: std::ops::Range<usize>,
+}
+
+pub(crate) fn timeline_chunk_plan(total: usize, sealed: usize, chunk: usize) -> TimelineChunkPlan {
+    let full = total / chunk;
+    let reused = sealed.min(full);
+    TimelineChunkPlan {
+        reused,
+        new_full: reused * chunk..full * chunk,
+        tail: full * chunk..total,
+    }
 }
 
 /// The shared per-branch index: observed at row apply, seeded from the first
@@ -149,6 +208,16 @@ impl PartialEq for RetainedCommitTimeline {
 
 impl Eq for RetainedCommitTimeline {}
 
+impl RetainedTimelineState {
+    /// #3643: entry `at` was rewritten in place — every durable ref from the
+    /// chunk holding it onward is stale, and so is the tail.
+    fn rewrote_entry(&mut self, at: usize) {
+        self.sealed.truncate(at / TIMELINE_CHUNK_ENTRIES);
+        self.tail = None;
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
 impl RetainedCommitTimeline {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -156,6 +225,9 @@ impl RetainedCommitTimeline {
                 entries: Vec::new(),
                 timestamps_monotonic: true,
                 complete: false,
+                sealed: Vec::new(),
+                tail: None,
+                revision: 0,
             }),
         })
     }
@@ -286,6 +358,8 @@ impl RetainedCommitTimeline {
         match state.entries[at].committed_at() {
             None => {
                 state.entries[at] = state.entries[at].with_committed_at(Some(instant));
+                // #3643: the durable chunk holding this entry is now stale.
+                state.rewrote_entry(at);
             }
             Some(existing) if existing == instant => {}
             Some(_) => state.complete = false,
@@ -335,6 +409,113 @@ impl RetainedCommitTimeline {
         state.entries = merged;
         state.timestamps_monotonic = timestamps_monotonic;
         state.complete = true;
+        // #3643: replaced entries void every durable chunk ref; recovery
+        // re-seeds them after the seed (`seed_segments`).
+        state.sealed.clear();
+        state.tail = None;
+        state.revision = state.revision.wrapping_add(1);
+    }
+
+    /// #3643: what a checkpoint at `bound` must make durable. `None` unless the
+    /// index is complete (as `snapshot_entries`).
+    pub(crate) fn persist_plan(&self, bound: CommitVersion) -> Option<TimelinePersistPlan> {
+        let state = self.inner.read();
+        if !state.complete {
+            return None;
+        }
+        let total = state
+            .entries
+            .partition_point(|entry| entry.commit_version().as_u64() <= bound.as_u64());
+        let chunks = timeline_chunk_plan(total, state.sealed.len(), TIMELINE_CHUNK_ENTRIES);
+        let new_chunks = state.entries[chunks.new_full.clone()]
+            .chunks(TIMELINE_CHUNK_ENTRIES)
+            .map(<[RetainedTimelineEntry]>::to_vec)
+            .collect();
+        let tail = match state.tail {
+            _ if chunks.tail.is_empty() => TimelineTailPlan::None,
+            // Re-usable only if it is exactly this range — the same first and
+            // last version and count at this position (entries are strictly
+            // ascending, so these pin the range; an in-place rewrite already
+            // cleared the tail).
+            Some(tail)
+                if (
+                    tail.first_version,
+                    tail.last_version,
+                    tail.entry_count as usize,
+                ) == (
+                    state.entries[chunks.tail.start].commit_version(),
+                    state.entries[chunks.tail.end - 1].commit_version(),
+                    chunks.tail.len(),
+                ) =>
+            {
+                TimelineTailPlan::Reuse(tail)
+            }
+            _ => TimelineTailPlan::Write(state.entries[chunks.tail].to_vec()),
+        };
+        Some(TimelinePersistPlan {
+            reused: state.sealed[..chunks.reused].to_vec(),
+            new_chunks,
+            tail,
+            revision: state.revision,
+        })
+    }
+
+    /// #3643: adopt the refs a COMPLETED checkpoint made durable for a plan cut
+    /// at `revision`: `full` covers the branch's first `full.len()` chunks and
+    /// `tail` the partial chunk after them. Refused when an entry was
+    /// rewritten since the plan (the refs would describe stale content) or the
+    /// index lost completeness.
+    pub(crate) fn adopt_segments(
+        &self,
+        revision: u64,
+        full: &[TimelineSegmentRef],
+        tail: Option<TimelineSegmentRef>,
+    ) {
+        let mut state = self.inner.write();
+        if !state.complete || state.revision != revision || full.len() < state.sealed.len() {
+            return;
+        }
+        state.sealed = full.to_vec();
+        state.tail = tail;
+    }
+
+    /// #3643: seed the durable refs of a restored timeline (after the entries
+    /// were seeded). A ref is kept only where the installed entries still hold
+    /// exactly its versions at its chunk position — recovery may fence out a
+    /// predecessor generation's prefix, and a ref that no longer lines up
+    /// would re-reference content the index does not have.
+    pub(crate) fn seed_segments(&self, refs: &[TimelineSegmentRef]) {
+        let mut state = self.inner.write();
+        if !state.complete {
+            return;
+        }
+        let lines_up =
+            |state: &RetainedTimelineState, index: usize, segment: &TimelineSegmentRef| {
+                let start = index * TIMELINE_CHUNK_ENTRIES;
+                let end = start + segment.entry_count as usize;
+                end <= state.entries.len()
+                    && state.entries[start].commit_version() == segment.first_version
+                    && state.entries[end - 1].commit_version() == segment.last_version
+            };
+        let mut sealed = Vec::new();
+        for (index, segment) in refs.iter().enumerate() {
+            if segment.entry_count as usize != TIMELINE_CHUNK_ENTRIES
+                || !lines_up(&state, index, segment)
+            {
+                break;
+            }
+            sealed.push(*segment);
+        }
+        // The tail must be the final reference and line up. (A full-size last
+        // reference that lines up was already sealed by the loop above.)
+        let tail = refs
+            .get(sealed.len())
+            .filter(|segment| {
+                sealed.len() + 1 == refs.len() && lines_up(&state, sealed.len(), segment)
+            })
+            .copied();
+        state.sealed = sealed;
+        state.tail = tail;
     }
 
     /// W3.1c: the version-bounded entries when the index is complete — the
@@ -577,6 +758,278 @@ fn bounded_prefix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const N: usize = TIMELINE_CHUNK_ENTRIES;
+
+    /// #3643: an index observed through `count` commits (versions 1..=count),
+    /// complete from birth.
+    fn index_with(count: usize) -> Arc<RetainedCommitTimeline> {
+        let index = RetainedCommitTimeline::new();
+        index.mark_complete_from_birth();
+        for version in 1..=count as u64 {
+            index.observe(
+                CommitVersion::new(version),
+                Timestamp::from_micros(version * 10),
+            );
+        }
+        index
+    }
+
+    fn segment(sealing: u64, first: usize, count: usize) -> TimelineSegmentRef {
+        TimelineSegmentRef {
+            sealing_snapshot_id: sealing,
+            ordinal: 0,
+            entry_count: u32::try_from(count).expect("fits"),
+            first_version: CommitVersion::new(first as u64),
+            last_version: CommitVersion::new((first + count - 1) as u64),
+            crc32: 0,
+        }
+    }
+
+    /// #3643: the chunk arithmetic, on both sides of every boundary.
+    #[test]
+    fn timeline_chunk_plan_truth_table() {
+        for (total, sealed, chunk, reused, new_full, tail) in [
+            (0, 0, 4, 0, 0..0, 0..0),
+            (3, 0, 4, 0, 0..0, 0..3),
+            (4, 0, 4, 0, 0..4, 4..4),
+            (5, 0, 4, 0, 0..4, 4..5),
+            (9, 1, 4, 1, 4..8, 8..9),
+            (9, 2, 4, 2, 8..8, 8..9),
+            // More sealed refs than full chunks under the bound: re-use only
+            // the chunks the bound covers.
+            (5, 2, 4, 1, 4..4, 4..5),
+            (8, 2, 4, 2, 8..8, 8..8),
+        ] {
+            assert_eq!(
+                timeline_chunk_plan(total, sealed, chunk),
+                TimelineChunkPlan {
+                    reused,
+                    new_full,
+                    tail
+                },
+                "total={total} sealed={sealed} chunk={chunk}"
+            );
+        }
+    }
+
+    #[test]
+    fn persist_plan_is_none_until_the_index_is_complete() {
+        let index = RetainedCommitTimeline::new();
+        index.observe(CommitVersion::new(1), Timestamp::from_micros(10));
+        assert_eq!(index.persist_plan(CommitVersion::new(1)), None);
+    }
+
+    /// A fresh index seals every full chunk and writes the tail; after the
+    /// checkpoint completes, the next plan re-uses both until the tail grows.
+    #[test]
+    fn persist_plan_seals_full_chunks_once_and_reuses_an_unchanged_tail() {
+        let index = index_with(N + 3);
+        let bound = CommitVersion::new((N + 3) as u64);
+        let first = index.persist_plan(bound).expect("complete");
+        assert!(first.reused.is_empty());
+        assert_eq!(first.new_chunks.len(), 1);
+        assert_eq!(first.new_chunks[0].len(), N);
+        let TimelineTailPlan::Write(tail) = &first.tail else {
+            panic!("a fresh tail is written: {:?}", first.tail);
+        };
+        assert_eq!(tail.len(), 3);
+
+        let full = segment(1, 1, N);
+        let tail_ref = segment(1, N + 1, 3);
+        index.adopt_segments(first.revision, &[full], Some(tail_ref));
+        let second = index.persist_plan(bound).expect("complete");
+        assert_eq!(second.reused, vec![full]);
+        assert!(second.new_chunks.is_empty());
+        assert_eq!(second.tail, TimelineTailPlan::Reuse(tail_ref));
+
+        // The tail grows: the full chunk is still re-used, the tail rewritten.
+        index.observe(
+            CommitVersion::new((N + 4) as u64),
+            Timestamp::from_micros(((N + 4) * 10) as u64),
+        );
+        let third = index
+            .persist_plan(CommitVersion::new((N + 4) as u64))
+            .expect("complete");
+        assert_eq!(third.reused, vec![full]);
+        assert!(matches!(&third.tail, TimelineTailPlan::Write(tail) if tail.len() == 4));
+
+        // A bound below the tail's end cuts the tail short: not re-usable.
+        let bounded = index
+            .persist_plan(CommitVersion::new((N + 1) as u64))
+            .expect("complete");
+        assert!(matches!(&bounded.tail, TimelineTailPlan::Write(tail) if tail.len() == 1));
+        // A bound so low the tail range starts at the first entry, with the
+        // adopted tail's length: the versions differ, so it is not re-used.
+        let rewound = index.persist_plan(CommitVersion::new(4)).expect("complete");
+        assert!(matches!(&rewound.tail, TimelineTailPlan::Write(tail) if tail.len() == 4));
+        let low = index_with(N + 3);
+        low.adopt_segments(
+            low.persist_plan(bound).expect("plan").revision,
+            &[full],
+            Some(tail_ref),
+        );
+        let low_plan = low.persist_plan(CommitVersion::new(3)).expect("complete");
+        assert!(
+            matches!(&low_plan.tail, TimelineTailPlan::Write(tail) if tail.len() == 3),
+            "a same-length range at another position is not the adopted tail: {:?}",
+            low_plan.tail
+        );
+        // A timeline ending on a chunk boundary has no tail at all.
+        let boundary = index
+            .persist_plan(CommitVersion::new(N as u64))
+            .expect("complete");
+        assert_eq!(boundary.tail, TimelineTailPlan::None);
+        assert_eq!(boundary.reused, vec![full]);
+    }
+
+    /// Rewriting an entry in place (a `committed_at` upgrade) voids the refs
+    /// from its chunk on, and refuses an adoption cut before the rewrite.
+    #[test]
+    fn a_rewritten_entry_voids_its_chunk_and_any_adoption_cut_before_it() {
+        let index = index_with(2 * N + 1);
+        let bound = CommitVersion::new((2 * N + 1) as u64);
+        let plan = index.persist_plan(bound).expect("complete");
+        let refs = [segment(1, 1, N), segment(1, N + 1, N)];
+        index.adopt_segments(plan.revision, &refs, Some(segment(1, 2 * N + 1, 1)));
+        assert_eq!(
+            index.persist_plan(bound).expect("plan").reused,
+            refs.to_vec()
+        );
+
+        // An instant arrives for an entry in the SECOND chunk.
+        let stale = index.persist_plan(bound).expect("plan");
+        index.observe_committed_at(
+            CommitVersion::new((N + 5) as u64),
+            Timestamp::from_micros(1_700_000_000_000_000),
+        );
+        let after = index.persist_plan(bound).expect("plan");
+        assert_eq!(after.reused, vec![refs[0]], "the first chunk stays durable");
+        assert_eq!(after.new_chunks.len(), 1, "the second chunk is resealed");
+        assert!(matches!(after.tail, TimelineTailPlan::Write(_)));
+
+        // A checkpoint whose plan predates the rewrite may not adopt.
+        index.adopt_segments(stale.revision, &refs, None);
+        assert_eq!(
+            index.persist_plan(bound).expect("plan").reused,
+            vec![refs[0]]
+        );
+
+        // Re-observing an already known instant rewrites nothing.
+        let settled = index.persist_plan(bound).expect("plan");
+        index.observe_committed_at(
+            CommitVersion::new((N + 5) as u64),
+            Timestamp::from_micros(1_700_000_000_000_000),
+        );
+        assert_eq!(
+            index.persist_plan(bound).expect("plan").revision,
+            settled.revision
+        );
+    }
+
+    /// An adoption may extend the durable refs but never shrink them, and an
+    /// index that lost completeness adopts nothing.
+    #[test]
+    fn adopt_segments_only_extends_a_complete_index() {
+        let index = index_with(2 * N);
+        let bound = CommitVersion::new((2 * N) as u64);
+        let plan = index.persist_plan(bound).expect("complete");
+        let refs = [segment(1, 1, N), segment(1, N + 1, N)];
+        index.adopt_segments(plan.revision, &refs, None);
+        index.adopt_segments(plan.revision, &refs[..1], None);
+        assert_eq!(
+            index.persist_plan(bound).expect("plan").reused,
+            refs.to_vec()
+        );
+
+        let incomplete = index_with(N);
+        let plan = incomplete
+            .persist_plan(CommitVersion::new(N as u64))
+            .expect("plan");
+        incomplete.mark_incomplete_for_fork_recovery();
+        incomplete.adopt_segments(plan.revision, &refs[..1], None);
+        incomplete.seed_from_scan(&[]);
+        assert!(incomplete
+            .persist_plan(CommitVersion::new(N as u64))
+            .expect("complete again")
+            .reused
+            .is_empty());
+    }
+
+    /// Recovery seeds refs only where the installed entries still hold their
+    /// versions at their chunk positions; the first misaligned ref ends the
+    /// sealed prefix, and a tail must be the last ref and line up too.
+    #[test]
+    fn seed_segments_keeps_only_refs_that_line_up_with_the_entries() {
+        let index = index_with(2 * N + 2);
+        let bound = CommitVersion::new((2 * N + 2) as u64);
+        let refs = [
+            segment(1, 1, N),
+            segment(2, N + 1, N),
+            segment(3, 2 * N + 1, 2),
+        ];
+        index.seed_segments(&refs);
+        let plan = index.persist_plan(bound).expect("plan");
+        assert_eq!(plan.reused, refs[..2].to_vec());
+        assert_eq!(plan.tail, TimelineTailPlan::Reuse(refs[2]));
+
+        // A fenced prefix: the entries no longer start at version 1.
+        let fenced = RetainedCommitTimeline::new();
+        fenced.mark_complete_from_birth();
+        for version in 2..=(N + 1) as u64 {
+            fenced.observe(
+                CommitVersion::new(version),
+                Timestamp::from_micros(version * 10),
+            );
+        }
+        fenced.seed_segments(&[segment(1, 1, N)]);
+        assert!(fenced
+            .persist_plan(CommitVersion::new((N + 1) as u64))
+            .expect("plan")
+            .reused
+            .is_empty());
+
+        // A partial ref before the last one ends the sealed prefix, and the
+        // mismatched tail is not adopted either.
+        let short = index_with(N + 2);
+        short.seed_segments(&[segment(1, 1, 2), segment(1, 3, N)]);
+        let plan = short
+            .persist_plan(CommitVersion::new((N + 2) as u64))
+            .expect("plan");
+        assert!(plan.reused.is_empty());
+        assert!(matches!(plan.tail, TimelineTailPlan::Write(_)));
+
+        // A tail that is not the last ref is not adopted.
+        let tails = index_with(N + 2);
+        tails.seed_segments(&[segment(1, 1, N), segment(1, N + 1, 1), segment(1, N + 2, 1)]);
+        let plan = tails
+            .persist_plan(CommitVersion::new((N + 2) as u64))
+            .expect("plan");
+        assert_eq!(plan.reused, vec![segment(1, 1, N)]);
+        assert!(matches!(plan.tail, TimelineTailPlan::Write(_)));
+
+        // A reference that lines up as a tail but is not the last one is not
+        // adopted: a plan whose tail range it happens to match still writes.
+        let early = index_with(3);
+        early.seed_segments(&[segment(1, 1, 2), segment(1, 3, 1)]);
+        assert!(matches!(
+            early
+                .persist_plan(CommitVersion::new(2))
+                .expect("plan")
+                .tail,
+            TimelineTailPlan::Write(_)
+        ));
+
+        // An incomplete index seeds nothing.
+        let incomplete = RetainedCommitTimeline::new();
+        incomplete.seed_segments(&refs);
+        incomplete.seed_from_scan(&[]);
+        assert!(incomplete
+            .persist_plan(CommitVersion::new(1))
+            .expect("plan")
+            .reused
+            .is_empty());
+    }
 
     /// #3112 S2b: the `observe_committed_at` upgrade rule, arm by arm. The rule
     /// is deliberately fail-soft — an unknown instant is legal, a wrong one is

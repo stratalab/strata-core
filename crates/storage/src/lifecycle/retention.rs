@@ -16,6 +16,7 @@ use crate::object::ObjectName;
 use crate::service::{
     reconcilable_orphan, superseded_snapshot, SnapshotDeleteFailure, SnapshotDeleteOutcome,
     SnapshotDeleteReport, SnapshotObject, SnapshotPruneMode, SnapshotService, SnapshotServiceError,
+    TimelineSegmentPruneMode, TimelineSegmentPruneReport,
 };
 use strata_core::{BranchId, CommitVersion};
 
@@ -183,8 +184,11 @@ pub(crate) struct LifecycleSnapshotPruningOutcome {
     delete_outcomes: Vec<SnapshotDeleteOutcome>,
     protected: Vec<SnapshotObject>,
     failed: Vec<SnapshotDeleteFailure>,
-    /// Bytes the deletes released (#3622).
+    /// Bytes the deletes released (#3622), snapshot objects and (#3643)
+    /// timeline segments together.
     reclaimed_bytes: u64,
+    /// #3643: timeline segments the prune deleted.
+    deleted_timeline_segments: usize,
     recovery_health: Option<RecoveryHealth>,
 }
 
@@ -602,29 +606,7 @@ impl LifecycleSnapshotPruningOutcome {
         let protected = report.protected().to_vec();
         let failed = report.failed().to_vec();
         let reclaimed_bytes = report.reclaimed_bytes();
-        let recovery_health = if failed.is_empty() {
-            None
-        } else {
-            // Emit one fault per failed deletion so `fault_count` reflects
-            // the real number of stuck snapshots. The per-failure object
-            // identity and backend source error remain on the typed
-            // `failed: Vec<SnapshotDeleteFailure>` field for callers that
-            // need to surface object-level diagnostics; the health debt's
-            // count provides at-a-glance signal that retention has more
-            // than one stranded snapshot to address.
-            let faults: Vec<RecoveryFault> = (0..failed.len())
-                .map(|_| {
-                    RecoveryFault::new(
-                        RecoveryFaultKind::IoFailure,
-                        "snapshot pruning delete failure",
-                    )
-                })
-                .collect::<LifecycleResult<_>>()?;
-            Some(RecoveryHealth::degraded(
-                RecoveryDegradationClass::Telemetry,
-                faults,
-            )?)
-        };
+        let recovery_health = pruning_delete_health_debt(failed.len())?;
         Ok(Self {
             proof_status: LifecycleRetentionProofStatus::Complete,
             deleted,
@@ -632,8 +614,24 @@ impl LifecycleSnapshotPruningOutcome {
             protected,
             failed,
             reclaimed_bytes,
+            deleted_timeline_segments: 0,
             recovery_health,
         })
+    }
+
+    /// #3643: fold a timeline segment prune into this snapshot prune — the
+    /// segments are the snapshot family's other object kind. A segment that
+    /// failed to delete is health debt exactly like a snapshot that did.
+    fn record_timeline_segments(
+        &mut self,
+        report: &TimelineSegmentPruneReport,
+    ) -> LifecycleResult<()> {
+        self.deleted_timeline_segments = report.deleted.len();
+        self.reclaimed_bytes = self
+            .reclaimed_bytes
+            .saturating_add(report.reclaimed_bytes());
+        self.recovery_health = pruning_delete_health_debt(self.failed.len() + report.failed)?;
+        Ok(())
     }
 
     fn deferred(
@@ -647,6 +645,7 @@ impl LifecycleSnapshotPruningOutcome {
             protected: Vec::new(),
             failed: Vec::new(),
             reclaimed_bytes: 0,
+            deleted_timeline_segments: 0,
             recovery_health,
         }
     }
@@ -655,12 +654,19 @@ impl LifecycleSnapshotPruningOutcome {
         matches!(self.proof_status, LifecycleRetentionProofStatus::Complete)
     }
 
+    /// Completed having deleted nothing and failed nothing — snapshots and
+    /// (#3643) timeline segments alike (a failed delete is health debt).
     pub(crate) const fn completed_noop(&self) -> bool {
-        self.completed() && self.deleted.is_empty() && self.failed.is_empty()
+        self.completed()
+            && self.deleted.is_empty()
+            && self.deleted_timeline_segments == 0
+            && self.recovery_health.is_none()
     }
 
+    /// Completed with a delete that failed (a snapshot's or, #3643, a timeline
+    /// segment's), left as telemetry health debt.
     pub(crate) const fn completed_with_health_debt(&self) -> bool {
-        self.completed() && !self.failed.is_empty()
+        self.completed() && self.recovery_health.is_some()
     }
 
     pub(crate) const fn deferred_incomplete_proof(&self) -> bool {
@@ -704,7 +710,7 @@ impl LifecycleSnapshotPruningOutcome {
         let mut outcome = MaintenanceOutcome::new(MaintenanceTaskKind::SnapshotPruning, status)
             .with_effects(names.len(), self.reclaimed_bytes, false)
             .with_affected_object_names(names)
-            .with_state_changes(self.deleted.len())
+            .with_state_changes(self.deleted.len() + self.deleted_timeline_segments)
             .with_stats(LifecycleStats::new(
                 0,
                 self.recovery_health
@@ -853,12 +859,94 @@ pub(crate) fn retention_outcome_for_scope(
     LifecycleRetentionOutcome::from_decisions(proof, decisions, 0)
 }
 
+/// The telemetry health debt a prune's failed deletions leave: one fault per
+/// failed object (snapshot or, #3643, timeline segment), so `fault_count`
+/// reflects how many are stranded; `None` when every delete succeeded. The
+/// per-snapshot identities and sources stay on the outcome's typed `failed`.
+fn pruning_delete_health_debt(failures: usize) -> LifecycleResult<Option<RecoveryHealth>> {
+    if failures == 0 {
+        return Ok(None);
+    }
+    let faults: Vec<RecoveryFault> = (0..failures)
+        .map(|_| {
+            RecoveryFault::new(
+                RecoveryFaultKind::IoFailure,
+                "snapshot pruning delete failure",
+            )
+        })
+        .collect::<LifecycleResult<_>>()?;
+    Ok(Some(RecoveryHealth::degraded(
+        RecoveryDegradationClass::Telemetry,
+        faults,
+    )?))
+}
+
+/// #3643: which timeline segment prune a snapshot prune mode carries. The
+/// newest-N verb keeps older snapshots on purpose, so it deletes no segment
+/// they might reference; the proof-driven modes prune segments by the same
+/// rule they prune snapshots.
+pub(crate) const fn timeline_segment_prune_mode(
+    mode: SnapshotPruneMode,
+) -> Option<TimelineSegmentPruneMode> {
+    match mode {
+        SnapshotPruneMode::RetainNewest => None,
+        SnapshotPruneMode::Superseded => Some(TimelineSegmentPruneMode::Superseded),
+        SnapshotPruneMode::ReconcileToAttested => {
+            Some(TimelineSegmentPruneMode::ReconcileToAttested)
+        }
+    }
+}
+
+/// #3643 (re-review P2): the one incomplete proof a prune may still act on —
+/// the open reconcile of a database with NO attested snapshot, incomplete only
+/// because there is no snapshot. Then no snapshot references any timeline
+/// segment, so every segment is a crash orphan (a first checkpoint that died
+/// after writing its segments, before its snapshot). Recovery health still
+/// gates it: a blocked proof never reaches here.
+pub(crate) fn snapshotless_segment_reconcile(
+    proof: &LifecycleRetentionProof,
+    mode: SnapshotPruneMode,
+) -> bool {
+    mode == SnapshotPruneMode::ReconcileToAttested
+        && proof.status() == LifecycleRetentionProofStatus::Incomplete
+        && proof.live_snapshot_id().is_none()
+        && proof.missing_fact() == Some("manifest_snapshot")
+}
+
+/// Prune snapshots (and, #3643, the timeline segments nothing live
+/// references) under a complete retention proof. `live_segments` are the
+/// segments the manifest-attested snapshot references, established for the
+/// proof's live snapshot id; `None` (it could not be established) prunes no
+/// segment.
 pub(crate) fn prune_snapshots_with_proof(
     snapshots: &SnapshotService<'_>,
     request: &LifecycleSnapshotPruningRequest,
+    live_segments: Option<&std::collections::BTreeSet<crate::layout::TimelineSegmentId>>,
 ) -> LifecycleResult<LifecycleSnapshotPruningOutcome> {
     match request.proof().status() {
         LifecycleRetentionProofStatus::Complete => {}
+        LifecycleRetentionProofStatus::Incomplete
+            if snapshotless_segment_reconcile(request.proof(), request.snapshot_prune_mode()) =>
+        {
+            if let Some(referenced) = live_segments {
+                let segments = snapshots
+                    .prune_timeline_segments(
+                        TimelineSegmentPruneMode::ReconcileToAttested,
+                        0,
+                        referenced,
+                    )
+                    .map_err(snapshot_error)?;
+                let mut outcome = LifecycleSnapshotPruningOutcome::from_completed_report(
+                    &SnapshotDeleteReport::default(),
+                )?;
+                outcome.record_timeline_segments(&segments)?;
+                return Ok(outcome);
+            }
+            return Ok(LifecycleSnapshotPruningOutcome::deferred(
+                LifecycleRetentionProofStatus::Incomplete,
+                Some(telemetry_health_debt("retention proof is incomplete")?),
+            ));
+        }
         LifecycleRetentionProofStatus::Incomplete => {
             return Ok(LifecycleSnapshotPruningOutcome::deferred(
                 LifecycleRetentionProofStatus::Incomplete,
@@ -879,7 +967,17 @@ pub(crate) fn prune_snapshots_with_proof(
             request.effective_retain_newest(),
         )
         .map_err(snapshot_error)?;
-    let outcome = LifecycleSnapshotPruningOutcome::from_completed_report(&report)?;
+    let mut outcome = LifecycleSnapshotPruningOutcome::from_completed_report(&report)?;
+    if let (Some(live), Some(mode), Some(referenced)) = (
+        request.live_snapshot_id(),
+        timeline_segment_prune_mode(request.snapshot_prune_mode()),
+        live_segments,
+    ) {
+        let segments = snapshots
+            .prune_timeline_segments(mode, live, referenced)
+            .map_err(snapshot_error)?;
+        outcome.record_timeline_segments(&segments)?;
+    }
     crate::observability::perf_trace::record_lifecycle_snapshot_pruning_with_proof(
         outcome.deleted().len(),
         outcome.protected().len(),

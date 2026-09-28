@@ -774,16 +774,17 @@ mod tests {
         // position the regression pins, shifted by the one #2690 segment-loss watermark
         // publish the initial segment creation now performs); `Once` makes it transient so
         // a later flush heals it.
-        // The 7th publish is the flush's manifest publish (creation manifest,
-        // segment 1, checkpoint snapshot, checkpoint manifest, the #2690
-        // commit watermark at the post-checkpoint roll, segment 2, then the
-        // flush's manifest update). Verified by sweep: only this index makes
-        // the flush fault into recoverable debt so the checkpoint defers.
+        // The 8th publish is the flush's manifest publish (creation manifest,
+        // segment 1, the checkpoint's #3643 timeline tail segment, checkpoint
+        // snapshot, checkpoint manifest, the #2690 commit watermark at the
+        // post-checkpoint roll, segment 2, then the flush's manifest update).
+        // Verified by sweep: only this index makes the flush fault into
+        // recoverable debt so the checkpoint defers.
         let backend = StorageBackend::faulting_local_fs(
             dir.path().to_path_buf(),
             FaultScript::new([FaultRule::with_mode(
                 BackendOperation::PublishObject,
-                NonZeroU64::new(7).expect("non-zero"),
+                NonZeroU64::new(8).expect("non-zero"),
                 FaultKind::NoSpace,
                 FaultMode::Once,
             )]),

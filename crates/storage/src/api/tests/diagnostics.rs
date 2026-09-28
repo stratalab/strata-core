@@ -1070,7 +1070,8 @@ fn footprint_audit_tier_reports_quarantine_snapshots_and_what_the_prune_reclaims
         .last_snapshot_prune()
         .expect("the prune is on the ledger");
     assert_eq!(prune.outcome(), DiagnosticsReclaimOutcome::Reclaimed);
-    assert_eq!(prune.state_changes(), 1);
+    // The superseded snapshot and (#3643) the timeline tail only it referenced.
+    assert_eq!(prune.state_changes(), 2);
     assert_eq!(after.reclaim().pending_reclaim_tasks(), Some(0));
     assert!(after.reclaim().total_passes() >= 1);
 }

@@ -754,10 +754,14 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
             return match request.scope() {
                 LifecycleRetentionScope::SnapshotObjects => {
                     let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
-                    Ok(
-                        prune_snapshots_with_proof(self.services.snapshot(), &pruning)?
-                            .maintenance_outcome(),
-                    )
+                    Ok(prune_snapshots_with_proof(
+                        self.services.snapshot(),
+                        &pruning,
+                        self.services
+                            .timeline_segments_referenced_by(pruning.live_snapshot_id())
+                            .as_ref(),
+                    )?
+                    .maintenance_outcome())
                 }
                 LifecycleRetentionScope::Global
                 | LifecycleRetentionScope::TableObjects { .. }
@@ -784,16 +788,25 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
         match request.scope() {
             LifecycleRetentionScope::SnapshotObjects => {
                 let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
-                Ok(
-                    prune_snapshots_with_proof(self.services.snapshot(), &pruning)?
-                        .maintenance_outcome(),
-                )
+                Ok(prune_snapshots_with_proof(
+                    self.services.snapshot(),
+                    &pruning,
+                    self.services
+                        .timeline_segments_referenced_by(pruning.live_snapshot_id())
+                        .as_ref(),
+                )?
+                .maintenance_outcome())
             }
             LifecycleRetentionScope::Global => {
                 let pruning =
                     LifecycleSnapshotPruningRequest::for_request(proof.clone(), &request)?;
-                let snapshot_outcome =
-                    prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
+                let snapshot_outcome = prune_snapshots_with_proof(
+                    self.services.snapshot(),
+                    &pruning,
+                    self.services
+                        .timeline_segments_referenced_by(pruning.live_snapshot_id())
+                        .as_ref(),
+                )?;
                 let retention_outcome = retention_outcome_for_delegated_families(proof)?;
                 Ok(global_retention_maintenance_outcome(
                     &snapshot_outcome,

@@ -1867,15 +1867,15 @@ fn checkpoint_row_section_round_trips_and_rejects_trailing_bytes() {
     assert!(error.source().is_some());
 }
 
-/// #3629: recovery interprets exactly the four section kinds this build
-/// writes or reads; every other kind is unknown.
+/// #3629: recovery interprets exactly the five section kinds this build
+/// writes or reads (#3643 added kind 5); every other kind is unknown.
 #[test]
 fn known_snapshot_section_kind_truth_table() {
     use crate::lifecycle::recovery::known_snapshot_section_kind;
-    for kind in 1..=4 {
+    for kind in 1..=5 {
         assert!(known_snapshot_section_kind(kind), "kind {kind}");
     }
-    for kind in [0, 5, 6, 0x7f, 0xff] {
+    for kind in [0, 6, 7, 0x7f, 0xff] {
         assert!(!known_snapshot_section_kind(kind), "kind {kind}");
     }
 }
@@ -1888,7 +1888,7 @@ fn known_snapshot_section_kind_truth_table() {
 fn a_snapshot_with_an_unknown_section_kind_refuses_recovery() {
     let row = put_row(branch_id(0x37), 11, b"section", b"value");
     let rows = encode_checkpoint_row_section(std::slice::from_ref(&row)).expect("rows section");
-    let unknown = crate::format::SnapshotSection::new(5, b"a newer format's state".to_vec())
+    let unknown = crate::format::SnapshotSection::new(6, b"a newer format's state".to_vec())
         .expect("unknown section shape");
     let recover = |sections: Vec<crate::format::SnapshotSection>| {
         let backend: &'static RecoveryTestBackend =
@@ -3629,12 +3629,14 @@ fn close_drained_checkpoint_defers_to_the_close_checkpoint() {
             ),
             "the close checkpoint (not the drained task) publishes"
         );
-        // The drained checkpoint task reports Deferred: the only task that
-        // completes during this close is the reclaim drive's sweep.
+        // The drained checkpoint task reports Deferred: the tasks that complete
+        // during this close are the reclaim drive's sweep and (#3643 re-review
+        // P2) the open's snapshot-less segment reconcile, a drain-before-close
+        // reclaim task.
         let stats_after = runtime.maintenance_status().stats();
         assert_eq!(
             stats_after.completed(),
-            stats_before.completed() + 1,
+            stats_before.completed() + 2,
             "{stats_before:?} -> {stats_after:?}"
         );
         assert!(

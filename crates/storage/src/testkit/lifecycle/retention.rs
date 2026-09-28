@@ -194,8 +194,12 @@ fn check_snapshot_pruning(
     let proof = build_retention_proof(&request, Some(&manifest(3, 9)), &RecoveryHealth::Healthy, 3);
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .map_err(retention_error)?;
-    let pruned = prune_snapshots_with_proof(&SnapshotService::new(&backend), &pruning)
-        .map_err(retention_error)?;
+    let pruned = prune_snapshots_with_proof(
+        &SnapshotService::new(&backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .map_err(retention_error)?;
 
     ensure(pruned.completed(), "snapshot pruning did not complete")?;
     ensure(
@@ -214,8 +218,12 @@ fn check_snapshot_pruning(
     let proof = build_retention_proof(&request, Some(&manifest(6, 9)), &RecoveryHealth::Healthy, 3);
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .map_err(retention_error)?;
-    let partial = prune_snapshots_with_proof(&SnapshotService::new(&failing), &pruning)
-        .map_err(retention_error)?;
+    let partial = prune_snapshots_with_proof(
+        &SnapshotService::new(&failing),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .map_err(retention_error)?;
     ensure(
         partial.completed_with_health_debt(),
         "snapshot delete failure did not become health debt",

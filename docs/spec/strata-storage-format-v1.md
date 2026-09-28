@@ -640,7 +640,7 @@ Current storage-owned section types:
 ```text
 StorageRows            0x01
 RetainedTimelineLegacy 0x02   (decoded, never written)
-RetainedTimeline       0x03
+RetainedTimeline       0x03   (decoded, no longer written; see requirement 14)
 DurableBaseBranches    0x04
 TimelineSegments       0x05
 ```
@@ -718,16 +718,27 @@ V1 direction:
     no references is a branch whose complete timeline is empty. Disorder,
     duplicate branch ids, a malformed reference, a nonzero reserved field,
     truncation, trailing bytes, and a reference count above the decoder's
-    ceiling MUST fail decode. Until the checkpoint writer adopts it, recovery
-    rejects this kind as unrecognized (requirement 6).
+    ceiling MUST fail decode, as MUST a snapshot carrying more than one such
+    section. Checkpoints write this section in place of kind `0x03`; a
+    snapshot written before it still recovers from its kind-`0x03` section.
+    Recovery loads each referenced segment and MUST refuse one whose entry
+    count, version range or CRC32 disagrees with its reference, or whose last
+    entry exceeds the snapshot watermark: strict recovery fails as corruption;
+    lossy recovery records a `MissingSnapshotObject` fault and leaves that
+    branch's checkpointed timeline unrestored, so reads into it are refused
+    rather than answered.
 
 ## 13a. Timeline Segment Objects
 
 A timeline segment (`timeline/<sealing-snapshot-id>/<ordinal>`, #3643) holds
 one chunk of a branch's retained timeline: up to 65,536 consecutive entries,
 chunks aligned by entry count from the start of the branch's history. It is
-immutable once written; a checkpoint writes its segments durably before it
-publishes the snapshot that references them.
+immutable once referenced; a checkpoint writes its segments durably (with
+replace semantics — a segment is sealed under an id above the live snapshot,
+so no live reference can name it yet) before it publishes the snapshot that
+references them. A segment no longer referenced by the manifest-live snapshot
+is reclaimed by the snapshot prune: after a completed checkpoint only if it
+was sealed below the live snapshot id, at open unconditionally.
 
 ```text
 magic                  4 bytes   "TLSG"

@@ -108,6 +108,16 @@ exclude_globs = [
     # on claim-strict-verified Healthy stores, where refusals are loud).
     # Product code the harness calls stays fully mutated.
     "crates/storage/src/testkit/dual_mutation.rs",
+    # The lifecycle retention contract checker (#3643 touched it when the
+    # snapshot prune gained its live-segment argument). It is exercised only
+    # through `tests/lifecycle_maintenance.rs`, which is
+    # `#[cfg(feature = "testkit")]` and so compiles away under this lane's
+    # default features — the same vacuous-survivor shape as the entries above.
+    # Killable where it runs: planting `check_snapshot_pruning -> Ok(())` fails
+    # 4 tests of `cargo test -p strata-storage --features testkit --test
+    # lifecycle_maintenance`, which the `test` CI job runs. Product code the
+    # checker calls stays fully mutated.
+    "crates/storage/src/testkit/lifecycle/retention.rs",
 ]
 
 # Reasoned equivalent-mutant exclusions (regexes over mutant names):
