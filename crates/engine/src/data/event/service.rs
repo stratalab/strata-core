@@ -10,11 +10,11 @@ use crate::branch::BranchName;
 use crate::commit::CommitOutcome;
 use crate::control::ControlPlane;
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineResult};
+use crate::diagnostics::EngineError;
 use crate::persistence::{
     decode_event_key_sequence, encode_event_key, encode_event_meta_key, encode_event_space_prefix,
-    encode_event_type_index_key, CommitPlan, PersistenceReadRow, ReadSelector, RowAddress,
-    RowClass, RowMutation, StoragePersistence,
+    encode_event_type_index_key, encode_event_type_index_space_prefix, CommitPlan, OrderedTextScan,
+    PersistenceReadRow, ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
 };
 
 use super::{
@@ -139,7 +139,7 @@ impl<'a> EventService<'a> {
         }
         mutations.push(RowMutation::put(
             self.metadata_address(&record),
-            encode_event_metadata(&metadata)?,
+            encode_event_metadata(&metadata),
         ));
         let commit = self.commit_batch(&record, mutations)?;
         for (position, event) in appended {
@@ -211,7 +211,7 @@ impl<'a> EventService<'a> {
         }
         mutations.push(RowMutation::put(
             self.metadata_address(&record),
-            encode_event_metadata(&metadata)?,
+            encode_event_metadata(&metadata),
         ));
         self.commit_batch(&record, mutations)?;
         Ok(())
@@ -387,11 +387,7 @@ impl<'a> EventService<'a> {
     /// Lists latest event types.
     pub fn list_types(&mut self) -> Result<EventTypeList, EngineError> {
         let record = self.branch_record()?;
-        let metadata = self.read_metadata(&record, ReadSelector::Latest)?;
-        let event_types = metadata
-            .event_types()
-            .map(EventType::new)
-            .collect::<EngineResult<Vec<_>>>()?;
+        let event_types = self.indexed_types(&record, ReadSelector::Latest)?;
         Ok(EventTypeList::new(event_types))
     }
 
@@ -610,6 +606,39 @@ impl<'a> EventService<'a> {
         )
     }
 
+    /// #3595: the log's event types, in name order, read from the type
+    /// index every event writes — one seek per distinct type, however many
+    /// events each has. (The head row no longer carries them, so appends do
+    /// not rewrite a per-type map.)
+    fn indexed_types(
+        &self,
+        record: &BranchCatalogRecord,
+        selector: ReadSelector,
+    ) -> Result<Vec<EventType>, EngineError> {
+        const PAGE: usize = 256;
+        let scan = OrderedTextScan::new(
+            self.persistence,
+            record.storage_branch_id(),
+            RowClass::EventIndex,
+            encode_event_type_index_space_prefix(&self.space),
+            selector,
+            "data_loss.engine.event_index_key",
+        );
+        let mut types = Vec::new();
+        let mut after: Option<Vec<u8>> = None;
+        loop {
+            let page = scan.distinct_values(after.as_deref(), after.is_some(), PAGE)?;
+            let full = page.len() == PAGE;
+            for (value, _row) in page {
+                types.push(event_type_from_index_component(&value)?);
+                after = Some(value);
+            }
+            if !full {
+                return Ok(types);
+            }
+        }
+    }
+
     fn metadata_address(&self, record: &BranchCatalogRecord) -> RowAddress {
         RowAddress::new(
             record.storage_branch_id(),
@@ -783,6 +812,19 @@ fn exclusive_after_key(key: &[u8]) -> Vec<u8> {
     let mut next = key.to_vec();
     next.push(0);
     next
+}
+
+/// The event type a type-index key's text component names.
+fn event_type_from_index_component(value: &[u8]) -> Result<EventType, EngineError> {
+    std::str::from_utf8(value)
+        .ok()
+        .and_then(|name| EventType::new(name).ok())
+        .ok_or_else(|| {
+            EngineError::corruption(
+                "data_loss.engine.event_index_key",
+                "stored event type index key carries an invalid event type",
+            )
+        })
 }
 
 fn next_event_timestamp(metadata: &EventLogMetadata) -> Timestamp {
@@ -987,5 +1029,110 @@ mod tests {
             Some(super::encode_event_record(event).expect("encoded event")),
             false,
         )
+    }
+
+    /// #3595: `list_types` reads the type index, so a log whose head is still
+    /// version 1 (a 1.2.x log) lists the same types, and the first append
+    /// after it writes a version-2 head over the same chain.
+    #[test]
+    fn a_version_one_head_lists_its_types_and_is_replaced_on_append() {
+        use crate::api::{CacheOpenOptions, Database, DatabaseOpenOutcome};
+        use crate::branch::BranchName;
+        use crate::data::kv::ProductSpace;
+        use crate::persistence::{ReadSelector, RowMutation};
+
+        let db = Database::open_cache(CacheOpenOptions::new())
+            .map(DatabaseOpenOutcome::into_database)
+            .expect("cache database");
+        let mut events = db
+            .event(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("event service");
+        let b = EventType::new("b").expect("type");
+        let a = EventType::new("a").expect("type");
+        for event_type in [b.clone(), a.clone(), b.clone()] {
+            events
+                .append(event_type, EventPayload::new(json!({})).expect("payload"))
+                .expect("append");
+        }
+        let record = events.branch_record().expect("record");
+        let head = events
+            .read_metadata(&record, ReadSelector::Latest)
+            .expect("head");
+        let last = head.last_timestamp_micros().expect("timestamp");
+        let v1 = json!({
+            "next_sequence": head.next_sequence(),
+            "head_hash": head.head_hash().to_vec(),
+            "hash_version": 1,
+            "summaries": {
+                "a": {"count": 1, "first_sequence": 1, "last_sequence": 1,
+                      "first_timestamp": 0, "last_timestamp": last},
+                "b": {"count": 2, "first_sequence": 0, "last_sequence": 2,
+                      "first_timestamp": 0, "last_timestamp": last}
+            }
+        });
+        let mut v1_bytes = vec![1];
+        v1_bytes.extend(serde_json::to_vec(&v1).expect("v1"));
+        events
+            .commit_batch(
+                &record,
+                vec![RowMutation::put(events.metadata_address(&record), v1_bytes)],
+            )
+            .expect("v1 head");
+        assert_eq!(
+            events.list_types().expect("types").event_types(),
+            [a.clone(), b.clone()],
+            "distinct types in name order, from the index"
+        );
+        let c = EventType::new("c").expect("type");
+        events
+            .append(c.clone(), EventPayload::new(json!({})).expect("payload"))
+            .expect("append after the v1 head");
+        let head = events
+            .read_metadata(&record, ReadSelector::Latest)
+            .expect("head");
+        assert_eq!(head.next_sequence(), 4);
+        assert!(head.last_timestamp_micros() > Some(last));
+        assert_eq!(events.list_types().expect("types").event_types(), [a, b, c]);
+        assert!(events.verify_chain().expect("verify").is_valid());
+    }
+
+    /// `list_types` pages through the type index: more distinct types than
+    /// one page still come back complete and in name order.
+    #[test]
+    fn list_types_spans_more_than_one_page_of_types() {
+        use crate::api::{CacheOpenOptions, Database, DatabaseOpenOutcome};
+        use crate::branch::BranchName;
+        use crate::data::event::EventBatchAppendEntry;
+        use crate::data::kv::ProductSpace;
+
+        let db = Database::open_cache(CacheOpenOptions::new())
+            .map(DatabaseOpenOutcome::into_database)
+            .expect("cache database");
+        let mut events = db
+            .event(
+                BranchName::new("default").expect("branch"),
+                ProductSpace::new("default").expect("space"),
+            )
+            .expect("event service");
+        let names: Vec<String> = (0..300).map(|i| format!("type-{i:03}")).collect();
+        events
+            .batch_append(names.iter().rev().map(|name| {
+                EventBatchAppendEntry::new(
+                    EventType::new(name.clone()).expect("type"),
+                    EventPayload::new(json!({})).expect("payload"),
+                )
+            }))
+            .expect("append");
+        let listed: Vec<String> = events
+            .list_types()
+            .expect("types")
+            .event_types()
+            .iter()
+            .map(|event_type| event_type.as_str().to_owned())
+            .collect();
+        assert_eq!(listed, names);
     }
 }

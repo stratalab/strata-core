@@ -290,9 +290,6 @@ the public registry when adding, renaming, or removing a public error code.
 <a id="invalid_argument.engine.event_batch"></a>
 - `invalid_argument.engine.event_batch`
 
-<a id="invalid_argument.engine.event_metadata"></a>
-- `invalid_argument.engine.event_metadata`
-
 <a id="invalid_argument.engine.event_payload"></a>
 - `invalid_argument.engine.event_payload`
 
