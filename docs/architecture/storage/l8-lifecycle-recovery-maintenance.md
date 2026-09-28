@@ -127,13 +127,19 @@ Snapshot-floor advancement is owned by the caller-supplied retention proof: the
 public snapshot lifecycle above storage decides the floor, persists any public
 snapshot state, and passes manifest-derived proof facts down to lifecycle.
 
-Allowed pruning callers are explicit retention and snapshot-pruning maintenance
-requests. Their proof shape is the current manifest snapshot id plus snapshot
-watermark, with recovery-health facts attached. A complete proof may prune
-snapshot objects according to the requested newest-snapshot window; incomplete
-or unsafe proofs defer before backend deletion. Automatic post-commit
-maintenance, flush drains, compaction chains, materialization, and benchmark
-source-shape drains must not advance the floor or prune snapshots implicitly.
+Pruning callers are explicit retention and snapshot-pruning maintenance
+requests, plus the two proof-driven modes of the space-reclamation contract
+(DUR-019, 1.2.6). Every caller's proof shape is the current manifest snapshot
+id plus snapshot watermark, with recovery-health facts attached; incomplete or
+unsafe proofs defer before backend deletion. The explicit verb prunes by the
+requested newest-snapshot window. `SnapshotPruneMode::Superseded` is chained
+after every completed checkpoint and at a clean close: it deletes only ids
+below the live one, never one at or above it, which may be a publish in flight.
+`SnapshotPruneMode::ReconcileToAttested` is queued at reopen: it deletes every
+snapshot but the attested one (including crash orphans), and it is safe because
+nothing publishes during the open's reclaim-only window. Flush drains,
+compaction chains, materialization, and benchmark source-shape drains still
+never advance the floor or prune snapshots.
 
 Durability and recovery remain tied to the manifest proof. Recovery reloads the
 current manifest snapshot facts and rebuilds retention proof state on demand
@@ -161,9 +167,10 @@ unbounded duplicate queue.
 task inline. Cross-branch coverage work is queued deterministically and is not
 driven inline by the coverage pass. `Disabled` policy skips coverage entirely.
 
-Storage has no implicit background scheduler clock. Idle rounds therefore
-mean consecutive coverage passes, triggered by later mutating commits, that find
-no eligible quiet-branch work. The in-process idle anchor consumes at most five
+Coverage idle rounds are consecutive coverage passes, triggered by later
+mutating commits, that find no eligible quiet-branch work. (Reclaim has its
+own idle trigger since 1.2.6: while reclaim is owed, one delayed low-tier wake
+arms on the `MaintenanceClock` after the writer goes quiet; see DUR-019.) The in-process idle anchor consumes at most five
 idle rounds before recording an idle-limit stop. Healthy, idle-limit,
 queue-full, and failure stops are recorded separately. Coverage does not enqueue
 ordinary maintenance when close-required drain or closing state owns the
@@ -227,9 +234,10 @@ L9 Storage API Boundary
         v
 L8 Lifecycle / Recovery / Maintenance
   orders recovery, flush, checkpoint, compaction, retention, repair, close
-  (the background drain services one pending low-tier task — retention/
-   quarantine/purge/repair — after every few upper-tier tasks, so sustained
-   flush/compaction load cannot starve table-object reclaim indefinitely)
+  (the background drain services pending low-tier work — retention/
+   quarantine/purge/repair — by suspected reclaim debt as well as a minimum
+   ratio (`should_service_low_tier`), so sustained flush/compaction load
+   cannot starve table-object reclaim)
         |
         +--> L7 Commit Runtime
         |      quiesce, commit facts, visible version, commit bootstrap
@@ -476,8 +484,9 @@ It should support:
 
 - explicit task priorities
 - coalescing of redundant flush/compaction work
-- drain-before-close
-- cancellation before close
+- drain-before-close (the reclaim kinds — retention, quarantine, purge,
+  snapshot pruning — via `close_policy_for_kind`)
+- cancellation before close (every other kind)
 - metrics
 - deterministic single-threaded execution in tests
 - fault injection at task boundaries
@@ -560,14 +569,23 @@ Storage close should be ordered and idempotent.
 
 Storage-owned close sequence:
 
-1. stop accepting new storage commits
-2. drain storage maintenance tasks
-3. wait for L7 commit quiescence or return a typed timeout
-4. stop storage writer/background sync loops
-5. flush durable WAL state when durability requires it
-6. persist required storage manifests
-7. publish final storage health facts
-8. release storage-owned backend guards/leases/locks
+1. stop accepting new storage commits and stop the background workers
+2. cancel queued maintenance that is not drain-before-close
+3. run the bounded reclaim drive: a fresh table-object mark, then sweep and
+   purge rounds within `ReclaimBudget` (default 500 ms; `Disabled` skips it)
+4. flush every branch whose unflushed delta reaches 64 KiB into tables, then
+   checkpoint every branch, truncate the WAL behind the snapshot, and prune the
+   snapshot it superseded (skipped for a disabled budget, a structural
+   deferral such as a fresh fork's inherited layers, or nothing new)
+5. wait for L7 commit quiescence or return a typed timeout
+6. flush durable WAL state when durability requires it
+7. persist required storage manifests
+8. publish final storage health facts
+9. release storage-owned backend guards/leases/locks
+
+Every close-time reclaim step is best-effort: a failure or deferral is health
+debt, never a close failure, and whatever it leaves the next open settles
+(DUR-019).
 
 Engine-owned close sequence may wrap this with primitive freeze hooks,
 IPC shutdown, product handle registry release, and public error mapping.
@@ -619,10 +637,17 @@ ask engine callback to install primitive snapshot payload, if snapshot exists
 replay WAL records after checkpoint/flush watermark
 recover branch/table manifests and table objects
 reconcile quarantine inventory
-classify recovery health
+classify recovery health; per branch, an orphaned checkpoint delta (a branch the
+  snapshot records as holding a durable base whose table manifest is gone)
+  recovers its WAL prefix with data-loss health
 bootstrap commit runtime from recovered max version/txn facts
+on reopen: queue the table-object mark, the ReconcileToAttested snapshot prune,
+  and a quarantine purge when quarantine is non-empty; arm one reclaim-only wake
 return StorageOpenOutcome
 ```
+
+`open` runs no reclaim inline (DUR-018); the armed wake does it, admitting only
+the reclaim tier until the first commit.
 
 Cache mode skips durable recovery and starts from empty storage state.
 
@@ -657,7 +682,7 @@ again.
 Checkpointing should be storage-ordered but primitive-neutral:
 
 ```text
-reject if storage is closing
+reject if storage is closing (the close path's own checkpoint excepted)
 quiesce commits through L7
 obtain checkpoint watermark
 ask engine for primitive-neutral checkpoint payload

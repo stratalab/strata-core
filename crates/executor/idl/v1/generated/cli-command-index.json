@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "60686f6eb9dfc01c00830c9c85a8c500ef5dd0b608c5eac8bbef24c3f9775806",
+    "checksum_sha256": "c1523a6e898cedf7cf7e40b3759211e771ce64c4fa0232bf64a3185566d0228a",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -230,7 +230,7 @@
       "kind": "read.summary",
       "title": "Read storage footprint",
       "summary": "Read the database's on-disk footprint.",
-      "description": "Returns the database's on-disk footprint as the storage layer computes it: the durable table objects the runtime catalogues and their bytes, the retained and active WAL bytes, and the reclaim ledger (the last pass of every reclaim family with its running totals). With `audit: true` it also lists and stats what the reclaim runners would touch — unreferenced and quarantined table objects, checkpoint snapshots and the superseded set, the WAL's reclaimable-versus-tail split — and reports a total when every part is known. The facts are database-global: every branch shares one table catalogue, one WAL and one reclaim ledger, so the branch only has to exist (it defaults to the handle branch). A cache database holds no durable objects and is refused.\n\nStatus commands return a scalar or compact status payload and do not mutate database state.",
+      "description": "Returns the database's on-disk footprint as the storage layer computes it: the table objects in the table family and their bytes, the retained and active WAL bytes, and the reclaim ledger (the last pass of every reclaim family with its running totals; the byte total counts only what left the disk, so a sweep's move into quarantine is counted once, by the purge). With `audit: true` it also lists and stats what the reclaim runners would touch — unreferenced and quarantined table objects, checkpoint snapshots and the superseded set, the WAL's reclaimable-versus-tail split — and reports a total when every part is known. The facts are database-global: every branch shares one table catalogue, one WAL and one reclaim ledger, so the branch only has to exist (it defaults to the handle branch). A cache database holds no durable objects and is refused.\n\nReclaim needs no command. Superseded table objects move to quarantine and are purged in the background while the database is in use, again after writes go quiet, at a clean close (which also checkpoints every branch, truncates the WAL behind it, and first flushes any large unflushed delta into compressed tables) and at the next open, which settles whatever the previous session left. This command reports that state; it never triggers reclaim itself.\n\nStatus commands return a scalar or compact status payload and do not mutate database state.",
       "docs": "/docs/admin/storage",
       "feature": "core",
       "access": "read",

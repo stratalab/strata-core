@@ -1694,7 +1694,9 @@ Confirmed parity:
   reachability produces proof tokens, quarantine publishes inventory, purge
   requires a fresh proof, and repair/reconciliation produce typed health debt.
 - Durable close is ordered and idempotent. It cancels ordinary pending
-  maintenance, drains close-required work, records maintenance health, attempts
+  maintenance, drains close-required work (since 1.2.6: a bounded reclaim
+  drive, a flush of any large unflushed delta, and a checkpoint of every
+  branch that truncates the WAL and prunes the superseded snapshot — DUR-019), records maintenance health, attempts
   commit quiesce, refuses clean close with unresolved durable commits, closes
   WAL, forces a final manifest publish when health changed, releases the writer
   guard, records the close outcome, and returns stable idempotent facts on

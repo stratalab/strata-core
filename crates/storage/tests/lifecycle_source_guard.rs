@@ -480,9 +480,14 @@ fn snapshot_pruning_ownership_semantic_decisions_are_recorded() {
         "Snapshot object pruning is separate from source-shape maintenance",
         "does not implement an implicit `set_snapshot_floor` or `gc_safe_point`",
         "Snapshot-floor advancement is owned by the caller-supplied retention proof",
-        "Allowed pruning callers are explicit retention and snapshot-pruning maintenance requests",
+        // Space-reclamation contract (DUR-019, 1.2.6): the explicit verbs
+        // plus exactly two proof-driven modes, each with its safety rule.
+        "Pruning callers are explicit retention and snapshot-pruning maintenance requests, plus the two proof-driven modes",
         "current manifest snapshot id plus snapshot watermark",
-        "Automatic post-commit maintenance, flush drains, compaction chains, materialization, and benchmark source-shape drains must not advance the floor or prune snapshots implicitly",
+        "`SnapshotPruneMode::Superseded` is chained after every completed checkpoint",
+        "it deletes only ids below the live one, never one at or above it",
+        "`SnapshotPruneMode::ReconcileToAttested` is queued at reopen",
+        "Flush drains, compaction chains, materialization, and benchmark source-shape drains still never advance the floor or prune snapshots",
         "Benchmarks must report source-shape maintenance separately from pruning",
     ] {
         assert!(
@@ -560,7 +565,7 @@ fn maintenance_coverage_semantic_decisions_are_recorded() {
         "committing branch is inspected for scan accounting but is not enqueued",
         "flush-before-compaction ordering",
         "Cross-branch coverage work is queued deterministically and is not driven inline",
-        "Idle rounds therefore mean consecutive coverage passes",
+        "Coverage idle rounds are consecutive coverage passes",
         "at most five idle rounds",
         "close-required drain or closing state owns the lifecycle",
     ] {

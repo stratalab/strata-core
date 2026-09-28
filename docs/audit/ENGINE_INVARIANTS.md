@@ -191,7 +191,9 @@ leaves recovery a manifest whose every listed object exists.
 `publish_compaction_outcome_manifest` (`lifecycle/rewrite_publication.rs`) → the GC mark
 enqueued after publish (`lifecycle/durable/maintenance.rs`). Verify no deletion is reachable
 before the manifest publish. The recovery direction is pinned by
-`strict_recovery_rejects_missing_manifest_listed_table_object`.
+`strict_recovery_rejects_missing_manifest_listed_table_object`. The clean close's bounded
+reclaim drive (1.2.6, DUR-019) runs the same mark → sweep → purge chain inline during close;
+it is still post-publish and uses the same sweep runner, so the ordering is unchanged.
 
 ### CMP-005: Dynamic level sizing correctness
 
@@ -843,7 +845,11 @@ objects exist.
 
 **Audit**: Find `manifest_frontier_pinned_objects` (`lifecycle/table_manifest.rs`) and its
 consumption in `reclaim_pinned_table_objects` (`lifecycle/durable/maintenance.rs`). Verify
-both frontier legs (confirmed + pending) pin, and no deletion path bypasses the sweep.
+both frontier legs (confirmed + pending) pin, and no deletion path bypasses the sweep —
+including the close-time reclaim drive (`lifecycle/durable/close.rs`), whose quarantine arm
+reuses `DurableTableObjectSweepRunner`. A swept object also leaves the durable table
+catalogue (`forget_objects`, #3619); only objects the sweep already proved unreachable and
+moved are forgotten.
 
 ### ARCH-010: The error-code registry is the single authority for an error's row
 
@@ -1507,6 +1513,13 @@ starter, `begin_flush_publish`, and `begin_compaction_publish`
 (lifecycle/tests/branch_lifecycle/clear_delete.rs) pins the predicate truth table. The
 whole-DB DST deep seeds 24 30 38 88 122 220 237 332 364 are the volume lane.
 
+One documented exception (1.2.6, slice 6): the checkpoint's size-based
+`DeferredDeltaExceedsCap` is decided when the rows are collected, not by the
+enqueue-side registry, because the delta size is unknown until then. It does
+not break mirroring: the deferral chains exactly one flush per active branch and
+one retried checkpoint (`chain_flush_and_checkpoint_after_delta_cap`), each of
+which the registry admits normally.
+
 ### DUR-010: Recovery combines a non-seeded checkpoint with a flush-published base
 
 A snapshot MAY legitimately coexist with a non-seeded branch's durable table-manifest
@@ -1754,6 +1767,15 @@ replacement). Fence enforcement:
 `strict_recovery_refuses_attested_commits_hidden_in_the_orphaned_tail`
 (`lifecycle/tests/recovery.rs`).
 
+Since 1.2.6 the envelope also holds for the checkpoint path itself: the
+checkpoint delta is capped (`checkpoint_delta_cap_decision`; an over-cap delta
+defers as `DeferredDeltaExceedsCap` and flushes first), and a clean close
+flushes any branch whose unflushed delta reaches `CLOSE_FLUSH_MIN_DELTA_BYTES`
+before its checkpoint (#3625), so no snapshot a close writes decodes to more
+than the cap. `recovery_budget.rs`'s seeding phase exits without `close()` on
+purpose: a large WAL tail is the crash scenario the envelope bounds, and a clean
+close would checkpoint it away.
+
 ### DUR-018: Covered WAL is released — a fully-covered active segment seals at truncation
 
 Retained WAL whose every record sits at or below the retention watermark is
@@ -1777,15 +1799,20 @@ Completed but carries the source (never a silent absorb).
 
 This entry establishes the reclaim MECHANISM (seal a covered active segment so
 the existing truncation delete pass can free it) and its safety envelope. What
-should DRIVE reclaim autonomously for a small database — a trigger that fires
-when the WAL grows disproportionate to the live data — is DEFERRED: it is
-entangled with the recovery-memory contract (DUR-017) and time-travel
-retention, and every prototype trigger surfaced a distinct hazard (a boot-time
-flush pruned pre-fork as-of history and masked a recovery-scan fault; a
-checkpoint-driven operation-time trigger regressed the DUR-017 bounded-recovery
-envelope). Two invariants bound any future trigger: reclaim must run ONLY
-during operation, never at open; and it must not create recovery state whose
-decode is unbounded under a small budget. The safety oracle for the first is
+DRIVES reclaim is the space-reclamation contract, DUR-019 (1.2.6): a clean close
+checkpoints every branch and truncates the WAL behind the snapshot, and the
+open, operation and idle phases each have their own reclaim trigger. Earlier
+prototype triggers each surfaced a hazard (a boot-time flush pruned pre-fork
+as-of history and masked a recovery-scan fault; an unbounded checkpoint-driven
+trigger regressed the DUR-017 envelope), and two invariants still bound every
+trigger. First, `open` itself reclaims nothing: it only ARMS a reclaim-only wake
+that the worker (or the inline executor's next progress wait) runs, and that
+wake admits only the reclaim tier until the first commit. The clean-close flush
+and checkpoint are operation-time work: they run inside `close`, after the
+writers stopped, never inside `open`. Second, no trigger may create recovery
+state whose decode is unbounded under a small budget: the checkpoint delta is
+capped and flushed first (slice 6), and the close flushes any large delta into
+tables before snapshotting (#3625). The safety oracle for the first is
 `aggressive_reclaim_preserves_pre_fork_as_of_across_reopens` (reclaim on every
 commit must still resolve a pre-fork as-of read); for the second, the
 `recovery_budget` envelope tests (`crates/engine/tests/recovery_budget.rs`).
@@ -1807,6 +1834,65 @@ earlier boot-time reclaim variant did, and this pins that it cannot recur),
 `active_segment_reclaim_eligibility_is_watermark_gated`; typed surfacing:
 the compound-fault harness's maintenance sweep
 (`maintenance_publish_faults_surface_typed_and_resume`).
+
+### DUR-019: Space reclamation runs at every session boundary
+
+Every reclaim family (table objects, quarantine, checkpoint snapshots, WAL) has a
+trigger in every phase of a database's life, and nothing a session owes is lost at
+a session boundary (the 952 MB field report, #3492 round 2, was reclaim cancelled
+at close and never woken at open). The proofs are unchanged (COW-001, ARCH-005,
+ARCH-009, CMP-004, MVCC-009, DUR-016); this contract fixes WHEN they run.
+
+- **Open** (reopened databases only): bootstrap queues the table-object mark, a
+  `ReconcileToAttested` snapshot prune (every snapshot but the attested one), and
+  a quarantine purge whenever the recovered quarantine inventory is non-empty
+  (#3626). `open` arms ONE reclaim-only wake and runs nothing inline (DUR-018).
+  The wake admits only the reclaim tier until the first commit.
+- **Operation**: every completed checkpoint chains a `Superseded` snapshot prune
+  (never an id at or above the live one) and its WAL truncation. The low tier is
+  serviced by suspected debt (`should_service_low_tier`), not a fixed ratio, so a
+  write firehose cannot starve reclaim. Every checkpoint's delta is capped
+  (DUR-017).
+- **Idle**: while reclaim is owed, one delayed low-tier wake arms after the
+  writer goes quiet (`quiescence_should_arm`). It also re-runs a sweep a held
+  reader deferred. It fires once per quiet period and is cancelled at close.
+- **Clean close**: the workers stop, then a bounded reclaim drive runs mark,
+  sweep and purge (`ReclaimBudget`, default 500 ms; reclaim-kind tasks are
+  drain-before-close via `close_policy_for_kind`). Next, any branch whose
+  unflushed delta reaches 64 KiB is flushed into tables (#3625). Then one
+  checkpoint covers every branch, truncates the WAL behind it and prunes the
+  snapshot it superseded. Multi-branch checkpoints are sound because recovery
+  handles an orphaned delta per branch (DUR-010, slice 12).
+- **Crash or drop without close**: nothing runs; the next open settles the debt.
+
+The observable half is part of the contract: the storage diagnostics (Live and
+Audit tiers) are the one canonical source for `Database::storage_footprint` and
+`strata admin storage`. The ledger's byte total counts only bytes that left the
+disk (purge, snapshot prune, WAL truncation; `family_frees_disk`, #3619), and
+every reclaim pass reports what it freed (#3622).
+
+**Audit**: Truth tables — `close_policy_for_kind_truth_table`,
+`close_reclaim_should_continue_truth_table`, `close_checkpoint_decision_truth_table`,
+`close_flushes_branch_truth_table`, `quiescence_should_arm_truth_table`,
+`should_service_low_tier_truth_table`, `reopen_owes_quarantine_purge_truth_table`,
+`family_frees_disk_truth_table`. Call sites (`crates/storage/src/api/tests/maintenance.rs`):
+`api_close_reclaim_is_bounded_by_the_budget`,
+`api_close_reclaim_truncates_the_wal_behind_the_close_checkpoint`,
+`api_close_flushes_a_large_delta_into_tables_before_its_checkpoint`,
+`api_close_keeps_a_small_delta_in_the_snapshot`, `api_read_only_reopen_reclaims_deterministically`,
+`api_open_reclaims_nothing_inline_without_a_worker`,
+`api_reopen_reconciles_snapshots_to_the_attested_id`,
+`api_reopen_purges_quarantine_a_prior_session_left_unpurged`,
+`api_idle_wake_retries_a_reader_deferred_sweep_without_any_commit`,
+`api_close_cancels_an_armed_idle_wake`. Engine:
+`clean_close_checkpoints_every_branch_and_truncates_the_wal`,
+`clean_close_then_reopen_replays_nothing`,
+`two_user_branches_with_durable_bases_checkpoint_and_reclaim_wal`. Oracles: the
+whole-database simulation's footprint audits and their sabotage twins
+(`sabotage_unreclaimed_debt_is_caught`, `sabotage_superseded_snapshot_is_caught`), and
+the per-PR footprint ratchet (`crates/engine/tests/storage_footprint_ratchet.rs`: per
+primitive, clean at every reopen and under a named total/logical ceiling). A regression
+of any reclaim family must fail the ratchet or the simulation, never only a unit test.
 
 ## How to Use This Catalog
 

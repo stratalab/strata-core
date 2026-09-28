@@ -75,7 +75,7 @@
       "description": "One recorded reclaim pass.",
       "properties": {
         "bytes_reclaimed": {
-          "description": "Bytes the pass released.",
+          "description": "Bytes the pass reported: for a sweep, the bytes it moved into\nquarantine; for every other family, the bytes it removed from disk.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -131,7 +131,7 @@
           "type": "integer"
         },
         "live_table_objects": {
-          "description": "Durable table objects the runtime catalogues.",
+          "description": "Table objects in the table family: everything a manifest or a live\nbranch uses, plus any a compaction superseded that the reclaim sweep\nhas not yet moved to quarantine.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -195,7 +195,7 @@
           ]
         },
         "total_bytes": {
-          "description": "Every byte the database holds on disk — catalogued tables, unreferenced\nand quarantined objects, snapshots and the retained WAL — when every\npart is known (audit, with warm WAL facts).",
+          "description": "Every byte the database holds on disk — table objects, quarantined\nobjects, snapshots and the WAL (from the audit's own listing) — when\nevery part is known (audit).",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -249,7 +249,7 @@
           ]
         },
         "wal_retained_segments": {
-          "description": "Retained WAL segments, when known.",
+          "description": "Retained WAL segments, including the active one, when known.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -359,13 +359,13 @@
           ]
         },
         "reclaimed_passes": {
-          "description": "Passes that released bytes.",
+          "description": "Passes that reclaimed something.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "total_bytes_reclaimed": {
-          "description": "Bytes released since the database opened.",
+          "description": "Bytes removed from disk since the database opened: purges, snapshot\nprunes and WAL truncations. A sweep only moves bytes into quarantine,\nso they are counted once, when the purge deletes them.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
