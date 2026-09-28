@@ -99,6 +99,18 @@ impl BranchSnapshotPublisher {
         }
     }
 
+    /// #3047: every branch's CURRENTLY published view. A reader may load one at any moment, so
+    /// the table-object mark must treat every object these reference as live — independent of
+    /// the manifests and in-memory state it also pins, which can briefly disagree with what is
+    /// published.
+    pub(crate) fn current_views(&self) -> Vec<Arc<BranchReadView>> {
+        self.read_slots
+            .load()
+            .values()
+            .map(|slot| slot.load())
+            .collect()
+    }
+
     /// A shared handle to the registry so the runtime slot can load snapshots off-lock (BS2.4).
     pub(crate) fn registry_handle(&self) -> Arc<BranchSnapshotRegistry> {
         Arc::clone(&self.read_slots)

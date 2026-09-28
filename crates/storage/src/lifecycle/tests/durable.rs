@@ -5083,6 +5083,132 @@ fn build_compaction_for_adoption_test(
     pending.build().expect("build compaction")
 }
 
+/// #3047: a table the CURRENT published view references is never swept.
+///
+/// Drives the interleaving the #3047 investigation suspected: a compaction
+/// installs its output Y and defers on a busy publish slot (so no manifest it
+/// registered lists Y), the flush holding the slot republishes a view that
+/// references Y, and a second compaction consumes Y while a sweep runs. The
+/// mark now pins every table the current published views reference, so Y
+/// survives regardless of how the manifests and in-memory state line up.
+#[test]
+fn a_table_the_current_published_view_references_is_never_swept() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x7d);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+
+    // Two confirmed L0 tables over the same key — the first compaction's inputs.
+    for value in [&b"value-1"[..], &b"value-2"[..]] {
+        let (built, _) = build_flush_for_frontier_tests(&mut runtime, branch, b"race-key", value);
+        publish_to_confirmation(&mut runtime, built);
+    }
+
+    // A flush holds the branch's publish slot mid-fsync.
+    let (flush_h, _) =
+        build_flush_for_frontier_tests(&mut runtime, branch, b"race-key", b"value-3");
+    let PreparedPublishStep::OffLock(prepared_h) = runtime
+        .begin_publish_phase(flush_h)
+        .expect("begin flush publish")
+    else {
+        panic!("the flush publishes off-lock");
+    };
+
+    // Compaction C1 installs its output Y, finds the slot busy and defers.
+    let before_c1: std::collections::BTreeSet<ObjectName> = runtime
+        .inflight_table_outputs()
+        .snapshot()
+        .into_iter()
+        .collect();
+    let built_c1 = build_compaction_for_adoption_test(&mut runtime, branch);
+    let outputs_c1: Vec<ObjectName> = runtime
+        .inflight_table_outputs()
+        .snapshot()
+        .into_iter()
+        .filter(|name| !before_c1.contains(name))
+        .collect();
+    assert_eq!(
+        outputs_c1.len(),
+        1,
+        "C1 published one output: {outputs_c1:?}"
+    );
+    let y = outputs_c1[0].clone();
+    match runtime
+        .begin_publish_phase(built_c1)
+        .expect("begin C1 publish")
+    {
+        PreparedPublishStep::Done(result) => assert_eq!(
+            result.expect("C1 resolves").status(),
+            MaintenanceOutcomeStatus::Deferred,
+            "C1 defers on the busy publish slot"
+        ),
+        PreparedPublishStep::OffLock(_) => panic!("the slot is held by the flush"),
+    }
+
+    // The flush finishes: the view it republishes carries Y.
+    let (prepared_h, write_result) = prepared_h.persist_off_lock();
+    runtime
+        .finish_publish_phase(prepared_h, write_result)
+        .expect("finish flush publish");
+    assert!(
+        !runtime
+            .table_catalog()
+            .manifest_frontier_pinned_objects()
+            .contains(&y),
+        "no manifest lists Y"
+    );
+
+    // Compaction C2 rewrites level 1 into level 2, consuming Y, and holds its
+    // own publish mid-fsync.
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::compaction(branch, 1))
+        .expect("enqueue level-1 compaction");
+    let DurableBackgroundMaintenanceStep::Build(pending_c2) = runtime
+        .start_next_background_table_rewrite_maintenance()
+        .expect("start C2")
+        .expect("C2 step")
+    else {
+        panic!("expected a level-1 compaction build step");
+    };
+    let built_c2 = pending_c2.build().expect("build C2");
+    let PreparedPublishStep::OffLock(prepared_c2) = runtime
+        .begin_publish_phase(built_c2)
+        .expect("begin C2 publish")
+    else {
+        panic!("C2 publishes off-lock");
+    };
+
+    // Every table the current published view references is pinned by the
+    // published-view pin on its own, whatever the manifests say.
+    assert!(
+        runtime
+            .published_view_pinned_objects_for_test()
+            .contains(&y),
+        "the current published view references Y, so the mark pins it"
+    );
+
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::quarantine())
+        .expect("enqueue sweep");
+    if let Some(DurableBackgroundMaintenanceStep::SweepStage(inputs)) = runtime
+        .start_next_background_quarantine_sweep()
+        .expect("start sweep")
+    {
+        runtime
+            .finish_quarantine_sweep(inputs.stage())
+            .expect("finish sweep");
+    }
+    assert!(
+        backend.object_metadata(&y).is_ok(),
+        "a table the current view references must survive the sweep: {y}"
+    );
+
+    let (prepared_c2, write_result) = prepared_c2.persist_off_lock();
+    runtime
+        .finish_publish_phase(prepared_c2, write_result)
+        .expect("finish C2 publish");
+}
+
 /// #2553 (adoption race): content-derived rewrite identities are
 /// deterministic across retries, so a re-planned compaction can find its
 /// output already on disk — an orphan of an abandoned attempt — and ADOPT it

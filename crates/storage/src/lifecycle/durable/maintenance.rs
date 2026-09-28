@@ -2393,11 +2393,24 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     /// a recovery-relevant object as garbage.
     pub(super) fn reclaim_pinned_table_objects(&self) -> Vec<crate::object::ObjectName> {
         let mut pinned = in_memory_pinned_table_objects(&self.branch_catalog, &self.table_catalog);
+        pinned.extend(published_view_pinned_table_objects(
+            &self.snapshot_publisher.current_views(),
+            &self.table_catalog,
+        ));
         pinned.extend(self.inflight_outputs.snapshot());
         let frontier = self.table_catalog.manifest_frontier_pinned_objects();
         crate::observability::perf_trace::record_table_object_frontier_pins(frontier.len() as u64);
         pinned.extend(frontier);
         pinned
+    }
+
+    /// #3047 test seam: the objects the currently published views pin.
+    #[cfg(test)]
+    pub(crate) fn published_view_pinned_objects_for_test(&self) -> Vec<crate::object::ObjectName> {
+        published_view_pinned_table_objects(
+            &self.snapshot_publisher.current_views(),
+            &self.table_catalog,
+        )
     }
 
     fn record_publish_phase_health(
@@ -5993,6 +6006,31 @@ fn in_memory_pinned_table_objects(
         };
         let owned = state.owned_levels().iter().flatten();
         let inherited = state
+            .inherited_layers()
+            .iter()
+            .flat_map(|layer| layer.owned_levels().iter().flatten());
+        for table in owned.chain(inherited) {
+            if let Some(object) = table_catalog.object_for_identity(table.descriptor().identity()) {
+                pinned.insert(object.clone());
+            }
+        }
+    }
+    pinned.into_iter().collect()
+}
+
+/// #3047: the table objects the currently published views reference. A reader
+/// can load a current view at any moment and range-read any table in it, so
+/// none of those objects may be swept, whatever the manifests and in-memory
+/// state say (retired views are covered separately: the sweep defers while one
+/// is held).
+fn published_view_pinned_table_objects(
+    views: &[std::sync::Arc<crate::branch::read::BranchReadView>],
+    table_catalog: &crate::lifecycle::LifecycleDurableTableCatalog,
+) -> Vec<crate::object::ObjectName> {
+    let mut pinned = std::collections::BTreeSet::new();
+    for view in views {
+        let owned = view.owned_levels().iter().flatten();
+        let inherited = view
             .inherited_layers()
             .iter()
             .flat_map(|layer| layer.owned_levels().iter().flatten());
