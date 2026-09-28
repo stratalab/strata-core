@@ -114,9 +114,9 @@ Follow-on work in milestone 1.2.6, after the slices:
 |---|---|---|---|
 | #3594 event records stored both hashes as JSON number arrays (~230 B/event) | event record format v2: the two hashes as 64 raw bytes ahead of the JSON body; v1 still decodes. Events 0.627× → 0.457× logical on disk | #3635 | `92303baa` |
 | #3595 every append rewrote the ~790 B event-log head (per-type JSON summaries) | event-log head v2: a fixed 51-byte record; `list_types` reads the type index; v1 heads still decode; `put_count` unchanged. One event per commit 1.056× → 0.842× | #3636 | `552c524d` |
-| #3629 recovery silently skipped unknown snapshot section kinds (spec §13 rule 6) | recovery refuses an unknown kind as typed `RecoveryCorruption` | #3638 | open |
-| #3633 public rustdoc linked to private items | three links fixed; the `check` job builds rustdoc strictly for the six published crates | #3637 | open |
-| #3047 an off-lock reader hit a table object reclaim had deleted | defense: the mark also pins every table the current published views reference. The race itself is not reproduced; #3047 stays open with #3048 (loom) | #3639 | open |
+| #3629 recovery silently skipped unknown snapshot section kinds (spec §13 rule 6) | recovery refuses an unknown kind as typed `RecoveryCorruption` | #3638 | `0db84cf2` |
+| #3633 public rustdoc linked to private items | three links fixed; the `check` job builds rustdoc strictly for the six published crates | #3637 | `91f48456` |
+| #3047 an off-lock reader hit a table object reclaim had deleted | defense: the mark also pins every table the current published views reference. The race itself is not reproduced; #3047 stays open with #3048 (loom) | #3639 | `634a16cc` |
 
 Compatibility note for the 1.2.6 release: a 1.2.5 binary cannot read events or event-log heads a 1.2.6 binary writes (#3594, #3595); upgrading is one-way.
 
