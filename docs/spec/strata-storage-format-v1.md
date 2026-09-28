@@ -148,6 +148,7 @@ manifest/
 wal/
 tables/
 snapshots/
+timeline/
 tmp/
 quarantine/
 locks/
@@ -167,6 +168,8 @@ tables/<branch-id>/manifest
 
 snapshots/<snapshot-id>
 
+timeline/<sealing-snapshot-id>/<ordinal>
+
 tmp/<operation-id>/<object-id>
 
 quarantine/<branch-id>/<object-id>
@@ -183,7 +186,8 @@ empty path components, `.` components, `..` components, backend URL syntax, or
 platform path separators other than `/`.
 
 The V1 object namespace uses ASCII-only names. Segment and snapshot IDs are
-encoded as 16-character fixed-width lowercase hex. Table levels are encoded as
+encoded as 16-character fixed-width lowercase hex, as are both components of
+a timeline segment name. Table levels are encoded as
 `l` plus four fixed-width decimal digits, such as `l0000`, and must be in the
 range `0..=9999`. Branch and table IDs must use validated database-relative
 object-name components; the final durable ID source is owned by the
@@ -638,6 +642,7 @@ StorageRows            0x01
 RetainedTimelineLegacy 0x02   (decoded, never written)
 RetainedTimeline       0x03
 DurableBaseBranches    0x04
+TimelineSegments       0x05
 ```
 
 The old primitive section tags from development builds are historical evidence
@@ -688,6 +693,59 @@ V1 direction:
     unknown; a present section is authoritative, an EMPTY set meaning the
     snapshot carries every branch in full. Recovery MUST fail closed on more
     than one such section in a snapshot.
+14. The timeline segment-reference section uses `section_kind = 0x05`
+    (#3643). It replaces the retained-timeline section: the timeline lives in
+    sealed segment objects (section 13a) and the snapshot holds only bounded
+    references to them. Payload layout (little-endian):
+
+    ```text
+    group_count            u32
+    repeated group, strictly ascending and unique by branch_id:
+      branch_id            16 bytes
+      ref_count            u32
+      repeated ref (40 bytes):
+        sealing_snapshot_id  u64   nonzero
+        ordinal              u32
+        entry_count          u32   1..=65536; exactly 65536 unless the last ref
+        first_version        u64   nonzero
+        last_version         u64   >= first_version + entry_count - 1
+        crc32                u32   the segment object's footer
+        reserved             u32   0
+    ```
+
+    Within a group the references are in version order: each ref's
+    `first_version` MUST exceed the previous ref's `last_version`. A group with
+    no references is a branch whose complete timeline is empty. Disorder,
+    duplicate branch ids, a malformed reference, a nonzero reserved field,
+    truncation, trailing bytes, and a reference count above the decoder's
+    ceiling MUST fail decode. Until the checkpoint writer adopts it, recovery
+    rejects this kind as unrecognized (requirement 6).
+
+## 13a. Timeline Segment Objects
+
+A timeline segment (`timeline/<sealing-snapshot-id>/<ordinal>`, #3643) holds
+one chunk of a branch's retained timeline: up to 65,536 consecutive entries,
+chunks aligned by entry count from the start of the branch's history. It is
+immutable once written; a checkpoint writes its segments durably before it
+publishes the snapshot that references them.
+
+```text
+magic                  4 bytes   "TLSG"
+format_version         u32 LE    1
+entry_count            u32 LE    1..=65536
+reserved               u32 LE    0
+first_version          u64 LE    equal to the first entry's commit_version
+last_version           u64 LE    equal to the last entry's commit_version
+entries                entry_count x 24 bytes, the kind-0x03 entry layout
+crc32                  u32 LE    over every preceding byte
+```
+
+Decoders MUST check the CRC32 footer before interpreting any other byte, and
+MUST reject an unknown magic, a format version other than 1, an out-of-range
+or inconsistent `entry_count`, a nonzero reserved field, a header version range
+that disagrees with the entries, and entries that are not strictly ascending
+with nonzero versions. A reference (section 13 requirement 14) matches a
+segment only when its entry count, version range and CRC32 all agree.
 
 ## 14. Snapshot Row Payloads
 
@@ -1258,6 +1316,8 @@ Required golden vector categories:
 - pending releases manifest, multiple branch entries
 - snapshot retained-timeline section, one group (current and legacy kinds)
 - snapshot durable-base branch-set section, two branches
+- snapshot timeline segment-reference section, two groups
+- timeline segment object, two entries
 
 Golden vectors must include:
 

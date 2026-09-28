@@ -25,6 +25,11 @@ mod storage_row;
 mod table;
 mod table_manifest;
 mod table_row_split_extension;
+#[allow(
+    dead_code,
+    reason = "#3643 slice 1 lands the codecs; slice 2's checkpoint writer and recovery consume them and drop this allow"
+)]
+mod timeline_segment;
 mod wal;
 mod wal_watermark;
 mod watermark;
@@ -71,6 +76,16 @@ pub(crate) use snapshot_timeline::{
     SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY,
 };
 pub(crate) use storage_row::{decode_storage_row, encode_storage_row, storage_row_encoded_len};
+#[allow(
+    unused_imports,
+    reason = "#3643 slice 1 lands the codecs; slice 2's checkpoint writer and recovery consume them"
+)]
+pub(crate) use timeline_segment::{
+    decode_snapshot_timeline_segments_payload, decode_timeline_segment,
+    encode_snapshot_timeline_segments_section, encode_timeline_segment, segment_ref_is_well_formed,
+    DecodedTimelineSegment, SnapshotTimelineSegmentGroup, TimelineSegmentRef,
+    SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND, TIMELINE_CHUNK_ENTRIES,
+};
 
 #[expect(
     unused_imports,

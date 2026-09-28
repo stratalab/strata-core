@@ -1,8 +1,8 @@
 use super::{
     LayoutError, ManifestObjectClassification, ObjectFamily, ObjectLayout,
     QuarantineObjectClassification, QuarantineObjectShape, QuarantineObjectShapeReason,
-    SnapshotObjectClassification, TableObjectClassification, WalObjectClassification,
-    MAX_TABLE_LEVEL,
+    SnapshotObjectClassification, TableObjectClassification, TimelineSegmentId,
+    WalObjectClassification, MAX_TABLE_LEVEL,
 };
 use crate::object::{ObjectName, ObjectNameError};
 
@@ -296,6 +296,65 @@ fn snapshot_classifier_round_trips_to_canonical_objects() {
             }
         };
         assert_eq!(reconstructed, object);
+    }
+}
+
+/// #3643: a timeline segment is `timeline/<sealing snapshot id>/<ordinal>`,
+/// both fixed-width lowercase hex, and round-trips through its classifier.
+#[test]
+fn timeline_segment_layout_round_trips_and_rejects_malformed_names() {
+    let id = TimelineSegmentId {
+        sealing_snapshot_id: 0x2a,
+        ordinal: 3,
+    };
+    let object = ObjectLayout::timeline_segment(id).expect("segment");
+    assert_eq!(
+        object.as_str(),
+        "timeline/000000000000002a/0000000000000003"
+    );
+    assert_eq!(
+        ObjectLayout::classify_timeline_segment_object(&object),
+        Ok(Some(id))
+    );
+    assert_eq!(
+        ObjectFamily::from_object_name(&object),
+        Some(ObjectFamily::Timeline)
+    );
+    for sealing_snapshot_id in sample_u64_values() {
+        for ordinal in [0, 1, u64::MAX] {
+            let id = TimelineSegmentId {
+                sealing_snapshot_id,
+                ordinal,
+            };
+            let object = ObjectLayout::timeline_segment(id).expect("segment");
+            assert_eq!(
+                ObjectLayout::classify_timeline_segment_object(&object),
+                Ok(Some(id))
+            );
+        }
+    }
+    assert_eq!(
+        ObjectLayout::classify_timeline_segment_object(&ObjectLayout::snapshot(1).expect("snap")),
+        Ok(None),
+        "another family is not a timeline segment"
+    );
+    for malformed in [
+        "timeline/000000000000002a",
+        "timeline/000000000000002a/3",
+        "timeline/000000000000002A/0000000000000003",
+        "timeline/000000000000002a/0000000000000003/extra",
+        "timeline/00000000000000zz/0000000000000003",
+    ] {
+        assert!(
+            matches!(
+                ObjectLayout::classify_timeline_segment_object(&object_name(malformed)),
+                Err(LayoutError::InvalidObjectShape {
+                    family: ObjectFamily::Timeline,
+                    ..
+                })
+            ),
+            "{malformed} should be malformed"
+        );
     }
 }
 
@@ -654,6 +713,7 @@ fn every_reserved_family_has_a_prefix() {
         (ObjectFamily::Wal, "wal/"),
         (ObjectFamily::Tables, "tables/"),
         (ObjectFamily::Snapshots, "snapshots/"),
+        (ObjectFamily::Timeline, "timeline/"),
         (ObjectFamily::Temporary, "tmp/"),
         (ObjectFamily::Quarantine, "quarantine/"),
         (ObjectFamily::Locks, "locks/"),
@@ -674,6 +734,7 @@ fn every_reserved_family_has_a_prefix() {
         ObjectLayout::wal_prefix().expect("wal prefix"),
         ObjectLayout::table_prefix().expect("table prefix"),
         ObjectLayout::snapshot_prefix().expect("snapshot prefix"),
+        ObjectLayout::timeline_prefix().expect("timeline prefix"),
         ObjectLayout::temporary_prefix().expect("temporary prefix"),
         ObjectLayout::quarantine_prefix().expect("quarantine prefix"),
         ObjectLayout::locks_prefix().expect("locks prefix"),
@@ -691,6 +752,7 @@ fn every_reserved_family_has_a_prefix() {
             "wal/",
             "tables/",
             "snapshots/",
+            "timeline/",
             "tmp/",
             "quarantine/",
             "locks/",

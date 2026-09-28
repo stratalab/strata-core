@@ -25,7 +25,8 @@ use std::convert::Infallible;
 use super::{
     branch_catalog_manifest, key, manifest, pending_releases_manifest, quarantine,
     retained_history_extension, segment_metadata, snapshot, snapshot_flushed_branches,
-    snapshot_rows, snapshot_timeline, storage_row, table, table_manifest, wal, watermark,
+    snapshot_rows, snapshot_timeline, storage_row, table, table_manifest, timeline_segment, wal,
+    watermark,
 };
 
 /// The round-trip fidelity oracle (TCP4.6b). `decoded` came from arbitrary
@@ -172,6 +173,33 @@ pub(crate) fn decode_snapshot_timeline_payload(bytes: &[u8]) -> bool {
                     .map(|section| section.payload().to_vec())
             },
             |bytes| snapshot_timeline::decode_snapshot_timeline_payload(bytes, kind),
+        ),
+        Err(_) => false,
+    }
+}
+
+/// #3643: the sealed timeline segment object.
+pub(crate) fn decode_timeline_segment(bytes: &[u8]) -> bool {
+    match timeline_segment::decode_timeline_segment(bytes) {
+        Ok(segment) => roundtrip(
+            &segment,
+            |segment| timeline_segment::encode_timeline_segment(&segment.entries),
+            timeline_segment::decode_timeline_segment,
+        ),
+        Err(_) => false,
+    }
+}
+
+/// #3643: the snapshot's kind-5 segment-reference section payload.
+pub(crate) fn decode_snapshot_timeline_segments_payload(bytes: &[u8]) -> bool {
+    match timeline_segment::decode_snapshot_timeline_segments_payload(bytes) {
+        Ok(groups) => roundtrip(
+            &groups,
+            |groups| {
+                timeline_segment::encode_snapshot_timeline_segments_section(groups)
+                    .map(|section| section.payload().to_vec())
+            },
+            timeline_segment::decode_snapshot_timeline_segments_payload,
         ),
         Err(_) => false,
     }

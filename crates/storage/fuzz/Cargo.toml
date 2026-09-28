@@ -261,6 +261,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "format_snapshot_timeline_segments_payload"
+path = "fuzz_targets/format_snapshot_timeline_segments_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "format_timeline_segment"
+path = "fuzz_targets/format_timeline_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "format_snapshot_flushed_branches_payload"
 path = "fuzz_targets/format_snapshot_flushed_branches_payload.rs"
 test = false

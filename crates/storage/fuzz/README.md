@@ -44,6 +44,8 @@ cargo +nightly fuzz run format_key
 cargo +nightly fuzz run format_segment_metadata
 cargo +nightly fuzz run format_snapshot_flushed_branches_payload
 cargo +nightly fuzz run format_snapshot_timeline_payload
+cargo +nightly fuzz run format_snapshot_timeline_segments_payload
+cargo +nightly fuzz run format_timeline_segment
 cargo +nightly fuzz run format_wal_segment_header
 cargo +nightly fuzz run format_watermark
 ```

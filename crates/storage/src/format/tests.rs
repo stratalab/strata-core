@@ -1035,6 +1035,11 @@ const SNAPSHOT_TIMELINE_SECTION_ONE_GROUP: &str = include_str!(
 const SNAPSHOT_FLUSHED_BRANCHES_SECTION_TWO_BRANCHES: &str = include_str!(
     "../../testdata/goldens/storage-format-v1/snapshot-flushed-branches-section-two-branches.hex"
 );
+const SNAPSHOT_TIMELINE_SEGMENTS_SECTION_TWO_GROUPS: &str = include_str!(
+    "../../testdata/goldens/storage-format-v1/snapshot-timeline-segments-section-two-groups.hex"
+);
+const TIMELINE_SEGMENT_TWO_ENTRIES: &str =
+    include_str!("../../testdata/goldens/storage-format-v1/timeline-segment-two-entries.hex");
 const TABLE_ROW_SPLIT_PAYLOAD_TWO_SPLITS: &str =
     include_str!("../../testdata/goldens/storage-format-v1/table-row-split-payload-two-splits.hex");
 const INTERNAL_KEY_MAX_VERSION: &str =
@@ -1213,6 +1218,108 @@ fn snapshot_flushed_branches_section_matches_golden_vector() {
     );
 }
 
+/// #3643: two entries, one with a known wall-clock instant and one unknown, so
+/// the golden pins both `committed_at` encodings.
+fn timeline_segment_golden_entries() -> Vec<super::SnapshotTimelineEntry> {
+    vec![
+        super::SnapshotTimelineEntry {
+            commit_version: CommitVersion::new(7),
+            commit_timestamp: Timestamp::from_micros(1_000),
+            committed_at: Some(Timestamp::from_micros(1_700_000_000_000_000)),
+        },
+        super::SnapshotTimelineEntry {
+            commit_version: CommitVersion::new(9),
+            commit_timestamp: Timestamp::from_micros(1_500),
+            committed_at: None,
+        },
+    ]
+}
+
+/// #3643: an empty group (a complete, empty timeline) and a group whose one
+/// full chunk is followed by a tail, so the golden pins group order, the
+/// full-chunk rule and the reference layout.
+fn timeline_segments_golden_groups() -> Vec<super::SnapshotTimelineSegmentGroup> {
+    let full = u32::try_from(super::TIMELINE_CHUNK_ENTRIES).expect("chunk fits u32");
+    vec![
+        super::SnapshotTimelineSegmentGroup {
+            branch_id: ordinary_branch_id(),
+            refs: vec![],
+        },
+        super::SnapshotTimelineSegmentGroup {
+            branch_id: BranchId::from_bytes([0xa5; 16]),
+            refs: vec![
+                super::TimelineSegmentRef {
+                    sealing_snapshot_id: 3,
+                    ordinal: 0,
+                    entry_count: full,
+                    first_version: CommitVersion::new(1),
+                    last_version: CommitVersion::new(u64::from(full)),
+                    crc32: 0x0102_0304,
+                },
+                super::TimelineSegmentRef {
+                    sealing_snapshot_id: 4,
+                    ordinal: 1,
+                    entry_count: 2,
+                    first_version: CommitVersion::new(u64::from(full) + 1),
+                    last_version: CommitVersion::new(u64::from(full) + 5),
+                    crc32: 0xa0b0_c0d0,
+                },
+            ],
+        },
+    ]
+}
+
+#[test]
+#[ignore = "prints the #3643 timeline segment and kind-5 section golden bytes; run when regenerating"]
+fn dump_timeline_segment_golden_bytes() {
+    let segment =
+        super::encode_timeline_segment(&timeline_segment_golden_entries()).expect("segment");
+    eprintln!("TIMELINE_SEGMENT\n{}", to_hex_lines(&segment));
+    let section =
+        super::encode_snapshot_timeline_segments_section(&timeline_segments_golden_groups())
+            .expect("segments section");
+    let bytes = super::snapshot::encode_snapshot_section(&section).expect("encode section");
+    eprintln!("TIMELINE_SEGMENTS_SECTION\n{}", to_hex_lines(&bytes));
+}
+
+#[test]
+fn timeline_segment_matches_golden_vector() {
+    let entries = timeline_segment_golden_entries();
+    let golden = parse_hex(TIMELINE_SEGMENT_TWO_ENTRIES);
+    assert_eq!(
+        super::encode_timeline_segment(&entries).expect("segment"),
+        golden
+    );
+    assert_eq!(
+        super::decode_timeline_segment(&golden)
+            .expect("decode")
+            .entries,
+        entries
+    );
+}
+
+#[test]
+fn snapshot_timeline_segments_section_matches_golden_vector() {
+    let groups = timeline_segments_golden_groups();
+    let section =
+        super::encode_snapshot_timeline_segments_section(&groups).expect("segments section");
+    let golden = parse_hex(SNAPSHOT_TIMELINE_SEGMENTS_SECTION_TWO_GROUPS);
+    assert_eq!(
+        super::snapshot::encode_snapshot_section(&section).expect("encode section"),
+        golden
+    );
+    let (decoded, consumed) = decode_snapshot_section(&golden).expect("decode section");
+    assert_eq!(consumed, golden.len());
+    assert_eq!(
+        decoded.section_kind(),
+        super::SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND
+    );
+    assert_eq!(
+        super::decode_snapshot_timeline_segments_payload(decoded.payload()),
+        Ok(groups)
+    );
+}
+
 #[test]
 fn table_row_split_payload_matches_golden_vector() {
     let splits = vec![
@@ -1374,9 +1481,19 @@ fn adversarial_decoder(file: &str) -> Option<AdversarialArm> {
                     && fuzzing::decode_snapshot_flushed_branches_payload(section.payload())
             })
         }),
+        // #3643: routed through the fuzz arms, like kind 4, so the matrix
+        // also pins their round-trip oracles.
+        ("snapshot-timeline-segments-section-", |bytes| {
+            decode_snapshot_section(bytes).is_ok_and(|(section, consumed)| {
+                consumed == bytes.len()
+                    && section.section_kind() == super::SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND
+                    && fuzzing::decode_snapshot_timeline_segments_payload(section.payload())
+            })
+        }),
         ("snapshot-watermark-", fuzzing::decode_watermark),
         ("storage-row-", fuzzing::decode_storage_row),
         ("table-data-block-", fuzzing::decode_table_block),
+        ("timeline-segment-", fuzzing::decode_timeline_segment),
         ("table-manifest-", fuzzing::decode_table_manifest),
         ("table-row-split-payload-", |bytes| {
             super::table_row_split_extension::decode_table_row_split_extension_payload(bytes)
@@ -1455,7 +1572,7 @@ fn adversarial_matrix_matches_the_pinned_contract() {
         .collect();
     files.sort();
     assert!(
-        files.len() >= 55,
+        files.len() >= 57,
         "the golden inventory shrank: {}",
         files.len()
     );
