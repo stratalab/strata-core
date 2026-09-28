@@ -7,7 +7,8 @@
 //!
 //! - the first opener of a durable store OWNS it and may host an [`IpcServer`]
 //!   on `<data_dir>/strata.sock`;
-//! - a contending opener connects an [`IpcClient`] to that socket and speaks
+//! - a contending opener connects an IPC client (the crate-internal
+//!   `IpcClient`) to that socket and speaks
 //!   the SAME executor wire JSON every frontend already uses (`{"type":…}`
 //!   requests, `{"type","data"}` / `{"error":…}` responses), so a socket
 //!   client is wire-identical to an in-process [`crate::Executor`].

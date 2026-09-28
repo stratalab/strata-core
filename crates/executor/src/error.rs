@@ -481,8 +481,8 @@ impl ExecutorError {
     }
 
     /// The resolver's answer this refusal carries, read back from its
-    /// details — the inverse of [`Self::from_inference`], for a consumer
-    /// that acts on `availability` rather than on the code (the CLI's
+    /// details — the inverse of the crate-internal `Self::from_inference`,
+    /// for a consumer that acts on `availability` rather than on the code (the CLI's
     /// download offer). `None` when the failure did not come from model
     /// resolution and so has no answer.
     #[must_use]

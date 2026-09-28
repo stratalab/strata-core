@@ -503,7 +503,8 @@ pub(crate) fn exact_count(value: f64) -> Option<u64> {
 }
 
 impl GraphEdgeData {
-    /// The largest count [`Self::from_count`] accepts; see [`MAX_EXACT_COUNT`].
+    /// The largest count [`Self::from_count`] accepts: 2^53 − 1, the largest
+    /// integer an `f64` weight represents exactly.
     pub const MAX_COUNT: u64 = MAX_EXACT_COUNT;
 
     /// Creates graph edge data.
