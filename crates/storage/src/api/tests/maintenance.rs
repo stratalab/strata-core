@@ -1962,6 +1962,21 @@ fn api_reopen_reconciles_snapshots_to_the_attested_id() {
     let before_open = snapshot_object_ids(backend);
     assert!(before_open.contains(&orphan_id));
     assert!(before_open.len() >= 2);
+    // #3622: the bytes the reconcile will free — every snapshot but the
+    // attested one.
+    let doomed_bytes: u64 = before_open
+        .iter()
+        .filter(|id| **id != attested)
+        .map(|id| {
+            let object = crate::layout::ObjectLayout::snapshot(*id).expect("object");
+            backend
+                .as_backend()
+                .read_object(&object)
+                .expect("snapshot bytes")
+                .len() as u64
+        })
+        .sum();
+    assert!(doomed_bytes > 0);
 
     let mut runtime = StorageRuntime::open_with_backend(options(), backend)
         .expect("reopen")
@@ -1973,10 +1988,24 @@ fn api_reopen_reconciles_snapshots_to_the_attested_id() {
         "open reclaims nothing inline"
     );
     let drain = runtime.drain_maintenance().expect("drain");
-    assert!(drain.outcomes().iter().any(|outcome| {
-        outcome.task() == MaintenanceTask::SnapshotPruning
-            && outcome.status() == MaintenanceSummaryStatus::Completed
-    }));
+    let prune = drain
+        .outcomes()
+        .iter()
+        .find(|outcome| {
+            outcome.task() == MaintenanceTask::SnapshotPruning
+                && outcome.status() == MaintenanceSummaryStatus::Completed
+        })
+        .expect("the reconcile prune completed");
+    // #3622: the prune reports the bytes it freed, and so does the ledger.
+    assert_eq!(prune.bytes_reclaimed(), doomed_bytes);
+    let ledger = runtime.reclaim_ledger_for_test().expect("ledger");
+    assert_eq!(
+        ledger
+            .last(ReclaimFamily::SnapshotPrune)
+            .map(crate::lifecycle::ReclaimPass::bytes_reclaimed),
+        Some(doomed_bytes),
+        "{ledger:?}"
+    );
     assert_eq!(snapshot_object_ids(backend), vec![attested]);
     assert_eq!(attested_snapshot_id(backend), Some(attested));
     let value = runtime

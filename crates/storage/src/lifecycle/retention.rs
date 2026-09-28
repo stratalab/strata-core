@@ -183,6 +183,8 @@ pub(crate) struct LifecycleSnapshotPruningOutcome {
     delete_outcomes: Vec<SnapshotDeleteOutcome>,
     protected: Vec<SnapshotObject>,
     failed: Vec<SnapshotDeleteFailure>,
+    /// Bytes the deletes released (#3622).
+    reclaimed_bytes: u64,
     recovery_health: Option<RecoveryHealth>,
 }
 
@@ -599,6 +601,7 @@ impl LifecycleSnapshotPruningOutcome {
         let delete_outcomes = report.delete_outcomes().to_vec();
         let protected = report.protected().to_vec();
         let failed = report.failed().to_vec();
+        let reclaimed_bytes = report.reclaimed_bytes();
         let recovery_health = if failed.is_empty() {
             None
         } else {
@@ -628,6 +631,7 @@ impl LifecycleSnapshotPruningOutcome {
             delete_outcomes,
             protected,
             failed,
+            reclaimed_bytes,
             recovery_health,
         })
     }
@@ -642,6 +646,7 @@ impl LifecycleSnapshotPruningOutcome {
             delete_outcomes: Vec::new(),
             protected: Vec::new(),
             failed: Vec::new(),
+            reclaimed_bytes: 0,
             recovery_health,
         }
     }
@@ -697,7 +702,7 @@ impl LifecycleSnapshotPruningOutcome {
         };
         let names = snapshot_object_names(&self.deleted, &self.protected, &self.failed);
         let mut outcome = MaintenanceOutcome::new(MaintenanceTaskKind::SnapshotPruning, status)
-            .with_effects(names.len(), 0, false)
+            .with_effects(names.len(), self.reclaimed_bytes, false)
             .with_affected_object_names(names)
             .with_state_changes(self.deleted.len())
             .with_stats(LifecycleStats::new(
