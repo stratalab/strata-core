@@ -114,7 +114,9 @@ use diagnostics::{
 };
 #[cfg(test)]
 use error::commit_error;
-use error::{branch_error, default_branch_generation, map_lifecycle_error};
+use error::{
+    branch_error, default_branch_generation, map_lifecycle_error, map_open_lifecycle_error,
+};
 #[cfg(any(test, feature = "testkit"))]
 pub(crate) use error::{
     map_commit_error_for_test, map_lifecycle_error_for_test, map_maintenance_outcome_for_test,
@@ -613,16 +615,16 @@ fn assemble_durable_runtime(
     .map_err(map_lifecycle_error)?;
     let mut shell =
         LifecycleDurableLocalShell::assemble(request, backend, default_timestamp_source())
-            .map_err(map_lifecycle_error)?;
+            .map_err(map_open_lifecycle_error)?;
     let recovery_request =
         crate::lifecycle::LifecycleRecoveryRequest::from_open_plan(shell.open_plan())
             .map_err(map_lifecycle_error)?;
     let recovery = LifecycleRecoveryRuntime::new(&mut shell)
         .recover(&recovery_request)
-        .map_err(map_lifecycle_error)?;
+        .map_err(map_open_lifecycle_error)?;
     let runtime = shell
         .complete_recovery(&recovery)
-        .map_err(map_lifecycle_error)?;
+        .map_err(map_open_lifecycle_error)?;
     let summary = map_open_summary(
         runtime.open_outcome(),
         options.mode(),

@@ -143,6 +143,14 @@ pub enum StorageApiError {
     IncompatibleLayout {
         reason: &'static str,
     },
+    /// #3659: an object written in a format version newer than this build
+    /// reads — the database was written by a newer Strata. Permanent: only a
+    /// build that reads `version` can open it.
+    IncompatibleFormat {
+        format: &'static str,
+        version: u32,
+        max_supported: u32,
+    },
     LowerLayer {
         layer: StorageApiLowerLayer,
         /// The failing inner layer's stable code (e.g.
@@ -186,6 +194,9 @@ impl StorageApiError {
             Self::ResourceExhausted { .. } => "resource_exhausted.storage_api.memory_budget",
             Self::IncompatibleLayout { .. } => {
                 "failed_precondition.storage_api.incompatible_layout"
+            }
+            Self::IncompatibleFormat { .. } => {
+                "failed_precondition.storage_api.incompatible_format"
             }
             Self::LowerLayer { layer, .. } => layer.code(),
         }
@@ -252,6 +263,9 @@ impl StorageApiError {
             Self::IncompatibleLayout { .. } => {
                 "Choose an empty directory or an existing V1 database directory; pre-V1 layouts are not readable by this version."
             }
+            Self::IncompatibleFormat { .. } => {
+                "Open the database with the Strata version that wrote it or a newer one; downgrades are not supported."
+            }
             Self::LowerLayer { .. } => {
                 "Inspect the source error and storage diagnostics for the underlying failure."
             }
@@ -269,7 +283,8 @@ impl StorageApiError {
             | Self::MaintenanceRejected { .. }
             | Self::StoragePressure { .. }
             | Self::RecoveryDegraded { .. }
-            | Self::IncompatibleLayout { .. } => StorageApiErrorClass::FailedPrecondition,
+            | Self::IncompatibleLayout { .. }
+            | Self::IncompatibleFormat { .. } => StorageApiErrorClass::FailedPrecondition,
             Self::BranchNotFound { .. } => StorageApiErrorClass::NotFound,
             Self::BranchAlreadyExists { .. } => StorageApiErrorClass::AlreadyExists,
             Self::Conflict { .. } => StorageApiErrorClass::Conflict,
@@ -367,6 +382,14 @@ impl fmt::Display for StorageApiError {
             Self::IncompatibleLayout { reason } => {
                 write!(formatter, "incompatible storage layout: {reason}")
             }
+            Self::IncompatibleFormat {
+                format,
+                version,
+                max_supported,
+            } => write!(
+                formatter,
+                "this database was written by a newer version of Strata ({format} format {version}; this build reads up to {max_supported})"
+            ),
             Self::BranchNotFound { branch_id } => write!(formatter, "branch {branch_id} not found"),
             Self::BranchAlreadyExists { branch_id } => {
                 write!(formatter, "branch {branch_id} already exists")

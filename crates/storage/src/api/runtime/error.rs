@@ -253,6 +253,29 @@ pub(super) fn map_recovery_health(health: &RecoveryHealth) -> RecoveryHealthSumm
     }
 }
 
+/// #3659: an open that failed because an object carries a format version
+/// this build cannot read. A newer version means a newer Strata wrote the
+/// database; a reserved pre-V1 version is the pre-V1 layout refusal. Both are
+/// permanent refusals with their own codes, never the generic (retryable)
+/// lower-layer failure the decode error would otherwise surface as.
+pub(super) fn map_open_lifecycle_error(error: LifecycleError) -> StorageApiError {
+    match crate::format::format_version_refusal(&error) {
+        Some(crate::format::FormatVersionRefusal::Newer {
+            format,
+            version,
+            max_supported,
+        }) => StorageApiError::IncompatibleFormat {
+            format,
+            version,
+            max_supported,
+        },
+        Some(crate::format::FormatVersionRefusal::PreV1) => StorageApiError::IncompatibleLayout {
+            reason: "an object carries a pre-V1 format version",
+        },
+        None => map_lifecycle_error(error),
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "storage API keeps lifecycle error mapping in one exhaustive registry"

@@ -965,6 +965,58 @@ fn a_failed_open_leaves_a_v1_manifest_at_version_1() {
     );
 }
 
+/// #3659: a manifest from a newer build is refused with its own typed,
+/// non-retryable error naming the format and both versions, never the
+/// generic lower-layer (retryable, "unavailable") failure.
+#[cfg(feature = "localfs")]
+#[test]
+fn a_newer_manifest_is_refused_as_an_incompatible_format() {
+    let root = temp_dir_for_api_test("manifest-newer-typed");
+    let mut runtime = StorageRuntime::open_local(root.clone())
+        .expect("open")
+        .into_runtime();
+    put_persisted(&mut runtime, b"value");
+    runtime.close().expect("close");
+    set_manifest_format_version(&root, 9);
+
+    let error = StorageRuntime::open_local(root).expect_err("a newer manifest is refused");
+    assert_eq!(error.class(), StorageApiErrorClass::FailedPrecondition);
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.incompatible_format"
+    );
+    assert!(
+        matches!(
+            error,
+            StorageApiError::IncompatibleFormat {
+                format: "database_manifest",
+                version: 9,
+                max_supported,
+            } if max_supported == crate::format::DATABASE_MANIFEST_FORMAT_VERSION
+        ),
+        "{error:?}"
+    );
+}
+
+/// #3659: a manifest carrying a reserved pre-V1 version is the pre-V1 layout
+/// refusal, not a generic failure.
+#[cfg(feature = "localfs")]
+#[test]
+fn a_pre_v1_manifest_version_is_refused_as_an_incompatible_layout() {
+    let root = temp_dir_for_api_test("manifest-pre-v1-typed");
+    let mut runtime = StorageRuntime::open_local(root.clone())
+        .expect("open")
+        .into_runtime();
+    runtime.close().expect("close");
+    set_manifest_format_version(&root, 2);
+
+    let error = StorageRuntime::open_local(root).expect_err("a pre-V1 manifest is refused");
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.incompatible_layout"
+    );
+}
+
 /// #3658: a manifest from a newer build is refused, and the refusal writes
 /// nothing — a downgrade can never damage the newer database.
 #[cfg(feature = "localfs")]

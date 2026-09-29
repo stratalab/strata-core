@@ -334,6 +334,45 @@ impl fmt::Display for FormatError {
 
 impl std::error::Error for FormatError {}
 
+/// #3659: why an object's format version cannot be read by this build, when
+/// that is the cause of a failure — a refusal, never a retryable condition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FormatVersionRefusal {
+    /// A newer Strata wrote it: `version` is above `max_supported`.
+    Newer {
+        format: &'static str,
+        version: u32,
+        max_supported: u32,
+    },
+    /// It carries a reserved pre-V1 version.
+    PreV1,
+}
+
+/// #3659: the first format-version refusal in `error`'s source chain.
+pub(crate) fn format_version_refusal(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<FormatVersionRefusal> {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        match current.downcast_ref::<FormatError>() {
+            Some(FormatError::FutureFormat {
+                format,
+                version,
+                max_supported,
+            }) => {
+                return Some(FormatVersionRefusal::Newer {
+                    format,
+                    version: *version,
+                    max_supported: *max_supported,
+                });
+            }
+            Some(FormatError::PreV1Format { .. }) => return Some(FormatVersionRefusal::PreV1),
+            _ => source = current.source(),
+        }
+    }
+    None
+}
+
 struct ByteReader<'a> {
     format: &'static str,
     bytes: &'a [u8],
