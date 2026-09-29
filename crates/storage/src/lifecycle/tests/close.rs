@@ -528,6 +528,30 @@ fn close_flushes_branch_truth_table() {
     assert!(close_flushes_branch(threshold + 1, threshold));
 }
 
+/// #3614: only a delta-cap deferral makes the close flush every branch and
+/// retry its checkpoint.
+#[test]
+fn close_checkpoint_retries_after_truth_table() {
+    use crate::lifecycle::durable::close_checkpoint_retries_after;
+    use crate::lifecycle::LifecycleCheckpointStatus as Status;
+    let cases = [
+        (Status::Completed, false),
+        (Status::DeferredNoVisibleRows, false),
+        (Status::DeferredUnmaterializedInheritedLayers, false),
+        (Status::DeferredDeltaExceedsCap, true),
+        (Status::SnapshotPublishedManifestNotUpdated, false),
+        (Status::SnapshotVisibilityUncertain, false),
+        (Status::FlushWatermarkFailed, false),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(
+            close_checkpoint_retries_after(status),
+            expected,
+            "{status:?}"
+        );
+    }
+}
+
 /// #3644: a clean close starts a queued reclaim task only while its reclaim
 /// budget has time left; a disabled budget starts none.
 #[test]

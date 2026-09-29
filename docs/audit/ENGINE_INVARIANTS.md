@@ -1900,7 +1900,10 @@ never from `manifest().load_*` directly.
   drain-before-close via `close_policy_for_kind`). Next, any branch whose
   unflushed delta reaches 64 KiB is flushed into tables (#3625). Then one
   checkpoint covers every branch, truncates the WAL behind it and prunes the
-  snapshot it superseded. Multi-branch checkpoints are sound because recovery
+  snapshot it superseded. A checkpoint that still defers on the delta cap
+  (DUR-017) flushes every branch holding a row and retries exactly once with
+  the same request; a delta no flush can shrink defers and leaves the WAL for
+  the next open (#3614). Multi-branch checkpoints are sound because recovery
   handles an orphaned delta per branch (DUR-010, slice 12).
 - **Crash or drop without close**: nothing runs; the next open settles the debt.
 
@@ -1912,7 +1915,8 @@ every reclaim pass reports what it freed (#3622).
 
 **Audit**: Truth tables — `close_policy_for_kind_truth_table`,
 `close_reclaim_should_continue_truth_table`, `close_checkpoint_decision_truth_table`,
-`close_flushes_branch_truth_table`, `quiescence_should_arm_truth_table`,
+`close_flushes_branch_truth_table`, `close_checkpoint_retries_after_truth_table`,
+`quiescence_should_arm_truth_table`,
 `should_service_low_tier_truth_table`, `reopen_owes_quarantine_purge_truth_table`,
 `family_frees_disk_truth_table`, `reclaim_waits_on_reader_truth_table`,
 `round_asks_idle_wake_truth_table`, `timeline_segment_is_dead_truth_table`,
@@ -1920,7 +1924,10 @@ every reclaim pass reports what it freed (#3622).
 `api_close_reclaim_is_bounded_by_the_budget`,
 `api_close_reclaim_truncates_the_wal_behind_the_close_checkpoint`,
 `api_close_flushes_a_large_delta_into_tables_before_its_checkpoint`,
-`api_close_keeps_a_small_delta_in_the_snapshot`, `api_read_only_reopen_reclaims_deterministically`,
+`api_close_keeps_a_small_delta_in_the_snapshot`,
+`close_checkpoint_over_the_delta_cap_flushes_and_retries_once` and
+`close_checkpoint_over_the_cap_after_the_retry_leaves_the_wal_for_the_next_session`
+(`crates/storage/src/lifecycle/tests/close_checkpoint.rs`), `api_read_only_reopen_reclaims_deterministically`,
 `api_open_reclaims_nothing_inline_without_a_worker`,
 `api_reopen_reconciles_snapshots_to_the_attested_id`,
 `api_reopen_purges_quarantine_a_prior_session_left_unpurged`,

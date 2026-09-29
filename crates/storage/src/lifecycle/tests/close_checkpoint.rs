@@ -524,14 +524,61 @@ fn close_checkpoint_skips_when_nothing_sits_above_the_watermark() {
     assert_eq!(snapshot_ids(backend), vec![1]);
 }
 
-/// A delta over the snapshot payload cap defers at close (the flush-first
-/// retry belongs to the next session's growth chain); nothing is published or
-/// deleted, and the next open replays every record.
+/// #3614: a delta still over the snapshot payload cap after the large-delta
+/// flush (#3625) — here twenty small commits, each branch below the
+/// large-delta threshold, against a shrunken cap — makes the close flush every
+/// branch's memtables and retry the checkpoint once. The retry completes with
+/// the rows in tables, the WAL is truncated, and the next open replays nothing.
 #[test]
-fn close_checkpoint_over_the_delta_cap_leaves_the_wal_for_the_next_session() {
+fn close_checkpoint_over_the_delta_cap_flushes_and_retries_once() {
+    const KEYS: [&[u8]; 20] = [
+        b"cap-00", b"cap-01", b"cap-02", b"cap-03", b"cap-04", b"cap-05", b"cap-06", b"cap-07",
+        b"cap-08", b"cap-09", b"cap-10", b"cap-11", b"cap-12", b"cap-13", b"cap-14", b"cap-15",
+        b"cap-16", b"cap-17", b"cap-18", b"cap-19",
+    ];
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let initial = branch_id(0xe8);
+    let mut runtime = open_runtime(initial, backend);
+    for key in KEYS {
+        commit(&mut runtime, initial, key);
+    }
+    // Twenty rows' payload exceeds this cap; the row-free retry fits it.
+    runtime.set_checkpoint_delta_cap_for_test(512);
+    let tables_before = table_data_objects(backend);
+
+    let close = runtime.close().expect("clean close");
+
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
+    assert_eq!(
+        snapshot_ids(backend),
+        vec![1],
+        "one snapshot, from the retry"
+    );
+    assert!(
+        table_data_objects(backend).len() > tables_before.len(),
+        "the retry's flush moved the delta into a table"
+    );
+
+    let (reopened, replayed) = reopen_counting_replay(initial, backend);
+    assert_eq!(replayed, 0, "the next open replays nothing");
+    for key in KEYS {
+        assert!(row_is_present(&reopened, initial, key));
+    }
+}
+
+/// #3614: a delta that no flush can bring under the cap (the cap below the
+/// snapshot's row-free sections) defers after the one retry — never a loop —
+/// and leaves the WAL as the durable record the next open replays.
+#[test]
+fn close_checkpoint_over_the_cap_after_the_retry_leaves_the_wal_for_the_next_session() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xe7);
     let mut runtime = open_runtime(initial, backend);
     commit(&mut runtime, initial, b"close-over-cap-a");
     commit(&mut runtime, initial, b"close-over-cap-b");
@@ -548,7 +595,6 @@ fn close_checkpoint_over_the_delta_cap_leaves_the_wal_for_the_next_session() {
     );
     let events = events_since(backend, events_before);
     assert!(!events.contains(&CheckpointBackendEvent::SnapshotCreate));
-    assert!(!events.contains(&CheckpointBackendEvent::ObjectDelete));
     let wal_after = wal_objects(backend);
     assert!(
         wal_before.iter().all(|object| wal_after.contains(object)),
@@ -556,12 +602,11 @@ fn close_checkpoint_over_the_delta_cap_leaves_the_wal_for_the_next_session() {
     );
     assert!(snapshot_ids(backend).is_empty());
 
-    let (reopened, replayed) = reopen_counting_replay(initial, backend);
-    assert_eq!(replayed, 2, "the next open replays both commits");
+    let (reopened, _replayed) = reopen_counting_replay(initial, backend);
+    assert!(row_is_present(&reopened, initial, b"close-over-cap-a"));
     assert!(row_is_present(&reopened, initial, b"close-over-cap-b"));
 }
 
-/// The table data objects under `tables/` (manifests excluded).
 fn table_data_objects(backend: &CheckpointTestBackend) -> Vec<String> {
     backend
         .object_snapshot()
