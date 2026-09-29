@@ -2107,9 +2107,12 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         outcome
     }
 
+    // Spelled out (not `LifecycleResult`) so the mutation gate can write an
+    // `Ok(None)` replacement for this body (#3337); an alias return leaves it
+    // only an unviable `Default::default()`.
     pub(crate) fn start_next_background_checkpoint_maintenance(
         &mut self,
-    ) -> LifecycleResult<Option<DurableBackgroundMaintenanceStep<'a>>> {
+    ) -> Result<Option<DurableBackgroundMaintenanceStep<'a>>, LifecycleError> {
         require_admitted(self.state, LifecycleOperationKind::OrdinaryMaintenance)?;
         let Some(task) = self
             .maintenance
@@ -2155,17 +2158,20 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 .branch_catalog
                 .branch_state(descriptor.branch_id())?
                 .clone();
-            // #2863: capture which owned tables are DURABLY cataloged now, under
+            // #2863: capture which owned tables are DURABLE bases now, under
             // the lock — the off-lock build uses this to keep the snapshot
-            // self-contained over volatile tables.
+            // self-contained over volatile tables. #3665: durable means listed
+            // by the owning branch's confirmed manifest (`is_durable_base`),
+            // the rule every inline checkpoint path uses — catalogued is not
+            // enough, since a flush catalogues its table before (and whether
+            // or not) the manifest covering it publishes.
             let durable_identities: std::collections::HashSet<crate::table::TableIdentity> = branch
                 .owned_levels()
                 .iter()
                 .flatten()
                 .filter(|table| {
                     self.table_catalog
-                        .object_for_identity(table.descriptor().identity())
-                        .is_some()
+                        .is_durable_base(table.descriptor().identity())
                 })
                 .map(|table| table.descriptor().identity().clone())
                 .collect();
