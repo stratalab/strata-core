@@ -459,6 +459,18 @@ impl StorageRuntime<'static> {
         }
     }
 
+    /// Hold a maintenance lane as if a worker had the task in flight, so a
+    /// queued task sharing that lane is pending-but-unstartable (#3652).
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn set_active_lifecycle_maintenance_for_test(
+        &self,
+        task: crate::lifecycle::MaintenanceTask,
+    ) {
+        if let StorageRuntimeInner::DurableOwned(slot) = &self.inner {
+            slot.lock().set_active_maintenance_for_test(task);
+        }
+    }
+
     #[cfg(test)]
     // Read by the scaled background closed-loop test, which needs a durable
     // store: under `perf-trace` alone that test compiles away.

@@ -986,40 +986,260 @@ fn checkpoint_over_a_snapshot_recovered_base_stays_self_contained() {
     );
 }
 
-/// Did a drain round make progress, or is the queue genuinely churning?
-///
-/// Two things count as progress, and the second is the one #2953 was missing:
-///
-/// - the queue shrank, or
-/// - a task is in flight. An active task cannot shrink the queue until it
-///   finishes, and while it holds its lane `next_startable_task_index` filters
-///   out every queued task sharing that lane — so `drain_maintenance` returns
-///   immediately having started nothing. That is waiting, not churn.
-///
-/// Pure so it can be truth-tabled directly; the drain loop reads its verdict.
-const fn drain_round_made_progress(
+/// What one drain round observed about the maintenance queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrainRound {
+    /// The queue is empty: the fixed point.
+    Drained,
+    /// A task is in flight. It holds its lane, and while it does
+    /// `next_startable_task_index` filters out every queued task sharing that
+    /// lane — so `drain_maintenance` returns having started nothing (#2953).
+    /// Only the in-flight task finishing can change that, so the caller must
+    /// WAIT for it, bounded by time, not re-drain (#3652).
+    InFlight,
+    /// The queue shrank with nothing in flight: progress, drain again.
+    Shrinking,
+    /// Neither shrinking nor waiting on anything: the churn the drain test
+    /// exists to catch.
+    Stalled,
+}
+
+/// Classify one drain round from the queue length, the previous round's queue
+/// length, and the in-flight task. Pure so it can be truth-tabled directly;
+/// `drain_to_fixed_point` acts on its verdict.
+const fn classify_drain_round(
     pending: usize,
     previous: usize,
     active_task: Option<u64>,
-) -> bool {
-    pending < previous || active_task.is_some()
+) -> DrainRound {
+    if pending == 0 {
+        DrainRound::Drained
+    } else if active_task.is_some() {
+        DrainRound::InFlight
+    } else if pending < previous {
+        DrainRound::Shrinking
+    } else {
+        DrainRound::Stalled
+    }
 }
 
 #[test]
-fn a_drain_round_counts_an_in_flight_task_as_progress() {
-    // Shrinking is progress whether or not anything is active.
-    assert!(drain_round_made_progress(1, 2, None));
-    assert!(drain_round_made_progress(1, 2, Some(7)));
+fn a_drain_round_is_classified_drained_in_flight_shrinking_or_stalled() {
+    // An empty queue is the fixed point, whatever is still active.
+    assert_eq!(classify_drain_round(0, 1, None), DrainRound::Drained);
+    assert_eq!(classify_drain_round(0, 0, Some(7)), DrainRound::Drained);
 
     // #2953: not shrinking is NOT churn while a task is in flight — it holds
-    // its lane, so every queued task sharing that lane is unstartable.
-    assert!(drain_round_made_progress(1, 1, Some(7)));
-    assert!(drain_round_made_progress(2, 1, Some(7)));
+    // its lane, so every queued task sharing that lane is unstartable. An
+    // in-flight task outranks shrinking: the caller must wait for it either way.
+    assert_eq!(classify_drain_round(1, 1, Some(7)), DrainRound::InFlight);
+    assert_eq!(classify_drain_round(2, 1, Some(7)), DrainRound::InFlight);
+    assert_eq!(classify_drain_round(1, 2, Some(7)), DrainRound::InFlight);
 
-    // Neither shrinking nor waiting on anything: this is the churn the
-    // assertion exists to catch, and it must still be caught.
-    assert!(!drain_round_made_progress(1, 1, None));
-    assert!(!drain_round_made_progress(2, 1, None));
+    // Shrinking with nothing in flight is progress the next drain continues.
+    assert_eq!(classify_drain_round(1, 2, None), DrainRound::Shrinking);
+    assert_eq!(
+        classify_drain_round(1, usize::MAX, None),
+        DrainRound::Shrinking
+    );
+
+    // Neither shrinking nor waiting on anything: this is the churn the drain
+    // test exists to catch, and it must still be caught.
+    assert_eq!(classify_drain_round(1, 1, None), DrainRound::Stalled);
+    assert_eq!(classify_drain_round(2, 1, None), DrainRound::Stalled);
+}
+
+/// Why `drain_to_fixed_point` gave up, with the queue it gave up on.
+#[cfg(feature = "localfs")]
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "the fields are the diagnosis, read through Debug in the panic message"
+)]
+enum DrainFixedPointFailure {
+    /// The queue stopped shrinking with nothing in flight for
+    /// `STALLED_ROUNDS_BEFORE_CHURN` consecutive rounds: churn.
+    Churning {
+        rounds: usize,
+        status: Box<crate::api::MaintenanceQueueSummary>,
+        pending_kinds: Vec<crate::lifecycle::MaintenanceTaskKind>,
+    },
+    /// Work was still in flight when the deadline passed: a task that never
+    /// releases its lane is stuck, not slow.
+    NotDrainedByDeadline {
+        rounds: usize,
+        status: Box<crate::api::MaintenanceQueueSummary>,
+        pending_kinds: Vec<crate::lifecycle::MaintenanceTaskKind>,
+    },
+}
+
+/// Consecutive stalled rounds (nothing shrinking, nothing in flight) that are
+/// judged churn. More than one because a background drain that finished
+/// between two reads may have queued a follow-up the next drain consumes.
+#[cfg(feature = "localfs")]
+const STALLED_ROUNDS_BEFORE_CHURN: usize = 3;
+
+/// Drain the maintenance queue to an actual fixed point: empty.
+///
+/// #3652: the loop this replaces bounded itself by a ROUND count (64) and
+/// re-drained without waiting. A round where a background worker holds the
+/// queued task's lane (`InFlight`) returns in microseconds, so under load the
+/// 64 rounds elapsed while that worker was still legitimately mid-flush, and
+/// the test reported "churn" with `active_task: Some(..)` and zero stalled
+/// rounds. An in-flight round now waits for the background workers to go
+/// idle, and the bound is a wall-clock deadline — a task that never releases
+/// its lane still fails, as `NotDrainedByDeadline`, not as churn.
+///
+/// Every round still requires no `Failed` outcome and a silent failure ring.
+#[cfg(feature = "localfs")]
+fn drain_to_fixed_point(
+    runtime: &mut StorageRuntime<'static>,
+    deadline: std::time::Duration,
+) -> Result<usize, DrainFixedPointFailure> {
+    use crate::api::MaintenanceSummaryStatus;
+
+    let started = std::time::Instant::now();
+    let mut previous = usize::MAX;
+    let mut stalled = 0;
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        let drain = runtime
+            .drain_maintenance()
+            .expect("draining a stale branch-scoped task must not fail the drain");
+        for outcome in drain.outcomes() {
+            assert_ne!(
+                outcome.status(),
+                MaintenanceSummaryStatus::Failed,
+                "a deleted task target is a legal race, not a maintenance failure: task {:?} reported {:?}",
+                outcome.task(),
+                outcome.source_error_code(),
+            );
+        }
+        let status = runtime.maintenance_status().expect("maintenance status");
+        assert!(
+            status.recent_failures().is_empty(),
+            "the failure ring must stay silent for the enqueue/delete race: {:?}",
+            status.recent_failures(),
+        );
+        let pending = status.pending_tasks();
+        match classify_drain_round(pending, previous, status.active_task()) {
+            DrainRound::Drained => return Ok(rounds),
+            DrainRound::Shrinking => stalled = 0,
+            DrainRound::InFlight => {
+                stalled = 0;
+                if started.elapsed() >= deadline {
+                    return Err(DrainFixedPointFailure::NotDrainedByDeadline {
+                        rounds,
+                        status: Box::new(status),
+                        pending_kinds: runtime.pending_lifecycle_maintenance_kinds_for_test(),
+                    });
+                }
+                // Wait on the actual condition — the worker holding the lane
+                // finishing — instead of re-draining a queue that cannot move.
+                // The short sleep yields even when the in-flight task is not a
+                // background worker's (the pool is idle, so the wait returns
+                // at once).
+                // Rationale for discarding: the returned stats are only a
+                // snapshot; the next round re-reads the executor status, which
+                // is what the verdict judges.
+                let _ = runtime
+                    .wait_background_idle_until_for_test(std::time::Duration::from_millis(20));
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            DrainRound::Stalled => {
+                stalled += 1;
+                if stalled >= STALLED_ROUNDS_BEFORE_CHURN {
+                    return Err(DrainFixedPointFailure::Churning {
+                        rounds,
+                        status: Box::new(status),
+                        pending_kinds: runtime.pending_lifecycle_maintenance_kinds_for_test(),
+                    });
+                }
+                // Let a background drain that raced this read land its
+                // follow-up before the next round judges the queue again.
+                // Rationale for discarding: as above, the next round re-reads
+                // the executor status.
+                let _ = runtime
+                    .wait_background_idle_until_for_test(std::time::Duration::from_millis(20));
+            }
+        }
+        previous = pending;
+    }
+}
+
+/// #3652 at the call site: a queued task whose lane is held by an in-flight
+/// task that never finishes. The old loop re-drained 64 times in a few
+/// milliseconds and then declared churn; the drain must instead wait on the
+/// held lane until its wall-clock deadline and report the task as not drained
+/// by the deadline — never as churn, and never before the deadline.
+#[cfg(feature = "localfs")]
+#[test]
+fn drain_to_fixed_point_waits_out_an_in_flight_lane_by_time_not_rounds() {
+    use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
+    use crate::lifecycle::{
+        MaintenanceTask as LifecycleTask, MaintenanceTaskKind, MaintenanceTaskPolicy,
+        MaintenanceTaskPriority, MaintenanceTaskRequest, MaintenanceTaskScope,
+    };
+
+    let root = temp_dir_for_api_test("branch-drain-fixed-point-in-flight");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root));
+    let mut runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        backend,
+    )
+    .expect("durable open")
+    .into_runtime();
+    let held = branch_with(0x6a);
+    runtime.branch(&create_request(held)).expect("create");
+    put_at(&mut runtime, held, b"held-a", b"row", 10);
+
+    // Hold the Flush lane as a worker mid-flush would, then queue a flush
+    // behind it: pending-but-unstartable for as long as the lane is held.
+    let in_flight = LifecycleTask::new_for_test(
+        1_000_000,
+        MaintenanceTaskRequest::new(
+            MaintenanceTaskKind::Flush,
+            MaintenanceTaskPriority::Normal,
+            MaintenanceTaskScope::Branch(held),
+            MaintenanceTaskPolicy::ordinary(),
+        )
+        .expect("in-flight flush request"),
+    )
+    .expect("in-flight flush");
+    runtime.set_active_lifecycle_maintenance_for_test(in_flight);
+    runtime
+        .enqueue_maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Flush,
+            MaintenanceScope::Branch(held),
+        ))
+        .expect("enqueue the flush behind the held lane");
+
+    let deadline = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let failure = drain_to_fixed_point(&mut runtime, deadline)
+        .expect_err("a lane that is never released cannot drain");
+    let elapsed = started.elapsed();
+
+    match failure {
+        DrainFixedPointFailure::NotDrainedByDeadline {
+            status,
+            pending_kinds,
+            ..
+        } => {
+            assert_eq!(status.pending_tasks(), 1);
+            assert_eq!(status.active_task(), Some(1_000_000));
+            assert_eq!(pending_kinds, vec![MaintenanceTaskKind::Flush]);
+        }
+        other @ DrainFixedPointFailure::Churning { .. } => {
+            panic!("a held lane is in flight, not churn: {other:?}")
+        }
+    }
+    assert!(
+        elapsed >= deadline,
+        "the drain must wait on the held lane until its deadline, not give up \
+         after a round count: gave up after {elapsed:?} of {deadline:?}",
+    );
 }
 
 /// A branch-scoped compaction task legally races a branch delete: enqueued while the
@@ -1032,15 +1252,13 @@ fn a_drain_round_counts_an_in_flight_task_as_progress() {
 #[cfg(feature = "localfs")]
 #[test]
 fn drain_cancels_branch_scoped_compaction_enqueued_before_the_branch_was_deleted() {
-    use crate::api::{
-        MaintenanceRequest, MaintenanceScope, MaintenanceSummaryStatus, MaintenanceTask,
-    };
+    use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
 
     let root = temp_dir_for_api_test("branch-drain-cancel-deleted-scope");
-    let backend = StorageBackend::local_fs(root);
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root));
     let mut runtime = StorageRuntime::open_with_backend(
         StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
+        backend,
     )
     .expect("durable open")
     .into_runtime();
@@ -1086,71 +1304,18 @@ fn drain_cancels_branch_scoped_compaction_enqueued_before_the_branch_was_deleted
     // #2867: a drain's background rounds may chain follow-up enqueues (e.g. the
     // table-object retention that follows a completed task) that land after the
     // drain's queue snapshot — drain to a fixed point before judging the queue.
-    // Every round still requires no Failed outcome and a silent failure ring.
-    // #3182: the round count used to be a flat 5, which conflated "still
-    // draining" with "churning" — the two states the assertion below claims to
-    // tell apart. A drain that was legitimately still making progress on its
-    // fifth round failed the test. Drain to an actual fixed point instead:
-    // keep going while the queue is shrinking, and stop early only when it
-    // stops shrinking, which is the churn this is meant to catch. The outer
-    // bound is a safety net against an infinite loop, not the real condition.
-    //
-    // #2953: shrinking is not the only form of progress. A queued task whose
-    // lane is already occupied is pending-but-UNSTARTABLE:
-    // `next_startable_task_index` filters it out, `run_next_matching` returns
-    // `None`, and `drain_maintenance` therefore returns having done nothing
-    // while the queue is still non-empty. The count does not fall, and three
-    // such rounds used to be declared churn — which is why raising the round
-    // count twice (#2868, #3209) never fixed this: the blocker is a held lane,
-    // not elapsed time. An in-flight task is progress we cannot see in the
-    // queue length, so it is not churn.
-    let safety_rounds = 64;
-    let stalled_rounds_before_giving_up = 3;
-    let mut pending = usize::MAX;
-    let mut previous = usize::MAX;
-    let mut stalled = 0;
-    for _ in 0..safety_rounds {
-        let drain = runtime
-            .drain_maintenance()
-            .expect("draining a stale branch-scoped task must not fail the drain");
-        for outcome in drain.outcomes() {
-            assert_ne!(
-                outcome.status(),
-                MaintenanceSummaryStatus::Failed,
-                "a deleted task target is a legal race, not a maintenance failure: task {:?} reported {:?}",
-                outcome.task(),
-                outcome.source_error_code(),
-            );
-        }
-        let status = runtime.maintenance_status().expect("maintenance status");
-        assert!(
-            status.recent_failures().is_empty(),
-            "the failure ring must stay silent for the enqueue/delete race: {:?}",
-            status.recent_failures(),
+    // #3182 replaced a flat 5-round bound with drain-while-shrinking; #2953
+    // taught it that an in-flight task holding the queued task's lane is
+    // waiting, not churn. #3652: the loop still bounded itself by 64 ROUNDS and
+    // never waited, so a background flush still mid-flight under load outlasted
+    // the rounds. `drain_to_fixed_point` waits on the in-flight lane and bounds
+    // the drain by wall-clock time — see its doc comment.
+    if let Err(failure) = drain_to_fixed_point(&mut runtime, std::time::Duration::from_secs(60)) {
+        panic!(
+            "the queue must drain to a fixed point: the stale tasks are consumed, \
+             not churning or stuck: {failure:?}"
         );
-        pending = status.pending_tasks();
-        if pending == 0 {
-            break;
-        }
-        // Shrinking is progress; so is a task in flight, which cannot shrink
-        // the queue until it finishes. Only a queue that is neither shrinking
-        // nor waiting on anything is churning.
-        if drain_round_made_progress(pending, previous, status.active_task()) {
-            stalled = 0;
-        } else {
-            stalled += 1;
-            if stalled >= stalled_rounds_before_giving_up {
-                break;
-            }
-        }
-        previous = pending;
     }
-    assert_eq!(
-        pending, 0,
-        "the queue must drain to a fixed point: the stale tasks are consumed, \
-         not churning. {pending} task(s) still queued after the count stopped \
-         falling, so this is churn rather than slow progress",
-    );
 }
 
 #[cfg(feature = "localfs")]
