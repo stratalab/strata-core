@@ -165,6 +165,23 @@ impl SnapshotService<'_> {
         Ok(segments)
     }
 
+    /// Every listed segment with its on-disk size; one that vanishes between
+    /// the listing and its stat (a concurrent prune) is dropped.
+    pub(crate) fn list_timeline_segment_sizes(
+        &self,
+    ) -> SnapshotServiceResult<Vec<(TimelineSegmentId, u64)>> {
+        require_capability(&self.backend, BackendCapability::ObjectMetadata)?;
+        let mut sizes = Vec::new();
+        for (id, object) in self.list_timeline_segments()? {
+            match self.backend.object_metadata(&object) {
+                Ok(metadata) => sizes.push((id, metadata.size_bytes())),
+                Err(source) if source.kind() == BackendErrorKind::NotFound => {}
+                Err(source) => return Err(SnapshotServiceError::List { source }),
+            }
+        }
+        Ok(sizes)
+    }
+
     /// Delete every listed segment `timeline_segment_is_dead` rules dead.
     pub(crate) fn prune_timeline_segments(
         &self,

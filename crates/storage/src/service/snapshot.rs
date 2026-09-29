@@ -571,7 +571,9 @@ pub(crate) use listing::{
     reconcilable_orphan, superseded_snapshot, SnapshotDeleteFailure, SnapshotDeleteOutcome,
     SnapshotObject, SnapshotPruneMode,
 };
-pub(crate) use timeline_segments::{TimelineSegmentPruneMode, TimelineSegmentPruneReport};
+pub(crate) use timeline_segments::{
+    timeline_segment_is_dead, TimelineSegmentPruneMode, TimelineSegmentPruneReport,
+};
 
 #[cfg(test)]
 mod listing_tests;

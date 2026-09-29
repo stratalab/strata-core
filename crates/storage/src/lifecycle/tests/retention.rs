@@ -1868,6 +1868,8 @@ struct RetentionBackend {
     phantoms: Mutex<BTreeSet<ObjectName>>,
     /// #3643: every delete removes the object but reports it non-durable.
     non_durable_deletes: AtomicBool,
+    /// #3643: every metadata read fails `Unavailable`.
+    fail_metadata: AtomicBool,
 }
 
 impl RetentionBackend {
@@ -2050,6 +2052,12 @@ impl Backend for RetentionBackend {
     }
 
     fn object_metadata(&self, name: &ObjectName) -> BackendResult<BackendMetadata> {
+        if self.fail_metadata.load(Ordering::SeqCst) {
+            return Err(BackendError::new(
+                BackendErrorKind::Unavailable,
+                "injected metadata failure",
+            ));
+        }
         self.objects
             .lock()
             .expect("objects")
@@ -3495,4 +3503,34 @@ fn snapshotless_segment_reconcile_truth_table() {
             "{proof:?} {mode:?}"
         );
     }
+}
+
+/// #3643: the audit's segment size listing drops a segment that vanished
+/// between the listing and its stat, rather than failing the audit.
+#[test]
+fn segment_size_listing_drops_a_vanished_segment() {
+    let backend: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([3]));
+    backend.insert_timeline_segment(3, 0);
+    backend.insert_phantom(timeline_segment_name(1, 0));
+    let sizes = SnapshotService::new(backend)
+        .list_timeline_segment_sizes()
+        .expect("listing");
+    assert_eq!(
+        sizes,
+        vec![(
+            crate::layout::TimelineSegmentId {
+                sealing_snapshot_id: 3,
+                ordinal: 0
+            },
+            b"segment".len() as u64
+        )]
+    );
+
+    // Only a vanished segment is dropped: any other stat failure fails the
+    // listing, rather than under-reporting the footprint.
+    backend.fail_metadata.store(true, Ordering::SeqCst);
+    assert!(SnapshotService::new(backend)
+        .list_timeline_segment_sizes()
+        .is_err());
 }

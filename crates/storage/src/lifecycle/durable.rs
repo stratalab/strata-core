@@ -115,8 +115,10 @@ pub(crate) struct LifecycleDurableLocalServices<'a> {
     /// #3643: the timeline segments the manifest-live snapshot references —
     /// seeded at recovery from the attested snapshot and replaced after every
     /// completed checkpoint. The segment prune spares exactly these.
-    live_timeline_segments:
-        parking_lot::Mutex<(Option<u64>, std::collections::BTreeSet<TimelineSegmentId>)>,
+    live_timeline_segments: parking_lot::Mutex<(
+        Option<u64>,
+        std::collections::BTreeMap<TimelineSegmentId, crate::format::TimelineSegmentRef>,
+    )>,
 }
 
 pub(crate) struct LifecycleDurableLocalShell<'a, S = CommitManualTimestampSource> {
@@ -346,33 +348,54 @@ impl<'a> LifecycleDurableLocalServices<'a> {
         &self,
         live_snapshot_id: Option<u64>,
     ) -> Option<std::collections::BTreeSet<TimelineSegmentId>> {
+        self.with_live_timeline_segments(live_snapshot_id, |refs| refs.keys().copied().collect())
+    }
+
+    /// #3643: the references snapshot `live_snapshot_id` makes, for a
+    /// checkpoint to re-use a chunk the live snapshot already names (fork
+    /// dedup). Resolved like `timeline_segments_referenced_by`, so a stale
+    /// cache is never re-referenced; when the references cannot be established
+    /// the checkpoint re-uses nothing and seals its chunks afresh.
+    pub(crate) fn timeline_segment_refs_of(
+        &self,
+        live_snapshot_id: Option<u64>,
+    ) -> Vec<crate::format::TimelineSegmentRef> {
+        self.with_live_timeline_segments(live_snapshot_id, |refs| refs.values().copied().collect())
+            .unwrap_or_default()
+    }
+
+    fn with_live_timeline_segments<T>(
+        &self,
+        live_snapshot_id: Option<u64>,
+        read: impl FnOnce(
+            &std::collections::BTreeMap<TimelineSegmentId, crate::format::TimelineSegmentRef>,
+        ) -> T,
+    ) -> Option<T> {
         let mut cache = self.live_timeline_segments.lock();
-        if cache.0 == live_snapshot_id {
-            return Some(cache.1.clone());
-        }
-        let Some(snapshot_id) = live_snapshot_id else {
-            return Some(std::collections::BTreeSet::new());
-        };
-        let container = self.snapshot.load_required(snapshot_id).ok()?;
-        let mut referenced = std::collections::BTreeSet::new();
-        for section in container.sections() {
-            if section.section_kind() != crate::format::SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND {
-                continue;
+        if cache.0 != live_snapshot_id {
+            let mut referenced = std::collections::BTreeMap::new();
+            if let Some(snapshot_id) = live_snapshot_id {
+                let container = self.snapshot.load_required(snapshot_id).ok()?;
+                for section in container.sections() {
+                    if section.section_kind()
+                        != crate::format::SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND
+                    {
+                        continue;
+                    }
+                    let groups =
+                        crate::format::decode_snapshot_timeline_segments_payload(section.payload())
+                            .ok()?;
+                    referenced.extend(
+                        groups
+                            .iter()
+                            .flat_map(|group| group.refs.iter())
+                            .map(|segment| (timeline_segment_id(segment), *segment)),
+                    );
+                }
             }
-            let groups =
-                crate::format::decode_snapshot_timeline_segments_payload(section.payload()).ok()?;
-            referenced.extend(
-                groups
-                    .iter()
-                    .flat_map(|group| group.refs.iter())
-                    .map(|segment| TimelineSegmentId {
-                        sealing_snapshot_id: segment.sealing_snapshot_id,
-                        ordinal: u64::from(segment.ordinal),
-                    }),
-            );
+            *cache = (live_snapshot_id, referenced);
         }
-        *cache = (live_snapshot_id, referenced.clone());
-        Some(referenced)
+        Some(read(&cache.1))
     }
 
     /// #3643: record the segments snapshot `snapshot_id` references, now that
@@ -381,9 +404,15 @@ impl<'a> LifecycleDurableLocalServices<'a> {
     pub(crate) fn set_live_timeline_segments(
         &self,
         snapshot_id: u64,
-        referenced: std::collections::BTreeSet<TimelineSegmentId>,
+        referenced: impl IntoIterator<Item = crate::format::TimelineSegmentRef>,
     ) {
-        *self.live_timeline_segments.lock() = (Some(snapshot_id), referenced);
+        *self.live_timeline_segments.lock() = (
+            Some(snapshot_id),
+            referenced
+                .into_iter()
+                .map(|segment| (timeline_segment_id(&segment), segment))
+                .collect(),
+        );
     }
 
     pub(crate) const fn table_object(&self) -> &TableObjectService<'static> {
@@ -938,5 +967,13 @@ pub(super) fn commit_error(error: CommitRuntimeError) -> LifecycleError {
             "commit runtime failed",
             other,
         ),
+    }
+}
+
+/// #3643: a reference's segment identity.
+const fn timeline_segment_id(segment: &crate::format::TimelineSegmentRef) -> TimelineSegmentId {
+    TimelineSegmentId {
+        sealing_snapshot_id: segment.sealing_snapshot_id,
+        ordinal: segment.ordinal as u64,
     }
 }

@@ -241,6 +241,8 @@ pub(super) struct FootprintAudit {
     quarantined_objects: u64,
     snapshot_objects: u64,
     superseded_snapshots: u64,
+    /// #3643: timeline segments the live snapshot no longer references.
+    superseded_timeline_segments: u64,
     wal_reclaimable_bytes: u64,
     /// The ledger explained the remaining debt (a deferred mark or sweep).
     debt_deferred: bool,
@@ -253,7 +255,8 @@ struct FootprintExpectation {
     /// No unreferenced or quarantined table object — unless the ledger
     /// recorded why the sweep could not run (a documented deferral).
     no_object_debt: bool,
-    /// No snapshot beside the attested one (the open reconcile pruned).
+    /// No snapshot beside the attested one (the open reconcile pruned), and
+    /// (#3643) no timeline segment the attested snapshot does not reference.
     no_superseded: bool,
 }
 
@@ -1019,6 +1022,7 @@ impl WholeDbSim {
             quarantined_objects: count(quarantine.quarantined_objects()),
             snapshot_objects: count(footprint.snapshot_objects()),
             superseded_snapshots: count(footprint.superseded_snapshots()),
+            superseded_timeline_segments: count(footprint.superseded_timeline_segments()),
             wal_reclaimable_bytes: footprint.wal_reclaimable_bytes().unwrap_or(u64::MAX),
             debt_deferred,
         };
@@ -1040,6 +1044,16 @@ impl WholeDbSim {
                 format!(
                     "footprint audit ({phase}): {} superseded snapshots survive: {audit:?}",
                     audit.superseded_snapshots
+                ),
+            ));
+        }
+        if expectation.no_superseded && audit.superseded_timeline_segments > 0 {
+            return Err(self.error(
+                epoch,
+                format!(
+                    "footprint audit ({phase}): {} unreferenced timeline segments survive: \
+                     {audit:?}",
+                    audit.superseded_timeline_segments
                 ),
             ));
         }
@@ -1535,6 +1549,82 @@ mod tests {
         );
         let last = sim.facts.footprint_audits().last().expect("recorded");
         assert_eq!(last.superseded_snapshots, 1, "{last:?}");
+    }
+
+    /// #3643 non-vacuity twin: a timeline segment the live snapshot no longer
+    /// references, sealed below it, is superseded debt the footprint oracle
+    /// must see — the snapshot family counts its segments.
+    #[test]
+    fn sabotage_unreferenced_timeline_segment_is_caught() {
+        use crate::api::{
+            CommitBatch, CommitOptions, MaintenanceRequest, MaintenanceScope, MaintenanceTask,
+            StorageBackend, StorageDurabilityPolicy, StorageRuntime,
+        };
+        use crate::layout::{ObjectLayout, TimelineSegmentId};
+        use crate::testkit::recovery_oracle::workload::to_commit_mutation;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let backend = StorageBackend::local_fs(dir.path().to_path_buf());
+        let mut runtime = StorageRuntime::open_with_backend(
+            crate::testkit::simulation::faults::deterministic_options(
+                StorageDurabilityPolicy::Standard,
+            ),
+            &backend,
+        )
+        .expect("open")
+        .into_runtime();
+        let mut sim = super::WholeDbSim::new(0, 4);
+        for index in 0..2 {
+            let batch = CommitBatch::new(
+                super::default_branch(),
+                sim.workload[index].iter().map(to_commit_mutation).collect(),
+                CommitOptions::default(),
+            )
+            .expect("batch");
+            runtime.commit(&batch).expect("commit");
+            runtime
+                .maintenance(&MaintenanceRequest::new(
+                    MaintenanceTask::Checkpoint,
+                    MaintenanceScope::Global,
+                ))
+                .expect("checkpoint");
+            runtime
+                .drain_maintenance()
+                .expect("drain the chained prune");
+        }
+        sim.audit_footprint(&runtime, 0, "twin", super::FootprintExpectation::CLEAN)
+            .expect("the chained prune left only live segments");
+
+        // Plant a segment sealed by snapshot 1 that nothing references.
+        let segment = |id: TimelineSegmentId| {
+            dir.path().join(format!(
+                "{}.object@",
+                ObjectLayout::timeline_segment(id).expect("layout").as_str()
+            ))
+        };
+        let live_tail = std::fs::read_dir(dir.path().join("timeline"))
+            .expect("timeline family")
+            .flatten()
+            .flat_map(|sealing| {
+                std::fs::read_dir(sealing.path())
+                    .expect("sealing")
+                    .flatten()
+            })
+            .map(|entry| entry.path())
+            .next()
+            .expect("a live segment");
+        let planted = segment(TimelineSegmentId {
+            sealing_snapshot_id: 1,
+            ordinal: 7,
+        });
+        std::fs::create_dir_all(planted.parent().expect("dir")).expect("mkdir");
+        std::fs::copy(live_tail, planted).expect("plant an unreferenced segment");
+
+        let verdict = sim.audit_footprint(&runtime, 0, "twin", super::FootprintExpectation::CLEAN);
+        assert!(
+            verdict.is_err(),
+            "an unreferenced timeline segment passed the footprint oracle — it is vacuous"
+        );
     }
 
     /// Sabotage twin: a fork whose model seeding is SKIPPED must fire the

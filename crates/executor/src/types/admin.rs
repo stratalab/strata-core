@@ -438,6 +438,20 @@ pub struct AdminStorage {
     /// Bytes of those snapshots (audit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_snapshot_bytes: Option<u64>,
+    /// Sealed retained-timeline segment objects on disk: the commit history
+    /// the checkpoint snapshots reference (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_segment_objects: Option<u64>,
+    /// Bytes of those segments (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_segment_bytes: Option<u64>,
+    /// Segments the live snapshot no longer references, which the next
+    /// snapshot prune deletes (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_timeline_segments: Option<u64>,
+    /// Bytes of those segments (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_timeline_segment_bytes: Option<u64>,
     /// WAL bytes below the retention watermark a truncation may delete (audit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_reclaimable_bytes: Option<u64>,
@@ -445,7 +459,7 @@ pub struct AdminStorage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_tail_bytes: Option<u64>,
     /// The bytes of every storage family — table objects in use, unreferenced
-    /// and quarantined objects, snapshots and the WAL (from the audit's own
+    /// and quarantined objects, snapshots, timeline segments and the WAL (from the audit's own
     /// listing) — each file counted once, when every part is known (audit).
     /// Small metadata objects (manifests, locks) are outside the families.
     #[serde(default, skip_serializing_if = "Option::is_none")]

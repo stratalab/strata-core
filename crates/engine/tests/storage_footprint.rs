@@ -183,6 +183,12 @@ mod inline {
         );
         assert!(all.snapshot_bytes.is_some_and(|bytes| bytes > 0), "{all:?}");
         assert_eq!(all.superseded_snapshots, Some(0), "{all:?}");
+        // #3643: the snapshot references a timeline tail per branch.
+        assert!(
+            all.timeline_segment_objects.is_some_and(|count| count > 0),
+            "{all:?}"
+        );
+        assert_eq!(all.superseded_timeline_segments, Some(0), "{all:?}");
         assert!(
             all.wal_retained_bytes.is_some_and(|bytes| bytes > 0),
             "{all:?}"
@@ -196,10 +202,12 @@ mod inline {
             Some(
                 all.live_table_bytes
                     + all.snapshot_bytes.expect("audit")
+                    + all.timeline_segment_bytes.expect("audit")
                     + all.wal_reclaimable_bytes.expect("audit")
                     + all.wal_tail_bytes.expect("audit")
             ),
-            "a clean database's total is its tables, its snapshot and the WAL on disk: {all:?}"
+            "a clean database's total is its tables, its snapshot, its timeline segments and \
+             the WAL on disk: {all:?}"
         );
         for name in ["default", "feature"] {
             let scoped = db

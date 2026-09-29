@@ -149,12 +149,22 @@ pub struct StorageFootprint {
     pub superseded_snapshots: Option<u64>,
     /// Bytes of those snapshots (audit).
     pub superseded_snapshot_bytes: Option<u64>,
+    /// Sealed retained-timeline segment objects on disk: the commit history
+    /// the checkpoint snapshots reference (audit).
+    pub timeline_segment_objects: Option<u64>,
+    /// Bytes of those segments (audit).
+    pub timeline_segment_bytes: Option<u64>,
+    /// Segments the live snapshot no longer references, which the next
+    /// snapshot prune deletes (audit).
+    pub superseded_timeline_segments: Option<u64>,
+    /// Bytes of those segments (audit).
+    pub superseded_timeline_segment_bytes: Option<u64>,
     /// WAL bytes below the retention watermark a truncation may delete (audit).
     pub wal_reclaimable_bytes: Option<u64>,
     /// WAL bytes above the retention watermark (audit).
     pub wal_tail_bytes: Option<u64>,
     /// The bytes of every storage family — table objects in use, unreferenced
-    /// and quarantined objects, snapshots and the WAL — when every part is
+    /// and quarantined objects, snapshots, timeline segments and the WAL — when every part is
     /// known (audit; the WAL from the audit's own listing, so a read-only open
     /// with cold live facts still totals). The families are disjoint, so each
     /// file counts once. Small metadata objects (manifests, locks) are outside

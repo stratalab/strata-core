@@ -316,6 +316,14 @@ fn debt_violations(footprint: &StorageFootprint) -> Vec<String> {
             footprint.superseded_snapshots
         ));
     }
+    // #3643: a timeline segment the live snapshot no longer references is
+    // leaked history (the snapshot prune deletes it with its snapshot).
+    if footprint.superseded_timeline_segments != Some(0) {
+        violations.push(format!(
+            "superseded timeline segments: {:?} ({:?} bytes)",
+            footprint.superseded_timeline_segments, footprint.superseded_timeline_segment_bytes
+        ));
+    }
     // A listing count independent of the superseded predicate: the live
     // snapshot plus at most the one superseded snapshot allowed above.
     if footprint.snapshot_objects.is_none_or(|count| count > 2) {

@@ -286,6 +286,17 @@ fn audit_snapshots_count_the_superseded_family_the_prune_reclaims() {
     let newer = ObjectLayout::snapshot(2).expect("snapshot 2");
     let older_bytes = object_bytes(backend, &older);
     let newer_bytes = object_bytes(backend, &newer);
+    // #3643: each checkpoint sealed its branch's timeline tail; the older one
+    // is superseded with its snapshot (the newer references only its own).
+    let tail = |sealing| {
+        ObjectLayout::timeline_segment(crate::layout::TimelineSegmentId {
+            sealing_snapshot_id: sealing,
+            ordinal: 0,
+        })
+        .expect("tail segment")
+    };
+    let older_tail = object_bytes(backend, &tail(1));
+    let newer_tail = object_bytes(backend, &tail(2));
 
     let before = runtime.footprint_audit_facts().expect("audit");
 
@@ -293,6 +304,8 @@ fn audit_snapshots_count_the_superseded_family_the_prune_reclaims() {
     assert_eq!(before.snapshot_bytes(), older_bytes + newer_bytes);
     assert_eq!(before.superseded_snapshots(), 1);
     assert_eq!(before.superseded_snapshot_bytes(), older_bytes);
+    assert_eq!(before.timeline_segments(), (2, older_tail + newer_tail));
+    assert_eq!(before.superseded_timeline_segments(), (1, older_tail));
 
     // The chained prune (slice 5) reclaims exactly the superseded part.
     while let Some(outcome) = runtime
@@ -309,6 +322,8 @@ fn audit_snapshots_count_the_superseded_family_the_prune_reclaims() {
 
     assert_eq!(after.snapshot_objects(), 1);
     assert_eq!(after.snapshot_bytes(), newer_bytes);
+    assert_eq!(after.timeline_segments(), (1, newer_tail));
+    assert_eq!(after.superseded_timeline_segments(), (0, 0));
     assert_eq!(after.superseded_snapshots(), 0);
     assert_eq!(after.superseded_snapshot_bytes(), 0);
 }

@@ -47,9 +47,10 @@ pub(crate) use quarantine::{
 pub(crate) use sidecar::{WalSegmentMetadataSidecarLoad, WalSegmentMetadataSidecarService};
 
 pub(crate) use snapshot::{
-    reconcilable_orphan, superseded_snapshot, SnapshotDeleteFailure, SnapshotDeleteOutcome,
-    SnapshotDeleteReport, SnapshotObject, SnapshotPruneMode, SnapshotPublishRequest,
-    SnapshotService, SnapshotServiceError, TimelineSegmentPruneMode, TimelineSegmentPruneReport,
+    reconcilable_orphan, superseded_snapshot, timeline_segment_is_dead, SnapshotDeleteFailure,
+    SnapshotDeleteOutcome, SnapshotDeleteReport, SnapshotObject, SnapshotPruneMode,
+    SnapshotPublishRequest, SnapshotService, SnapshotServiceError, TimelineSegmentPruneMode,
+    TimelineSegmentPruneReport,
 };
 
 #[allow(

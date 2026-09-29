@@ -518,7 +518,7 @@ pub(super) fn durable_footprint_report<S>(
         });
     let footprint = crate::api::diagnostics::footprint_for_detail(
         detail,
-        live_report,
+        &live_report,
         audit.map(map_footprint_audit),
     );
     let reclaim = map_reclaim_report(runtime.reclaim_ledger(), live.pending_reclaim_tasks());
@@ -541,6 +541,10 @@ pub(super) fn map_footprint_audit(
         snapshot_bytes: audit.snapshot_bytes(),
         superseded_snapshots: audit.superseded_snapshots(),
         superseded_snapshot_bytes: audit.superseded_snapshot_bytes(),
+        timeline_segment_objects: audit.timeline_segments().0,
+        timeline_segment_bytes: audit.timeline_segments().1,
+        superseded_timeline_segments: audit.superseded_timeline_segments().0,
+        superseded_timeline_segment_bytes: audit.superseded_timeline_segments().1,
         wal_reclaimable_bytes: audit.wal_reclaimable_bytes(),
         wal_tail_bytes: audit.wal_tail_bytes(),
     }
