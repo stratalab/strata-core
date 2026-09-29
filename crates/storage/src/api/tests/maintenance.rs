@@ -3777,19 +3777,22 @@ fn api_clean_close_drains_the_sessions_reclaim_debt() {
     let expected: std::collections::BTreeSet<String> =
         before_close.difference(&superseded).cloned().collect();
 
-    // A generous budget with a tight elapsed bound: the drive must stop the
-    // moment a sweep finds nothing left, never spin the budget down.
+    // #3649: the drive stops the moment a sweep leaves nothing behind; one
+    // that spun its budget down could not finish inside it. The budget is far
+    // above any loaded runner's close (worker stop, drain, checkpoint, fsyncs),
+    // so the bound is never a timing race; the stop rule itself is pinned by
+    // `close_reclaim_should_continue_truth_table`.
+    let budget = std::time::Duration::from_secs(10);
     let started = std::time::Instant::now();
     let close = runtime
         .close_with_options(
-            StorageCloseOptions::graceful()
-                .with_reclaim_budget(ReclaimBudget::Bounded(std::time::Duration::from_secs(2))),
+            StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Bounded(budget)),
         )
         .expect("close");
+    let elapsed = started.elapsed();
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
-        "the drive stopped once the debt was gone: {:?}",
-        started.elapsed()
+        elapsed < budget,
+        "the close spun its reclaim budget down: {elapsed:?}"
     );
     assert!(close.maintenance_drained(), "{close:?}");
     assert_eq!(table_data_object_files(&root), expected);
