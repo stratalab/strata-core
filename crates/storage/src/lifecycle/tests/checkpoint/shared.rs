@@ -202,6 +202,14 @@ pub(in crate::lifecycle::tests) struct CheckpointTestBackend {
     corrupt_table_object_create_call: AtomicUsize,
     uncertain_manifest_replace_call: AtomicUsize,
     pub(super) manifest_visible_then_uncertain: AtomicBool,
+    /// #3671: a crash model for the database manifest. `durable_manifest` is
+    /// what survives power loss: only a publish that fully succeeds (the
+    /// rename AND its directory sync) replaces it. While
+    /// `unconfirmed_manifest` holds `(snapshot id, n)`, the next `n` publishes
+    /// of a manifest naming that snapshot install their bytes (visible) but
+    /// report `VisibleDurabilityUnconfirmed`.
+    durable_manifest: Mutex<Option<Vec<u8>>>,
+    unconfirmed_manifest: Mutex<Option<(u64, usize)>>,
     manifest_replace_calls: AtomicUsize,
     table_manifest_replace_calls: AtomicUsize,
     table_object_create_calls: AtomicUsize,
@@ -263,6 +271,8 @@ impl CheckpointTestBackend {
             corrupt_table_object_create_call: AtomicUsize::new(0),
             uncertain_manifest_replace_call: AtomicUsize::new(0),
             manifest_visible_then_uncertain: AtomicBool::new(false),
+            durable_manifest: Mutex::new(None),
+            unconfirmed_manifest: Mutex::new(None),
             manifest_replace_calls: AtomicUsize::new(0),
             table_manifest_replace_calls: AtomicUsize::new(0),
             table_object_create_calls: AtomicUsize::new(0),
@@ -297,6 +307,54 @@ impl CheckpointTestBackend {
             return true;
         }
         false
+    }
+
+    /// #3671: the next `publishes` publishes of a database manifest naming
+    /// `snapshot_id` become visible but report their durability unconfirmed
+    /// (a failed directory sync).
+    pub(in crate::lifecycle::tests) fn fail_manifest_durability(
+        &self,
+        snapshot_id: u64,
+        publishes: usize,
+    ) {
+        *self
+            .unconfirmed_manifest
+            .lock()
+            .expect("unconfirmed manifest") = Some((snapshot_id, publishes));
+    }
+
+    /// #3671: power loss — the database manifest reverts to the last one
+    /// whose publish was confirmed durable. Every other object keeps its
+    /// current state (their publishes and deletes were durable).
+    fn take_unconfirmed_manifest_publish(&self, bytes: &[u8]) -> bool {
+        let mut unconfirmed = self.unconfirmed_manifest.lock().expect("unconfirmed");
+        match (*unconfirmed, crate::format::decode_manifest(bytes)) {
+            (Some((snapshot_id, left)), Ok(manifest))
+                if left > 0 && manifest.snapshot_id() == Some(snapshot_id) =>
+            {
+                *unconfirmed = Some((snapshot_id, left - 1));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(in crate::lifecycle::tests) fn crash_to_durable_manifest(&self) {
+        let name = crate::layout::ObjectLayout::database_manifest().expect("manifest object");
+        let durable = self
+            .durable_manifest
+            .lock()
+            .expect("durable manifest")
+            .clone();
+        let mut objects = self.objects.lock().expect("objects");
+        match durable {
+            Some(bytes) => {
+                objects.insert(name, bytes);
+            }
+            None => {
+                objects.remove(&name);
+            }
+        }
     }
 
     pub(in crate::lifecycle::tests) fn fail_object_on_next_read(&self, object: ObjectName) {
@@ -820,7 +878,19 @@ impl Backend for CheckpointTestBackend {
         }
         let stored_bytes = self.published_bytes(kind, bytes);
         let byte_count = stored_bytes.len() as u64;
-        objects.insert(name.clone(), stored_bytes);
+        objects.insert(name.clone(), stored_bytes.clone());
+        if matches!(kind, CheckpointPublishKind::DatabaseRecord)
+            && self.take_unconfirmed_manifest_publish(bytes)
+        {
+            return Err(PublishError::new(
+                name.clone(),
+                PublishFailureKind::VisibleDurabilityUnconfirmed,
+                BackendError::new(
+                    BackendErrorKind::Unavailable,
+                    "manifest replacement visible, directory sync failed",
+                ),
+            ));
+        }
         if matches!(kind, CheckpointPublishKind::DatabaseRecord)
             && crate::format::decode_manifest(bytes)
                 .is_ok_and(|manifest| manifest.snapshot_id() == Some(2))
@@ -836,6 +906,9 @@ impl Backend for CheckpointTestBackend {
                     "review: manifest visible, final durability uncertain",
                 ),
             ));
+        }
+        if matches!(kind, CheckpointPublishKind::DatabaseRecord) {
+            *self.durable_manifest.lock().expect("durable manifest") = Some(stored_bytes);
         }
         Ok(PublishOutcome::new(
             name.clone(),

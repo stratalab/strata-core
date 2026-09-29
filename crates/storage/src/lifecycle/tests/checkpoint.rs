@@ -898,7 +898,12 @@ fn wal_truncation_task_uses_strongest_manifest_retention_proof() {
         .expect("flush facts");
     let task = maintenance_task_for_test(1, MaintenanceTaskRequest::wal_truncation());
 
-    let request = wal_truncation_request_from_maintenance_task(&task, shell.services().manifest())
+    let confirmed = shell
+        .services()
+        .manifest_gate()
+        .confirmed_manifest()
+        .expect("confirm manifest");
+    let request = wal_truncation_request_from_maintenance_task(&task, &confirmed)
         .expect("request")
         .expect("proof");
 
@@ -1245,6 +1250,286 @@ fn strict_recovery_refuses_a_missing_timeline_segment_as_corruption() {
         .recover(&request)
         .expect_err("strict recovery refuses the missing segment");
     assert_eq!(error.code(), "corruption.lifecycle.recovery_corruption");
+}
+
+/// #3671: checkpoint 1 completes durably; the store is reopened (its open
+/// reconcile queued); a row lands only in the WAL; checkpoint 2's final
+/// manifest replacement becomes visible, but its durability is unconfirmed for
+/// the next `unconfirmed_publishes` manifest publishes.
+fn second_checkpoint_with_unconfirmed_manifest(
+    backend: &'static CheckpointTestBackend,
+    branch: BranchId,
+    unconfirmed_publishes: usize,
+) -> LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource> {
+    let mut first = open_runtime(branch, backend);
+    first
+        .execute_durable_commit(
+            durable_batch(branch, b"durable-old", b"v"),
+            generation_guard(),
+        )
+        .expect("commit");
+    let request =
+        LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(23)).expect("request");
+    assert_eq!(
+        first.checkpoint(&request).expect("checkpoint 1").status(),
+        LifecycleCheckpointStatus::Completed
+    );
+    drop(first);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"durable-new", b"v"),
+            generation_guard(),
+        )
+        .expect("commit");
+    backend.fail_manifest_durability(2, unconfirmed_publishes);
+    let request =
+        LifecycleCheckpointRequest::new(branch, 2, Timestamp::from_micros(24)).expect("request");
+    assert_eq!(
+        runtime.checkpoint(&request).expect("checkpoint 2").status(),
+        LifecycleCheckpointStatus::SnapshotVisibilityUncertain
+    );
+    assert_eq!(
+        DatabaseManifestService::new(backend)
+            .load_required()
+            .expect("visible manifest")
+            .snapshot_id(),
+        Some(2),
+        "the replacement is visible"
+    );
+    runtime
+}
+
+/// Drains the queued retention work (the open's reconcile) and reports
+/// whether a snapshot prune ran.
+fn drain_snapshot_pruning(
+    runtime: &mut LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+) -> bool {
+    let mut pruned = false;
+    for _ in 0..8 {
+        match runtime
+            .run_next_retention_maintenance()
+            .expect("retention maintenance")
+        {
+            Some(outcome) if outcome.task_kind() == MaintenanceTaskKind::SnapshotPruning => {
+                pruned = true;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    pruned
+}
+
+/// Strict recovery must succeed and every acknowledged row must read back.
+fn assert_strict_recovery_keeps_both_rows(
+    backend: &'static CheckpointTestBackend,
+    branch: BranchId,
+) {
+    let mut shell = assemble_shell(branch, backend).expect("shell");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    assert_eq!(request.strictness(), RecoveryStrictness::Strict);
+    let outcome = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect("strict recovery after the crash");
+    let runtime = shell.complete_recovery(&outcome).expect("open runtime");
+    for key in [&b"durable-old"[..], &b"durable-new"[..]] {
+        assert!(
+            runtime
+                .read_view_for_branch(branch)
+                .expect("read view")
+                .latest(&physical_key(branch, key))
+                .expect("read")
+                .is_some(),
+            "{} survived",
+            String::from_utf8_lossy(key)
+        );
+    }
+}
+
+/// #3671 (third review P1): a manifest replacement that is visible but whose
+/// durability stays unconfirmed may be undone by power loss. Until a publish
+/// confirms it, reclaim must keep both possible recovery states: the open's
+/// reconcile deletes neither the previous snapshot nor its timeline segments,
+/// and after the crash restores the previous manifest, strict recovery
+/// succeeds with every row.
+#[test]
+fn an_unconfirmed_manifest_keeps_the_previous_checkpoint_through_reclaim_and_a_crash() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x74);
+    let mut runtime = second_checkpoint_with_unconfirmed_manifest(backend, branch, usize::MAX);
+    let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+    let first_snapshot = ObjectLayout::snapshot(1).expect("snapshot 1");
+    assert!(backend.read_object(&first_snapshot).is_ok());
+    assert!(!segments_sealed_by(&backend.list_prefix(&prefix).expect("list"), 1).is_empty());
+
+    assert!(drain_snapshot_pruning(&mut runtime), "the reconcile ran");
+    assert!(
+        backend.read_object(&first_snapshot).is_ok(),
+        "the previous checkpoint is a possible recovery state"
+    );
+    assert!(
+        !segments_sealed_by(&backend.list_prefix(&prefix).expect("list"), 1).is_empty(),
+        "its timeline segments too"
+    );
+
+    drop(runtime);
+    backend.crash_to_durable_manifest();
+    assert_eq!(
+        DatabaseManifestService::new(backend)
+            .load_required()
+            .expect("manifest")
+            .snapshot_id(),
+        Some(1),
+        "power loss undid the unconfirmed replacement"
+    );
+    assert_strict_recovery_keeps_both_rows(backend, branch);
+}
+
+/// #3671: WAL truncation reads the same watermark. Behind an unconfirmed
+/// manifest it defers: the rows checkpoint 2 covered are still the previous
+/// manifest's WAL tail, and a crash that restores that manifest replays them.
+#[test]
+fn wal_truncation_waits_for_the_manifest_to_be_confirmed_durable() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x75);
+    let mut runtime = second_checkpoint_with_unconfirmed_manifest(backend, branch, usize::MAX);
+    let wal = ObjectLayout::wal_prefix().expect("wal prefix");
+    let before = backend.list_prefix(&wal).expect("list");
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::wal_truncation())
+        .expect("enqueue");
+    let outcome = runtime
+        .run_next_wal_truncation_maintenance()
+        .expect("truncation")
+        .expect("a truncation task ran");
+    assert_eq!(outcome.status(), MaintenanceOutcomeStatus::Deferred);
+    assert!(
+        outcome.source_error().is_some(),
+        "the deferral reports the backend fault that left the manifest unconfirmed"
+    );
+    assert_eq!(backend.list_prefix(&wal).expect("list"), before);
+
+    drop(runtime);
+    backend.crash_to_durable_manifest();
+    assert_strict_recovery_keeps_both_rows(backend, branch);
+}
+
+/// #3671: the protection lasts only until durability is confirmed. Once a
+/// publish of the visible manifest succeeds (the confirming re-publish here),
+/// the previous checkpoint is no longer a recovery state: the reconcile
+/// reclaims it, and a crash keeps the confirmed manifest.
+#[test]
+fn a_confirmed_manifest_releases_the_previous_checkpoint_to_reclaim() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x76);
+    let mut runtime = second_checkpoint_with_unconfirmed_manifest(backend, branch, 1);
+    let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+
+    assert!(drain_snapshot_pruning(&mut runtime), "the reconcile ran");
+    assert!(
+        backend
+            .read_object(&ObjectLayout::snapshot(1).expect("snapshot 1"))
+            .is_err(),
+        "the confirmed manifest supersedes checkpoint 1"
+    );
+    assert!(segments_sealed_by(&backend.list_prefix(&prefix).expect("list"), 1).is_empty());
+
+    drop(runtime);
+    backend.crash_to_durable_manifest();
+    assert_eq!(
+        DatabaseManifestService::new(backend)
+            .load_required()
+            .expect("manifest")
+            .snapshot_id(),
+        Some(2),
+        "the confirmed replacement survives power loss"
+    );
+    assert_strict_recovery_keeps_both_rows(backend, branch);
+}
+
+/// #3671: the gate confirms a manifest durable once per session — the first
+/// reclaim of an open re-publishes it (a previous process's last rename may
+/// never have reached disk) — and afterwards trusts its record until the
+/// manifest changes, so steady-state reclaim costs no extra publish.
+#[test]
+fn the_manifest_gate_confirms_once_until_the_manifest_changes() {
+    use crate::lifecycle::retention::ConfirmedManifest;
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x77);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(durable_batch(branch, b"gate", b"v"), generation_guard())
+        .expect("commit");
+    let request =
+        LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(23)).expect("request");
+    assert_eq!(
+        runtime.checkpoint(&request).expect("checkpoint").status(),
+        LifecycleCheckpointStatus::Completed
+    );
+    drop(runtime);
+
+    let shell = assemble_shell(branch, backend).expect("shell");
+    let gate = shell.services().manifest_gate();
+    let before = backend.manifest_replace_calls();
+    let first = gate.confirmed_manifest().expect("confirm");
+    assert!(
+        matches!(&first, ConfirmedManifest::Confirmed(Some(manifest)) if manifest.snapshot_id() == Some(1)),
+        "{first:?}"
+    );
+    assert_eq!(
+        backend.manifest_replace_calls(),
+        before + 1,
+        "a new session confirms by re-publishing"
+    );
+    assert_eq!(gate.confirmed_manifest().expect("again"), first);
+    assert_eq!(
+        backend.manifest_replace_calls(),
+        before + 1,
+        "an unchanged confirmed manifest is not re-published"
+    );
+
+    drop(shell);
+
+    // A completed checkpoint's final publish is itself the confirmation.
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(durable_batch(branch, b"gate-2", b"v"), generation_guard())
+        .expect("commit");
+    let request =
+        LifecycleCheckpointRequest::new(branch, 2, Timestamp::from_micros(24)).expect("request");
+    assert_eq!(
+        runtime.checkpoint(&request).expect("checkpoint 2").status(),
+        LifecycleCheckpointStatus::Completed
+    );
+    let after_checkpoint = backend.manifest_replace_calls();
+    assert!(
+        drain_snapshot_pruning(&mut runtime),
+        "the checkpoint's chained prune ran"
+    );
+    assert_eq!(
+        backend.manifest_replace_calls(),
+        after_checkpoint,
+        "the checkpoint's own publish confirmed the manifest"
+    );
+    drop(runtime);
+
+    backend.fail_manifest_durability(2, usize::MAX);
+    let fresh = assemble_shell(branch, backend).expect("second shell");
+    let unconfirmed = fresh
+        .services()
+        .manifest_gate()
+        .confirmed_manifest()
+        .expect("gate");
+    assert!(
+        matches!(unconfirmed, ConfirmedManifest::Unconfirmed(_)),
+        "a confirmation that cannot complete leaves the manifest unconfirmed: {unconfirmed:?}"
+    );
 }
 
 /// #3643 (re-review P1): a checkpoint whose manifest publication became

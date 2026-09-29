@@ -42,9 +42,10 @@ use crate::lifecycle::maintenance::{
     MAINTENANCE_COVERAGE_IDLE_ROUND_LIMIT,
 };
 use crate::lifecycle::retention::{
-    build_retention_proof, build_retention_proof_from_facts, prune_snapshots_with_proof,
-    retention_outcome_for_delegated_families, retention_outcome_for_scope,
-    retention_request_from_maintenance_task, LifecycleRetentionOutcome, LifecycleRetentionRequest,
+    build_retention_proof_for_manifest, build_retention_proof_from_facts,
+    prune_snapshots_with_proof, retention_outcome_for_delegated_families,
+    retention_outcome_for_scope, retention_request_from_maintenance_task,
+    with_unconfirmed_manifest_error, LifecycleRetentionOutcome, LifecycleRetentionRequest,
     LifecycleRetentionScope, LifecycleRetentionStatus, LifecycleSnapshotPruningOutcome,
     LifecycleSnapshotPruningRequest,
 };
@@ -1419,18 +1420,14 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 .record_reclaim(&outcome.maintenance_outcome());
             return Ok(outcome);
         }
-        let manifest = self
-            .services
-            .manifest()
-            .load_current()
-            .map_err(manifest_error)?;
+        let manifest = self.services.manifest_gate().confirmed_manifest()?;
         let snapshots = self
             .services
             .snapshot()
             .list_snapshots()
             .map_err(snapshot_error)?;
         let snapshot_count = snapshots.len();
-        let proof = build_retention_proof(request, manifest.as_ref(), &health, snapshot_count);
+        let proof = build_retention_proof_for_manifest(request, &manifest, &health, snapshot_count);
         let outcome = retention_outcome_for_scope(request, proof, &snapshots)?;
         self.maintenance
             .record_reclaim(&outcome.maintenance_outcome());
@@ -1471,18 +1468,14 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
                 .record_reclaim(&outcome.maintenance_outcome());
             return Ok(outcome);
         }
-        let manifest = self
-            .services
-            .manifest()
-            .load_current()
-            .map_err(manifest_error)?;
+        let manifest = self.services.manifest_gate().confirmed_manifest()?;
         let snapshot_count = self
             .services
             .snapshot()
             .list_snapshots()
             .map_err(snapshot_error)?
             .len();
-        let proof = build_retention_proof(request, manifest.as_ref(), &health, snapshot_count);
+        let proof = build_retention_proof_for_manifest(request, &manifest, &health, snapshot_count);
         let pruning = LifecycleSnapshotPruningRequest::for_request(proof, request)?;
         // Inline verb: not a queued task, so record the prune here.
         let outcome = prune_snapshots_with_proof(
@@ -2265,30 +2258,42 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         else {
             return Ok(None);
         };
-        let proof =
-            match wal_truncation_request_from_maintenance_task(&task, self.services.manifest()) {
-                Ok(Some(proof)) => proof,
-                Ok(None) => {
-                    let outcome = MaintenanceOutcome::new(
+        // The task is started: every failure below must finish it, never
+        // return early with it in flight.
+        let request = self
+            .services
+            .manifest_gate()
+            .confirmed_manifest()
+            .and_then(|manifest| {
+                wal_truncation_request_from_maintenance_task(&task, &manifest)
+                    .map(|proof| (proof, manifest))
+            });
+        let proof = match request {
+            Ok((Some(proof), _)) => proof,
+            Ok((None, manifest)) => {
+                let outcome = with_unconfirmed_manifest_error(
+                    MaintenanceOutcome::new(
                         crate::lifecycle::MaintenanceTaskKind::WalTruncation,
                         MaintenanceOutcomeStatus::Deferred,
                     )
                     .with_reason("WAL truncation has no retention proof")
-                    .with_deferral_reason(MaintenanceDeferralReason::IncompleteProof);
-                    let outcome = self.maintenance.finish_started(task, outcome, false)?;
-                    return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
-                }
-                Err(error) => {
-                    let outcome = MaintenanceOutcome::new(
-                        crate::lifecycle::MaintenanceTaskKind::WalTruncation,
-                        MaintenanceOutcomeStatus::Failed,
-                    )
-                    .with_source_error(error);
-                    let outcome = self.maintenance.finish_started(task, outcome, false)?;
-                    self.record_optional_maintenance_health(&Ok(Some(outcome.clone())));
-                    return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
-                }
-            };
+                    .with_deferral_reason(MaintenanceDeferralReason::IncompleteProof),
+                    &manifest,
+                );
+                let outcome = self.maintenance.finish_started(task, outcome, false)?;
+                return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
+            }
+            Err(error) => {
+                let outcome = MaintenanceOutcome::new(
+                    crate::lifecycle::MaintenanceTaskKind::WalTruncation,
+                    MaintenanceOutcomeStatus::Failed,
+                )
+                .with_source_error(error);
+                let outcome = self.maintenance.finish_started(task, outcome, false)?;
+                self.record_optional_maintenance_health(&Ok(Some(outcome.clone())));
+                return Ok(Some(DurableBackgroundMaintenanceStep::completed(outcome)));
+            }
+        };
         // Reclaim rotation (#3494) happens HERE, under the lock, before the
         // retention clone is taken: rotation mutates writer state (active
         // pointer, watermark publish) and must never run off-lock, while the
@@ -5046,7 +5051,7 @@ pub(super) const fn checkpoint_created_at(
 }
 
 struct DurableWalTruncationMaintenanceRunner<'a, 'b> {
-    manifest: &'a crate::service::DatabaseManifestService<'b>,
+    manifest: crate::lifecycle::durable::ManifestDurabilityGate<'a, 'b>,
     wal: &'a mut crate::service::WalService<'b>,
 }
 
@@ -5061,14 +5066,17 @@ struct DurableFlushWatermarkMaintenanceRunner<'a, 'b> {
 
 impl MaintenanceTaskRunner for DurableWalTruncationMaintenanceRunner<'_, '_> {
     fn run_task(&mut self, task: &MaintenanceTask) -> LifecycleResult<MaintenanceOutcome> {
-        let Some(request) = wal_truncation_request_from_maintenance_task(task, self.manifest)?
-        else {
-            return Ok(MaintenanceOutcome::new(
-                crate::lifecycle::MaintenanceTaskKind::WalTruncation,
-                MaintenanceOutcomeStatus::Deferred,
-            )
-            .with_reason("WAL truncation has no retention proof")
-            .with_deferral_reason(MaintenanceDeferralReason::IncompleteProof));
+        let manifest = self.manifest.confirmed_manifest()?;
+        let Some(request) = wal_truncation_request_from_maintenance_task(task, &manifest)? else {
+            return Ok(with_unconfirmed_manifest_error(
+                MaintenanceOutcome::new(
+                    crate::lifecycle::MaintenanceTaskKind::WalTruncation,
+                    MaintenanceOutcomeStatus::Deferred,
+                )
+                .with_reason("WAL truncation has no retention proof")
+                .with_deferral_reason(MaintenanceDeferralReason::IncompleteProof),
+                &manifest,
+            ));
         };
         // Reclaim rotation (#3494): a fully-covered active segment is sealed
         // first, so the delete pass below — which protects the active id —
@@ -5785,11 +5793,7 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
                 )),
             };
         }
-        let manifest = self
-            .services
-            .manifest()
-            .load_current()
-            .map_err(manifest_error)?;
+        let manifest = self.services.manifest_gate().confirmed_manifest()?;
         let snapshot_count = self
             .services
             .snapshot()
@@ -5797,8 +5801,8 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
             .map_err(snapshot_error)?
             .len();
         let proof =
-            build_retention_proof(&request, manifest.as_ref(), &self.health, snapshot_count);
-        match request.scope() {
+            build_retention_proof_for_manifest(&request, &manifest, &self.health, snapshot_count);
+        let outcome = match request.scope() {
             LifecycleRetentionScope::SnapshotObjects => {
                 let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
                 Ok(prune_snapshots_with_proof(
@@ -5847,7 +5851,8 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
                  retention_request_from_maintenance_task should reject this kind",
                 request.scope(),
             ),
-        }
+        };
+        outcome.map(|outcome| with_unconfirmed_manifest_error(outcome, &manifest))
     }
 }
 

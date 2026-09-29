@@ -147,6 +147,12 @@ A second external review (2026-09-28) confirmed all four fixes against the combi
 
 The review's point, which carries past this fix: tests that separately prove segment reuse, ordinary pruning and strict missing-segment refusal do not prove that GC cannot *create* the missing-segment condition. Each new publish-uncertainty outcome needs a test that composes it with the reconcile that follows.
 
+A third external review (2026-09-29) confirmed all seven earlier regressions fixed and found one more P1 in the same composition:
+
+| issue | severity | what | fix | PR | status |
+|---|---|---|---|---|---|
+| #3671 | P1 | Reclaim acted on the **visible** database manifest. After `VisibleDurabilityUnconfirmed` (the rename happened, the directory sync failed) a crash may restore the previous manifest, and by then the open reconcile had deleted its snapshot and segments; the visible watermark could also release WAL the older manifest replays. **Release blocker.** | Every destructive reclaim (snapshot and segment prunes, all WAL truncation) reads the manifest through `ManifestDurabilityGate`. It acts only on a manifest confirmed durable in this session: a durable re-publish of its bytes, or a `Completed` checkpoint's own publish. An unconfirmed manifest proves nothing, so nothing is deleted, and the deferral reports the fault. | see #3671 | open |
+
 Flaky tests filed along the way, none caused by these fixes: #3649 (a close test's 1 s wall-clock bound), #3650 (one unreproduced `stress_random` row divergence under full-suite load), #3652 (the drain fixed-point flake, a third recurrence), and #3655 (an event-range test assumes no event lands 10–11 µs apart).
 
 Every slice is one PR: its implementation and its tests land together, TDD (red first), with the invariant check and review before merge, ≤ 1,500 LOC. Storage-level tests open a **two-branch** runtime (an empty non-seeded root beside the seeded branch, mirroring `_system_`) under `DeterministicInline` with the manual clock; engine-level tests get the real topology for free. Tests assert typed outcomes and byte facts read from `diagnostics()`, never display text and never a directory walk. Every pure decision fn is truth-tabled and has a call-site test (mutation gate). Existing tests that pin the old contract are rewritten in the slice that changes the contract, never deleted. Fault-injection tests (`-p strata-storage --features fault-injection`) ride the slice they cover.
