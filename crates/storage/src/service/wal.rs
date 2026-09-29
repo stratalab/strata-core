@@ -1824,30 +1824,43 @@ impl<'a> WalService<'a> {
     /// Space-reclamation contract §3.5 (slice 2, audit tier): every listed WAL
     /// segment with the facts a covered-segment delete pass decides on. A
     /// sealed segment below the active one is read for its highest commit
-    /// (the pass reads it the same way); the active segment and anything
-    /// above it is only sized. A segment that vanishes between the listing
-    /// and its read (a concurrent truncation) is dropped — the same tolerance
-    /// the delete pass and the sealed-retention scan apply.
+    /// (the pass reads it the same way); anything above the active segment is
+    /// only sized. A segment that vanishes between the listing and its read (a
+    /// concurrent truncation) is dropped — the same tolerance the delete pass
+    /// and the sealed-retention scan apply.
+    ///
+    /// #3666: the active segment is never listed or stat'ed. It is counted
+    /// once, at the writer's LOGICAL length — the source `growth_facts` adds
+    /// to the sealed total — because the on-disk file lags the writer while
+    /// the append buffer holds accepted bytes. The audit's WAL split then sums
+    /// to the retained total by construction.
     pub(crate) fn segment_coverage(&self) -> WalServiceResult<Vec<WalSegmentCoverage>> {
-        let mut coverage = Vec::new();
+        let mut coverage = vec![WalSegmentCoverage {
+            bytes: self.active_segment_size,
+            sealed_max_commit: None,
+        }];
         for (segment_id, object) in list_segments(&self.backend)? {
-            if segment_id >= self.active_segment_id {
-                let metadata = match self.backend.object_metadata(&object) {
-                    Ok(metadata) => metadata,
-                    Err(source) if source.kind() == BackendErrorKind::NotFound => continue,
-                    Err(source) => {
-                        return Err(WalServiceError::Backend {
-                            operation: WalOperation::List,
-                            object,
-                            source,
-                        });
-                    }
-                };
-                coverage.push(WalSegmentCoverage {
-                    bytes: metadata.size_bytes(),
-                    sealed_max_commit: None,
-                });
-                continue;
+            match segment_id.cmp(&self.active_segment_id) {
+                std::cmp::Ordering::Equal => continue,
+                std::cmp::Ordering::Greater => {
+                    let metadata = match self.backend.object_metadata(&object) {
+                        Ok(metadata) => metadata,
+                        Err(source) if source.kind() == BackendErrorKind::NotFound => continue,
+                        Err(source) => {
+                            return Err(WalServiceError::Backend {
+                                operation: WalOperation::List,
+                                object,
+                                source,
+                            });
+                        }
+                    };
+                    coverage.push(WalSegmentCoverage {
+                        bytes: metadata.size_bytes(),
+                        sealed_max_commit: None,
+                    });
+                    continue;
+                }
+                std::cmp::Ordering::Less => {}
             }
             let bytes = match self.backend.read_object(&object) {
                 Ok(bytes) => bytes,
