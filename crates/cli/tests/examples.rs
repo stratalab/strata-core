@@ -276,6 +276,30 @@ mod matching_tests {
         assert!(!line_matches("…UTC…4", row));
     }
 
+    /// #3513: `read-historical-state.md` holds `kv history` rows against a
+    /// live wall-clock timestamp, so a sample of runs only ever tries a few
+    /// microsecond values. Try all of them: every row that example prints
+    /// matches its own expected line and no other, whatever the clock read.
+    #[test]
+    fn history_rows_match_under_every_microsecond_value() {
+        let values = ["100", "150", "200"];
+        for micros in 0..1_000_000_u32 {
+            for (position, value) in values.iter().enumerate() {
+                let row = format!(
+                    "         {v}        {v}  2026-09-22 01:13:27.{micros:06} UTC  {value}",
+                    v = position + 3
+                );
+                for other in values {
+                    assert_eq!(
+                        line_matches(&format!("…{other}"), &row),
+                        other == *value,
+                        "`…{other}` against `{row}`"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn quoted_arguments_survive_splitting() {
         assert_eq!(
