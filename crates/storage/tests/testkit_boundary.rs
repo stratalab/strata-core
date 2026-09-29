@@ -83,6 +83,80 @@ fn localfs_feature_is_rejected_for_wasm_builds() {
     );
 }
 
+/// The nightly ASAN + LSAN lane runs `cargo test --tests` for
+/// `strata-storage` and `strata-engine` with leak detection on. An
+/// intentional fixture leak must go through `testkit::leak_static` /
+/// `testkit::forget_registered`, which keep it reachable from a process
+/// global; a bare leak is reported as a real one and turns the lane red
+/// (#3495). This per-PR guard catches that before nightly does.
+///
+/// Scope = every `*.rs` file under the source and test roots of both
+/// crates the lane runs, walked from disk. The only exemption is the
+/// leak registry itself.
+#[test]
+fn fixture_leaks_route_through_the_leak_registry() {
+    let storage = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let engine = storage.parent().expect("crates directory").join("engine");
+    let registry = storage.join("src/testkit/leak.rs");
+    assert!(
+        fs::read_to_string(&registry)
+            .expect("read leak registry")
+            .contains("pub fn leak_static"),
+        "the leak registry must stay at {}",
+        registry.display()
+    );
+
+    // Assembled so this file does not match its own needles.
+    let needles = [concat!("Box::", "leak("), concat!("mem::", "forget(")];
+    let mut files = Vec::new();
+    for root in [
+        storage.join("src"),
+        storage.join("tests"),
+        engine.join("src"),
+        engine.join("tests"),
+    ] {
+        assert!(
+            root.is_dir(),
+            "lane source root {} must exist",
+            root.display()
+        );
+        collect_rs_files(&root, &mut files);
+    }
+    assert!(
+        files.len() > 100,
+        "the walk must see the whole tree (saw {} files)",
+        files.len()
+    );
+
+    let mut offenders = Vec::new();
+    for file in files.iter().filter(|file| **file != registry) {
+        let source = fs::read_to_string(file).expect("read source file");
+        for (index, line) in source.lines().enumerate() {
+            if needles.iter().any(|needle| line.contains(needle)) {
+                offenders.push(format!("{}:{}: {}", file.display(), index + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "bare fixture leaks fail the nightly LSAN lane; use \
+         strata_storage::testkit::leak_static / forget_registered \
+         (engine has no registry and must not leak):\n{}",
+        offenders.join("\n")
+    );
+}
+
+fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).expect("read source directory") {
+        let path = entry.expect("read source entry").path();
+        if path.is_dir() {
+            collect_rs_files(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+}
+
 fn probe_cases<'a>() -> Vec<ProbeCase<'a>> {
     vec![
         ProbeCase {

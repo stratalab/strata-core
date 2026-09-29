@@ -475,10 +475,10 @@ fn budgeted_replay_drains_the_backlog_to_durable_tables() {
     .expect("budgeted durable shell");
     // A replayed working set several times the rotation threshold.
     let record_count: u64 = 64;
-    let value: &'static [u8] = Box::leak(vec![b'x'; 96 * 1024].into_boxed_slice());
+    let value: &'static [u8] = crate::testkit::leak_static(vec![b'x'; 96 * 1024]).as_slice();
     for version in 1..=record_count {
         let key: &'static [u8] =
-            Box::leak(format!("bulk-{version:03}").into_bytes().into_boxed_slice());
+            crate::testkit::leak_static(format!("bulk-{version:03}").into_bytes()).as_slice();
         let record = wal_record(branch, version, key, value);
         shell
             .services_mut()
@@ -520,7 +520,7 @@ fn budgeted_replay_drains_the_backlog_to_durable_tables() {
         let row = view
             .latest(&physical_key(
                 branch,
-                Box::leak(key.into_bytes().into_boxed_slice()),
+                crate::testkit::leak_static(key.into_bytes()).as_slice(),
             ))
             .expect("read")
             .unwrap_or_else(|| panic!("replayed row {version} lost by the budgeted replay"));

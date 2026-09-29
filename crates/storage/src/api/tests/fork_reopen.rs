@@ -354,7 +354,8 @@ fn fork_with_unflushed_rows_is_cow_and_survives_reopen() {
 #[test]
 fn aggressive_reclaim_preserves_pre_fork_as_of_across_reopens() {
     fn open_reclaiming(root: std::path::PathBuf) -> StorageRuntime<'static> {
-        let backend: &'static StorageBackend = Box::leak(Box::new(StorageBackend::local_fs(root)));
+        let backend: &'static StorageBackend =
+            crate::testkit::leak_static(StorageBackend::local_fs(root));
         StorageRuntime::open_with_backend(
             StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
                 .with_maintenance_scheduling_policy(
@@ -426,7 +427,8 @@ fn as_of_reads_survive_snapshot_pruning_across_reopens() {
     fn open_pruning(
         root: std::path::PathBuf,
     ) -> (&'static StorageBackend, StorageRuntime<'static>) {
-        let backend: &'static StorageBackend = Box::leak(Box::new(StorageBackend::local_fs(root)));
+        let backend: &'static StorageBackend =
+            crate::testkit::leak_static(StorageBackend::local_fs(root));
         let runtime = StorageRuntime::open_with_backend(
             StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
                 .with_maintenance_scheduling_policy(
