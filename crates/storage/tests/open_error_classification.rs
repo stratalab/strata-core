@@ -154,6 +154,130 @@ fn opening_under_a_missing_parent_directory_reports_invalid_argument() {
     );
 }
 
+/// Commits one row so a later open can prove it reached the same store.
+#[cfg(unix)]
+fn commit_marker(runtime: &StorageRuntime<'_>, name: &str) {
+    let key = StorageKey::new(name.as_bytes().to_vec()).expect("key");
+    let batch = CommitBatch::new(
+        default_branch(),
+        vec![CommitMutation::Put {
+            storage_space: StorageSpaceId::new(vec![0x20]).expect("engine space"),
+            key,
+            value: StorageValue::new(vec![b'v'; 16]),
+            ttl: None,
+        }],
+        CommitOptions::default(),
+    )
+    .expect("commit batch");
+    runtime.commit(&batch).expect("durable commit");
+}
+
+/// #3008: a database path that is a symlink to a directory names that
+/// directory. It opens, and the layout lands in the real directory — not
+/// beside the link, and not refused as "not a directory".
+#[cfg(unix)]
+#[test]
+fn opening_through_a_symlink_to_a_directory_opens_the_real_directory() {
+    let real = temp_root("symlink-real");
+    std::fs::create_dir_all(&real).expect("real database directory");
+    let link = temp_root("symlink-link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink to the database directory");
+
+    let mut runtime = StorageRuntime::open_durable_local(&link, StorageDurabilityPolicy::Always)
+        .expect("a symlink to a directory is a valid database path")
+        .into_runtime();
+    commit_marker(&runtime, "through-link");
+    runtime.close().expect("clean close");
+
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("link still present")
+            .file_type()
+            .is_symlink(),
+        "opening through the link must not replace the link"
+    );
+    assert!(
+        real.join("wal").is_dir(),
+        "the durable layout is written into the link's target directory"
+    );
+
+    // Reopening through the real path opens the same store the link created.
+    let reopened = StorageRuntime::open_durable_local(&real, StorageDurabilityPolicy::Always)
+        .expect("reopen through the real path");
+    drop(reopened);
+}
+
+/// #3008: two opens of one directory — one through a symlink, one through the
+/// real path — contend on the same writer lock. Following the link must never
+/// let a second writer in beside the first.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_open_and_a_real_path_open_contend_on_one_writer_lock() {
+    let real = temp_root("symlink-lock-real");
+    std::fs::create_dir_all(&real).expect("real database directory");
+    let link = temp_root("symlink-lock-link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink to the database directory");
+
+    let through_link = StorageRuntime::open_durable_local(&link, StorageDurabilityPolicy::Standard)
+        .expect("open through the link")
+        .into_runtime();
+    let error = StorageRuntime::open_durable_local(&real, StorageDurabilityPolicy::Standard)
+        .expect_err("the real path names the directory the link's writer already holds");
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.writer_lock",
+        "the real-path open must contend on the link open's writer lock"
+    );
+    drop(through_link);
+
+    let through_real = StorageRuntime::open_durable_local(&real, StorageDurabilityPolicy::Standard)
+        .expect("open through the real path")
+        .into_runtime();
+    let error = StorageRuntime::open_durable_local(&link, StorageDurabilityPolicy::Standard)
+        .expect_err("the link names the directory the real-path writer already holds");
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.writer_lock",
+        "the link open must contend on the real-path open's writer lock"
+    );
+    drop(through_real);
+}
+
+/// #3008: a dangling symlink still refuses with the typed path-shape code; it
+/// names no directory, and the refused open must not create one at the target.
+#[cfg(unix)]
+#[test]
+fn opening_through_a_dangling_symlink_reports_invalid_argument() {
+    let target = temp_root("dangling-target");
+    let link = temp_root("dangling-link");
+    std::os::unix::fs::symlink(&target, &link).expect("dangling symlink");
+
+    let error = StorageRuntime::open_durable_local(&link, StorageDurabilityPolicy::Standard)
+        .expect_err("a dangling symlink names no database directory");
+    assert_eq!(error.class(), StorageApiErrorClass::InvalidArgument);
+    assert_eq!(error.code(), "invalid_argument.storage_api.argument");
+    assert!(
+        std::fs::symlink_metadata(&target).is_err(),
+        "a refused open must not materialize the dangling link's target"
+    );
+}
+
+/// #3008: a symlink to a regular file is refused exactly like the file itself.
+#[cfg(unix)]
+#[test]
+fn opening_through_a_symlink_to_a_file_reports_invalid_argument() {
+    let file = temp_root("symlink-file-target");
+    std::fs::create_dir_all(file.parent().expect("temp parent")).expect("temp parent dir");
+    std::fs::write(&file, b"not a database directory").expect("write regular file");
+    let link = temp_root("symlink-file-link");
+    std::os::unix::fs::symlink(&file, &link).expect("symlink to a file");
+
+    let error = StorageRuntime::open_durable_local(&link, StorageDurabilityPolicy::Standard)
+        .expect_err("a symlink to a file is not a database directory");
+    assert_eq!(error.class(), StorageApiErrorClass::InvalidArgument);
+    assert_eq!(error.code(), "invalid_argument.storage_api.argument");
+}
+
 /// Deletes every WAL segment object under `wal/`, leaving sidecar metadata
 /// and every other artifact untouched (the #2765 sabotage).
 fn delete_all_wal_segments(root: &Path) {

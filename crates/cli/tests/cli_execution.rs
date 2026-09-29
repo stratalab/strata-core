@@ -83,6 +83,36 @@ fn pipe(args: &[&str], script: &[u8]) -> Output {
 /// their rendering is only proven through the binary that prints them.
 /// #3116: bytes written through the CLI come back through the CLI.
 ///
+/// #3008, the issue's own repro: a database opened through a symlink to its
+/// directory is the database in that directory. Each step is its own process,
+/// so a write through the link must be durable in the real directory and read
+/// back through the real path (and the reverse).
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_database_directory_opens_that_database() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let real = db_arg(dir.path());
+    let link = dir.path().join("link").to_string_lossy().into_owned();
+
+    assert_ok(
+        &strata(&["--db", &real, "kv", "put", "x", "hello"]),
+        "kv put through the real path",
+    );
+    std::os::unix::fs::symlink(&real, &link).expect("symlink to the database directory");
+
+    let via_link = strata(&["--db", &link, "kv", "get", "x"]);
+    assert_ok(&via_link, "kv get through the link");
+    assert_eq!(stdout(&via_link), "hello\n");
+
+    assert_ok(
+        &strata(&["--db", &link, "kv", "put", "y", "world"]),
+        "kv put through the link",
+    );
+    let via_real = strata(&["--db", &real, "kv", "get", "y"]);
+    assert_ok(&via_real, "kv get through the real path");
+    assert_eq!(stdout(&via_real), "world\n");
+}
+
 /// The issue's own repro: three bytes that are not text, stored with
 /// `--file` and read back with `--raw`. Before S4 every output mode answered
 /// with base64 and nothing said so, which left no correct behaviour available
