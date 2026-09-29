@@ -1,7 +1,7 @@
 ---
 title: "Rank passages"
 description: "Rank passages against a query."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: inference
 ---
 

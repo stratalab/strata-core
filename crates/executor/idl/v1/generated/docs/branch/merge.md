@@ -1,7 +1,7 @@
 ---
 title: "Promote branch"
 description: "Promote one branch's changes into another as a single atomic commit."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: branch
 ---
 

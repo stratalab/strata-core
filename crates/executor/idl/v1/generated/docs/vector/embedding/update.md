@@ -1,7 +1,7 @@
 ---
 title: "Update vector embedding"
 description: "Replace the embedding for one vector, keeping its metadata."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: vector
 ---
 

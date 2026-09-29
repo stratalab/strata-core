@@ -1,7 +1,7 @@
 ---
 title: "Count vectors"
 description: "Count visible vectors in a collection."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: vector
 ---
 
