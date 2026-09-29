@@ -421,6 +421,82 @@ fn checkpoint_carries_an_unpublished_table_after_another_branch_clears_the_debt(
     assert!(row_is_present(&reopened, initial, b"masked-root-row"));
 }
 
+/// #3665 (background path): the off-lock checkpoint captures its durable-table
+/// set under the lock. After another branch's publish masks the debt flag, it
+/// must still treat an unpublished table as volatile — the same rule as the
+/// inline paths — so its rows ride the snapshot and recovery stays healthy.
+#[test]
+fn background_checkpoint_carries_an_unpublished_table_after_the_debt_is_masked() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xeb);
+    let extra = branch_id(0xec);
+    let mut runtime = open_runtime(initial, backend);
+    runtime
+        .create_branch(
+            extra,
+            CommitBranchGeneration::new(1).expect("generation"),
+            None,
+        )
+        .expect("create the root");
+    commit(&mut runtime, extra, b"bg-masked-extra-row");
+    flush_with_failed_manifest(&mut runtime, backend, extra, "bg-masked-extra");
+    commit(&mut runtime, initial, b"bg-masked-root-row");
+    runtime
+        .rotate_active_for_branch_for_maintenance(initial)
+        .expect("rotate initial");
+    runtime
+        .flush_frozen(
+            &FlushFrozenRequest::new(
+                initial,
+                None,
+                FlushTableIdentitySeed::new("bg-masked-root-seed").expect("seed"),
+                FlushTableObjectId::new("bg-masked-root-object").expect("object id"),
+            )
+            .expect("flush request"),
+        )
+        .expect("the root's flush publishes its manifest");
+    commit(&mut runtime, initial, b"bg-masked-root-tail");
+
+    runtime
+        .enqueue_maintenance(crate::lifecycle::MaintenanceTaskRequest::checkpoint())
+        .expect("enqueue checkpoint");
+    let step = runtime
+        .start_next_background_checkpoint_maintenance()
+        .expect("start background checkpoint")
+        .expect("background checkpoint step");
+    let crate::lifecycle::durable::DurableBackgroundMaintenanceStep::Build(pending) = step else {
+        panic!("expected a checkpoint build step, got a completed outcome");
+    };
+    let built = (*pending).build().expect("build checkpoint");
+    let outcome = match runtime.begin_publish_phase(built).expect("begin publish") {
+        crate::lifecycle::durable::PreparedPublishStep::Done(result) => {
+            result.expect("publish done")
+        }
+        crate::lifecycle::durable::PreparedPublishStep::OffLock(prepared) => {
+            let (prepared, write_result) = prepared.persist_off_lock();
+            runtime
+                .finish_publish_phase(prepared, write_result)
+                .expect("finish publish")
+        }
+    };
+    assert_eq!(
+        outcome.status(),
+        MaintenanceOutcomeStatus::Completed,
+        "the root's publish masked the catalog-global debt flag"
+    );
+    drop(runtime);
+
+    let (reopened, _) = reopen_counting_replay(initial, backend);
+    assert!(
+        reopened.current_recovery_health_for_test().is_healthy(),
+        "{:?}",
+        reopened.current_recovery_health_for_test()
+    );
+    assert!(row_is_present(&reopened, extra, b"bg-masked-extra-row"));
+    assert!(row_is_present(&reopened, initial, b"bg-masked-root-row"));
+}
+
 /// Nothing above the retention watermark: a close right after a checkpoint
 /// that already covers the visible version publishes no second snapshot.
 #[test]
