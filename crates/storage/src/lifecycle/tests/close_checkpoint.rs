@@ -561,6 +561,119 @@ fn close_checkpoint_over_the_delta_cap_leaves_the_wal_for_the_next_session() {
     assert!(row_is_present(&reopened, initial, b"close-over-cap-b"));
 }
 
+/// The table data objects under `tables/` (manifests excluded).
+fn table_data_objects(backend: &CheckpointTestBackend) -> Vec<String> {
+    backend
+        .object_snapshot()
+        .keys()
+        .map(|object| object.as_str().to_owned())
+        .filter(|object| object.starts_with("tables/") && !object.ends_with("/manifest"))
+        .collect()
+}
+
+/// #3678: a compaction task a background worker had claimed when close began
+/// is in flight, and the close drain services it through the close runner.
+/// That runner cannot finish a background build and must not re-run it
+/// inline: an inline compaction installs output tables that no catalog entry
+/// or table manifest records, so the close checkpoint treats them as volatile
+/// and captures every row they hold (a bulk load's close then defers on the
+/// payload cap and leaves the whole WAL), and the branch can no longer publish
+/// a table manifest. The close defers the compaction instead: it writes no
+/// table object the manifests do not list, checkpoints, and reopens cleanly.
+#[test]
+fn close_defers_an_in_flight_compaction_instead_of_running_it_inline() {
+    const KEYS: [&[u8]; 8] = [
+        b"compaction-0",
+        b"compaction-1",
+        b"compaction-2",
+        b"compaction-3",
+        b"compaction-4",
+        b"compaction-5",
+        b"compaction-6",
+        b"compaction-7",
+    ];
+    use crate::lifecycle::{MaintenanceTask, MaintenanceTaskRequest};
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xed);
+    let mut runtime = open_runtime(initial, backend);
+    for (index, key) in KEYS.iter().enumerate() {
+        let name = format!("compaction-{index}");
+        runtime
+            .execute_durable_commit(durable_batch(initial, key, b"value"), generation_guard())
+            .expect("commit");
+        runtime
+            .rotate_active_for_branch_for_maintenance(initial)
+            .expect("rotate");
+        runtime
+            .flush_frozen(
+                &FlushFrozenRequest::new(
+                    initial,
+                    None,
+                    FlushTableIdentitySeed::new(format!("{name}-seed")).expect("seed"),
+                    FlushTableObjectId::new(format!("{name}-object")).expect("object id"),
+                )
+                .expect("flush request"),
+            )
+            .expect("flush");
+    }
+    let flushed_tables = table_data_objects(backend);
+    assert_eq!(
+        flushed_tables.len(),
+        8,
+        "eight level-0 tables: {flushed_tables:?}"
+    );
+    // A background worker claimed a level-0 compaction and stopped mid-build.
+    runtime.set_active_maintenance_for_test(
+        MaintenanceTask::new_for_test(77, MaintenanceTaskRequest::compaction(initial, 0))
+            .expect("task"),
+    );
+    commit(&mut runtime, initial, b"compaction-tail");
+
+    let close = runtime.close().expect("clean close");
+
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
+    assert_eq!(
+        table_data_objects(backend),
+        flushed_tables,
+        "close publishes no table object outside what the manifests list"
+    );
+    // The close snapshot carries only the unflushed tail: the flushed tables
+    // stay durable bases. An inline compaction would have made them volatile
+    // outputs whose rows the snapshot re-captures — at bulk-load scale, past
+    // the payload cap.
+    let snapshot_id = *snapshot_ids(backend).last().expect("close snapshot");
+    let container = SnapshotService::new(backend)
+        .load_required(snapshot_id)
+        .expect("snapshot");
+    let rows: usize = container
+        .sections()
+        .iter()
+        .filter(|section| section.section_kind() == crate::format::SNAPSHOT_ROW_SECTION_KIND)
+        .map(|section| {
+            crate::format::decode_snapshot_row_payload(section.payload())
+                .expect("rows")
+                .len()
+        })
+        .sum();
+    assert_eq!(rows, 1, "only the tail row rides the close snapshot");
+    let (reopened, replayed) = reopen_counting_replay(initial, backend);
+    assert_eq!(replayed, 0, "the close checkpoint covered the WAL");
+    assert!(reopened.current_recovery_health_for_test().is_healthy());
+    for key in KEYS {
+        assert!(
+            row_is_present(&reopened, initial, key),
+            "{}",
+            String::from_utf8_lossy(key)
+        );
+    }
+    assert!(row_is_present(&reopened, initial, b"compaction-tail"));
+}
+
 /// A disabled close-time reclaim budget skips the checkpoint before any
 /// work: no snapshot, no rotation, no truncation.
 #[test]
