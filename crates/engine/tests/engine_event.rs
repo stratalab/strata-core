@@ -626,12 +626,21 @@ fn assert_event_timestamp_and_list_edges(events: &mut EventService<'_>) {
         // #2695: a zero-width `[ts, ts)` window is empty under the half-open end.
         Vec::<u64>::new()
     );
+    // #3655: a non-degenerate window no event occupies. Event timestamps are
+    // wall-clock, so a fixed offset from one event can land on the next one;
+    // derive the window from the observed log instead — strictly past the
+    // newest event's timestamp, where nothing can be.
+    let newest_micros = events
+        .list(None, None, None)
+        .expect("full list succeeds")
+        .iter()
+        .map(|event| event.timestamp().as_micros())
+        .max()
+        .expect("contract events exist");
     assert!(events
         .range_by_time(
-            Timestamp::from_micros(third.timestamp().as_micros().saturating_add(10)),
-            Some(Timestamp::from_micros(
-                third.timestamp().as_micros().saturating_add(11),
-            )),
+            Timestamp::from_micros(newest_micros.saturating_add(1)),
+            Some(Timestamp::from_micros(newest_micros.saturating_add(2))),
             None,
             EventRangeDirection::Forward,
             None,
