@@ -467,9 +467,8 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         .with_wal_truncation_after_checkpoint(true)
         .with_delta_cap_bytes(self.checkpoint_delta_cap_bytes)?;
         let table_catalog = &self.table_catalog;
-        let table_is_durable = |identity: &crate::table::TableIdentity| {
-            table_catalog.object_for_identity(identity).is_some()
-        };
+        let table_is_durable =
+            |identity: &crate::table::TableIdentity| table_catalog.is_durable_base(identity);
         let outcome = checkpoint_durable_runtime_with_budget(
             &self.branch_catalog,
             &self.services,

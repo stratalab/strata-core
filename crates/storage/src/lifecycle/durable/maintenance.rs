@@ -1130,9 +1130,8 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     ) -> LifecycleResult<LifecycleCheckpointOutcome> {
         require_admitted(self.state, LifecycleOperationKind::OrdinaryMaintenance)?;
         let table_catalog = &self.table_catalog;
-        let table_is_durable = |identity: &crate::table::TableIdentity| {
-            table_catalog.object_for_identity(identity).is_some()
-        };
+        let table_is_durable =
+            |identity: &crate::table::TableIdentity| table_catalog.is_durable_base(identity);
         let outcome = checkpoint_durable_runtime_with_budget(
             &self.branch_catalog,
             &self.services,
@@ -5002,9 +5001,8 @@ impl MaintenanceTaskRunner for DurableCheckpointMaintenanceRunner<'_, '_> {
         )?
         .with_delta_cap_bytes(self.delta_cap_bytes)?;
         let table_catalog = self.table_catalog;
-        let table_is_durable = |identity: &crate::table::TableIdentity| {
-            table_catalog.object_for_identity(identity).is_some()
-        };
+        let table_is_durable =
+            |identity: &crate::table::TableIdentity| table_catalog.is_durable_base(identity);
         let outcome = checkpoint_durable_runtime_with_budget(
             self.branch_catalog,
             self.services,

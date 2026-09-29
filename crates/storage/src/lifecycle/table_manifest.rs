@@ -46,14 +46,12 @@ pub(crate) struct LifecycleDurableTableCatalog {
     // floor past them. In-memory bookkeeping only — recovery rebuilds the catalog via
     // `record_manifest`, which clears it, so a reopen always starts settled (`false`).
     //
-    // Catalog-global, not per-branch — correct for a single flushing branch (the regime the
-    // fault soak exercises). Multiple branches can flush (the maintenance coverage scan in
-    // `durable/maintenance.rs` enqueues flush per-branch under pressure), so branch B's
-    // `record_manifest` could clear the flag branch A's install set, masking branch A's debt from
-    // the checkpoint defer. The multi-branch checkpoint guard covers this in practice — a checkpoint
-    // also defers while any non-seeded branch holds a durable base, and a branch carrying publish
-    // debt owns exactly such a base, so the masked-debt snapshot is not recorded. A per-branch debt
-    // set is the deferred precise fix; see multi-branch-orphaned-delta-recovery-gap.md.
+    // Catalog-global, not per-branch: branch B's `record_manifest` clears the flag branch A's
+    // install set, masking A's debt from the checkpoint defer. The multi-branch checkpoint guard
+    // that used to cover this was lifted by slice 12 (#3618). Correctness no longer rests on the
+    // flag: a checkpoint treats a table as a durable base only while its owning branch's confirmed
+    // manifest lists it (`is_durable_base`, #3665), so a masked-debt table's rows are captured into
+    // the snapshot rather than skipped. The flag remains a coarse "defer when unsure" signal.
     manifest_publish_pending: bool,
     // #2553: the reclaim mark must never sweep an object that a recovery-relevant manifest
     // still references. Two per-branch object-name frontiers make that predicate local:
@@ -391,6 +389,29 @@ impl LifecycleDurableTableCatalog {
     pub(crate) fn total_object_bytes(&self) -> u64 {
         self.entries.values().fold(0u64, |total, entry| {
             total.saturating_add(entry.object_facts.byte_count())
+        })
+    }
+
+    /// #3665: whether `identity`'s table is a DURABLE base — listed by the last durably
+    /// confirmed manifest of the branch that owns its object (the branch named in its
+    /// `tables/<branch>/…` path), the exact set recovery loads if the process dies now.
+    /// Catalogued is not enough: a flush records its table before the manifest publish that
+    /// covers it, and that publish may fail, be abandoned at close, or not have run yet. A
+    /// checkpoint that trusted the catalogue would skip such a table's rows as manifest-covered
+    /// and record its branch as a durable base, then truncate the WAL behind rows no durable
+    /// object lists. Unconfirmed tables are volatile to a checkpoint: their rows are captured.
+    pub(crate) fn is_durable_base(&self, identity: &TableIdentity) -> bool {
+        let Some(object) = self.object_for_identity(identity) else {
+            return false;
+        };
+        let Ok(Some(crate::layout::TableObjectClassification::Data {
+            branch_id: owner, ..
+        })) = crate::layout::ObjectLayout::classify_table_object(object)
+        else {
+            return false;
+        };
+        self.confirmed_frontiers.iter().any(|(branch, names)| {
+            names.contains(object) && BranchId::from_bytes(*branch).to_string() == owner
         })
     }
 

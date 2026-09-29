@@ -299,6 +299,128 @@ fn close_checkpoint_completes_with_a_flushed_non_seeded_branch() {
     assert!(row_is_present(&reopened, extra, b"close-flushed-root-base"));
 }
 
+/// Flushes `branch`'s current active rows into one table whose manifest
+/// publish fails: the table is installed and catalogued, but no durable
+/// manifest lists it (#3665).
+fn flush_with_failed_manifest(
+    runtime: &mut LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+    backend: &'static CheckpointTestBackend,
+    branch: BranchId,
+    name: &str,
+) {
+    runtime
+        .rotate_active_for_branch_for_maintenance(branch)
+        .expect("rotate");
+    backend.fail_table_manifest_replacement_on_call(backend.table_manifest_replace_calls() + 1);
+    runtime
+        .flush_frozen(
+            &FlushFrozenRequest::new(
+                branch,
+                None,
+                FlushTableIdentitySeed::new(format!("{name}-seed")).expect("seed"),
+                FlushTableObjectId::new(format!("{name}-object")).expect("object id"),
+            )
+            .expect("flush request"),
+        )
+        .expect("the flush installs despite the failed manifest publish");
+}
+
+/// #3665: a non-seeded branch's flushed table whose manifest was never
+/// durably published is not a durable base. The close checkpoint must carry
+/// its rows in the snapshot rather than skip them as manifest-covered —
+/// otherwise the WAL is truncated behind rows no durable object lists, and
+/// the next open reports `MissingTableManifestBase` and loses them.
+#[test]
+fn close_checkpoint_carries_a_flushed_table_whose_manifest_never_published() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xe7);
+    let extra = branch_id(0xe8);
+    let mut runtime = open_runtime(initial, backend);
+    commit(&mut runtime, initial, b"unpublished-root-a");
+    runtime
+        .create_branch(
+            extra,
+            CommitBranchGeneration::new(1).expect("generation"),
+            None,
+        )
+        .expect("create the root");
+    commit(&mut runtime, extra, b"unpublished-extra-row");
+    flush_with_failed_manifest(&mut runtime, backend, extra, "unpublished-extra");
+    commit(&mut runtime, initial, b"unpublished-root-b");
+
+    let close = runtime.close().expect("clean close");
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+
+    let (reopened, _) = reopen_counting_replay(initial, backend);
+    assert!(
+        reopened.current_recovery_health_for_test().is_healthy(),
+        "{:?}",
+        reopened.current_recovery_health_for_test()
+    );
+    assert!(row_is_present(&reopened, extra, b"unpublished-extra-row"));
+    assert!(row_is_present(&reopened, initial, b"unpublished-root-a"));
+    assert!(row_is_present(&reopened, initial, b"unpublished-root-b"));
+}
+
+/// #3665: the catalog's manifest-debt flag is catalog-global, so another
+/// branch's successful publish clears it while this branch's table is still
+/// unpublished. A checkpoint taken then must still treat the unpublished
+/// table as volatile and carry its rows.
+#[test]
+fn checkpoint_carries_an_unpublished_table_after_another_branch_clears_the_debt() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xe9);
+    let extra = branch_id(0xea);
+    let mut runtime = open_runtime(initial, backend);
+    runtime
+        .create_branch(
+            extra,
+            CommitBranchGeneration::new(1).expect("generation"),
+            None,
+        )
+        .expect("create the root");
+    commit(&mut runtime, extra, b"masked-extra-row");
+    flush_with_failed_manifest(&mut runtime, backend, extra, "masked-extra");
+    commit(&mut runtime, initial, b"masked-root-row");
+    runtime
+        .rotate_active_for_branch_for_maintenance(initial)
+        .expect("rotate initial");
+    runtime
+        .flush_frozen(
+            &FlushFrozenRequest::new(
+                initial,
+                None,
+                FlushTableIdentitySeed::new("masked-root-seed").expect("seed"),
+                FlushTableObjectId::new("masked-root-object").expect("object id"),
+            )
+            .expect("flush request"),
+        )
+        .expect("the root's flush publishes its manifest");
+    commit(&mut runtime, initial, b"masked-root-tail");
+    let request =
+        LifecycleCheckpointRequest::new(initial, 1, strata_core::Timestamp::from_micros(99))
+            .expect("request")
+            .with_wal_truncation_after_checkpoint(true);
+    let outcome = runtime.checkpoint(&request).expect("checkpoint");
+    drop(runtime);
+
+    assert_eq!(
+        outcome.status(),
+        LifecycleCheckpointStatus::Completed,
+        "the root's publish cleared the catalog-global debt flag, so the checkpoint runs"
+    );
+    let (reopened, _) = reopen_counting_replay(initial, backend);
+    assert!(
+        reopened.current_recovery_health_for_test().is_healthy(),
+        "{:?}",
+        reopened.current_recovery_health_for_test()
+    );
+    assert!(row_is_present(&reopened, extra, b"masked-extra-row"));
+    assert!(row_is_present(&reopened, initial, b"masked-root-row"));
+}
+
 /// Nothing above the retention watermark: a close right after a checkpoint
 /// that already covers the visible version publishes no second snapshot.
 #[test]
