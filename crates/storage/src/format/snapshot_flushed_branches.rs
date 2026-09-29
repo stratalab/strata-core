@@ -225,6 +225,12 @@ mod tests {
     /// The encode-side ceiling is exact: a set of exactly the ceiling encodes,
     /// one more is refused before any bytes are written.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds and encodes 2^20 branch ids (a 16 MiB payload) twice; safe-Rust \
+                  bounds arithmetic already covered natively, and it outruns the Miri \
+                  runner (#3623)"
+    )]
     fn flushed_branches_section_encode_ceiling_is_exact() {
         let ascending = |count: usize| -> Vec<BranchId> {
             (0..count)
