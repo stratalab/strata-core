@@ -2213,6 +2213,17 @@ fn table_data_object_files(root: &std::path::Path) -> std::collections::BTreeSet
     files
 }
 
+/// #3676: an idle-wake debounce no test run reaches. On a background runtime a
+/// drain round that ends with reclaim owed arms the idle (quiescence) wake, and
+/// a sweep that staged objects leaves reclaim owed until a clean sweep proves
+/// otherwise; so one debounce after the chain settles, the idle wake runs a
+/// clean re-sweep that records `Nothing` in the ledger's single
+/// `TableObjectSweep` slot. A test that asserts on the slot the chain left pins
+/// the debounce out of reach, so the slot it reads is the chain's sweep rather
+/// than a later idle retry's, however long a loaded runner takes to read it.
+#[cfg(feature = "localfs")]
+const IDLE_WAKE_OUT_OF_REACH_MILLIS: u64 = 3_600_000;
+
 /// Drain the maintenance queue to a fixed point: each drain runs the queued tasks (including the
 /// GC chain's self-enqueued follow-ups); repeat until a drain finds nothing.
 #[cfg(feature = "localfs")]
@@ -2247,7 +2258,8 @@ fn api_compaction_gc_reclaims_superseded_table_objects() {
     let root = temp_dir_for_api_test("maintenance-gc-end-to-end");
     let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
     let mut runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_quiescence_debounce_millis_for_test(IDLE_WAKE_OUT_OF_REACH_MILLIS),
         backend,
     )
     .expect("open durable runtime")
@@ -2307,6 +2319,7 @@ fn api_compaction_gc_reclaims_superseded_table_objects() {
     let ledger = runtime
         .reclaim_ledger_for_test()
         .expect("durable runtime has a reclaim ledger");
+    assert_eq!(ledger.idle_wakes(), 0, "{ledger:?}");
     let mark = ledger
         .last(ReclaimFamily::TableObjectMark)
         .expect("mark recorded");
@@ -2426,7 +2439,8 @@ fn api_background_gc_reclaims_superseded_table_objects_off_lock() {
     let root = temp_dir_for_api_test("maintenance-gc-background-off-lock");
     let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
     let mut runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_quiescence_debounce_millis_for_test(IDLE_WAKE_OUT_OF_REACH_MILLIS),
         backend,
     )
     .expect("open durable runtime")
@@ -2494,12 +2508,12 @@ fn api_background_gc_reclaims_superseded_table_objects_off_lock() {
         "reads must stay correct after off-lock reclaim",
     );
     // The off-lock sweep (`finish_quarantine_sweep`) reports the bytes it
-    // staged, like the inline runner: the ledger's byte total exceeds what the
-    // purge alone reported, so the sweep contributed bytes even if a later
-    // empty sweep pass overwrote its slot.
+    // staged, like the inline runner. #3676: with the idle wake out of reach
+    // no later clean re-sweep can overwrite the sweep's slot.
     let ledger = runtime
         .reclaim_ledger_for_test()
         .expect("durable runtime has a reclaim ledger");
+    assert_eq!(ledger.idle_wakes(), 0, "{ledger:?}");
     assert!(
         ledger.last(ReclaimFamily::TableObjectSweep).is_some(),
         "{ledger:?}"
@@ -2603,7 +2617,8 @@ fn api_gc_sweep_defers_while_retired_read_view_is_held() {
     let root = temp_dir_for_api_test("maintenance-gc-reader-interlock");
     let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
     let mut runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_quiescence_debounce_millis_for_test(IDLE_WAKE_OUT_OF_REACH_MILLIS),
         backend,
     )
     .expect("open durable runtime")
@@ -2668,6 +2683,7 @@ fn api_gc_sweep_defers_while_retired_read_view_is_held() {
     let ledger = runtime
         .reclaim_ledger_for_test()
         .expect("durable runtime has a reclaim ledger");
+    assert_eq!(ledger.idle_wakes(), 0, "{ledger:?}");
     let sweep = ledger
         .last(ReclaimFamily::TableObjectSweep)
         .expect("sweep recorded");
