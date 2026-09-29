@@ -1,7 +1,7 @@
 ---
 title: "Scan KV rows"
 description: "Scan KV rows with values and version facts."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: kv
 ---
 

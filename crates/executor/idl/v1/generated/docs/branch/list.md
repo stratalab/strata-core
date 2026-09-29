@@ -1,7 +1,7 @@
 ---
 title: "List branches"
 description: "List active branches with their lineage facts."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: branch
 ---
 

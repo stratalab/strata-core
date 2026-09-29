@@ -1,7 +1,7 @@
 ---
 title: "Read one config value"
 description: "Read one sanitized configuration value by key."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: admin
 ---
 

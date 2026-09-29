@@ -1,7 +1,7 @@
 ---
 title: "Sample graph nodes"
 description: "Sample graph nodes."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: graph
 ---
 

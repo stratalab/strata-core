@@ -4,6 +4,119 @@ All notable changes to StrataDB are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.6] - 2026-09-29
+
+A storage-footprint release. A database written through the Python SDK
+(1.9 M events from a 79 MB CSV) weighed 952 MB, and most of that was
+reclaimable debt, not data: table objects nothing referenced, superseded
+checkpoint snapshots, and flushed WAL. Every reclaim family had a sound
+proof and a working deleter, but reclamation only ran as best-effort
+background work inside a session, and every session boundary discarded it.
+1.2.6 makes reclamation a contract that holds at every point in a
+database's life: open, operation, idle and close. Two independent external
+reviews then hardened it, especially where publish uncertainty meets
+reclamation. Event records also shrink by about a quarter on disk.
+
+### Changed
+
+- **1.2.6 upgrades the database format on first open, and earlier
+  versions refuse to open it afterwards.** Back up the database directory
+  before upgrading if you may need to roll back. A writable open raises the
+  database manifest to format version 3 once recovery succeeds (#3658). The
+  release also adds a sealed timeline-segment object family, new checkpoint
+  snapshot sections, and version-2 event records. 1.2.6 still reads
+  everything 1.2.5 wrote.
+- **A clean close leaves a compact database.** Close drains the session's
+  reclaim debt under a bounded budget: unreferenced table objects,
+  quarantine and superseded snapshots. It then flushes a large unflushed
+  delta into compressed tables and takes a checkpoint across every branch.
+  Finally it truncates the WAL the checkpoint covers, so the next open
+  replays nothing (#3596, #3598, #3625). A clean close is bounded by the
+  reclaim budget (500 ms by default) plus one checkpoint.
+- **Reopening reclaims what a previous session left.** Open arms a single
+  reclaim-only wake that finishes an earlier session's debt, including
+  after a crash, without running any write-side maintenance (#3597,
+  #3626). While reclaim is owed and the database goes quiet, one idle wake
+  per quiet period runs it, and a steady write stream can no longer starve
+  it (#3591).
+- **Superseded checkpoint snapshots are pruned.** Every completed
+  checkpoint prunes the snapshots it superseded, and open removes any
+  snapshot the manifest never attested (#3592).
+- **Checkpoints stay bounded and cover every branch.** A checkpoint whose
+  delta would exceed the snapshot payload cap flushes first and retries,
+  instead of failing (#3593). A database with several flushed branches now
+  checkpoints and reclaims its WAL; before, a single-branch assumption
+  blocked it (#3598, #3493).
+- **The retained commit timeline lives in sealed segments** that a
+  checkpoint references rather than rewrites. A long history can no longer
+  push a checkpoint over its payload cap and freeze WAL reclamation.
+  Forked branches share the segments of their common history (#3643).
+- **Event records are about 27% smaller on disk.** Hashes are stored as
+  raw bytes, and the event-log head is a fixed 51-byte record instead of a
+  JSON summary rewritten on every append (#3594, #3595).
+- **Deleting a large space finishes.** It marks the space in one commit,
+  then sweeps the rows in commits the storage budget admits, the same way
+  deleting a large graph works (#3574, #3575).
+
+### Added
+
+- **`admin storage`** reports the database's on-disk footprint by family:
+  - live tables;
+  - unreferenced and quarantined objects;
+  - snapshots and timeline segments, with what the next prune would free;
+  - reclaimable WAL and the WAL tail;
+  - the total.
+
+  It also reports the outcome of the last reclaim pass. `--audit` adds the
+  I/O-backed families. The same facts are available from the engine as
+  `Database::storage_footprint` (#3599).
+- **`failed_precondition.engine.format_version`.** A database written by a
+  newer Strata is refused with a clear, non-retryable error that names the
+  format and both versions. Before, it was refused with a retryable
+  "persistence unavailable" (#3659).
+
+### Fixed
+
+- **Reclamation never deletes a possible recovery state:**
+  - Reclaim acts only on a database manifest confirmed durable (#3671).
+  - Timeline segments are resolved against the snapshot actually attested
+    (#3661).
+  - A checkpoint counts a table as a durable base only when its branch's
+    confirmed manifest lists it, on every checkpoint path including the
+    background one. A crash after a clean close can no longer report a
+    lost table-manifest base (#3665).
+- **A first checkpoint that crashes before its snapshot** no longer
+  strands timeline segments (#3662).
+- **A clean close right after a fast bulk load** no longer re-runs an
+  in-flight background compaction inline. That re-run installed tables the
+  checkpoint could not treat as durable, pushed the close checkpoint over
+  its cap, and left the WAL and the compaction's debt for the next session.
+  A 1M-record KV load now closes at 0.58x its input instead of 2.2x (#3678).
+- **A close checkpoint still over the payload cap** after the large-delta
+  flush flushes every branch and retries once, instead of leaving the WAL
+  for the next open to replay (#3614).
+- **An unprovable flush-watermark advance** defers instead of failing the
+  maintenance drain (#3667).
+- **The close reclaim budget** governs reclaim tasks already queued, and
+  `Disabled` or a zero budget runs none (#3644).
+- **A reader released after the idle retry** re-arms the idle wake (#3645).
+- **The audit footprint** counts each file exactly once (#3646), and
+  swept objects leave the live tier (#3619). The active WAL segment is
+  counted at the writer's length rather than a stat of its partly buffered
+  file, so reclaimable WAL plus the tail always equals retained WAL (#3666).
+- **Snapshot prunes report the bytes they free** (#3622).
+- **Recovery refuses a snapshot section kind it does not understand,**
+  instead of skipping it (#3629).
+- **A covered WAL segment that vanishes before its read** no longer fails
+  the delete pass (#3603).
+- **A reopened checkpoint allocator** is seeded past every snapshot object
+  on disk (#3612).
+- **Space usage and branch compare** treat a graph or space that is being
+  deleted as deleted (#3575).
+- **A stale table-object mark** now pins every table the current published
+  views reference, a defence against the off-lock scan race tracked in
+  #3047, which stays open (#3639).
+
 ## [1.2.5] - 2026-09-25
 
 A graph-hardening release, driven by a city-scale graph application: 22

@@ -1,7 +1,7 @@
 ---
 title: "List catalog models"
 description: "List catalog inference models."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: inference
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Declare vector collection embedding model"
 description: "Declare the embedding model a vector collection's vectors come from."
-source: strata-core@1.2.5
+source: strata-core@1.2.6
 section: vector
 ---
 
