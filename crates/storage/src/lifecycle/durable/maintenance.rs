@@ -5130,21 +5130,42 @@ impl MaintenanceTaskRunner for DurableFlushWatermarkMaintenanceRunner<'_, '_> {
             }
             Err(error) => return Err(error),
         };
-        if self.registry.active_branch_ids() != vec![branch_id] {
-            return Err(LifecycleError::WalRetentionProofIncomplete {
+        let persisted = if self.registry.active_branch_ids() == vec![branch_id] {
+            persist_flush_watermark_with_table_manifest_proof(
+                self.manifest,
+                self.visible_version,
+                candidate,
+                &LifecycleFlushWatermarkProof::TableManifestCovered(proof.clone()),
+                proof.manifest_epoch(),
+                proof.recovery_health_epoch(),
+                &[(branch_id, table_manifest.manifest_sequence())],
+            )
+        } else {
+            Err(LifecycleError::WalRetentionProofIncomplete {
                 reason: "table manifest flush proof requires all active branches to be loaded",
-            });
+            })
+        };
+        match persisted {
+            Ok(outcome) => Ok(outcome.maintenance_outcome()),
+            // #3667: every `WalRetentionProofIncomplete` fires before the
+            // manifest write, so nothing was persisted and the WAL stays the
+            // durable record. Commit versions are database-global: a branch
+            // that is alone again after a fork was deleted owns only some of
+            // the versions below the candidate, and its manifest cannot cover
+            // the rest (a "commit-version gap"). That is an unprovable
+            // advance, not a failure — defer, as the proof arm above and the
+            // background runner (`persist_off_lock_flush_watermark_coverage`)
+            // already do; the checkpoint remains the reclaim path.
+            Err(error @ LifecycleError::WalRetentionProofIncomplete { .. }) => {
+                Ok(MaintenanceOutcome::new(
+                    MaintenanceTaskKind::FlushWatermark,
+                    MaintenanceOutcomeStatus::Deferred,
+                )
+                .with_reason("table manifest flush proof is incomplete")
+                .with_source_error(error))
+            }
+            Err(error) => Err(error),
         }
-        Ok(persist_flush_watermark_with_table_manifest_proof(
-            self.manifest,
-            self.visible_version,
-            candidate,
-            &LifecycleFlushWatermarkProof::TableManifestCovered(proof.clone()),
-            proof.manifest_epoch(),
-            proof.recovery_health_epoch(),
-            &[(branch_id, table_manifest.manifest_sequence())],
-        )?
-        .maintenance_outcome())
     }
 }
 

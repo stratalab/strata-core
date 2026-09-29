@@ -5112,6 +5112,76 @@ fn open_timeline_runtime(
     .map(crate::api::StorageOpenOutcome::into_runtime)
 }
 
+/// #3667: commit versions are database-global, so a default branch that was
+/// alone again after a fork was deleted owns only some of the versions below a
+/// flush-watermark candidate; its table manifest cannot cover the rest, and
+/// the proof is incomplete. The inline flush-watermark runner must defer that
+/// (as its proof arm and the background runner already do), not fail the
+/// drain and record a maintenance failure.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_flush_watermark_defers_when_a_deleted_forks_versions_leave_a_gap() {
+    let root = temp_dir_for_api_test("flush-watermark-deleted-fork-gap");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    let child = branch_with(0x67);
+    let mut micros = 0;
+    let mut commit = |runtime: &mut StorageRuntime<'static>, branch, key: &[u8]| {
+        micros += 10;
+        runtime
+            .commit_for_test(
+                &put_batch_for(branch, key, b"v"),
+                strata_core::Timestamp::from_micros(micros),
+            )
+            .expect("commit");
+    };
+    commit(&mut runtime, branch(), b"gap-a");
+    fork_branch(&mut runtime, child);
+    commit(&mut runtime, child, b"gap-child-1");
+    commit(&mut runtime, branch(), b"gap-b");
+    commit(&mut runtime, child, b"gap-child-2");
+    commit(&mut runtime, branch(), b"gap-c");
+    runtime
+        .branch(&BranchRequest::new(
+            child,
+            BranchAction::Delete,
+            Some(BranchGeneration::new(1)),
+        ))
+        .expect("delete the fork");
+    runtime
+        .enqueue_maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Flush,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("enqueue flush");
+
+    drain_maintenance_to_idle(&mut runtime);
+    let status = runtime.maintenance_status().expect("status");
+    assert!(
+        status.recent_failures().is_empty(),
+        "an incomplete flush-watermark proof defers, it is not a failure: {:?}",
+        status.recent_failures()
+    );
+    assert!(
+        runtime
+            .read_point(&PointReadRequest::new(
+                branch(),
+                engine_space(),
+                api_key(b"gap-c"),
+                ReadBound::Latest,
+            ))
+            .expect("read")
+            .row()
+            .is_some(),
+        "the default branch still reads its rows"
+    );
+}
+
 /// #3643: `count` commits to one key, commit `i` (from 0) writing `v{i}` at
 /// logical timestamp `(i + 1) * 10`.
 #[cfg(feature = "localfs")]
