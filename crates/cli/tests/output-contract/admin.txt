@@ -139,8 +139,8 @@ wal_active_bytes                   55.8 kB
 wal_retained_segments              1
 wal_retention_watermark            2
 wal_reclaimable_bytes              0 B
-wal_tail_bytes                     36 B
-total_bytes                        5.5 kB
+wal_tail_bytes                     55.8 kB
+total_bytes                        61.3 kB
 reclaim
   pending_tasks          0
   total_passes           1
@@ -167,8 +167,8 @@ wal_active_bytes	55767
 wal_retained_segments	1
 wal_retention_watermark	2
 wal_reclaimable_bytes	0
-wal_tail_bytes	36
-total_bytes	5530
+wal_tail_bytes	55767
+total_bytes	61261
 reclaim.pending_reclaim_tasks	0
 reclaim.total_passes	1
 reclaim.total_bytes_reclaimed	0

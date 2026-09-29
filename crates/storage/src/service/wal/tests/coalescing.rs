@@ -8,6 +8,7 @@ use super::{WalService, WalServiceConfig};
 use crate::backend::Backend;
 use crate::config::mode::DurabilityPolicy;
 use crate::layout::ObjectLayout;
+use crate::service::wal::WalSegmentCoverage;
 
 const SEGMENT_SIZE: u64 = 16 * 1024;
 
@@ -343,4 +344,65 @@ fn zero_window_degenerates_to_per_append_writes() {
             "zero-window buffering diverged at version {version}"
         );
     }
+}
+
+/// #3666: `segment_coverage` counts the active segment at the writer's
+/// logical length, so its segments sum to `growth_facts().retained_bytes()`
+/// even while the append buffer holds bytes the backend has not seen — each
+/// segment exactly once, sealed ones at their on-disk size.
+#[test]
+fn segment_coverage_sums_to_retained_bytes_while_the_buffer_holds_bytes() {
+    let backend = StoredWalBackend::default();
+    let mut service = open_service(
+        &backend,
+        DurabilityPolicy::Standard,
+        u64::from(u16::MAX),
+        SEGMENT_SIZE,
+    );
+    for version in 1..=12u64 {
+        service
+            .append(&record(version, vec![0xa5; 3000]))
+            .expect("append");
+    }
+    service
+        .append(&record(13, b"staged in the buffer".to_vec()))
+        .expect("staged append");
+    assert!(service.active_segment_id() > 1, "the appends rotated");
+    let growth = service.growth_facts().expect("growth facts");
+    let active = ObjectLayout::wal_segment(service.active_segment_id()).expect("active object");
+    let on_disk = backend.read_object(&active).expect("active bytes").len() as u64;
+    assert!(
+        on_disk < growth.active_segment_size(),
+        "precondition: the buffer holds bytes ({on_disk} on disk, {} logical)",
+        growth.active_segment_size()
+    );
+
+    let coverage = service.segment_coverage().expect("coverage");
+
+    assert_eq!(coverage.len(), growth.retained_segments());
+    assert_eq!(
+        coverage.iter().map(WalSegmentCoverage::bytes).sum::<u64>(),
+        growth.retained_bytes()
+    );
+    let unsealed: Vec<u64> = coverage
+        .iter()
+        .filter(|segment| segment.sealed_max_commit().is_none())
+        .map(WalSegmentCoverage::bytes)
+        .collect();
+    assert_eq!(unsealed, vec![growth.active_segment_size()]);
+    let sealed_on_disk: u64 = (1..service.active_segment_id())
+        .map(|segment_id| {
+            let object = ObjectLayout::wal_segment(segment_id).expect("sealed object");
+            backend.read_object(&object).expect("sealed bytes").len() as u64
+        })
+        .sum();
+    assert_eq!(
+        coverage
+            .iter()
+            .filter(|segment| segment.sealed_max_commit().is_some())
+            .map(WalSegmentCoverage::bytes)
+            .sum::<u64>(),
+        sealed_on_disk,
+        "sealed segments are counted at their on-disk size"
+    );
 }

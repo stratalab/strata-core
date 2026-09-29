@@ -26,7 +26,7 @@
     "superseded_timeline_segments": 0,
     "timeline_segment_bytes": 120,
     "timeline_segment_objects": 2,
-    "total_bytes": 5530,
+    "total_bytes": 61261,
     "unreferenced_bytes": 0,
     "unreferenced_objects": 0,
     "wal_active_bytes": 55767,
@@ -34,7 +34,7 @@
     "wal_retained_bytes": 55767,
     "wal_retained_segments": 1,
     "wal_retention_watermark": 2,
-    "wal_tail_bytes": 36
+    "wal_tail_bytes": 55767
   },
   "type": "storage"
 }

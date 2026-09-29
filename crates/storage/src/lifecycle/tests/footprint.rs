@@ -466,20 +466,26 @@ fn audit_tolerates_wal_segments_that_vanish_between_listing_and_read() {
     );
     assert_eq!(without_sealed.wal_tail_bytes(), complete.wal_tail_bytes());
 
-    // The active segment vanishes at its stat: its bytes leave the tail side.
+    // #3666: the active segment is never listed or stat'ed — it is counted at
+    // the writer's logical length — so a vanish armed on it changes nothing.
     backend.vanish_object_on_next_read(active.clone());
-    let without_active = runtime
+    let with_active_armed = runtime
         .footprint_audit_facts()
-        .expect("audit survives a vanished stat");
+        .expect("audit never reads the active segment");
     assert_eq!(
-        without_active.wal_tail_bytes(),
-        complete.wal_tail_bytes() - wal[&active]
+        with_active_armed.wal_tail_bytes(),
+        complete.wal_tail_bytes()
+    );
+    assert!(
+        wal_bytes_by_object(backend).contains_key(&active),
+        "the armed vanish never fired: the audit did not touch the active segment"
     );
 }
 
 /// The tolerance is for `NotFound` only: any other failure to read a sealed
-/// segment or to stat the active one is the audit's error, never a dropped
-/// segment — a silently smaller figure would misreport the debt.
+/// segment is the audit's error, never a dropped segment — a silently smaller
+/// figure would misreport the debt. The active segment is never stat'ed
+/// (#3666), so a fault armed on it cannot fail or shrink the audit.
 #[test]
 fn audit_propagates_wal_segment_read_and_stat_failures_other_than_not_found() {
     let backend: &'static CheckpointTestBackend =
@@ -509,18 +515,62 @@ fn audit_propagates_wal_segment_read_and_stat_failures_other_than_not_found() {
         runtime.footprint_audit_facts().is_err(),
         "a sealed segment read failure propagates instead of dropping the segment"
     );
-    backend.fail_object_on_next_read(active);
-    assert!(
-        runtime.footprint_audit_facts().is_err(),
-        "an active segment stat failure propagates instead of dropping the segment"
-    );
 
-    // Once the faults are spent the audit is whole again.
+    // Once the sealed fault is spent the audit is whole again — and a fault
+    // armed on the active segment never fires, because the audit counts it
+    // at the writer's logical length instead of stat'ing it.
+    backend.fail_object_on_next_read(active);
     let complete = runtime
         .footprint_audit_facts()
-        .expect("audit after the faults");
+        .expect("audit never stats the active segment");
     assert_eq!(
         complete.wal_reclaimable_bytes() + complete.wal_tail_bytes(),
         wal_bytes_by_object(backend).values().sum::<u64>()
+    );
+}
+
+/// A segment listed ABOVE the active one (a crash leftover the delete pass
+/// never reads) is only sized: its stat bytes join the tail. The `NotFound`
+/// tolerance holds there too — a segment that vanishes before its stat is
+/// dropped — while any other stat failure is the audit's error.
+#[test]
+fn audit_sizes_a_segment_above_the_active_one_and_tolerates_only_not_found() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0xd9);
+    let mut runtime = open_runtime_with_wal_segment_size(branch, backend, 4096);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"wal-above", b"value"),
+            generation_guard(),
+        )
+        .expect("commit");
+    let before = runtime.footprint_audit_facts().expect("audit");
+    let active_id = runtime.services().wal().active_segment_id();
+    let above = ObjectLayout::wal_segment(active_id + 1).expect("segment above the active one");
+    backend
+        .write_object(&above, &[0xa5; 100])
+        .expect("plant the leftover segment");
+
+    let with_above = runtime.footprint_audit_facts().expect("audit");
+    assert_eq!(with_above.wal_tail_bytes(), before.wal_tail_bytes() + 100);
+    assert_eq!(
+        with_above.wal_reclaimable_bytes(),
+        before.wal_reclaimable_bytes()
+    );
+
+    backend.vanish_object_on_next_read(above.clone());
+    let vanished = runtime
+        .footprint_audit_facts()
+        .expect("a segment gone before its stat is dropped");
+    assert_eq!(vanished.wal_tail_bytes(), before.wal_tail_bytes());
+
+    backend
+        .write_object(&above, &[0xa5; 100])
+        .expect("plant the leftover segment again");
+    backend.fail_object_on_next_read(above);
+    assert!(
+        runtime.footprint_audit_facts().is_err(),
+        "a stat failure other than NotFound propagates"
     );
 }

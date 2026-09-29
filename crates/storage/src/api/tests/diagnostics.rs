@@ -1104,6 +1104,44 @@ fn footprint_audit_tier_reports_quarantine_snapshots_and_what_the_prune_reclaims
     assert!(after.reclaim().total_passes() >= 1);
 }
 
+/// #3666: the audit counts the active WAL segment at the writer's logical
+/// length — the same source as `wal_retained_bytes` — never a stat of the
+/// on-disk file, which lags the writer while the append buffer holds bytes.
+/// One report is therefore consistent by construction: the WAL split sums to
+/// the retained total, so every WAL byte is counted exactly once.
+#[cfg(feature = "localfs")]
+#[test]
+fn footprint_audit_wal_split_sums_to_retained_while_the_append_buffer_holds_bytes() {
+    use crate::layout::ObjectLayout;
+
+    let (backend, runtime) = open_counting_durable_runtime("footprint-audit-buffered-wal");
+    // Warm the sealed-retention cache so the retained total is known.
+    let _warm = diagnostics_with(&runtime, DiagnosticsDetail::Audit);
+    runtime
+        .commit(&put_batch(b"buffered", b"value"))
+        .expect("commit");
+
+    let audit = diagnostics_with(&runtime, DiagnosticsDetail::Audit);
+
+    let footprint = audit.footprint();
+    let retained = footprint.wal_retained_bytes().expect("retained is known");
+    let active = footprint.wal_active_bytes().expect("active is known");
+    let active_object = ObjectLayout::wal_segment(1).expect("active segment object");
+    let on_disk = backend
+        .as_backend()
+        .object_metadata(&active_object)
+        .expect("active segment is on disk")
+        .size_bytes();
+    assert!(
+        on_disk < active,
+        "precondition: the append buffer holds the commit ({on_disk} on disk, {active} logical)"
+    );
+    let reclaimable = footprint.wal_reclaimable_bytes().expect("reclaimable");
+    let tail = footprint.wal_tail_bytes().expect("tail");
+    assert_eq!(reclaimable + tail, retained, "{footprint:?}");
+    assert_eq!(tail, active, "no proof: the lone active segment is tail");
+}
+
 /// The reclaim report carries a deferred pass's typed reason: a sweep held
 /// off by a retired read view reports `ReaderPinned` (never prose), and the
 /// pass that reclaims once the reader is gone reports no deferral.
