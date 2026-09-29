@@ -1,6 +1,6 @@
 # #3596 — Space reclamation contract: root cause, design, and paired implementation + test slices
 
-Status: **APPROVED 2026-09-26 — IMPLEMENTED 2026-09-28** (milestone 1.2.6, issues #3591–#3600; evidence on #3493). Every slice has merged; the ledger at the top of §4 records each PR and the follow-up fixes the slices surfaced. The catalog entry is DUR-019 (`docs/audit/ENGINE_INVARIANTS.md`).
+Status: **APPROVED 2026-09-26 — IMPLEMENTED 2026-09-28, with review follow-ups** (milestone 1.2.6, issues #3591–#3600; evidence on #3493). Every slice has merged; the ledger at the top of §4 records each PR and the follow-up fixes the slices surfaced. An external review of the implemented contract (2026-09-28) found one P1 and three P2 gaps; §4 "Review of the implemented contract" records each finding, its fix and where it stands, and the P1's own design is `docs/design/3643-timeline-segments.md`. The catalog entry is DUR-019 (`docs/audit/ENGINE_INVARIANTS.md`).
 
 Provenance: three read-only exploration passes (maintenance executor and session lifecycle; the three reclaim proofs and branch topology; test harnesses and diagnostics) and three design passes (scheduling contract; multi-branch proofs and snapshot lifecycle; observability and tests), reconciled against measurements of the failing database. Every symbol below was verified on `main` @ `e95167d7`. Field tools used for the measurements live outside the repo (`/data2/strata-probe/tools/dbsize.py`); after slice 10 the product reports the same facts itself.
 
@@ -114,11 +114,40 @@ Follow-on work in milestone 1.2.6, after the slices:
 |---|---|---|---|
 | #3594 event records stored both hashes as JSON number arrays (~230 B/event) | event record format v2: the two hashes as 64 raw bytes ahead of the JSON body; v1 still decodes. Events 0.627× → 0.457× logical on disk | #3635 | `92303baa` |
 | #3595 every append rewrote the ~790 B event-log head (per-type JSON summaries) | event-log head v2: a fixed 51-byte record; `list_types` reads the type index; v1 heads still decode; `put_count` unchanged. One event per commit 1.056× → 0.842× | #3636 | `552c524d` |
-| #3629 recovery silently skipped unknown snapshot section kinds (spec §13 rule 6) | recovery refuses an unknown kind as typed `RecoveryCorruption` | #3638 | open |
-| #3633 public rustdoc linked to private items | three links fixed; the `check` job builds rustdoc strictly for the six published crates | #3637 | open |
-| #3047 an off-lock reader hit a table object reclaim had deleted | defense: the mark also pins every table the current published views reference. The race itself is not reproduced; #3047 stays open with #3048 (loom) | #3639 | open |
+| #3629 recovery silently skipped unknown snapshot section kinds (spec §13 rule 6) | recovery refuses an unknown kind as typed `RecoveryCorruption` | #3638 | `0db84cf2` |
+| #3633 public rustdoc linked to private items | three links fixed; the `check` job builds rustdoc strictly for the six published crates | #3637 | `91f48456` |
+| #3047 an off-lock reader hit a table object reclaim had deleted | defense: the mark also pins every table the current published views reference. The race itself is not reproduced; #3047 stays open with #3048 (loom) | #3639 | `634a16cc` |
 
-Compatibility note for the 1.2.6 release: a 1.2.5 binary cannot read events or event-log heads a 1.2.6 binary writes (#3594, #3595); upgrading is one-way.
+Compatibility note for the 1.2.6 release: a 1.2.5 binary cannot read events or event-log heads a 1.2.6 binary writes (#3594, #3595), nor timeline segments (#3643); upgrading is one-way. 1.2.6 stays a patch release (decision 2026-09-28: version tiers follow product significance, not format compatibility), so the format itself must stop a downgrade: the database manifest is written at format version 3, which a 1.2.5 binary refuses at open without writing (#3658). The CHANGELOG entry must say so, and the release runbook checks the refusal before tagging.
+
+### Review of the implemented contract
+
+An external review of #3596 (2026-09-28) verified the contract against the code and found four gaps. Each was reproduced on `main` before it was filed, and each fix carries the review's own regression test (renamed).
+
+| finding | severity | the gap | fix | PR | status |
+|---|---|---|---|---|---|
+| #3643 | P1 | The retained timeline (the only durable record of retained history since W3.1c) counted toward the 64 MiB checkpoint payload cap, and flushing cannot shrink it. Past about 2.8 M retained commits every checkpoint deferred forever: the watermark froze, the WAL was never reclaimed, and a clean close could not checkpoint. | The timeline moves into sealed segment objects (`timeline/<snapshot>/<ordinal>`, 65,536 entries each) that the snapshot references in a new kind-5 section. Sealed once, shared across forks, and reclaimed by the snapshot prune rules. Design: `docs/design/3643-timeline-segments.md` | #3653 (design, merged `f154bc0c`), #3654 (merged `7a6ab80e`), #3656 (merged `4edd5935`), #3657 (merged `9c7b7b72`) | merged; amended for the second review below |
+| #3644 | P2 | `ReclaimBudget::Disabled` and a zero budget still ran reclaim tasks already queued before the close. | The close budget governs queued drain-before-close tasks too (`drain_for_close_within`, `close_starts_reclaim`, one clock shared with the seeded drive). | #3648 | merged `d65bc422` |
+| #3645 | P2 | A reader released after the quiet period's one idle wake left reader-deferred debt until the next write or open. | A per-runtime view-release signal re-arms the debounced idle wake when the last retired view is released while reclaim waits on a reader. The slot removes the waker at shutdown. | #3651 | merged `57b76543` |
+| #3646 | P2 | The Audit footprint counted a superseded table in both live tables and unreferenced objects, so `total_bytes` overstated the disk. | The audit subtracts unreferenced objects the catalogue still lists (`disjoint_live_tables`), so every file lands in exactly one family. | #3647 | merged `551bb800` |
+
+Found while fixing them:
+
+| issue | what | PR | status |
+|---|---|---|---|
+| #3658 | Nothing stopped a 1.2.5 binary from opening a 1.2.6 database and half-reading it. Reproduced with the released binary: `event list` reported data loss, history lost every wall-clock instant, and 1.2.5 would write into it. The manifest is now written at format version 3 (0 and 2 are reserved as pre-V1). A writable open upgrades a version-1 manifest after recovery succeeds and before the first write. **1.2.6 release blocker.** | #3660 | merged `dc05657f` |
+| #3659 | A too-new database is refused as a retryable `unavailable.engine.persistence`; it should get a clear, non-retryable code. | — | open, not a blocker |
+
+A second external review (2026-09-28) confirmed all four fixes against the combined, unmerged stack: the original five regression tests pass. It found two new reclamation defects in the #3643 segment implementation before slice 2 merged. Both are fixed in slice 2 itself, and #3657 amends the #3643 design (§2.6, §2.8).
+
+| issue | severity | what | fix | PR | status |
+|---|---|---|---|---|---|
+| #3661 | P1 | A checkpoint whose final manifest replacement reported uncertainty, but did become visible, left the cached live segment set describing the previous snapshot. The queued open `ReconcileToAttested`, which has no sealing-id bound, then deleted the new snapshot's live segment, and a strict reopen refused. GC created the missing-segment state that recovery rightly rejects. **Release blocker.** | The live set is keyed by the snapshot id it describes. Every segment prune, the fork dedup and the Audit footprint resolve references for the id the manifest attests at their own proof, reloading from that snapshot on a mismatch and deleting nothing if it cannot be read. | #3656 | merged `4edd5935` |
+| #3662 | P2 | A first checkpoint that died after publishing segments and before its snapshot left segments with no attested snapshot. Both the open enqueue and the prune required one, so a read-only reopen never reclaimed them. | The open reconcile is enqueued on every `OpenedExisting`. A proof incomplete *only* because no snapshot exists lets `ReconcileToAttested` delete every segment (`snapshotless_segment_reconcile`). Any other missing fact, or a health block, deletes nothing. | #3656 | merged `4edd5935` |
+
+The review's point, which carries past this fix: tests that separately prove segment reuse, ordinary pruning and strict missing-segment refusal do not prove that GC cannot *create* the missing-segment condition. Each new publish-uncertainty outcome needs a test that composes it with the reconcile that follows.
+
+Flaky tests filed along the way, none caused by these fixes: #3649 (a close test's 1 s wall-clock bound), #3650 (one unreproduced `stress_random` row divergence under full-suite load), #3652 (the drain fixed-point flake, a third recurrence), and #3655 (an event-range test assumes no event lands 10–11 µs apart).
 
 Every slice is one PR: its implementation and its tests land together, TDD (red first), with the invariant check and review before merge, ≤ 1,500 LOC. Storage-level tests open a **two-branch** runtime (an empty non-seeded root beside the seeded branch, mirroring `_system_`) under `DeterministicInline` with the manual clock; engine-level tests get the real topology for free. Tests assert typed outcomes and byte facts read from `diagnostics()`, never display text and never a directory walk. Every pure decision fn is truth-tabled and has a call-site test (mutation gate). Existing tests that pin the old contract are rewritten in the slice that changes the contract, never deleted. Fault-injection tests (`-p strata-storage --features fault-injection`) ride the slice they cover.
 
