@@ -1867,6 +1867,17 @@ their own facts (`timeline_segment_*`, included in the total), superseded
 exactly when the next `Superseded` prune would delete them; the whole-database
 simulation's oracle and the engine ratchet both require none superseded.
 
+Every destructive reclaim acts only on a database manifest **confirmed durable**
+in the current session (#3671): a manifest replacement can be visible while its
+directory sync failed, and a crash may then restore the previous manifest, so
+both checkpoints remain recovery states until one is confirmed. The
+`ManifestDurabilityGate` confirms by a durable re-publish of the manifest's
+bytes (or records a `Completed` checkpoint's own publish); an unconfirmed
+manifest yields an incomplete proof (`manifest_durability`), so no snapshot,
+timeline segment or WAL object is deleted on its word. Audit: every snapshot
+prune and WAL truncation must obtain its manifest from `confirmed_manifest()`,
+never from `manifest().load_*` directly.
+
 - **Open** (reopened databases only): bootstrap queues the table-object mark, a
   `ReconcileToAttested` snapshot prune (every snapshot but the attested one), and
   a quarantine purge whenever the recovered quarantine inventory is non-empty

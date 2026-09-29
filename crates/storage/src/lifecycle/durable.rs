@@ -112,6 +112,13 @@ pub(crate) struct LifecycleDurableLocalServices<'a> {
     quarantine: QuarantineService<'static>,
     assembly_facts: LifecycleDurableAssemblyFacts,
     writer_guard: Option<BackendWriterGuard>,
+    reclaim: ReclaimSessionState,
+}
+
+/// What this session knows about the durable state destructive reclaim may act
+/// on. Session-scoped by design: every field starts empty at open.
+#[derive(Default)]
+struct ReclaimSessionState {
     /// #3643: the timeline segments the manifest-live snapshot references —
     /// seeded at recovery from the attested snapshot and replaced after every
     /// completed checkpoint. The segment prune spares exactly these.
@@ -119,6 +126,50 @@ pub(crate) struct LifecycleDurableLocalServices<'a> {
         Option<u64>,
         std::collections::BTreeMap<TimelineSegmentId, crate::format::TimelineSegmentRef>,
     )>,
+    /// #3671: the database manifest this session confirmed durable. Empty at
+    /// open: a previous process's last rename may never have reached disk.
+    confirmed_manifest: parking_lot::Mutex<Option<DatabaseManifest>>,
+}
+
+/// #3671: the database manifest service with this session's record of which
+/// manifest is confirmed durable — what every destructive reclaim consults.
+pub(crate) struct ManifestDurabilityGate<'s, 'a> {
+    manifest: &'s DatabaseManifestService<'a>,
+    confirmed: &'s parking_lot::Mutex<Option<DatabaseManifest>>,
+}
+
+impl ManifestDurabilityGate<'_, '_> {
+    /// The current manifest, if its durability is confirmed. A manifest not
+    /// yet confirmed this session is confirmed by re-publishing its exact
+    /// bytes durably (temp file, fsync, rename, directory fsync) — reading it
+    /// back is not confirmation. If that publish fails in any way the manifest
+    /// stays unconfirmed and the caller's reclaim defers.
+    pub(crate) fn confirmed_manifest(
+        &self,
+    ) -> LifecycleResult<crate::lifecycle::retention::ConfirmedManifest> {
+        use crate::lifecycle::retention::ConfirmedManifest;
+        let Some(current) = self.manifest.load_current().map_err(manifest_error)? else {
+            return Ok(ConfirmedManifest::Confirmed(None));
+        };
+        let mut confirmed = self.confirmed.lock();
+        if confirmed.as_ref() == Some(&current) {
+            return Ok(ConfirmedManifest::Confirmed(Some(current)));
+        }
+        // Any failure — including one that left the bytes visible — leaves
+        // durability unconfirmed; the next reclaim tries again.
+        if let Err(error) = self.manifest.publish_current(&current) {
+            return Ok(ConfirmedManifest::Unconfirmed(manifest_error(error)));
+        }
+        *confirmed = Some(current.clone());
+        Ok(ConfirmedManifest::Confirmed(Some(current)))
+    }
+
+    /// Record `manifest` as confirmed durable: its publish just completed,
+    /// directory sync included (a `Completed` checkpoint's final manifest), so
+    /// the next reclaim need not re-publish it.
+    pub(crate) fn record_confirmed(&self, manifest: DatabaseManifest) {
+        *self.confirmed.lock() = Some(manifest);
+    }
 }
 
 pub(crate) struct LifecycleDurableLocalShell<'a, S = CommitManualTimestampSource> {
@@ -305,8 +356,22 @@ impl<'a> LifecycleDurableLocalServices<'a> {
     /// rotation), which a pair of accessor calls cannot express.
     pub(crate) fn manifest_and_wal_mut(
         &mut self,
-    ) -> (&DatabaseManifestService<'a>, &mut WalService<'a>) {
-        (&self.manifest, &mut self.wal)
+    ) -> (ManifestDurabilityGate<'_, 'a>, &mut WalService<'a>) {
+        (
+            ManifestDurabilityGate {
+                manifest: &self.manifest,
+                confirmed: &self.reclaim.confirmed_manifest,
+            },
+            &mut self.wal,
+        )
+    }
+
+    /// #3671: the gate every destructive reclaim reads the manifest through.
+    pub(crate) fn manifest_gate(&self) -> ManifestDurabilityGate<'_, 'a> {
+        ManifestDurabilityGate {
+            manifest: &self.manifest,
+            confirmed: &self.reclaim.confirmed_manifest,
+        }
     }
 
     pub(crate) const fn manifest(&self) -> &DatabaseManifestService<'a> {
@@ -371,7 +436,7 @@ impl<'a> LifecycleDurableLocalServices<'a> {
             &std::collections::BTreeMap<TimelineSegmentId, crate::format::TimelineSegmentRef>,
         ) -> T,
     ) -> Option<T> {
-        let mut cache = self.live_timeline_segments.lock();
+        let mut cache = self.reclaim.live_timeline_segments.lock();
         if cache.0 != live_snapshot_id {
             let mut referenced = std::collections::BTreeMap::new();
             if let Some(snapshot_id) = live_snapshot_id {
@@ -406,7 +471,7 @@ impl<'a> LifecycleDurableLocalServices<'a> {
         snapshot_id: u64,
         referenced: impl IntoIterator<Item = crate::format::TimelineSegmentRef>,
     ) {
-        *self.live_timeline_segments.lock() = (
+        *self.reclaim.live_timeline_segments.lock() = (
             Some(snapshot_id),
             referenced
                 .into_iter()
@@ -567,7 +632,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             quarantine: QuarantineService::new(backend),
             assembly_facts,
             writer_guard: Some(writer_guard),
-            live_timeline_segments: parking_lot::Mutex::default(),
+            reclaim: ReclaimSessionState::default(),
         };
 
         state.transition(LifecycleTransitionTrigger::DurableRecoveryRequired)?;

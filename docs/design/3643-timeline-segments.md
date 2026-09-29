@@ -106,6 +106,24 @@ The second external #3596 review (artifacts in the #3642 addendum) confirmed the
 1. **P1, a live segment deleted after an uncertain manifest publication.** The live-set cache was updated only on `Completed`, so after `FinalManifestUncertain` with the manifest actually re-pointed it described the previous snapshot. The open `ReconcileToAttested`, which has no sealing-id bound, then deleted the new snapshot's segment. Fix: the snapshot-keyed resolution in §2.6. Regression: a checkpoint test whose backend installs the manifest and then reports `VisibilityUnknown`, followed by the queued reconcile and a strict reopen.
 2. **P2, a first-checkpoint crash stranded segments.** Both the open enqueue and the prune required an attested snapshot. Fix: the no-attested-snapshot case in §2.6. Regressions: an API test that reopens read-only twice, plus a truth table over the proof shapes.
 
+### 2.9 Third-review amendment (2026-09-29, #3671)
+
+The third external review confirmed all seven earlier regressions fixed, and found that "the manifest the prune's proof reads" is still not safe to act on:
+
+- **The gap.** A manifest replacement can be **visible without being durable**: `VisibleDurabilityUnconfirmed` means the rename happened but its directory sync failed. A crash may then restore the previous manifest. Reclaim read the visible manifest, so the open `ReconcileToAttested` deleted snapshot 1 and its segments while snapshot 1 was still a possible recovery state. The same visible watermark also released WAL that a rollback to snapshot 1 would replay.
+- **The fix.** Every destructive reclaim reads the manifest through one gate, `ManifestDurabilityGate::confirmed_manifest`. This covers the queued retention runner, the close runner, the inline prune verbs, and all three WAL-truncation sites.
+  - It acts only on a manifest this session has **confirmed durable**.
+  - A manifest not yet confirmed is confirmed by re-publishing its exact bytes (temp file, fsync, rename, directory fsync). Reading it back is not confirmation.
+  - If that publish fails, the proof is incomplete (`missing: manifest_durability`). No snapshot, segment or WAL object is deleted, and the deferred outcome reports the backend fault.
+  - The record starts empty at every open, because a previous process's last rename may never have reached disk. A `Completed` checkpoint records its own final manifest, since its publish already synced the directory, so steady state costs no extra publish.
+- **Regressions:**
+  - the reconcile keeps checkpoint 1 through an unconfirmed manifest, and a crash that restores manifest 1 recovers strictly with every row;
+  - WAL truncation defers behind an unconfirmed manifest;
+  - a successful confirmation releases checkpoint 1, and the confirmed manifest survives the crash;
+  - the gate confirms once per session and re-publishes nothing after a completed checkpoint.
+
+  The test backend models the crash by tracking the last manifest whose publish fully succeeded.
+
 ## 3. Invariants
 
 | ID | Effect |

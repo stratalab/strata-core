@@ -22,9 +22,10 @@ use crate::lifecycle::flush::{
     flush_durable_branch_with_budget,
 };
 use crate::lifecycle::retention::{
-    build_retention_proof, build_retention_proof_from_facts, prune_snapshots_with_proof,
-    retention_outcome_for_delegated_families, retention_outcome_for_scope,
-    retention_request_from_maintenance_task, LifecycleRetentionRequest, LifecycleRetentionScope,
+    build_retention_proof_for_manifest, build_retention_proof_from_facts,
+    prune_snapshots_with_proof, retention_outcome_for_delegated_families,
+    retention_outcome_for_scope, retention_request_from_maintenance_task,
+    with_unconfirmed_manifest_error, LifecycleRetentionRequest, LifecycleRetentionScope,
     LifecycleRetentionStatus, LifecycleSnapshotPruningRequest,
 };
 use crate::lifecycle::{
@@ -733,15 +734,17 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
         &mut self,
         task: &MaintenanceTask,
     ) -> LifecycleResult<MaintenanceOutcome> {
-        let Some(request) =
-            wal_truncation_request_from_maintenance_task(task, self.services.manifest())?
-        else {
-            return Ok(MaintenanceOutcome::new(
-                MaintenanceTaskKind::WalTruncation,
-                MaintenanceOutcomeStatus::Deferred,
-            )
-            .with_reason("WAL truncation has no retention proof")
-            .with_deferral_reason(crate::lifecycle::MaintenanceDeferralReason::IncompleteProof));
+        let manifest = self.services.manifest_gate().confirmed_manifest()?;
+        let Some(request) = wal_truncation_request_from_maintenance_task(task, &manifest)? else {
+            return Ok(with_unconfirmed_manifest_error(
+                MaintenanceOutcome::new(
+                    MaintenanceTaskKind::WalTruncation,
+                    MaintenanceOutcomeStatus::Deferred,
+                )
+                .with_reason("WAL truncation has no retention proof")
+                .with_deferral_reason(crate::lifecycle::MaintenanceDeferralReason::IncompleteProof),
+                &manifest,
+            ));
         };
         Ok(truncate_wal(self.services.wal(), request)?.maintenance_outcome())
     }
@@ -771,11 +774,7 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
             };
         }
 
-        let manifest = self
-            .services
-            .manifest()
-            .load_current()
-            .map_err(manifest_error)?;
+        let manifest = self.services.manifest_gate().confirmed_manifest()?;
         let snapshot_count = self
             .services
             .snapshot()
@@ -783,8 +782,8 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
             .map_err(snapshot_error)?
             .len();
         let proof =
-            build_retention_proof(&request, manifest.as_ref(), &self.health, snapshot_count);
-        match request.scope() {
+            build_retention_proof_for_manifest(&request, &manifest, &self.health, snapshot_count);
+        let outcome = match request.scope() {
             LifecycleRetentionScope::SnapshotObjects => {
                 let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
                 Ok(prune_snapshots_with_proof(
@@ -813,7 +812,8 @@ impl DurableCloseMaintenanceRunner<'_, '_> {
                 ))
             }
             _ => Ok(retention_outcome_for_delegated_families(proof)?.maintenance_outcome()),
-        }
+        };
+        outcome.map(|outcome| with_unconfirmed_manifest_error(outcome, &manifest))
     }
 
     fn run_purge(&mut self, task: &MaintenanceTask) -> LifecycleResult<MaintenanceOutcome> {

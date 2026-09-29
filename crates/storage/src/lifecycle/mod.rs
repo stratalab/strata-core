@@ -259,13 +259,14 @@ pub(crate) use result::LifecycleResult;
     reason = "retention maintenance exports define the local surface for later slices"
 )]
 pub(crate) use retention::{
-    build_retention_proof, build_retention_proof_from_facts, prune_snapshots_with_proof,
-    retention_outcome_for_delegated_families, retention_outcome_for_scope,
-    retention_request_from_maintenance_task, table_quarantine_candidate,
-    LifecycleRetentionDecisionReason, LifecycleRetentionDecisionRecord,
-    LifecycleRetentionObjectFamily, LifecycleRetentionOutcome, LifecycleRetentionProof,
-    LifecycleRetentionProofStatus, LifecycleRetentionRequest, LifecycleRetentionScope,
-    LifecycleRetentionStatus, LifecycleSnapshotPruningOutcome, LifecycleSnapshotPruningRequest,
+    build_retention_proof, build_retention_proof_for_manifest, build_retention_proof_from_facts,
+    prune_snapshots_with_proof, retention_outcome_for_delegated_families,
+    retention_outcome_for_scope, retention_request_from_maintenance_task,
+    table_quarantine_candidate, with_unconfirmed_manifest_error, LifecycleRetentionDecisionReason,
+    LifecycleRetentionDecisionRecord, LifecycleRetentionObjectFamily, LifecycleRetentionOutcome,
+    LifecycleRetentionProof, LifecycleRetentionProofStatus, LifecycleRetentionRequest,
+    LifecycleRetentionScope, LifecycleRetentionStatus, LifecycleSnapshotPruningOutcome,
+    LifecycleSnapshotPruningRequest,
 };
 #[allow(
     unused_imports,

@@ -2273,6 +2273,12 @@ fn publish_checkpoint_rows(
             // #3643: the snapshot is live — its segments are what the prune
             // spares, and each index may now re-reference what it sealed.
             services.set_live_timeline_segments(request.snapshot_id(), timeline.referenced_refs());
+            // #3671: the final manifest publish completed, directory sync
+            // included, so the visible manifest is the durable one. A failed
+            // read here only costs the next reclaim a confirming re-publish.
+            if let Ok(Some(manifest)) = services.manifest().load_current() {
+                services.manifest_gate().record_confirmed(manifest);
+            }
             for adoption in &timeline.adoptions {
                 adoption
                     .index
@@ -2644,7 +2650,7 @@ pub(crate) fn checkpoint_request_from_maintenance_task_with_snapshot_id(
 
 pub(crate) fn wal_truncation_request_from_maintenance_task(
     task: &MaintenanceTask,
-    manifest: &DatabaseManifestService<'_>,
+    manifest: &crate::lifecycle::retention::ConfirmedManifest,
 ) -> LifecycleResult<Option<WalRetentionProof>> {
     if task.kind() != MaintenanceTaskKind::WalTruncation {
         return Err(LifecycleError::MaintenanceTaskFailed {
@@ -2656,7 +2662,12 @@ pub(crate) fn wal_truncation_request_from_maintenance_task(
             reason: "WAL truncation task must target WAL scope",
         });
     }
-    let current = manifest.load_required().map_err(manifest_error)?;
+    // #3671: truncate only behind a manifest confirmed durable. Behind an
+    // unconfirmed one, a crash may restore the previous manifest, whose
+    // recovery replays WAL this watermark would have released.
+    let crate::lifecycle::retention::ConfirmedManifest::Confirmed(Some(current)) = manifest else {
+        return Ok(None);
+    };
     let snapshot = current.snapshot_watermark().map(CommitVersion::new);
     let flush = current.flushed_through_commit_id();
     let proof = match (snapshot, flush) {

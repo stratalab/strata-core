@@ -738,6 +738,72 @@ impl LifecycleSnapshotPruningOutcome {
     }
 }
 
+/// #3671: the database manifest a destructive reclaim may act on. A manifest
+/// replacement can become visible without its durability being confirmed
+/// (`VisibleDurabilityUnconfirmed`: the rename happened, the directory sync
+/// did not), and a crash may then restore the previous manifest. Reclaim acts
+/// only on a manifest this session has confirmed durable; an unconfirmed one
+/// means both the visible and the previous checkpoint are possible recovery
+/// states, so nothing either references may be deleted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ConfirmedManifest {
+    /// Durable: recovery reads exactly this manifest (or finds none).
+    Confirmed(Option<DatabaseManifest>),
+    /// Visible but not confirmed durable: the confirming publish failed with
+    /// this error. Reclaim defers and reports it.
+    Unconfirmed(LifecycleError),
+}
+
+impl ConfirmedManifest {
+    /// The error that left the manifest unconfirmed, for the deferred
+    /// reclaim's outcome to report (a backend fault is never absorbed).
+    pub(crate) fn unconfirmed_error(&self) -> Option<LifecycleError> {
+        match self {
+            Self::Confirmed(_) => None,
+            Self::Unconfirmed(error) => Some(error.clone()),
+        }
+    }
+}
+
+/// #3671: a reclaim deferred because the manifest could not be confirmed
+/// durable reports the backend fault that prevented it.
+pub(crate) fn with_unconfirmed_manifest_error(
+    outcome: MaintenanceOutcome,
+    manifest: &ConfirmedManifest,
+) -> MaintenanceOutcome {
+    match manifest.unconfirmed_error() {
+        Some(error) => outcome.with_source_error(error),
+        None => outcome,
+    }
+}
+
+/// #3671: the retention proof over a manifest's confirmed durability. An
+/// unconfirmed manifest proves nothing: the proof is incomplete, so no
+/// snapshot, timeline segment or WAL object is deleted on its word.
+pub(crate) fn build_retention_proof_for_manifest(
+    request: &LifecycleRetentionRequest,
+    manifest: &ConfirmedManifest,
+    recovery_health: &RecoveryHealth,
+    snapshot_objects: usize,
+) -> LifecycleRetentionProof {
+    match manifest {
+        ConfirmedManifest::Confirmed(manifest) => build_retention_proof(
+            request,
+            manifest.as_ref(),
+            recovery_health,
+            snapshot_objects,
+        ),
+        ConfirmedManifest::Unconfirmed(_) => LifecycleRetentionProof::new(
+            LifecycleRetentionProofStatus::Incomplete,
+            recovery_health.clone(),
+            None,
+            None,
+            None,
+            Some("manifest_durability"),
+        ),
+    }
+}
+
 pub(crate) fn build_retention_proof(
     request: &LifecycleRetentionRequest,
     manifest: Option<&DatabaseManifest>,
