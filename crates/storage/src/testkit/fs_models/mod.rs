@@ -104,8 +104,10 @@ fn inline_options(durability: StorageDurabilityPolicy) -> StorageOpenOptions {
 /// bounded retry (#2727 policy, as `testkit::simulation` does) — a briefly
 /// held writer lock is a transient, not a verdict on the store (#2796: two
 /// CI hits proved an in-process holder can outlive the staging drop even
-/// under `DeterministicInline`). Exhaustion returns the original error, so
-/// a genuine lock leak still fails loud.
+/// under `DeterministicInline` — a child forked concurrently by another test
+/// sharing the lock's open file description, which the writer guard's
+/// explicit unlock now closes, #3609). Exhaustion returns the original error,
+/// so a genuine lock leak still fails loud.
 fn open_verify_runtime(
     backend: &StorageBackend,
 ) -> crate::api::StorageApiResult<crate::api::StorageOpenOutcome<'_>> {
@@ -363,11 +365,17 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .expect("open lock object");
+        // The staging drop released the lock explicitly (#3609), so no child
+        // forked concurrently by another test can still be holding it here.
         interloper
             .try_lock_exclusive()
             .expect("interloper takes the writer lock");
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
+            // Unlock explicitly, as the product writer guard does (#3609): a
+            // bare drop leaves the lock held while any child this test binary
+            // forks concurrently still shares the descriptor.
+            fs2::FileExt::unlock(&interloper).expect("interloper releases the writer lock");
             drop(interloper);
         });
 

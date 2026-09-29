@@ -1104,23 +1104,8 @@ impl Backend for LocalFsBackend {
             .write(true)
             .open(&path)
             .map_err(|err| map_io_error(&err))?;
-        file.try_lock_exclusive().map_err(|err| {
-            // Contention is NOT a backend outage. `map_io_error` folds
-            // `WouldBlock` into `Unavailable`, which upstream reads as a
-            // transient failure worth retrying with the same request — but the
-            // lock is released by another opener, never by retrying. Classify
-            // it here rather than in `map_io_error`, whose `WouldBlock` mapping
-            // is correct for every other call site (#3005, #3167).
-            if err.kind() == std::io::ErrorKind::WouldBlock {
-                BackendError::new(
-                    BackendErrorKind::AlreadyExists,
-                    "writer lock is held by another opener",
-                )
-            } else {
-                map_io_error(&err)
-            }
-        })?;
-        Ok(BackendWriterGuard::new(name.clone(), file))
+        let lock = LocalFsWriterLock::acquire(file)?;
+        Ok(BackendWriterGuard::new(name.clone(), lock))
     }
 
     fn append_object(&self, name: &ObjectName, bytes: &[u8]) -> BackendResult<BackendAppend> {
@@ -1222,6 +1207,54 @@ fn is_object_file_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(OBJECT_FILE_SUFFIX))
+}
+
+/// The OS advisory writer lock a local-filesystem writer guard holds.
+///
+/// Releasing it is explicit, not left to the descriptor closing (#3609). A
+/// `flock` belongs to the *open file description*, and a child that any
+/// thread of this process forks shares that description until it execs.
+/// Closing only this descriptor therefore leaves the lock held for as long as
+/// a concurrently forked child is still between `fork` and `exec` — an
+/// immediate reopen of the same database in this process, even after a clean
+/// drop or close, fails as writer-lock contention. `LOCK_UN` releases the
+/// lock for every descriptor sharing the description, inherited ones
+/// included, so the release happens when the guard drops.
+struct LocalFsWriterLock {
+    file: File,
+}
+
+impl LocalFsWriterLock {
+    /// Takes the exclusive lock on `file`, fail-fast by contract.
+    fn acquire(file: File) -> Result<Self, BackendError> {
+        file.try_lock_exclusive().map_err(|err| {
+            // Contention is NOT a backend outage. `map_io_error` folds
+            // `WouldBlock` into `Unavailable`, which upstream reads as a
+            // transient failure worth retrying with the same request — but the
+            // lock is released by another opener, never by retrying. Classify
+            // it here rather than in `map_io_error`, whose `WouldBlock` mapping
+            // is correct for every other call site (#3005, #3167).
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                BackendError::new(
+                    BackendErrorKind::AlreadyExists,
+                    "writer lock is held by another opener",
+                )
+            } else {
+                map_io_error(&err)
+            }
+        })?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for LocalFsWriterLock {
+    fn drop(&mut self) {
+        // Rationale: a drop has no caller to report to, and a failed unlock
+        // degrades to the descriptor close that follows, which still releases
+        // the lock once no inherited descriptor shares it (the pre-#3609
+        // behavior).
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
 }
 
 fn map_io_error(error: &std::io::Error) -> BackendError {
@@ -1355,6 +1388,63 @@ mod tests {
             .acquire_writer_lock(&lock_name)
             .expect("released writer lock can be reacquired");
         assert_eq!(second_guard.object(), &lock_name);
+    }
+
+    #[test]
+    fn writer_lock_release_does_not_wait_for_an_inherited_descriptor() {
+        use fs2::FileExt as _;
+
+        // #3609: a child forked by any thread of this process shares the lock
+        // file's open file description until it execs. A `try_clone` shares
+        // the description the same way, so it stands in for that child
+        // deterministically: dropping the guard must release the lock while
+        // the inherited descriptor is still open.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        let lock_name = ObjectLayout::writer_lock().expect("writer lock name");
+        drop(
+            backend
+                .acquire_writer_lock(&lock_name)
+                .expect("stage the lock object"),
+        );
+        let lock_path = backend.path_for(&lock_name);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open lock object");
+        let inherited = file.try_clone().expect("share the open file description");
+        let guard = crate::backend::BackendWriterGuard::new(
+            lock_name.clone(),
+            super::LocalFsWriterLock::acquire(file).expect("take the writer lock"),
+        );
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open contender");
+        assert_eq!(
+            contender
+                .try_lock_exclusive()
+                .expect_err("the held lock excludes a second description")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(guard);
+
+        contender
+            .try_lock_exclusive()
+            .expect("a dropped guard releases the lock despite an inherited descriptor");
+        // The inherited descriptor is still open: the release did not come
+        // from the last reference to the description closing.
+        inherited
+            .metadata()
+            .expect("inherited descriptor still open");
+        drop(contender);
+        backend
+            .acquire_writer_lock(&lock_name)
+            .expect("the production acquire path reacquires the released lock");
     }
 
     #[test]
