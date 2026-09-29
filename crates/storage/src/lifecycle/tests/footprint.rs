@@ -336,8 +336,8 @@ fn audit_wal_split_is_exactly_what_the_truncation_pass_deletes() {
     let mut runtime = open_runtime_with_wal_segment_size(branch, backend, 4096);
     for index in 0..6u8 {
         let key: &'static [u8] =
-            Box::leak(format!("wal-split-{index}").into_bytes().into_boxed_slice());
-        let value: &'static [u8] = Box::leak(vec![index; 1500].into_boxed_slice());
+            crate::testkit::leak_static(format!("wal-split-{index}").into_bytes()).as_slice();
+        let value: &'static [u8] = crate::testkit::leak_static(vec![index; 1500]).as_slice();
         runtime
             .execute_durable_commit(durable_batch(branch, key, value), generation_guard())
             .expect("commit");
@@ -429,12 +429,9 @@ fn audit_tolerates_wal_segments_that_vanish_between_listing_and_read() {
     let branch = branch_id(0xd7);
     let mut runtime = open_runtime_with_wal_segment_size(branch, backend, 4096);
     for index in 0..6u8 {
-        let key: &'static [u8] = Box::leak(
-            format!("wal-vanish-{index}")
-                .into_bytes()
-                .into_boxed_slice(),
-        );
-        let value: &'static [u8] = Box::leak(vec![index; 1500].into_boxed_slice());
+        let key: &'static [u8] =
+            crate::testkit::leak_static(format!("wal-vanish-{index}").into_bytes()).as_slice();
+        let value: &'static [u8] = crate::testkit::leak_static(vec![index; 1500]).as_slice();
         runtime
             .execute_durable_commit(durable_batch(branch, key, value), generation_guard())
             .expect("commit");
@@ -494,8 +491,8 @@ fn audit_propagates_wal_segment_read_and_stat_failures_other_than_not_found() {
     let mut runtime = open_runtime_with_wal_segment_size(branch, backend, 4096);
     for index in 0..6u8 {
         let key: &'static [u8] =
-            Box::leak(format!("wal-fault-{index}").into_bytes().into_boxed_slice());
-        let value: &'static [u8] = Box::leak(vec![index; 1500].into_boxed_slice());
+            crate::testkit::leak_static(format!("wal-fault-{index}").into_bytes()).as_slice();
+        let value: &'static [u8] = crate::testkit::leak_static(vec![index; 1500]).as_slice();
         runtime
             .execute_durable_commit(durable_batch(branch, key, value), generation_guard())
             .expect("commit");
