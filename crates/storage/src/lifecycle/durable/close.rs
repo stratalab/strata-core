@@ -9,9 +9,7 @@ use crate::lifecycle::checkpoint::{
     LifecycleCheckpointRequest, LifecycleCheckpointStatus,
 };
 use crate::lifecycle::compaction::{
-    compact_durable_branch, current_compaction_request_from_maintenance_task,
     materialization_request_from_maintenance_task, materialize_durable_branch,
-    record_lifecycle_compaction_outcome, stale_compaction_maintenance_outcome,
 };
 use crate::lifecycle::durable::maintenance::{
     checkpoint_created_at, durable_quarantine_service_error, publish_table_manifest_after_flush,
@@ -632,6 +630,22 @@ fn close_drained_checkpoint_outcome() -> MaintenanceOutcome {
     .with_reason("checkpoint deferred during close: the close publishes its own checkpoint")
 }
 
+/// #3678: the outcome of a compaction the close drain services (see the
+/// runner's `Compaction` arm). A spelled-out `Result` rather than
+/// `LifecycleResult`, so the mutation gate can write a constructible `Err`
+/// replacement for it (#3337).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Result lets the mutation gate write a viable Err replacement (#3337)"
+)]
+fn close_deferred_compaction_outcome() -> Result<MaintenanceOutcome, LifecycleError> {
+    Ok(MaintenanceOutcome::new(
+        MaintenanceTaskKind::Compaction,
+        MaintenanceOutcomeStatus::Deferred,
+    )
+    .with_reason("compaction is deferred during close"))
+}
+
 struct DurableCloseMaintenanceRunner<'a, 'b> {
     branch: &'a mut BranchLocalState,
     services: &'a LifecycleDurableLocalServices<'b>,
@@ -701,16 +715,17 @@ impl MaintenanceTaskRunner for DurableCloseMaintenanceRunner<'_, '_> {
             )
             .with_reason("cache preheat is deferred during close")),
             MaintenanceTaskKind::WalTruncation => self.run_wal_truncation(task),
-            MaintenanceTaskKind::Compaction => {
-                let Some(request) =
-                    current_compaction_request_from_maintenance_task(task, self.branch)?
-                else {
-                    return Ok(stale_compaction_maintenance_outcome());
-                };
-                let compaction = compact_durable_branch(self.branch, &request)?;
-                record_lifecycle_compaction_outcome(&compaction);
-                Ok(compaction.maintenance_outcome())
-            }
+            // #3678: a compaction claimed before close began (in flight when
+            // the workers stopped) is not finished here. Running it inline
+            // would install output tables with no catalog entry and no table
+            // manifest: the close checkpoint would treat them as volatile and
+            // re-capture every row they hold (past the payload cap after a
+            // bulk load, so the checkpoint defers and the WAL stays), and the
+            // branch could no longer publish a table manifest. Compaction is
+            // optional; its inputs stay durable, and the next session
+            // recompacts. The abandoned build's objects are orphans the next
+            // open reclaims.
+            MaintenanceTaskKind::Compaction => close_deferred_compaction_outcome(),
             MaintenanceTaskKind::Materialization => {
                 let request = materialization_request_from_maintenance_task(task)?;
                 Ok(materialize_durable_branch(self.branch, &request)?.maintenance_outcome())
