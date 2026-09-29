@@ -871,24 +871,29 @@ impl MaintenanceTask {
     }
 
     const fn lane(self) -> MaintenanceTaskLane {
-        match self.kind() {
-            MaintenanceTaskKind::Flush => MaintenanceTaskLane::Flush,
-            MaintenanceTaskKind::Compaction | MaintenanceTaskKind::Materialization => {
-                MaintenanceTaskLane::Rewrite
-            }
-            MaintenanceTaskKind::Checkpoint => MaintenanceTaskLane::Checkpoint,
-            MaintenanceTaskKind::FlushWatermark | MaintenanceTaskKind::WalTruncation => {
-                MaintenanceTaskLane::Wal
-            }
-            MaintenanceTaskKind::SnapshotPruning | MaintenanceTaskKind::Retention => {
-                MaintenanceTaskLane::Retention
-            }
-            MaintenanceTaskKind::Quarantine
-            | MaintenanceTaskKind::Purge
-            | MaintenanceTaskKind::Repair => MaintenanceTaskLane::Quarantine,
-            MaintenanceTaskKind::HealthCollection => MaintenanceTaskLane::Health,
-            MaintenanceTaskKind::CachePreheat => MaintenanceTaskLane::Preheat,
+        lane_for_kind(self.kind())
+    }
+}
+
+/// The executor lane a task of `kind` occupies while it runs.
+const fn lane_for_kind(kind: MaintenanceTaskKind) -> MaintenanceTaskLane {
+    match kind {
+        MaintenanceTaskKind::Flush => MaintenanceTaskLane::Flush,
+        MaintenanceTaskKind::Compaction | MaintenanceTaskKind::Materialization => {
+            MaintenanceTaskLane::Rewrite
         }
+        MaintenanceTaskKind::Checkpoint => MaintenanceTaskLane::Checkpoint,
+        MaintenanceTaskKind::FlushWatermark | MaintenanceTaskKind::WalTruncation => {
+            MaintenanceTaskLane::Wal
+        }
+        MaintenanceTaskKind::SnapshotPruning | MaintenanceTaskKind::Retention => {
+            MaintenanceTaskLane::Retention
+        }
+        MaintenanceTaskKind::Quarantine
+        | MaintenanceTaskKind::Purge
+        | MaintenanceTaskKind::Repair => MaintenanceTaskLane::Quarantine,
+        MaintenanceTaskKind::HealthCollection => MaintenanceTaskLane::Health,
+        MaintenanceTaskKind::CachePreheat => MaintenanceTaskLane::Preheat,
     }
 }
 
@@ -1754,6 +1759,11 @@ impl LifecycleMaintenanceExecutor {
         self.active.push(task);
     }
 
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn clear_active_for_test(&mut self, task: MaintenanceTask) {
+        self.active.retain(|active| active.id() != task.id());
+    }
+
     pub(crate) const fn stats(&self) -> LifecycleMaintenanceStats {
         self.stats
     }
@@ -1785,7 +1795,17 @@ impl LifecycleMaintenanceExecutor {
     /// dispatch scorer skips conflicting levels, and correctness is enforced at publish by
     /// candidate revalidation regardless.
     fn lane_at_capacity(&self, task: MaintenanceTask) -> bool {
-        let lane = task.lane();
+        self.lane_full(task.lane())
+    }
+
+    /// Whether a task of `kind` would be refused a start right now because its lane is full.
+    /// A caller that enqueues-then-starts in one lock hold consults this FIRST, so a refused
+    /// start never leaves its task standing in the queue (#3687).
+    pub(crate) fn lane_at_capacity_for_kind(&self, kind: MaintenanceTaskKind) -> bool {
+        self.lane_full(lane_for_kind(kind))
+    }
+
+    fn lane_full(&self, lane: MaintenanceTaskLane) -> bool {
         let cap = if lane == MaintenanceTaskLane::Rewrite {
             self.rewrite_lane_cap
         } else {

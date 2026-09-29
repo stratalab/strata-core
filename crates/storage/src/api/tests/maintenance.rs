@@ -5734,3 +5734,127 @@ fn api_a_child_forked_after_a_checkpoint_shares_its_parents_sealed_tail() {
     .expect("reopen strict");
     assert_eq!(read_history_at(&reopened, 30).expect("read"), b"v2");
 }
+
+// ----------------------------------------------------------------------------
+// #3687: a cache preheat that loses the Preheat-lane race must not be left
+// queued. The runtime arms a flag, never a standing task; an orphaned
+// CachePreheat made `pending_tasks()` nonzero with nothing to start it, which
+// suppressed the write-admission wait's forced flush / L0 compaction.
+// ----------------------------------------------------------------------------
+
+/// A `CachePreheat` task standing in for a background worker mid-chunk.
+#[cfg(feature = "localfs")]
+fn in_flight_preheat() -> crate::lifecycle::MaintenanceTask {
+    crate::lifecycle::MaintenanceTask::new_for_test(
+        1_000_000,
+        crate::lifecycle::MaintenanceTaskRequest::cache_preheat(),
+    )
+    .expect("in-flight preheat task")
+}
+
+/// Open a deterministic durable runtime, hold the Preheat lane, then publish a
+/// table (arming the preheat) and drain: the drain's preheat step runs while
+/// the lane is held — the exact race #3687 orphaned a task on.
+#[cfg(feature = "localfs")]
+fn drain_with_preheat_lane_held(
+    name: &str,
+) -> (StorageRuntime<'static>, crate::lifecycle::MaintenanceTask) {
+    let mut runtime = open_durable_runtime_with_options(
+        name,
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_maintenance_scheduling_policy(
+                StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+            )
+            .with_cache_preheat_policy(StorageCachePreheatPolicy::WhenIdle),
+    );
+    runtime
+        .commit(&put_batch(b"preheat-lane-race", b"value"))
+        .expect("commit");
+    let held = in_flight_preheat();
+    runtime.set_active_lifecycle_maintenance_for_test(held);
+    let flush = MaintenanceRequest::new(MaintenanceTask::Flush, MaintenanceScope::Branch(branch()));
+    runtime
+        .maintenance(&flush)
+        .expect("flush publishes a table");
+    runtime
+        .drain_maintenance()
+        .expect("drain with the preheat lane held");
+    (runtime, held)
+}
+
+#[cfg(feature = "localfs")]
+fn pending_preheats(runtime: &StorageRuntime<'static>) -> usize {
+    runtime
+        .pending_lifecycle_maintenance_kinds_for_test()
+        .iter()
+        .filter(|kind| **kind == crate::lifecycle::MaintenanceTaskKind::CachePreheat)
+        .count()
+}
+
+#[cfg(feature = "localfs")]
+#[test]
+fn preheat_refused_by_a_busy_lane_is_not_left_queued() {
+    let (mut runtime, held) = drain_with_preheat_lane_held("preheat-lane-busy-no-orphan");
+
+    assert_eq!(
+        pending_preheats(&runtime),
+        0,
+        "a preheat the busy lane cannot start must not stand in the queue"
+    );
+    assert_eq!(
+        runtime
+            .maintenance_status()
+            .expect("status")
+            .pending_tasks(),
+        0,
+        "nothing startable was queued, so nothing may read as pending"
+    );
+
+    // The trigger is a flag and survives the refusal: once the lane frees,
+    // the next drain runs the owed pass and leaves the queue empty.
+    runtime.clear_active_lifecycle_maintenance_for_test(held);
+    let drained = runtime
+        .drain_maintenance()
+        .expect("drain after the lane frees");
+    assert!(
+        drained.drained_tasks() >= 1,
+        "the armed preheat must still run once its lane frees"
+    );
+    assert_eq!(pending_preheats(&runtime), 0);
+    assert_eq!(drained.queue().pending_tasks(), 0);
+}
+
+/// Call-site consequence: the write-admission wait forces its flush (frozen
+/// backlog) or L0->L1 compaction (level-zero backlog) only over an empty
+/// queue. After the preheat lane race it must still enqueue that work.
+#[cfg(feature = "localfs")]
+#[test]
+fn pressure_wait_still_forces_maintenance_after_a_preheat_lane_race() {
+    use crate::lifecycle::{LifecycleStoragePressureReason, MaintenanceTaskKind};
+
+    for (name, reason, forced) in [
+        (
+            "preheat-lane-race-frozen-backlog",
+            LifecycleStoragePressureReason::FrozenBacklog,
+            MaintenanceTaskKind::Flush,
+        ),
+        (
+            "preheat-lane-race-l0-backlog",
+            LifecycleStoragePressureReason::LevelZeroTableBacklog,
+            MaintenanceTaskKind::Compaction,
+        ),
+    ] {
+        let (runtime, _held) = drain_with_preheat_lane_held(name);
+        let pending = runtime.pressure_maintenance_for_background_wait_for_test(branch(), reason);
+        let kinds = runtime.pending_lifecycle_maintenance_kinds_for_test();
+        assert!(
+            kinds.contains(&forced),
+            "{reason:?} pressure must enqueue its {forced:?}; pending kinds {kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&MaintenanceTaskKind::CachePreheat),
+            "no orphaned preheat may stand in for real progress: {kinds:?}"
+        );
+        assert_eq!(pending, kinds.len());
+    }
+}

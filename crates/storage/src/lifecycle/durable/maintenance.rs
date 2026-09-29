@@ -1646,6 +1646,11 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         self.maintenance.set_active_for_test(task);
     }
 
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn clear_active_maintenance_for_test(&mut self, task: MaintenanceTask) {
+        self.maintenance.clear_active_for_test(task);
+    }
+
     #[allow(
         dead_code,
         reason = "runtime hook is consumed by concrete maintenance modules"
@@ -4516,7 +4521,7 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     /// the next trigger rather than spinning.
     pub(crate) fn start_next_background_cache_preheat(
         &mut self,
-    ) -> LifecycleResult<Option<DurableBackgroundMaintenanceStep<'a>>> {
+    ) -> Result<Option<DurableBackgroundMaintenanceStep<'a>>, LifecycleError> {
         if !self.cache_preheat_work_pending() {
             return Ok(None);
         }
@@ -4548,6 +4553,18 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             self.cache_preheat_rearm = false;
             self.cache_preheat_paused = true;
             crate::observability::perf_trace::record_table_preheat_deferred();
+            return Ok(None);
+        }
+        // #3687: a busy Preheat lane (a worker mid-chunk, off-lock) would
+        // refuse the start below and strand the task in the queue, where it
+        // reads as pending work nothing starts — suppressing the admission
+        // wait's forced flush/compaction. Check the lane BEFORE enqueuing;
+        // the flag/cursor are untouched, so the owed pass starts on the next
+        // poll after the in-flight chunk finishes.
+        if self
+            .maintenance
+            .lane_at_capacity_for_kind(MaintenanceTaskKind::CachePreheat)
+        {
             return Ok(None);
         }
         let state = self.state;

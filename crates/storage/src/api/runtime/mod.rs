@@ -471,6 +471,29 @@ impl StorageRuntime<'static> {
         }
     }
 
+    /// Release a lane held by [`Self::set_active_lifecycle_maintenance_for_test`],
+    /// as if its worker had finished (#3687).
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn clear_active_lifecycle_maintenance_for_test(
+        &self,
+        task: crate::lifecycle::MaintenanceTask,
+    ) {
+        if let StorageRuntimeInner::DurableOwned(slot) = &self.inner {
+            slot.lock().clear_active_maintenance_for_test(task);
+        }
+    }
+
+    /// Drive the write-admission wait's pressure-maintenance enqueue directly
+    /// (#3687): returns the pending count the wait path is paced on.
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn pressure_maintenance_for_background_wait_for_test(
+        &self,
+        branch_id: BranchId,
+        pressure_reason: LifecycleStoragePressureReason,
+    ) -> usize {
+        self.enqueue_pressure_maintenance_for_background_wait(branch_id, pressure_reason)
+    }
+
     #[cfg(test)]
     // Read by the scaled background closed-loop test, which needs a durable
     // store: under `perf-trace` alone that test compiles away.
