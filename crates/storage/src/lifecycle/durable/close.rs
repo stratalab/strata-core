@@ -6,7 +6,7 @@ use crate::commit::CommitRuntimeError;
 use crate::lifecycle::checkpoint::{
     checkpoint_durable_runtime_with_budget, checkpoint_structural_deferral, truncate_wal,
     wal_truncation_request_from_maintenance_task, CheckpointStructuralDeferral,
-    LifecycleCheckpointRequest, LifecycleCheckpointStatus,
+    LifecycleCheckpointOutcome, LifecycleCheckpointRequest, LifecycleCheckpointStatus,
 };
 use crate::lifecycle::compaction::{
     materialization_request_from_maintenance_task, materialize_durable_branch,
@@ -69,6 +69,18 @@ pub(crate) const CLOSE_FLUSH_MIN_DELTA_BYTES: u64 = 64 * 1024;
 /// `unflushed_bytes` before the close checkpoint.
 pub(crate) const fn close_flushes_branch(unflushed_bytes: u64, threshold: u64) -> bool {
     unflushed_bytes >= threshold
+}
+
+/// #3614: the unflushed delta at or above which the close's retry after a
+/// delta-cap deferral flushes a branch — any row at all, since the retry
+/// exists to bring the snapshot under the cap.
+pub(crate) const CLOSE_RETRY_FLUSH_MIN_DELTA_BYTES: u64 = 1;
+
+/// #3614: whether the close flushes every branch and retries its checkpoint
+/// after the first attempt reported `status`. Only a delta-cap deferral
+/// retries; the close calls this once, so it retries at most once.
+pub(crate) const fn close_checkpoint_retries_after(status: LifecycleCheckpointStatus) -> bool {
+    matches!(status, LifecycleCheckpointStatus::DeferredDeltaExceedsCap)
 }
 
 pub(crate) const fn close_checkpoint_decision(
@@ -448,7 +460,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         // the same way) and makes the close's own quiesce report the retry,
         // and that retry must not rotate the log again.
         drop(self.guard_set.try_begin_quiesce().map_err(commit_error)?);
-        self.flush_large_deltas_before_close_checkpoint();
+        self.flush_deltas_before_close_checkpoint(CLOSE_FLUSH_MIN_DELTA_BYTES);
         // Reclaim rotation first (#3494): the snapshot below covers every
         // record in the active segment, so sealing it now lets the
         // checkpoint's own truncation pass release it, leaving an empty
@@ -465,19 +477,14 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         )?
         .with_wal_truncation_after_checkpoint(true)
         .with_delta_cap_bytes(self.checkpoint_delta_cap_bytes)?;
-        let table_catalog = &self.table_catalog;
-        let table_is_durable =
-            |identity: &crate::table::TableIdentity| table_catalog.is_durable_base(identity);
-        let outcome = checkpoint_durable_runtime_with_budget(
-            &self.branch_catalog,
-            &self.services,
-            &self.guard_set,
-            || visible_version,
-            &request,
-            self.initial_branch_id,
-            Some(&self.budget),
-            &table_is_durable,
-        )?;
+        let mut outcome = self.close_checkpoint_attempt(&request, visible_version)?;
+        if close_checkpoint_retries_after(outcome.status()) {
+            // #3614: the delta outgrew the cap despite the large-delta flush;
+            // flush every branch that holds a row and retry once. A delta the
+            // flush cannot shrink defers again and the WAL stays the record.
+            self.flush_deltas_before_close_checkpoint(CLOSE_RETRY_FLUSH_MIN_DELTA_BYTES);
+            outcome = self.close_checkpoint_attempt(&request, visible_version)?;
+        }
         if let Some(snapshot_id) = outcome.snapshot_id() {
             self.next_checkpoint_snapshot_id =
                 snapshot_id
@@ -520,12 +527,33 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         Ok(CloseCheckpointReport::Attempted(outcome.status()))
     }
 
-    /// #3625: flush every branch whose unflushed delta is large enough to be
-    /// worth a table, so the close checkpoint snapshots only small deltas.
+    /// One close-time checkpoint publish of every branch's uncovered rows.
+    fn close_checkpoint_attempt(
+        &self,
+        request: &LifecycleCheckpointRequest,
+        visible_version: strata_core::CommitVersion,
+    ) -> Result<LifecycleCheckpointOutcome, LifecycleError> {
+        let table_catalog = &self.table_catalog;
+        let table_is_durable =
+            |identity: &crate::table::TableIdentity| table_catalog.is_durable_base(identity);
+        checkpoint_durable_runtime_with_budget(
+            &self.branch_catalog,
+            &self.services,
+            &self.guard_set,
+            || visible_version,
+            request,
+            self.initial_branch_id,
+            Some(&self.budget),
+            &table_is_durable,
+        )
+    }
+
+    /// #3625: flush every branch whose unflushed delta is at least
+    /// `threshold` bytes, so the close checkpoint snapshots only small deltas.
     /// Best-effort: a branch whose flush is refused or fails keeps its rows in
     /// the memtable, and the checkpoint below snapshots them as before; the
     /// failure is health debt, never a close failure.
-    fn flush_large_deltas_before_close_checkpoint(&mut self) {
+    fn flush_deltas_before_close_checkpoint(&mut self, threshold: u64) {
         for branch_id in self.branch_catalog.registry().active_branch_ids() {
             let Ok(branch) = self.branch_catalog.branch_state(branch_id) else {
                 continue;
@@ -533,7 +561,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
             let unflushed = branch
                 .active_byte_count()
                 .saturating_add(branch.frozen_byte_count());
-            if !close_flushes_branch(unflushed, CLOSE_FLUSH_MIN_DELTA_BYTES) {
+            if !close_flushes_branch(unflushed, threshold) {
                 continue;
             }
             let flushed = self
