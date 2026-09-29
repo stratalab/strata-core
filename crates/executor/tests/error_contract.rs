@@ -344,6 +344,54 @@ fn opening_a_pre_v1_layout_reports_layout_version_precondition() {
     );
 }
 
+/// CRC-32 (IEEE), the manifest footer's checksum, so the test can present a
+/// well-formed manifest from a newer format rather than a corrupt one.
+fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// #3659: a database written by a newer Strata is refused with a permanent,
+/// structured `format_version` precondition naming both versions — never the
+/// retryable `unavailable.engine.persistence` a decode failure would surface as.
+#[test]
+fn opening_a_newer_format_database_reports_format_version_precondition() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path().join("newer-db");
+    drop(Executor::open_durable_local(&root).expect("create database"));
+    let manifest = root.join("manifest/current.object@");
+    let mut bytes = std::fs::read(&manifest).expect("read manifest");
+    bytes[4..8].copy_from_slice(&9_u32.to_le_bytes());
+    let footer = bytes.len() - 4;
+    let crc = crc32_ieee(&bytes[..footer]);
+    bytes[footer..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&manifest, bytes).expect("write manifest");
+
+    let status = open_error(&root);
+    assert_fixture(
+        "newer-format database",
+        &status,
+        "failed_precondition.engine.format_version",
+        false,
+        &root,
+    );
+    let details = status["details"].to_string();
+    assert!(
+        details.contains("\"9\"") && details.contains("\"3\""),
+        "details name the database's format version and the newest this build reads: {status}"
+    );
+}
+
 /// Transient direction control: a held writer lock is genuinely temporary —
 /// the same request succeeds once the holder closes — so it must stay
 /// retryable. A harness that only ever asserts `retryable=false` would be

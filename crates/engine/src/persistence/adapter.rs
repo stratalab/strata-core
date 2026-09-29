@@ -1383,6 +1383,12 @@ const fn persistence_code(error: &StorageApiError) -> (&'static str, &'static st
             "failed_precondition.engine.layout_version",
             "this directory holds a database from a pre-V1 version of Strata",
         ),
+        // #3659: a newer Strata wrote this database. Permanent, never the
+        // retryable lower-layer failure its decode error would otherwise be.
+        StorageApiError::IncompatibleFormat { .. } => (
+            "failed_precondition.engine.format_version",
+            "this database was written by a newer version of Strata",
+        ),
         StorageApiError::BranchGenerationMismatch { .. } => (
             "conflict.engine.branch_generation",
             "branch generation changed before the write could commit",
@@ -1475,6 +1481,24 @@ fn persistence_hints(error: &StorageApiError) -> Vec<String> {
     vec![hint.to_owned()]
 }
 
+/// #3659: the format a newer Strata wrote, its version, and the newest
+/// version this build reads.
+fn format_details(error: &StorageApiError) -> Vec<ErrorDetail> {
+    let StorageApiError::IncompatibleFormat {
+        format,
+        version,
+        max_supported,
+    } = error
+    else {
+        return Vec::new();
+    };
+    vec![
+        ErrorDetail::new("format", *format),
+        ErrorDetail::new("format_version", version.to_string()),
+        ErrorDetail::new("max_supported_version", max_supported.to_string()),
+    ]
+}
+
 fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
     let mut details = Vec::new();
     match error {
@@ -1505,6 +1529,7 @@ fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
         | StorageApiError::BranchHasDependentChildren { branch_id } => {
             details.push(ErrorDetail::new("branch_id", branch_id.to_string()));
         }
+        StorageApiError::IncompatibleFormat { .. } => details.extend(format_details(error)),
         StorageApiError::BranchGenerationMismatch {
             branch_id,
             expected,
@@ -1752,6 +1777,15 @@ mod tests {
                 &[],
             ),
             (
+                StorageApiError::IncompatibleFormat {
+                    format: "database_manifest",
+                    version: 9,
+                    max_supported: 3,
+                },
+                "failed_precondition.engine.format_version",
+                &[],
+            ),
+            (
                 StorageApiError::lower_layer_with(
                     StorageApiLowerLayer::Service,
                     "test lower layer",
@@ -1857,6 +1891,31 @@ mod tests {
             "mapped storage errors should carry structured details"
         );
         assert_public_details_do_not_leak_storage_terms(error);
+    }
+
+    /// #3659: a newer-format refusal carries the format and both versions as
+    /// structured details, so a caller can report "format 9; this build reads
+    /// up to 3" without parsing the message.
+    #[test]
+    fn newer_format_refusal_details_name_the_format_and_both_versions() {
+        let mapped = map_storage_error(StorageApiError::IncompatibleFormat {
+            format: "database_manifest",
+            version: 9,
+            max_supported: 3,
+        });
+        let details: Vec<(&str, &str)> = mapped
+            .details()
+            .iter()
+            .map(|detail| (detail.key(), detail.value()))
+            .collect();
+        assert_eq!(
+            details,
+            vec![
+                ("format", "database_manifest"),
+                ("format_version", "9"),
+                ("max_supported_version", "3"),
+            ]
+        );
     }
 
     fn assert_public_details_do_not_leak_storage_terms(error: &EngineError) {

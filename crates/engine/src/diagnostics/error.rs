@@ -653,6 +653,13 @@ mod tests {
                 EngineError::new("failed_precondition.engine.layout_version", "probe"),
             ),
             (
+                EngineError::incompatible_layout(
+                    "failed_precondition.engine.format_version",
+                    "probe",
+                ),
+                EngineError::new("failed_precondition.engine.format_version", "probe"),
+            ),
+            (
                 EngineError::unsupported("unsupported.engine.persistence_capability", "probe"),
                 EngineError::new("unsupported.engine.persistence_capability", "probe"),
             ),

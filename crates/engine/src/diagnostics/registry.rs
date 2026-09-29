@@ -211,6 +211,7 @@ const INCOMPATIBLE_LAYOUT_CODES: &[&str] = &[
     "failed_precondition.engine.capability_registry",
     "failed_precondition.engine.control_payload_version",
     "failed_precondition.engine.default_branch",
+    "failed_precondition.engine.format_version",
     "failed_precondition.engine.layout_version",
     "failed_precondition.engine.migration_registry",
     "failed_precondition.engine.storage_registry",
@@ -550,6 +551,12 @@ fn class_prefixed_suggested_fix(code: &str) -> Option<&'static str> {
         "failed_precondition.engine.layout_version" => {
             "Point Strata at an empty directory or an existing V1 database; pre-V1 databases \
              are not migrated."
+        }
+        // #3659: a newer Strata wrote the database; only a build that reads
+        // its format can open it, so neither "retry" nor "migrate" applies.
+        "failed_precondition.engine.format_version" => {
+            "Open the database with the Strata version that wrote it or a newer one; \
+             downgrades are not supported."
         }
         "history_unavailable.engine.persistence_history" => {
             "Request history inside the retained window."
@@ -1142,6 +1149,27 @@ mod tests {
                 EngineErrorClass::Unavailable
             ),
             suggested_fix_for_code("internal.engine.persistence", EngineErrorClass::Internal),
+        );
+    }
+
+    /// #3659: a newer-format database cannot be retried or migrated into
+    /// readability — only a build that reads its format opens it — so its row
+    /// carries its own remedy, not the class's compatible-version arm.
+    #[test]
+    fn newer_format_row_says_open_with_a_newer_build() {
+        let fix = suggested_fix_for_code(
+            "failed_precondition.engine.format_version",
+            EngineErrorClass::IncompatibleLayout,
+        );
+        assert!(fix.contains("newer"), "{fix}");
+        assert!(fix.contains("downgrades are not supported"), "{fix}");
+        assert!(!fix.contains("migration"), "{fix}");
+        assert_ne!(
+            fix,
+            suggested_fix_for_code(
+                "failed_precondition.engine.migration_registry",
+                EngineErrorClass::IncompatibleLayout,
+            )
         );
     }
 
