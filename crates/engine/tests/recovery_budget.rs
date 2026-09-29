@@ -22,6 +22,18 @@
 //! pin broke as designed and was replaced by the envelope contract below.
 //! The correctness half is permanent: recovery under a small budget must
 //! still recover *all* the data, however much memory it uses.
+//!
+//! Sanitizer builds (#3496): `VmHWM` counts resident pages, and under
+//! `-Zsanitizer=thread|address` the runtime's shadow memory rides every page
+//! the program touches. The nightly thread-sanitizer lane measured the
+//! budgeted peak at 66-85 MB against ~28 MB natively (and a local run the
+//! unbudgeted one at ~566 MB against ~177 MB). The kB ceilings below are
+//! application bytes, so there the instrument, not the product, breaks them.
+//! Under `cfg(strata_sanitizer)` (derived from the real build by `build.rs`)
+//! the absolute-kB checks are reported, not asserted; the budgeted-vs-
+//! unbudgeted ratio (~0.12 in both builds — the shadow inflates both peaks
+//! alike) and the read-back still assert, and the per-PR native run holds
+//! every kB ceiling.
 #![cfg(all(feature = "localfs", target_os = "linux"))]
 
 use std::path::Path;
@@ -176,6 +188,20 @@ fn run_phase(test_name: &str, dir: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Asserts a kB ceiling stated in application bytes — or, in a sanitizer
+/// build, reports it: there `VmHWM` includes the sanitizer's shadow memory,
+/// so the measurement is not in the ceiling's units (see the module docs).
+fn assert_app_kb_ceiling(peak_kb: u64, ceiling_kb: u64, violation: &str) {
+    if cfg!(strata_sanitizer) {
+        eprintln!(
+            "sanitizer build: peak {peak_kb} kB vs application-byte ceiling \
+             {ceiling_kb} kB reported, not asserted (VmHWM includes shadow memory)"
+        );
+    } else {
+        assert!(peak_kb <= ceiling_kb, "{violation}");
+    }
+}
+
 /// Extracts `key=value` kB fields from a phase's marker line.
 fn phase_kb(output: &str, marker: &str, field: &str) -> u64 {
     let line = output
@@ -229,11 +255,14 @@ fn recovery_transient_stays_within_a_small_multiple_of_the_wal_tail() {
         - phase_kb(&budgeted, "PHASE-RECOVER-BUDGETED", "before_kb");
 
     let ceiling_kb = tail_kb + tail_kb / 2;
-    assert!(
-        budgeted_peak_kb <= ceiling_kb,
-        "recovery transient is unbounded: replaying a {tail_kb} kB WAL tail \
-         peaked at {budgeted_peak_kb} kB (> {ceiling_kb} kB = 1.5x the tail) — \
-         the tail is being materialized wholesale instead of streamed"
+    assert_app_kb_ceiling(
+        budgeted_peak_kb,
+        ceiling_kb,
+        &format!(
+            "recovery transient is unbounded: replaying a {tail_kb} kB WAL tail \
+             peaked at {budgeted_peak_kb} kB (> {ceiling_kb} kB = 1.5x the tail) — \
+             the tail is being materialized wholesale instead of streamed"
+        ),
     );
 }
 
@@ -269,14 +298,19 @@ fn budgeted_recovery_peak_stays_within_the_budget_envelope() {
         - phase_kb(&budgeted, "PHASE-RECOVER-BUDGETED", "before_kb");
 
     let budget_kb = RECOVERY_BUDGET / 1024;
-    assert!(
-        budgeted_peak_kb <= budget_kb + ENVELOPE_ALLOWANCE_KB,
-        "budgeted recovery peaked at {budgeted_peak_kb} kB — outside the \
-         envelope ({budget_kb} kB budget + {ENVELOPE_ALLOWANCE_KB} kB allowance): \
-         the replayed state is not being flushed under the budget"
+    assert_app_kb_ceiling(
+        budgeted_peak_kb,
+        budget_kb + ENVELOPE_ALLOWANCE_KB,
+        &format!(
+            "budgeted recovery peaked at {budgeted_peak_kb} kB — outside the \
+             envelope ({budget_kb} kB budget + {ENVELOPE_ALLOWANCE_KB} kB allowance): \
+             the replayed state is not being flushed under the budget"
+        ),
     );
     // The budget must INFLUENCE recovery: the same store recovered without a
     // budget keeps the whole replayed state resident and peaks well above.
+    // Both peaks carry the same shadow factor in a sanitizer build, so this
+    // ratio holds everywhere and is asserted unconditionally.
     assert!(
         budgeted_peak_kb < unbudgeted_peak_kb - unbudgeted_peak_kb / 4,
         "budgeted ({budgeted_peak_kb} kB) is not materially below unbudgeted \
