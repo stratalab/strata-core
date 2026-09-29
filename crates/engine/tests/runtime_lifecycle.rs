@@ -4,7 +4,7 @@ mod common;
 
 use common::{assert_no_storage_leak, assert_status, branch, open_cache_database, space};
 #[cfg(feature = "localfs")]
-use common::{key, open_durable_database, value};
+use common::{key, open_durable_database, reopen_durable_database_after_drop, value};
 #[cfg(feature = "localfs")]
 use strata_engine::DurableLocalOpenOptions;
 use strata_engine::{CacheOpenOptions, Database, EngineError, EngineErrorClass};
@@ -163,7 +163,8 @@ fn dropped_durable_handle_preserves_committed_data() {
         // The handle is dropped here without an explicit close().
     }
 
-    let db = open_durable_database(dir.path()).expect("durable reopens");
+    // Dropped, not closed: wait out a detached worker's writer lock (#2837).
+    let db = reopen_durable_database_after_drop(dir.path()).expect("durable reopens");
     let stored = db
         .kv(branch("default"), space("default"))
         .expect("kv opens")

@@ -1518,3 +1518,81 @@ fn background_block_pressure_wait_has_deadline_when_worker_is_busy() {
     );
     assert!(observed_open.load(Ordering::Acquire));
 }
+
+/// The writer-lock release contract of drop versus close (#2837, #3546).
+///
+/// Dropping a durable runtime bounds background shutdown (the 250 ms close
+/// timeout) and detaches a worker that misses it; the detached worker holds
+/// the runtime, and with it the writer lock, until its task finishes. `close`
+/// releases the writer lock explicitly before it returns, whatever the workers
+/// are doing. A same-process reopen after a DROP must therefore wait for the
+/// release; a reopen after a CLOSE never has to. The worker is parked on a
+/// barrier, so both halves are deterministic.
+#[cfg(feature = "localfs")]
+#[test]
+fn a_detached_worker_holds_the_writer_lock_past_drop_but_not_past_close() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    fn open(backend: &'static StorageBackend) -> StorageApiResult<StorageRuntime<'static>> {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            backend,
+        )
+        .map(StorageOpenOutcome::into_runtime)
+    }
+
+    fn park_a_worker(runtime: &StorageRuntime<'static>) -> Arc<Barrier> {
+        let ready = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        assert!(
+            runtime.submit_runtime_state_background_probe_for_test(
+                Arc::clone(&ready),
+                Arc::clone(&release),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            "the durable runtime runs a background worker"
+        );
+        ready.wait();
+        release
+    }
+
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(temp_dir_for_api_test(
+        "drop-vs-close-writer-lock",
+    )));
+
+    // Drop: the parked worker is detached and still holds the lock.
+    let release = {
+        let runtime = open(backend).expect("durable open");
+        park_a_worker(&runtime)
+    };
+    let error = open(backend)
+        .map(drop)
+        .expect_err("a detached worker keeps the dropped runtime's writer lock");
+    assert_eq!(error.code(), "failed_precondition.storage_api.writer_lock");
+    release.wait();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut runtime = loop {
+        match open(backend) {
+            Ok(runtime) => break runtime,
+            Err(StorageApiError::WriterLockHeld) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the detached worker never released the writer lock"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("reopen after the worker finished: {error:?}"),
+        }
+    };
+
+    // Close: the same parked worker, but the lock is released on return.
+    let release = park_a_worker(&runtime);
+    runtime
+        .close()
+        .expect("close detaches the parked worker after its deadline");
+    let reopened = open(backend).expect("close released the writer lock before returning");
+    release.wait();
+    drop(reopened);
+}

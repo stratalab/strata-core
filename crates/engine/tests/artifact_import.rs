@@ -4,6 +4,8 @@
 //! re-export is byte-identical, events and all — the property StrataHub's
 //! round-trip conformance (Ask 4) is built on.
 
+mod common;
+
 use std::path::Path;
 
 use serde_json::json;
@@ -252,6 +254,12 @@ fn open_durable(path: &Path) -> Database {
         .into_database()
 }
 
+/// Reopens a source the `build_*` helpers populated and DROPPED, not closed:
+/// waits out a detached worker's writer lock (#2837, #3546).
+fn reopen_durable_after_drop(path: &Path) -> Database {
+    common::reopen_durable_database_after_drop(path).expect("durable reopen")
+}
+
 fn put_kv(db: &mut Database, branch: &BranchName, key: &str, value: &[u8]) {
     db.kv(branch.clone(), space("default"))
         .expect("kv")
@@ -299,7 +307,7 @@ fn multi_branch_import_reconstructs_interleaved_commit_order() {
     let source_dir = tempfile::tempdir().expect("tmp");
     let (default, second) = build_interleaved_branches(source_dir.path());
 
-    let mut source = open_durable(source_dir.path());
+    let mut source = reopen_durable_after_drop(source_dir.path());
     let default_artifact = source.export_branch_artifact(&default).expect("export a");
     let second_artifact = source.export_branch_artifact(&second).expect("export b");
     drop(source);
@@ -383,7 +391,7 @@ fn build_forked_branches(path: &Path) -> (BranchName, BranchName) {
 fn multi_branch_import_handles_a_fork_sharing_timestamps() {
     let source_dir = tempfile::tempdir().expect("tmp");
     let (default, child) = build_forked_branches(source_dir.path());
-    let mut source = open_durable(source_dir.path());
+    let mut source = reopen_durable_after_drop(source_dir.path());
     let artifacts = [
         source.export_branch_artifact(&default).expect("export a"),
         source.export_branch_artifact(&child).expect("export b"),
@@ -435,7 +443,7 @@ fn multi_branch_import_handles_a_fork_sharing_timestamps() {
 fn multi_branch_import_is_deterministic_across_targets() {
     let source_dir = tempfile::tempdir().expect("tmp");
     let (default, second) = build_interleaved_branches(source_dir.path());
-    let mut source = open_durable(source_dir.path());
+    let mut source = reopen_durable_after_drop(source_dir.path());
     let artifacts = [
         source.export_branch_artifact(&default).expect("export a"),
         source.export_branch_artifact(&second).expect("export b"),
@@ -467,7 +475,7 @@ fn multi_branch_import_is_deterministic_across_targets() {
 fn multi_branch_import_refuses_a_populated_target_branch() {
     let source_dir = tempfile::tempdir().expect("tmp");
     let (default, second) = build_interleaved_branches(source_dir.path());
-    let mut source = open_durable(source_dir.path());
+    let mut source = reopen_durable_after_drop(source_dir.path());
     let artifacts = [
         source.export_branch_artifact(&default).expect("export a"),
         source.export_branch_artifact(&second).expect("export b"),

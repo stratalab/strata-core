@@ -75,3 +75,50 @@ fn a_database_held_by_another_opener_is_not_reported_as_an_outage() {
         status.details()
     );
 }
+
+/// The test-side reopen policy for a DROPPED handle (#2837, #3546): the
+/// helper outlasts a lock the previous holder releases a moment later — the
+/// detached-worker window — instead of failing on the first contention.
+#[test]
+fn a_reopen_after_drop_outlasts_a_briefly_held_writer_lock() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let holder = open_durable_database(tempdir.path()).expect("holder takes the writer lock");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(holder);
+    });
+
+    let reopened = common::reopen_durable_database_after_drop(tempdir.path());
+    release.join().expect("release thread");
+    reopened.expect("the reopen waits for the holder's release");
+}
+
+/// ... and it retries nothing else: a non-contention refusal returns on the
+/// first attempt with its own code, so a real failure is never delayed or
+/// masked by the lock policy.
+#[test]
+// The counting closure returns the engine's own open result; its error size is
+// the product's, not this test's to shrink.
+#[allow(clippy::result_large_err)]
+fn a_reopen_after_drop_returns_any_other_refusal_immediately() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    open_durable_database(tempdir.path())
+        .expect("create the database")
+        .close()
+        .expect("clean close");
+
+    let mut attempts = 0_u32;
+    let Err(error) = common::reopen_after_drop(|| {
+        attempts += 1;
+        strata_engine::Database::open_local(
+            tempdir.path(),
+            strata_engine::DurableLocalOpenOptions::new()
+                .with_default_branch("other")
+                .expect("valid default branch"),
+        )
+    }) else {
+        panic!("a conflicting default branch must be refused");
+    };
+    assert_eq!(error.code(), "failed_precondition.engine.default_branch");
+    assert_eq!(attempts, 1, "only writer-lock contention is retried");
+}

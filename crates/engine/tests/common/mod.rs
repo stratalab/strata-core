@@ -14,6 +14,60 @@ pub(crate) fn open_durable_database(path: &std::path::Path) -> EngineResult<Data
         .map(DatabaseOpenOutcome::into_database)
 }
 
+/// The writer-lock code a same-process reopen sees while the previous
+/// runtime still holds the lock.
+const WRITER_LOCK_CODE: &str = "failed_precondition.engine.writer_lock";
+
+/// Budget for [`reopen_after_drop`]: generous, because a detached worker's
+/// task is not bounded by the 250 ms shutdown window, and a loaded CI runner
+/// (thread sanitizer, the parallel mutation baseline) stretches it further.
+const REOPEN_AFTER_DROP_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reopens a durable database whose previous handle in this process was
+/// DROPPED, not closed (#2837, #3546).
+///
+/// `Database::close` releases the writer lock before it returns. A drop does
+/// not promise that: it bounds background shutdown and detaches a worker that
+/// misses the window, and the detached worker keeps the runtime — and its
+/// writer lock — until its task finishes (pinned in storage by
+/// `a_detached_worker_holds_the_writer_lock_past_drop_but_not_past_close`).
+/// A test that drops and reopens the same path must either close first or
+/// reopen through here. Only `failed_precondition.engine.writer_lock` is
+/// retried; any other error, and the lock still held when the budget runs
+/// out, is returned unchanged so a real leak fails loud.
+pub(crate) fn reopen_after_drop<T>(mut open: impl FnMut() -> EngineResult<T>) -> EngineResult<T> {
+    let deadline = std::time::Instant::now() + REOPEN_AFTER_DROP_BUDGET;
+    let mut backoff = std::time::Duration::from_millis(2);
+    loop {
+        match open() {
+            Err(error)
+                if error.code() == WRITER_LOCK_CODE && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(std::time::Duration::from_millis(50));
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// [`open_durable_database`] for a path whose previous handle was dropped:
+/// see [`reopen_after_drop`].
+pub(crate) fn reopen_durable_database_after_drop(path: &std::path::Path) -> EngineResult<Database> {
+    reopen_local_after_drop(path, &DurableLocalOpenOptions::new())
+}
+
+/// `Database::open_local` with `options` for a path whose previous handle was
+/// dropped: see [`reopen_after_drop`].
+pub(crate) fn reopen_local_after_drop(
+    path: &std::path::Path,
+    options: &DurableLocalOpenOptions,
+) -> EngineResult<Database> {
+    reopen_after_drop(|| {
+        Database::open_local(path, options.clone()).map(DatabaseOpenOutcome::into_database)
+    })
+}
+
 pub(crate) fn branch(name: &str) -> BranchName {
     BranchName::new(name).expect("valid branch name")
 }
