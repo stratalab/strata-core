@@ -113,9 +113,10 @@ fn writer_lock_releases_on_close_and_the_data_survives() {
         drop(first);
     }
 
-    let mut reopened = Database::open_local(&path, DurableLocalOpenOptions::new())
-        .expect("open after release")
-        .into_database();
+    // `first` was dropped, not closed: wait out a detached worker's writer
+    // lock (#2837, #3546).
+    let mut reopened =
+        common::reopen_durable_database_after_drop(&path).expect("open after release");
     common::assert_branch_value(&mut reopened, "default", "app", b"held", b"1");
 }
 

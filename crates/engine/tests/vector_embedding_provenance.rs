@@ -18,7 +18,9 @@ use strata_engine::{
     VectorEmbedding, VectorKey,
 };
 
-use common::{branch, open_cache_database, open_durable_database, space};
+use common::{
+    branch, open_cache_database, open_durable_database, reopen_durable_database_after_drop, space,
+};
 
 fn collection(name: &str) -> VectorCollectionName {
     VectorCollectionName::new(name).expect("collection name")
@@ -86,7 +88,9 @@ fn the_model_survives_a_durable_reopen() {
             .expect("collection is created");
     }
 
-    let mut database = open_durable_database(directory.path()).expect("durable reopen");
+    // Dropped, not closed: wait out a detached worker's writer lock (#2837).
+    let mut database =
+        reopen_durable_database_after_drop(directory.path()).expect("durable reopen");
     let info = database
         .vector(branch("default"), space("default"))
         .expect("vector service opens")
@@ -451,7 +455,9 @@ fn a_declared_model_survives_a_durable_reopen() {
             .expect("declaration succeeds");
     }
 
-    let mut database = open_durable_database(directory.path()).expect("durable reopen");
+    // Dropped, not closed: wait out a detached worker's writer lock (#2837).
+    let mut database =
+        reopen_durable_database_after_drop(directory.path()).expect("durable reopen");
     assert_eq!(
         database
             .vector(branch("default"), space("default"))

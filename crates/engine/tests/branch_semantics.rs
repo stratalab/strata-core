@@ -9,7 +9,8 @@ use strata_engine::{
 
 use common::{
     assert_branch_value, assert_no_storage_type_in_engine_error, branch, key, open_cache_database,
-    open_durable_database, space, value,
+    open_durable_database, reopen_durable_database_after_drop, reopen_local_after_drop, space,
+    value,
 };
 
 #[test]
@@ -186,7 +187,10 @@ fn durable_reopen_after_branch_delete_remains_usable() {
             .expect("branch deleted");
     }
 
-    let mut reopened = open_durable_database(dir.path()).expect("durable reopen succeeds");
+    // The first handle was dropped, not closed: wait out a detached worker's
+    // writer lock (#2837, #3546).
+    let mut reopened =
+        reopen_durable_database_after_drop(dir.path()).expect("durable reopen succeeds");
     reopened
         .spaces(branch("default"))
         .expect("space service opens")
@@ -405,7 +409,8 @@ fn configured_default_branch_is_protected_and_persisted() {
     let conflicting = DurableLocalOpenOptions::new()
         .with_default_branch("other")
         .expect("valid default branch");
-    let Err(error) = Database::open_local(&path, conflicting) else {
+    // The handle above was dropped, not closed (#2837, #3546).
+    let Err(error) = reopen_local_after_drop(&path, &conflicting) else {
         panic!("conflicting default branch rejected");
     };
     assert_eq!(error.class(), EngineErrorClass::IncompatibleLayout);

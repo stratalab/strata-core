@@ -131,9 +131,9 @@ fn durable_reopen_validates_registered_user_space_catalog() {
     }
 
     {
-        let mut database = Database::open_local(&path, DurableLocalOpenOptions::new())
-            .expect("durable reopen validates space catalog")
-            .into_database();
+        // Dropped, not closed: wait out a detached worker's writer lock (#2837).
+        let mut database = common::reopen_durable_database_after_drop(&path)
+            .expect("durable reopen validates space catalog");
         assert_branch_value(
             &mut database,
             "default",
