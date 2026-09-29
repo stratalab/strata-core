@@ -49,7 +49,7 @@ pub(crate) use sidecar::{WalSegmentMetadataSidecarLoad, WalSegmentMetadataSideca
 pub(crate) use snapshot::{
     reconcilable_orphan, superseded_snapshot, SnapshotDeleteFailure, SnapshotDeleteOutcome,
     SnapshotDeleteReport, SnapshotObject, SnapshotPruneMode, SnapshotPublishRequest,
-    SnapshotService, SnapshotServiceError,
+    SnapshotService, SnapshotServiceError, TimelineSegmentPruneMode, TimelineSegmentPruneReport,
 };
 
 #[allow(

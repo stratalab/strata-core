@@ -290,7 +290,6 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             .open_plan
             .lifecycle_config()
             .max_maintenance_queue_depth();
-        let attested_snapshot_present = self.assembly_facts().manifest_snapshot_id().is_some();
         let recovered_quarantine_entries = recovery.quarantine().entry_count();
         // #3612: seed the allocator past any snapshot object already on disk, not
         // just past the attested id — a crash orphan at attested+1 would otherwise
@@ -414,17 +413,17 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             // object above the attested id can only be a crash orphan: a
             // checkpoint writes its snapshot and re-points the manifest in one
             // step under the runtime lock, and this prune runs under the same
-            // lock, so it never sees a publish in flight. Only with an attested
-            // id: without one the proof-driven prune can prove nothing dead and
-            // would only defer with telemetry debt. Best-effort for the same
+            // lock, so it never sees a publish in flight. Queued without an
+            // attested id too (#3643 re-review P2): then no snapshot references
+            // any timeline segment, and a first checkpoint that died after
+            // writing its segments left orphans only this reconcile can reach
+            // (`snapshotless_segment_reconcile`). Best-effort for the same
             // reason as the mark above.
-            if attested_snapshot_present {
-                let _ = runtime.enqueue_maintenance(
-                    crate::lifecycle::MaintenanceTaskRequest::snapshot_pruning_with_mode(
-                        crate::service::SnapshotPruneMode::ReconcileToAttested,
-                    ),
-                );
-            }
+            let _ = runtime.enqueue_maintenance(
+                crate::lifecycle::MaintenanceTaskRequest::snapshot_pruning_with_mode(
+                    crate::service::SnapshotPruneMode::ReconcileToAttested,
+                ),
+            );
             // #3626: quarantine a prior session staged but never purged (a
             // crash after the sweep, a close whose reclaim budget ran out
             // between sweep and purge) is invisible to the mark above — the
@@ -3263,6 +3262,7 @@ fn install_non_seeded_checkpoint_state(
     seed_non_seeded_branch_timelines(
         branch_catalog,
         checkpoint.timeline_groups(),
+        checkpoint.timeline_segment_groups(),
         seeded_branch_id,
     );
     // W3.1c invariant, split by parentage (#2521/#2522): PARENTLESS branches
@@ -3406,6 +3406,7 @@ fn seed_forked_branch_timelines_from_parents(branch_catalog: &LifecycleBranchCat
 fn seed_non_seeded_branch_timelines(
     branch_catalog: &LifecycleBranchCatalog,
     groups: &[crate::format::SnapshotTimelineBranchGroup],
+    segment_groups: &[crate::format::SnapshotTimelineSegmentGroup],
     seeded_branch_id: BranchId,
 ) {
     use crate::lifecycle::LifecycleBranchStatus;
@@ -3449,6 +3450,7 @@ fn seed_non_seeded_branch_timelines(
         crate::lifecycle::recovery::seed_branch_timeline_from_groups(
             branch,
             std::slice::from_ref(group),
+            segment_groups,
         );
     }
 }

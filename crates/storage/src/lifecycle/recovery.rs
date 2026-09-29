@@ -18,9 +18,11 @@ use crate::branch::state::snapshot::{
 use crate::branch::state::BranchLocalState;
 use crate::format::{
     decode_snapshot_flushed_branches_payload, decode_snapshot_row_payload,
-    decode_snapshot_timeline_payload, encode_snapshot_row_section, FormatError, SnapshotContainer,
-    SnapshotSection, SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND, SNAPSHOT_ROW_SECTION_KIND,
-    SNAPSHOT_TIMELINE_SECTION_KIND, SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY,
+    decode_snapshot_timeline_payload, decode_snapshot_timeline_segments_payload,
+    encode_snapshot_row_section, FormatError, SnapshotContainer, SnapshotSection,
+    SnapshotTimelineSegmentGroup, SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND,
+    SNAPSHOT_ROW_SECTION_KIND, SNAPSHOT_TIMELINE_SECTION_KIND,
+    SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY, SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND,
 };
 use crate::object::ObjectName;
 use crate::row::StorageRow;
@@ -72,6 +74,10 @@ pub(crate) struct LifecycleRecoveredCheckpoint {
     // is seeded during `recover_checkpoint`; the rest are seeded post-
     // catalog-build alongside the non-seeded row install.
     timeline_groups: Vec<crate::format::SnapshotTimelineBranchGroup>,
+    // #3643: the snapshot's segment references per branch (kind 5), for the
+    // groups above that were loaded from segments. Seeded into each index
+    // after its entries so the next checkpoint re-references them.
+    timeline_segment_groups: Vec<SnapshotTimelineSegmentGroup>,
     // Space-reclamation contract §3.2 (slice 11): the branches the snapshot
     // recorded as holding a durable table-manifest base when it was written.
     // `None` when the snapshot predates the section (membership unknown, the
@@ -244,6 +250,7 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
                 seed_branch_timeline_from_groups(
                     self.shell.branch_state(),
                     checkpoint.timeline_groups(),
+                    checkpoint.timeline_segment_groups(),
                 );
             }
             (Some(_), None) if orphaned_delta => {
@@ -367,9 +374,20 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
         // WAL-tail replay observations extend every seeded index, so reopen
         // never rescans the timeline space. An absent group leaves that
         // branch's index unseeded — the W3.1a scan fallback.
-        let timeline_groups = decode_timeline_groups(container.sections(), watermark)?;
+        let mut timeline_groups = decode_timeline_groups(container.sections(), watermark)?;
+        // #3643: a snapshot written since sealed segments references its
+        // timeline instead of carrying it; load those into the same groups.
+        let (segment_timeline_groups, timeline_segment_groups) = self
+            .load_segment_timeline_groups(
+                request,
+                faults,
+                container.sections(),
+                snapshot_id,
+                watermark,
+            )?;
+        timeline_groups.extend(segment_timeline_groups);
         if let Some(branch) = recovered_branch.as_ref() {
-            seed_branch_timeline_from_groups(branch, &timeline_groups);
+            seed_branch_timeline_from_groups(branch, &timeline_groups, &timeline_segment_groups);
         }
         let durable_base_branches = decode_durable_base_branches(container.sections())?;
         Ok((
@@ -381,11 +399,103 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
                 install_outcome: Some(install_outcome),
                 non_seeded_rows,
                 timeline_groups,
+                timeline_segment_groups,
                 durable_base_branches,
                 install_identity_seed: Some(request.checkpoint_identity_seed().clone()),
             },
             recovered_branch,
         ))
+    }
+
+    /// #3643: load every branch's timeline from the segments the snapshot's
+    /// kind-5 section references, checking each against its reference and the
+    /// snapshot watermark. The references become the live segment set.
+    ///
+    /// A missing or corrupt segment loses that branch's checkpointed
+    /// timeline: under lossy recovery it records `MissingSnapshotObject`
+    /// (`DataLoss`) and leaves the branch unseeded — its history before the WAL
+    /// tail then reads as outside retained history, a refusal, never a wrong
+    /// answer (DUR-015); under strict recovery it is corruption.
+    fn load_segment_timeline_groups(
+        &mut self,
+        request: &LifecycleRecoveryRequest,
+        faults: &mut Vec<RecoveryFault>,
+        sections: &[SnapshotSection],
+        snapshot_id: u64,
+        watermark: CommitVersion,
+    ) -> LifecycleResult<(
+        Vec<crate::format::SnapshotTimelineBranchGroup>,
+        Vec<SnapshotTimelineSegmentGroup>,
+    )> {
+        // The attested snapshot's references are the live set, keyed by the
+        // snapshot they describe (a snapshot without the section references
+        // nothing).
+        let section_groups = decode_timeline_segment_groups(sections)?.unwrap_or_default();
+        self.shell
+            .services()
+            .set_live_timeline_segments(snapshot_id, referenced_timeline_segments(&section_groups));
+        let mut timeline_groups = Vec::with_capacity(section_groups.len());
+        let mut loaded_segment_groups = Vec::with_capacity(section_groups.len());
+        // A segment shared by several branches (fork dedup) is read once.
+        let mut loaded_segments: std::collections::HashMap<
+            crate::format::TimelineSegmentRef,
+            Vec<crate::format::SnapshotTimelineEntry>,
+        > = std::collections::HashMap::new();
+        for group in section_groups {
+            let mut entries = Vec::new();
+            let mut lost = false;
+            for segment in &group.refs {
+                let load = match loaded_segments.get(segment) {
+                    Some(shared) => Ok(shared.clone()),
+                    None => self
+                        .shell
+                        .services()
+                        .snapshot()
+                        .load_timeline_segment(segment),
+                };
+                match load {
+                    Ok(loaded) => {
+                        entries.extend_from_slice(&loaded);
+                        loaded_segments.insert(*segment, loaded);
+                    }
+                    Err(_)
+                        if request.strictness == RecoveryStrictness::AllowExplicitLossyFallback =>
+                    {
+                        lost = true;
+                        break;
+                    }
+                    Err(_) => {
+                        return Err(LifecycleError::recovery_corruption(
+                            "snapshot references a timeline segment that is missing or corrupt",
+                        ));
+                    }
+                }
+            }
+            if lost {
+                push_fault_for_branch(
+                    faults,
+                    request.max_faults,
+                    RecoveryFaultKind::MissingSnapshotObject,
+                    "snapshot references a timeline segment that is missing or corrupt",
+                    group.branch_id,
+                )?;
+                continue;
+            }
+            if entries
+                .last()
+                .is_some_and(|entry| entry.commit_version.as_u64() > watermark.as_u64())
+            {
+                return Err(LifecycleError::RecoveryFailed {
+                    reason: "timeline segment entry exceeds snapshot watermark",
+                });
+            }
+            timeline_groups.push(crate::format::SnapshotTimelineBranchGroup {
+                branch_id: group.branch_id,
+                entries,
+            });
+            loaded_segment_groups.push(group);
+        }
+        Ok((timeline_groups, loaded_segment_groups))
     }
 
     /// #2690: the durable commit watermark attests the highest commit version
@@ -809,6 +919,7 @@ impl LifecycleRecoveredCheckpoint {
             install_outcome: None,
             non_seeded_rows: Vec::new(),
             timeline_groups: Vec::new(),
+            timeline_segment_groups: Vec::new(),
             durable_base_branches: None,
             install_identity_seed: None,
         }
@@ -823,6 +934,7 @@ impl LifecycleRecoveredCheckpoint {
             install_outcome: None,
             non_seeded_rows: Vec::new(),
             timeline_groups: Vec::new(),
+            timeline_segment_groups: Vec::new(),
             durable_base_branches: None,
             install_identity_seed: None,
         }
@@ -832,6 +944,11 @@ impl LifecycleRecoveredCheckpoint {
     /// applied; non-seeded branches applied post-catalog-build).
     pub(crate) fn timeline_groups(&self) -> &[crate::format::SnapshotTimelineBranchGroup] {
         &self.timeline_groups
+    }
+
+    /// #3643: the snapshot's per-branch segment references (kind 5).
+    pub(crate) fn timeline_segment_groups(&self) -> &[SnapshotTimelineSegmentGroup] {
+        &self.timeline_segment_groups
     }
 
     /// Space-reclamation contract §3.2: the branches the snapshot recorded as
@@ -1081,10 +1198,49 @@ pub(crate) fn ensure_branch_timeline_complete(branch: &BranchLocalState) -> Life
     Ok(())
 }
 
-/// Seed a branch's retained-timeline index from its decoded group, if present.
+/// #3643: the kind-5 section's groups, `None` for a snapshot without one. A
+/// second such section is a corrupt or hand-assembled snapshot and fails
+/// closed, as the durable-base section does.
+fn decode_timeline_segment_groups(
+    sections: &[SnapshotSection],
+) -> LifecycleResult<Option<Vec<SnapshotTimelineSegmentGroup>>> {
+    let mut recorded = None;
+    for section in sections {
+        if section.section_kind() != SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND {
+            continue;
+        }
+        if recorded.is_some() {
+            return Err(LifecycleError::RecoveryFailed {
+                reason: "snapshot carries more than one timeline segment section",
+            });
+        }
+        recorded = Some(
+            decode_snapshot_timeline_segments_payload(section.payload()).map_err(format_error)?,
+        );
+    }
+    Ok(recorded)
+}
+
+/// #3643: every segment a snapshot's groups reference.
+pub(crate) fn referenced_timeline_segments(
+    groups: &[SnapshotTimelineSegmentGroup],
+) -> std::collections::BTreeSet<crate::layout::TimelineSegmentId> {
+    groups
+        .iter()
+        .flat_map(|group| group.refs.iter())
+        .map(|segment| crate::layout::TimelineSegmentId {
+            sealing_snapshot_id: segment.sealing_snapshot_id,
+            ordinal: u64::from(segment.ordinal),
+        })
+        .collect()
+}
+
+/// Seed a branch's retained-timeline index from its decoded group, if present,
+/// then (#3643) the durable segment refs that still line up with it.
 pub(crate) fn seed_branch_timeline_from_groups(
     branch: &BranchLocalState,
     groups: &[crate::format::SnapshotTimelineBranchGroup],
+    segment_groups: &[SnapshotTimelineSegmentGroup],
 ) {
     for group in groups {
         if group.branch_id != branch.branch_id() {
@@ -1104,6 +1260,12 @@ pub(crate) fn seed_branch_timeline_from_groups(
             })
             .collect::<Vec<_>>();
         branch.retained_timeline().seed_from_scan(&entries);
+    }
+    if let Some(segments) = segment_groups
+        .iter()
+        .find(|group| group.branch_id == branch.branch_id())
+    {
+        branch.retained_timeline().seed_segments(&segments.refs);
     }
 }
 
@@ -1560,6 +1722,7 @@ pub(crate) const fn known_snapshot_section_kind(kind: u8) -> bool {
             | SNAPSHOT_TIMELINE_SECTION_KIND_LEGACY
             | SNAPSHOT_TIMELINE_SECTION_KIND
             | SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND
+            | SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND
     )
 }
 
@@ -1573,7 +1736,7 @@ fn validate_known_section_kinds(sections: &[SnapshotSection]) -> LifecycleResult
         Some(unknown) => Err(format_error(FormatError::FutureFormat {
             format: "snapshot section kind",
             version: u32::from(unknown.section_kind()),
-            max_supported: u32::from(SNAPSHOT_FLUSHED_BRANCHES_SECTION_KIND),
+            max_supported: u32::from(SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND),
         })),
         None => Ok(()),
     }

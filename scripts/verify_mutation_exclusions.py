@@ -49,6 +49,13 @@ COMPILED_EXCLUSION_ALLOWLIST: dict[str, str] = {
         "DST simulation harness (TCP4.11): mutated to saturation, strength is its "
         "exact-facts pins; the full-file mutant set times out the per-PR budget."
     ),
+    "crates/storage/src/testkit/lifecycle/retention.rs": (
+        "lifecycle retention contract checker (#3643): compiles for the lib, but "
+        "it runs only through tests/lifecycle_maintenance.rs, which is "
+        "`#[cfg(feature = \"testkit\")]`; planting `check_snapshot_pruning -> Ok(())` "
+        "fails 4 tests of `-p strata-storage --features testkit --test "
+        "lifecycle_maintenance` in the `test` job."
+    ),
     "crates/storage/src/testkit/dual_mutation.rs": (
         "dual-mutation fuzz harness (TCP4.6c): same saturation doctrine, "
         "pin-verified; one full round timed out the 90-minute budget."

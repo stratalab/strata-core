@@ -409,8 +409,12 @@ fn incomplete_snapshot_pruning_proof_defers_before_backend_access() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let outcome =
-        prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+    let outcome = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome");
 
     assert!(outcome.deferred_incomplete_proof());
     assert_eq!(backend.list_calls(), 0);
@@ -434,8 +438,12 @@ fn retention_proof_blocks_data_loss_before_backend_access() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let outcome =
-        prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+    let outcome = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome");
 
     assert!(outcome.blocked_by_recovery_health());
     assert_eq!(backend.list_calls(), 0);
@@ -451,8 +459,12 @@ fn snapshot_pruning_retains_live_snapshot_outside_newest_window() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let outcome =
-        prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+    let outcome = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome");
 
     assert!(outcome.completed());
     assert_eq!(snapshot_ids(outcome.deleted()), [2, 3]);
@@ -562,8 +574,12 @@ fn generated_snapshot_pruning_proof_sweep_preserves_retained_snapshots() {
             LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
                 .expect(case);
 
-        let outcome =
-            prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect(case);
+        let outcome = prune_snapshots_with_proof(
+            &SnapshotService::new(backend),
+            &pruning,
+            Some(&std::collections::BTreeSet::new()),
+        )
+        .expect(case);
         let protected = snapshot_ids(outcome.protected());
         let deleted = snapshot_ids(outcome.deleted());
         let perf = crate::observability::perf_trace::snapshot();
@@ -636,8 +652,12 @@ fn snapshot_pruning_clamps_zero_retain_count_to_one() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let outcome =
-        prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+    let outcome = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome");
 
     assert_eq!(snapshot_ids(outcome.deleted()), [1, 2]);
     assert_eq!(snapshot_ids(outcome.protected()), [3]);
@@ -657,8 +677,12 @@ fn snapshot_pruning_malformed_listed_snapshot_fails_closed() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let error = prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning)
-        .expect_err("malformed listed snapshot fails closed");
+    let error = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect_err("malformed listed snapshot fails closed");
 
     assert_eq!(error.code(), "failed_precondition.lifecycle.service");
     assert_eq!(backend.delete_calls(), 0);
@@ -674,8 +698,12 @@ fn snapshot_pruning_does_not_mutate_manifest_snapshot_facts() {
         LifecycleSnapshotPruningRequest::new(proof.clone(), request.retain_newest_snapshots())
             .expect("pruning request");
 
-    let outcome =
-        prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+    let outcome = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome");
 
     assert!(outcome.completed());
     assert_eq!(pruning.proof(), &proof);
@@ -705,8 +733,12 @@ fn snapshot_pruning_object_candidate_mode_requires_declared_delete_capability() 
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let error = prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning)
-        .expect_err("delete capability required");
+    let error = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect_err("delete capability required");
 
     assert_eq!(error.code(), "failed_precondition.lifecycle.service");
     assert_eq!(backend.list_calls(), 0);
@@ -723,8 +755,12 @@ fn snapshot_pruning_delete_failure_records_health_debt_and_continues() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let outcome =
-        prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+    let outcome = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome");
 
     assert!(outcome.completed_with_health_debt());
     assert_eq!(snapshot_ids(outcome.deleted()), [2]);
@@ -750,8 +786,12 @@ fn snapshot_pruning_emits_one_fault_per_failed_deletion() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let outcome =
-        prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+    let outcome = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome");
 
     assert!(outcome.completed_with_health_debt());
     assert_eq!(snapshot_ids(outcome.deleted()), [3]);
@@ -775,8 +815,12 @@ fn snapshot_pruning_list_failure_preserves_service_source_chain() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let error = prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning)
-        .expect_err("list failure");
+    let error = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect_err("list failure");
 
     assert_eq!(error.code(), "failed_precondition.lifecycle.service");
     assert!(error.source().is_some());
@@ -1276,7 +1320,8 @@ fn global_retention_task_prunes_snapshots_through_durable_maintenance() {
         drain_snapshot_prune(&mut runtime);
     }
     assert_eq!(backend.snapshot_objects().len(), 1);
-    assert_eq!(backend.delete_calls(), 1);
+    // The superseded snapshot and (#3643) its timeline tail.
+    assert_eq!(backend.delete_calls(), 2);
     // A superseded snapshot object the chain never saw (a prior session's).
     let live_bytes = backend
         .object_snapshot()
@@ -1297,7 +1342,8 @@ fn global_retention_task_prunes_snapshots_through_durable_maintenance() {
     assert_eq!(maintenance.task_kind(), MaintenanceTaskKind::Retention);
     assert_eq!(maintenance.status(), MaintenanceOutcomeStatus::Completed);
     assert_eq!(maintenance.state_changes(), 1);
-    assert_eq!(backend.delete_calls(), 2);
+    // One more delete: the newest-N verb prunes no timeline segment (#3643).
+    assert_eq!(backend.delete_calls(), 3);
     assert_eq!(backend.snapshot_objects().len(), 1);
 }
 
@@ -1604,8 +1650,12 @@ fn snapshot_pruning_service_error_preserves_source() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let error = prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning)
-        .expect_err("list failure");
+    let error = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect_err("list failure");
 
     assert_eq!(error.code(), "failed_precondition.lifecycle.service");
     assert!(error.source().is_some());
@@ -1668,8 +1718,12 @@ fn retention_error_display_does_not_include_object_payload_bytes() {
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
 
-    let error = prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning)
-        .expect_err("list failure");
+    let error = prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect_err("list failure");
     let display = error.to_string();
 
     assert!(!display.contains("snapshot-1"));
@@ -1746,7 +1800,12 @@ fn snapshot_pruning(
     );
     let pruning = LifecycleSnapshotPruningRequest::new(proof, request.retain_newest_snapshots())
         .expect("pruning request");
-    prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome")
+    prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome")
 }
 
 fn data_loss_health() -> RecoveryHealth {
@@ -1804,9 +1863,36 @@ struct RetentionBackend {
     delete_calls: AtomicUsize,
     list_calls: AtomicUsize,
     omit_delete_capability: AtomicBool,
+    /// #3643: names the listing reports but no object backs — an object that
+    /// vanished between a prune's listing and its delete.
+    phantoms: Mutex<BTreeSet<ObjectName>>,
+    /// #3643: every delete removes the object but reports it non-durable.
+    non_durable_deletes: AtomicBool,
 }
 
 impl RetentionBackend {
+    fn insert_timeline_segment(&self, sealing_snapshot_id: u64, ordinal: u64) {
+        self.insert_object(
+            timeline_segment_name(sealing_snapshot_id, ordinal),
+            b"segment".to_vec(),
+        );
+    }
+
+    fn insert_phantom(&self, name: ObjectName) {
+        self.phantoms.lock().expect("phantoms").insert(name);
+    }
+
+    fn remaining_timeline_segments(&self) -> Vec<ObjectName> {
+        let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+        self.objects
+            .lock()
+            .expect("objects")
+            .keys()
+            .filter(|name| name.as_str().starts_with(prefix.as_str()))
+            .cloned()
+            .collect()
+    }
+
     fn with_snapshots<const N: usize>(ids: [u64; N]) -> Self {
         let backend = Self::default();
         for id in ids {
@@ -1925,7 +2011,20 @@ impl Backend for RetentionBackend {
                 BackendError::new(BackendErrorKind::Unavailable, "injected delete failure"),
             );
         }
+        if self.phantoms.lock().expect("phantoms").remove(name) {
+            return crate::backend::failed_delete_result(
+                name,
+                BackendError::new(BackendErrorKind::NotFound, "object vanished"),
+            );
+        }
         let removed = self.objects.lock().expect("objects").remove(name).is_some();
+        if self.non_durable_deletes.load(Ordering::SeqCst) {
+            return Ok(crate::backend::DeleteOutcome::from_removed(
+                name.clone(),
+                crate::backend::DeleteDurability::NonDurable,
+                removed,
+            ));
+        }
         crate::backend::durable_delete_result(name, removed)
     }
 
@@ -1942,6 +2041,7 @@ impl Backend for RetentionBackend {
             .lock()
             .expect("objects")
             .keys()
+            .chain(self.phantoms.lock().expect("phantoms").iter())
             .filter(|name| name.as_str().starts_with(prefix.as_str()))
             .cloned()
             .collect::<Vec<_>>();
@@ -2201,7 +2301,12 @@ fn proof_driven_pruning(
     );
     let pruning =
         LifecycleSnapshotPruningRequest::for_request(proof, &request).expect("pruning request");
-    prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome")
+    prune_snapshots_with_proof(
+        &SnapshotService::new(backend),
+        &pruning,
+        Some(&std::collections::BTreeSet::new()),
+    )
+    .expect("outcome")
 }
 
 #[test]
@@ -2249,12 +2354,14 @@ fn reconcile_prune_deletes_every_snapshot_but_the_attested_one() {
     assert_eq!(backend.delete_calls(), 3);
 }
 
+/// An incomplete proof defers before touching the backend — except the one
+/// narrow arm #3643 added (re-review P2): the open reconcile with NO attested
+/// snapshot reconciles only the timeline family (it lists segments; it never
+/// touches a snapshot), and still defers when the referenced set is unknown.
 #[test]
 fn proof_driven_prunes_defer_on_an_incomplete_proof_before_backend_access() {
-    for mode in [
-        SnapshotPruneMode::Superseded,
-        SnapshotPruneMode::ReconcileToAttested,
-    ] {
+    {
+        let mode = SnapshotPruneMode::Superseded;
         let backend: &'static RetentionBackend =
             crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3]));
         let request = LifecycleRetentionRequest::snapshot_pruning(1).with_snapshot_prune_mode(mode);
@@ -2263,14 +2370,50 @@ fn proof_driven_prunes_defer_on_an_incomplete_proof_before_backend_access() {
         let pruning =
             LifecycleSnapshotPruningRequest::for_request(proof, &request).expect("pruning request");
 
-        let outcome =
-            prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+        let outcome = prune_snapshots_with_proof(
+            &SnapshotService::new(backend),
+            &pruning,
+            Some(&std::collections::BTreeSet::new()),
+        )
+        .expect("outcome");
 
         assert!(outcome.deferred_incomplete_proof(), "{mode:?}");
         assert_eq!(backend.list_calls(), 0, "{mode:?}");
         assert_eq!(backend.delete_calls(), 0, "{mode:?}");
         assert_eq!(backend.remaining_snapshot_ids(), [1, 2, 3], "{mode:?}");
     }
+
+    let reconcile = |referenced: Option<&std::collections::BTreeSet<_>>| {
+        let backend: &'static RetentionBackend =
+            crate::testkit::leak_static(RetentionBackend::with_snapshots([1, 2, 3]));
+        backend.insert_timeline_segment(1, 0);
+        let request = LifecycleRetentionRequest::snapshot_pruning(1)
+            .with_snapshot_prune_mode(SnapshotPruneMode::ReconcileToAttested);
+        let proof = build_retention_proof(&request, None, &RecoveryHealth::Healthy, 3);
+        let pruning =
+            LifecycleSnapshotPruningRequest::for_request(proof, &request).expect("pruning request");
+        let outcome =
+            prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning, referenced)
+                .expect("outcome");
+        (backend, outcome)
+    };
+    let (backend, outcome) = reconcile(Some(&std::collections::BTreeSet::new()));
+    assert!(outcome.completed(), "the snapshot-less reconcile runs");
+    assert!(outcome.deleted().is_empty(), "no snapshot is touched");
+    assert_eq!(backend.remaining_snapshot_ids(), [1, 2, 3]);
+    assert!(
+        backend.remaining_timeline_segments().is_empty(),
+        "the orphan segment went"
+    );
+    assert_eq!(backend.delete_calls(), 1);
+
+    let (backend, outcome) = reconcile(None);
+    assert!(
+        outcome.deferred_incomplete_proof(),
+        "unknown references: defer"
+    );
+    assert_eq!(backend.list_calls(), 0);
+    assert_eq!(backend.remaining_timeline_segments().len(), 1);
 }
 
 #[test]
@@ -2291,8 +2434,12 @@ fn proof_driven_prunes_are_blocked_by_lossy_recovery() {
         let pruning =
             LifecycleSnapshotPruningRequest::for_request(proof, &request).expect("pruning request");
 
-        let outcome =
-            prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning).expect("outcome");
+        let outcome = prune_snapshots_with_proof(
+            &SnapshotService::new(backend),
+            &pruning,
+            Some(&std::collections::BTreeSet::new()),
+        )
+        .expect("outcome");
 
         assert!(outcome.blocked_by_recovery_health(), "{mode:?} {health:?}");
         assert_eq!(backend.list_calls(), 0, "{mode:?} {health:?}");
@@ -2591,9 +2738,10 @@ fn completed_checkpoints_chain_a_superseded_prune_that_leaves_one_snapshot() {
         let prune = drain_snapshot_prune(&mut runtime);
 
         assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
+        // The superseded snapshot and (#3643) the timeline tail it sealed.
         assert_eq!(
             prune.state_changes(),
-            usize::from(snapshot_id > 1),
+            2 * usize::from(snapshot_id > 1),
             "the prune deletes the one superseded snapshot"
         );
         assert_eq!(
@@ -2638,7 +2786,8 @@ fn superseded_prune_protects_the_live_snapshot_and_any_id_at_or_above_it() {
     let prune = drain_snapshot_prune(&mut runtime);
 
     assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
-    assert_eq!(prune.state_changes(), 1);
+    // Snapshot 1 and (#3643) the timeline tail it sealed.
+    assert_eq!(prune.state_changes(), 2);
     assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([2, 5]));
     assert_eq!(attested_snapshot_id(backend), Some(2));
 }
@@ -2776,7 +2925,9 @@ fn reopen_reconciles_the_snapshot_family_to_the_attested_id() {
     );
     let prune = drain_snapshot_prune(&mut reopened);
     assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
-    assert_eq!(prune.state_changes(), 2);
+    // Snapshots 1 and 5, and (#3643) the timeline tail snapshot 1 sealed
+    // (snapshot 5 was planted by hand and sealed none).
+    assert_eq!(prune.state_changes(), 3);
     assert_eq!(backend.snapshot_objects(), vec![snapshot_object(2)]);
     assert_eq!(attested_snapshot_id(backend), Some(2));
     assert_eq!(pending_snapshot_prunes(&reopened), 0);
@@ -2831,7 +2982,8 @@ fn a_snapshot_published_without_its_manifest_repoint_is_reconciled_at_the_next_o
     let prune = drain_snapshot_prune(&mut reopened);
 
     assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
-    assert_eq!(prune.state_changes(), 1);
+    // The unattested snapshot and (#3643) the timeline tail it sealed.
+    assert_eq!(prune.state_changes(), 2);
     assert_eq!(backend.snapshot_objects(), vec![snapshot_object(1)]);
     assert_eq!(attested_snapshot_id(backend), Some(1));
     let view = reopened.read_view().expect("view");
@@ -2875,7 +3027,9 @@ fn a_failed_snapshot_delete_keeps_the_live_snapshot_and_leaves_the_rest_for_the_
     let prune = drain_snapshot_prune(&mut runtime);
 
     assert_eq!(prune.status(), MaintenanceOutcomeStatus::Completed);
-    assert_eq!(prune.state_changes(), 1);
+    // Snapshot 2, plus (#3643) the timeline tails of snapshots 1 and 2: the
+    // failed snapshot delete does not keep its unreferenced tail.
+    assert_eq!(prune.state_changes(), 3);
     assert!(
         prune.recovery_health().is_some(),
         "the failed delete is health debt"
@@ -2896,8 +3050,12 @@ fn a_failed_snapshot_delete_keeps_the_live_snapshot_and_leaves_the_rest_for_the_
     assert_eq!(backend.snapshot_objects(), vec![snapshot_object(3)]);
 }
 
+/// #3643 (re-review P2): a never-checkpointed store's reopen queues the
+/// reconcile too — it cannot prune snapshots (none is attested) but it reclaims
+/// any timeline segment a dying first checkpoint left. It completes without
+/// telemetry debt and, with nothing to reclaim, deletes nothing.
 #[test]
-fn reopen_of_a_never_checkpointed_store_queues_no_reconcile() {
+fn reopen_of_a_never_checkpointed_store_queues_a_segment_only_reconcile() {
     let backend: &'static CheckpointTestBackend =
         crate::testkit::leak_static(CheckpointTestBackend::new());
     let branch = durable_branch_id(0xa9);
@@ -2913,15 +3071,20 @@ fn reopen_of_a_never_checkpointed_store_queues_no_reconcile() {
 
     let mut reopened = open_runtime(branch, backend);
 
-    // Nothing is attested, so nothing can be proven dead: no prune is queued
-    // (a deferred prune would only leave telemetry debt behind).
-    assert_eq!(pending_snapshot_prunes(&reopened), 0);
+    assert_eq!(pending_snapshot_prunes(&reopened), 1);
+    let mut reconciled = 0;
     while let Some(outcome) = reopened
         .run_next_retention_maintenance()
         .expect("retention lane")
     {
-        assert_ne!(outcome.task_kind(), MaintenanceTaskKind::SnapshotPruning);
+        if outcome.task_kind() == MaintenanceTaskKind::SnapshotPruning {
+            reconciled += 1;
+            assert_eq!(outcome.status(), MaintenanceOutcomeStatus::Completed);
+            assert_eq!(outcome.state_changes(), 0, "nothing to reclaim");
+            assert!(outcome.recovery_health().is_none(), "no telemetry debt");
+        }
     }
+    assert_eq!(reconciled, 1);
     assert!(backend.snapshot_objects().is_empty());
 }
 
@@ -3113,4 +3276,223 @@ fn superseded_prune_defers_under_data_loss_health_without_listing() {
     );
     assert_eq!(backend.delete_calls(), deletes_before);
     assert_eq!(backend.snapshot_objects(), sorted_snapshot_objects([1, 2]));
+}
+
+/// #3643: the newest-N verb carries no segment prune (it keeps older
+/// snapshots on purpose); each proof-driven mode carries its own rule.
+#[test]
+fn timeline_segment_prune_mode_truth_table() {
+    use crate::lifecycle::retention::timeline_segment_prune_mode;
+    use crate::service::TimelineSegmentPruneMode;
+    assert_eq!(
+        timeline_segment_prune_mode(SnapshotPruneMode::RetainNewest),
+        None
+    );
+    assert_eq!(
+        timeline_segment_prune_mode(SnapshotPruneMode::Superseded),
+        Some(TimelineSegmentPruneMode::Superseded)
+    );
+    assert_eq!(
+        timeline_segment_prune_mode(SnapshotPruneMode::ReconcileToAttested),
+        Some(TimelineSegmentPruneMode::ReconcileToAttested)
+    );
+}
+
+fn timeline_segment_name(sealing_snapshot_id: u64, ordinal: u64) -> ObjectName {
+    ObjectLayout::timeline_segment(crate::layout::TimelineSegmentId {
+        sealing_snapshot_id,
+        ordinal,
+    })
+    .expect("segment name")
+}
+
+/// #3643: a proof-driven prune with the live snapshot referencing `referenced`.
+fn segment_pruning(
+    backend: &RetentionBackend,
+    live_snapshot_id: u64,
+    mode: SnapshotPruneMode,
+    referenced: &[(u64, u64)],
+) -> LifecycleSnapshotPruningOutcome {
+    let request = LifecycleRetentionRequest::snapshot_pruning(1).with_snapshot_prune_mode(mode);
+    let proof = build_retention_proof(
+        &request,
+        Some(&manifest(live_snapshot_id, 7)),
+        &RecoveryHealth::Healthy,
+        backend.remaining_snapshot_ids().len(),
+    );
+    let pruning =
+        LifecycleSnapshotPruningRequest::for_request(proof, &request).expect("pruning request");
+    let referenced = referenced
+        .iter()
+        .map(
+            |(sealing_snapshot_id, ordinal)| crate::layout::TimelineSegmentId {
+                sealing_snapshot_id: *sealing_snapshot_id,
+                ordinal: *ordinal,
+            },
+        )
+        .collect();
+    prune_snapshots_with_proof(&SnapshotService::new(backend), &pruning, Some(&referenced))
+        .expect("outcome")
+}
+
+/// #3643: `Superseded` deletes exactly the segments the live snapshot does not
+/// reference AND that were sealed below it; a prune that deletes only a
+/// segment reclaimed something (it is not a no-op).
+#[test]
+fn superseded_prune_deletes_only_unreferenced_segments_sealed_below_live() {
+    let backend: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([3]));
+    for (sealing, ordinal) in [(1, 0), (2, 0), (3, 0), (5, 0)] {
+        backend.insert_timeline_segment(sealing, ordinal);
+    }
+
+    let outcome = segment_pruning(backend, 3, SnapshotPruneMode::Superseded, &[(2, 0)]);
+
+    assert!(outcome.completed());
+    assert!(outcome.deleted().is_empty(), "the live snapshot stays");
+    assert_eq!(
+        backend.remaining_timeline_segments(),
+        [(2, 0), (3, 0), (5, 0)].map(|(s, o)| timeline_segment_name(s, o))
+    );
+    assert!(!outcome.completed_noop(), "a segment-only prune reclaimed");
+    assert!(!outcome.completed_with_health_debt());
+    let maintenance = outcome.maintenance_outcome();
+    assert_eq!(maintenance.state_changes(), 1);
+    assert_eq!(maintenance.bytes_reclaimed(), b"segment".len() as u64);
+}
+
+/// #3643: a prune with nothing to delete among snapshots or segments is a
+/// no-op, and `ReconcileToAttested` deletes every unreferenced segment.
+#[test]
+fn segment_prune_modes_on_both_sides_of_their_rules() {
+    let quiet: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([3]));
+    quiet.insert_timeline_segment(3, 0);
+    let outcome = segment_pruning(quiet, 3, SnapshotPruneMode::Superseded, &[(3, 0)]);
+    assert!(outcome.completed_noop());
+
+    let reconciled: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([3]));
+    for (sealing, ordinal) in [(1, 0), (3, 0), (5, 0)] {
+        reconciled.insert_timeline_segment(sealing, ordinal);
+    }
+    let outcome = segment_pruning(
+        reconciled,
+        3,
+        SnapshotPruneMode::ReconcileToAttested,
+        &[(3, 0)],
+    );
+    assert_eq!(
+        reconciled.remaining_timeline_segments(),
+        [timeline_segment_name(3, 0)]
+    );
+    assert_eq!(outcome.maintenance_outcome().state_changes(), 2);
+
+    // The newest-N verb deletes no segment.
+    let explicit: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([3]));
+    explicit.insert_timeline_segment(1, 0);
+    segment_pruning(explicit, 3, SnapshotPruneMode::RetainNewest, &[]);
+    assert_eq!(explicit.remaining_timeline_segments().len(), 1);
+}
+
+/// #3643: a segment that vanished between the listing and its delete is
+/// neither deleted nor a failure; one whose delete fails is health debt.
+#[test]
+fn a_vanished_segment_is_not_a_failure_but_a_failed_delete_is_health_debt() {
+    let vanished: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([3]));
+    vanished.insert_phantom(timeline_segment_name(1, 0));
+    let outcome = segment_pruning(vanished, 3, SnapshotPruneMode::Superseded, &[]);
+    assert!(outcome.completed_noop(), "nothing deleted, nothing failed");
+    assert!(outcome.recovery_health().is_none());
+
+    let failing: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([3]));
+    failing.insert_timeline_segment(1, 0);
+    failing.fail_delete_on_call(1);
+    let outcome = segment_pruning(failing, 3, SnapshotPruneMode::Superseded, &[]);
+    assert!(outcome.completed_with_health_debt());
+    assert!(!outcome.completed_noop());
+    assert_eq!(
+        outcome.recovery_health().map(RecoveryHealth::fault_count),
+        Some(1)
+    );
+    assert_eq!(failing.remaining_timeline_segments().len(), 1);
+
+    // A delete the backend cannot confirm durable is not a reclaim: it is
+    // health debt, and no bytes are credited for it.
+    let non_durable: &'static RetentionBackend =
+        crate::testkit::leak_static(RetentionBackend::with_snapshots([3]));
+    non_durable.insert_timeline_segment(1, 0);
+    non_durable
+        .non_durable_deletes
+        .store(true, Ordering::SeqCst);
+    let outcome = segment_pruning(non_durable, 3, SnapshotPruneMode::Superseded, &[]);
+    assert!(outcome.completed_with_health_debt());
+    assert_eq!(
+        outcome.recovery_health().map(RecoveryHealth::fault_count),
+        Some(1)
+    );
+    assert_eq!(outcome.maintenance_outcome().bytes_reclaimed(), 0);
+}
+
+/// #3643 (re-review P2): the snapshot-less segment reconcile acts only for the
+/// open reconcile mode, on a proof incomplete solely because no snapshot is
+/// attested — never on a complete proof, a health-blocked one, another missing
+/// fact, or a proof naming a live snapshot.
+#[test]
+fn snapshotless_segment_reconcile_truth_table() {
+    use crate::lifecycle::retention::{snapshotless_segment_reconcile, LifecycleRetentionProof};
+    let proof = |status, live: Option<u64>, missing: Option<&'static str>| {
+        LifecycleRetentionProof::new(status, RecoveryHealth::Healthy, live, None, None, missing)
+    };
+    let incomplete = LifecycleRetentionProofStatus::Incomplete;
+    for (proof, mode, expected) in [
+        (
+            proof(incomplete, None, Some("manifest_snapshot")),
+            SnapshotPruneMode::ReconcileToAttested,
+            true,
+        ),
+        (
+            proof(incomplete, None, Some("manifest_snapshot")),
+            SnapshotPruneMode::Superseded,
+            false,
+        ),
+        (
+            proof(incomplete, None, Some("manifest_snapshot")),
+            SnapshotPruneMode::RetainNewest,
+            false,
+        ),
+        (
+            proof(incomplete, Some(3), Some("manifest_snapshot")),
+            SnapshotPruneMode::ReconcileToAttested,
+            false,
+        ),
+        (
+            proof(incomplete, None, Some("quarantine_inventory")),
+            SnapshotPruneMode::ReconcileToAttested,
+            false,
+        ),
+        (
+            proof(LifecycleRetentionProofStatus::Complete, None, None),
+            SnapshotPruneMode::ReconcileToAttested,
+            false,
+        ),
+        (
+            proof(
+                LifecycleRetentionProofStatus::BlockedByRecoveryHealth,
+                None,
+                Some("recovery_health"),
+            ),
+            SnapshotPruneMode::ReconcileToAttested,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            snapshotless_segment_reconcile(&proof, mode),
+            expected,
+            "{proof:?} {mode:?}"
+        );
+    }
 }

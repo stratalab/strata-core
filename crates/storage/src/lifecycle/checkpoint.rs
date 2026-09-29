@@ -1686,11 +1686,11 @@ pub(crate) fn checkpoint_durable_branch_with_budget(
             // W3.1b: persist the retained timeline alongside the delta rows
             // (only when provably complete; a fallback-scan reopen stays
             // correct otherwise).
-            let timeline_groups = timeline_group_for_branch(branch, visible_version)
+            let timeline_plans = timeline_plan_for_branch(branch, visible_version)
                 .into_iter()
                 .collect();
             let mut collection =
-                CheckpointCollection::new(rows, has_durable_rows, flush_boundary, timeline_groups);
+                CheckpointCollection::new(rows, has_durable_rows, flush_boundary, timeline_plans);
             collection.record_durable_base(branch.branch_id(), has_durable_rows);
             Ok(collection)
         },
@@ -1710,9 +1710,9 @@ pub(crate) struct CheckpointCollection {
     /// The snapshot's base floor: the highest durably flushed commit the delta
     /// sits on, `None` for a self-contained full snapshot.
     pub(crate) flush_boundary: Option<CommitVersion>,
-    /// W3.1b: the retained-timeline groups of every branch whose index was
-    /// provably complete at the watermark.
-    pub(crate) timeline_groups: Vec<crate::format::SnapshotTimelineBranchGroup>,
+    /// W3.1b / #3643: what each branch whose index was provably complete at
+    /// the watermark must make durable of its retained timeline.
+    pub(crate) timeline_plans: Vec<BranchTimelinePlan>,
     /// Space-reclamation contract §3.2: the branches whose delta sits on a
     /// durable table-manifest base (a durably catalogued owned table). The
     /// snapshot records the set so recovery can tell an orphaned delta from a
@@ -1725,13 +1725,13 @@ impl CheckpointCollection {
         rows: Vec<crate::row::StorageRow>,
         has_durable_rows: bool,
         flush_boundary: Option<CommitVersion>,
-        timeline_groups: Vec<crate::format::SnapshotTimelineBranchGroup>,
+        timeline_plans: Vec<BranchTimelinePlan>,
     ) -> Self {
         Self {
             rows,
             has_durable_rows,
             flush_boundary,
-            timeline_groups,
+            timeline_plans,
             durable_base_branches: Vec::new(),
         }
     }
@@ -1806,29 +1806,193 @@ pub(crate) fn branch_checkpoint_collection(
     Ok((rows, has_durable_rows, flush_boundary))
 }
 
-/// W3.1b: the branch's persistable timeline group — `None` unless its
+/// #3643: one branch's timeline persist plan, with the index the refs are
+/// adopted back into once the checkpoint completes.
+#[derive(Clone, Debug)]
+pub(crate) struct BranchTimelinePlan {
+    pub(crate) branch_id: BranchId,
+    pub(crate) index: std::sync::Arc<crate::timeline_index::RetainedCommitTimeline>,
+    pub(crate) plan: crate::timeline_index::TimelinePersistPlan,
+}
+
+/// W3.1b / #3643: the branch's timeline persist plan — `None` unless its
 /// retained index is complete at `visible_version`.
-pub(super) fn timeline_group_for_branch(
+pub(super) fn timeline_plan_for_branch(
     branch: &BranchLocalState,
     visible_version: CommitVersion,
-) -> Option<crate::format::SnapshotTimelineBranchGroup> {
-    let entries = branch
-        .retained_timeline()
-        .snapshot_entries(visible_version)?;
-    Some(crate::format::SnapshotTimelineBranchGroup {
+) -> Option<BranchTimelinePlan> {
+    let index = branch.retained_timeline();
+    let plan = index.persist_plan(visible_version)?;
+    Some(BranchTimelinePlan {
         branch_id: branch.branch_id(),
-        entries: entries
-            .iter()
-            .map(|entry| crate::format::SnapshotTimelineEntry {
-                commit_version: entry.commit_version(),
-                commit_timestamp: entry.commit_timestamp(),
-                // #3112 S2c: persist the wall-clock instant too, so a reopen
-                // served from this checkpoint restores it instead of reporting
-                // every checkpointed commit as undated.
-                committed_at: entry.committed_at(),
-            })
-            .collect(),
+        index: std::sync::Arc::clone(index),
+        plan,
     })
+}
+
+/// The persisted form of an index entry. #3112 S2c: the wall-clock instant is
+/// persisted too, so a reopen restores it instead of reporting every
+/// checkpointed commit as undated.
+fn snapshot_timeline_entries(
+    entries: &[crate::timeline_index::RetainedTimelineEntry],
+) -> Vec<crate::format::SnapshotTimelineEntry> {
+    entries
+        .iter()
+        .map(|entry| crate::format::SnapshotTimelineEntry {
+            commit_version: entry.commit_version(),
+            commit_timestamp: entry.commit_timestamp(),
+            committed_at: entry.committed_at(),
+        })
+        .collect()
+}
+
+/// #3643: one segment a checkpoint must publish, with the reference it will
+/// have (computed from its encoding before anything is written).
+struct TimelineSegmentWrite {
+    id: crate::layout::TimelineSegmentId,
+    entries: Vec<crate::format::SnapshotTimelineEntry>,
+    expected: crate::format::TimelineSegmentRef,
+}
+
+/// #3643: a checkpoint's timeline — the kind-5 groups the snapshot records,
+/// the segments to publish before it, and what each index adopts once the
+/// checkpoint completes.
+struct TimelineCheckpoint {
+    groups: Vec<crate::format::SnapshotTimelineSegmentGroup>,
+    writes: Vec<TimelineSegmentWrite>,
+    adoptions: Vec<TimelineAdoption>,
+}
+
+struct TimelineAdoption {
+    index: std::sync::Arc<crate::timeline_index::RetainedCommitTimeline>,
+    revision: u64,
+    full: Vec<crate::format::TimelineSegmentRef>,
+    tail: Option<crate::format::TimelineSegmentRef>,
+}
+
+impl TimelineCheckpoint {
+    /// Every segment the snapshot references (the live set once it completes).
+    fn referenced(&self) -> std::collections::BTreeSet<crate::layout::TimelineSegmentId> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.refs.iter())
+            .map(|segment| crate::layout::TimelineSegmentId {
+                sealing_snapshot_id: segment.sealing_snapshot_id,
+                ordinal: u64::from(segment.ordinal),
+            })
+            .collect()
+    }
+}
+
+/// #3643: turn the per-branch plans into segment writes and the snapshot's
+/// kind-5 groups. Each new segment is sealed under `snapshot_id` with the next
+/// ordinal; its reference comes from its encoding, so the snapshot section
+/// (and the payload-cap check) is complete before anything is published.
+fn prepare_timeline_checkpoint(
+    snapshot_id: u64,
+    plans: &[BranchTimelinePlan],
+) -> LifecycleResult<TimelineCheckpoint> {
+    let mut plans: Vec<&BranchTimelinePlan> = plans.iter().collect();
+    plans.sort_by_key(|plan| *plan.branch_id.as_bytes());
+    let mut checkpoint = TimelineCheckpoint {
+        groups: Vec::with_capacity(plans.len()),
+        writes: Vec::new(),
+        adoptions: Vec::with_capacity(plans.len()),
+    };
+    let mut ordinal = 0u32;
+    let mut seal = |entries: &[crate::timeline_index::RetainedTimelineEntry],
+                    writes: &mut Vec<TimelineSegmentWrite>|
+     -> LifecycleResult<crate::format::TimelineSegmentRef> {
+        let entries = snapshot_timeline_entries(entries);
+        let bytes = crate::format::encode_timeline_segment(&entries).map_err(format_error)?;
+        let (Some(first), Some(last)) = (entries.first(), entries.last()) else {
+            return Err(LifecycleError::CheckpointPublicationFailed {
+                reason: "timeline segment must hold at least one entry",
+            });
+        };
+        let mut crc = [0u8; 4];
+        crc.copy_from_slice(&bytes[bytes.len() - 4..]);
+        let expected = crate::format::TimelineSegmentRef {
+            sealing_snapshot_id: snapshot_id,
+            ordinal,
+            entry_count: u32::try_from(entries.len()).map_err(|_| {
+                LifecycleError::CheckpointPublicationFailed {
+                    reason: "timeline segment entry count must fit in u32",
+                }
+            })?,
+            first_version: first.commit_version,
+            last_version: last.commit_version,
+            crc32: u32::from_le_bytes(crc),
+        };
+        writes.push(TimelineSegmentWrite {
+            id: crate::layout::TimelineSegmentId {
+                sealing_snapshot_id: snapshot_id,
+                ordinal: u64::from(ordinal),
+            },
+            entries,
+            expected,
+        });
+        ordinal = ordinal
+            .checked_add(1)
+            .ok_or(LifecycleError::CheckpointPublicationFailed {
+                reason: "timeline segment ordinal overflow",
+            })?;
+        Ok(expected)
+    };
+    for plan in plans {
+        let mut full = plan.plan.reused.clone();
+        for chunk in &plan.plan.new_chunks {
+            full.push(seal(chunk, &mut checkpoint.writes)?);
+        }
+        let tail = match &plan.plan.tail {
+            crate::timeline_index::TimelineTailPlan::None => None,
+            crate::timeline_index::TimelineTailPlan::Reuse(tail) => Some(*tail),
+            crate::timeline_index::TimelineTailPlan::Write(entries) => {
+                Some(seal(entries, &mut checkpoint.writes)?)
+            }
+        };
+        let mut refs = full.clone();
+        refs.extend(tail);
+        checkpoint
+            .groups
+            .push(crate::format::SnapshotTimelineSegmentGroup {
+                branch_id: plan.branch_id,
+                refs,
+            });
+        checkpoint.adoptions.push(TimelineAdoption {
+            index: std::sync::Arc::clone(&plan.index),
+            revision: plan.plan.revision,
+            full,
+            tail,
+        });
+    }
+    Ok(checkpoint)
+}
+
+/// #3643: publish a checkpoint's new segments, each before the snapshot that
+/// references it, checking each lands as exactly the reference prepared.
+fn publish_timeline_segments(
+    services: &LifecycleDurableLocalServices<'_>,
+    timeline: &TimelineCheckpoint,
+) -> LifecycleResult<()> {
+    for write in &timeline.writes {
+        let published = services
+            .snapshot()
+            .publish_timeline_segment(write.id, &write.entries)
+            .map_err(|error| {
+                LifecycleError::lower_layer_with(
+                    LifecycleLowerLayer::Service,
+                    "timeline segment publish failed",
+                    error,
+                )
+            })?;
+        if published != write.expected {
+            return Err(LifecycleError::CheckpointPublicationFailed {
+                reason: "published timeline segment does not match its prepared reference",
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Multi-branch checkpoint entry point: collect rows from every active
@@ -1884,8 +2048,8 @@ pub(crate) fn checkpoint_durable_runtime_with_budget(
                     );
                 }
                 collection.rows.append(&mut rows);
-                if let Some(group) = timeline_group_for_branch(branch, visible_version) {
-                    collection.timeline_groups.push(group);
+                if let Some(plan) = timeline_plan_for_branch(branch, visible_version) {
+                    collection.timeline_plans.push(plan);
                 }
             }
             Ok(collection)
@@ -2008,12 +2172,14 @@ fn publish_checkpoint_rows(
     validate_snapshot_id_advances(services.manifest(), request.snapshot_id())?;
     let mut sections = Vec::with_capacity(3 + request.extra_sections().len());
     sections.push(encode_checkpoint_row_section(rows).map_err(format_error)?);
-    // W3.1b: the retained-timeline section, only for branches whose index was
-    // provably complete at the watermark (absent = reopen falls back to the
-    // timeline-space scan, the W3.1a behavior).
-    if !collection.timeline_groups.is_empty() {
+    // #3643: the retained timeline, as references to sealed segment objects
+    // (only branches whose index was provably complete at the watermark). The
+    // references are bounded, so the timeline never pushes a checkpoint over
+    // the payload cap; the segments publish below, before the snapshot.
+    let timeline = prepare_timeline_checkpoint(request.snapshot_id(), &collection.timeline_plans)?;
+    if !timeline.groups.is_empty() {
         sections.push(
-            crate::format::encode_snapshot_timeline_section(&collection.timeline_groups)
+            crate::format::encode_snapshot_timeline_segments_section(&timeline.groups)
                 .map_err(format_error)?,
         );
     }
@@ -2045,6 +2211,7 @@ fn publish_checkpoint_rows(
         ));
     }
     require_checkpoint_artifact_budget(budget, request, &sections)?;
+    publish_timeline_segments(services, &timeline)?;
     let active_wal_segment = services.wal().active_segment_id();
     let service_request = CheckpointRequest::new(
         *services.assembly_facts().database_id(),
@@ -2059,6 +2226,14 @@ fn publish_checkpoint_rows(
     let mut outcome = match services.checkpoint().checkpoint(service_request) {
         Ok(write) => {
             perf_trace::record_lifecycle_checkpoint_execution();
+            // #3643: the snapshot is live — its segments are what the prune
+            // spares, and each index may now re-reference what it sealed.
+            services.set_live_timeline_segments(request.snapshot_id(), timeline.referenced());
+            for adoption in &timeline.adoptions {
+                adoption
+                    .index
+                    .adopt_segments(adoption.revision, &adoption.full, adoption.tail);
+            }
             LifecycleCheckpointOutcome::completed(request, visible_version, row_count, &write)
         }
         Err(CheckpointServiceError::OrphanSnapshot { snapshot, .. }) => {
@@ -2579,5 +2754,119 @@ mod ranges_cover_interval_tests {
     fn saturating_top_range_covers() {
         // A range reaching u64::MAX covers any candidate at or below it without overflow.
         assert!(ranges_cover_interval(&[(1, u64::MAX)], 1, u64::MAX));
+    }
+}
+
+#[cfg(test)]
+mod timeline_checkpoint_tests {
+    use super::{prepare_timeline_checkpoint, BranchTimelinePlan};
+    use crate::format::{TimelineSegmentRef, TIMELINE_CHUNK_ENTRIES};
+    use crate::layout::TimelineSegmentId;
+    use crate::timeline_index::{RetainedCommitTimeline, TimelineTailPlan};
+    use strata_core::{BranchId, CommitVersion, Timestamp};
+
+    fn plan_for(byte: u8, first_version: u64, count: u64) -> BranchTimelinePlan {
+        let index = RetainedCommitTimeline::new();
+        index.mark_complete_from_birth();
+        for version in first_version..first_version + count {
+            index.observe(CommitVersion::new(version), Timestamp::from_micros(version));
+        }
+        let plan = index
+            .persist_plan(CommitVersion::new(first_version + count))
+            .expect("complete");
+        BranchTimelinePlan {
+            branch_id: BranchId::from_bytes([byte; BranchId::BYTE_LEN]),
+            index,
+            plan,
+        }
+    }
+
+    /// #3643: groups come out ascending by branch id whatever the collection
+    /// order; every new segment is sealed under the checkpoint's snapshot id
+    /// with the next ordinal; re-used refs are referenced, not rewritten; and
+    /// each group's refs are its full chunks then its tail.
+    #[test]
+    fn prepare_timeline_checkpoint_seals_in_branch_order_and_reuses_durable_refs() {
+        let chunk = TIMELINE_CHUNK_ENTRIES as u64;
+        let mut reusing = plan_for(0x02, 1, 3);
+        let reused_tail = TimelineSegmentRef {
+            sealing_snapshot_id: 4,
+            ordinal: 9,
+            entry_count: 3,
+            first_version: CommitVersion::new(1),
+            last_version: CommitVersion::new(3),
+            crc32: 0xabcd,
+        };
+        reusing.plan.tail = TimelineTailPlan::Reuse(reused_tail);
+        let sealing = plan_for(0x01, 100, chunk + 2);
+        let empty = plan_for(0x03, 1, 0);
+
+        let prepared = prepare_timeline_checkpoint(7, &[reusing, sealing, empty]).expect("prepare");
+
+        let branches: Vec<u8> = prepared
+            .groups
+            .iter()
+            .map(|group| group.branch_id.as_bytes()[0])
+            .collect();
+        assert_eq!(branches, vec![0x01, 0x02, 0x03]);
+        // Branch 0x01: one sealed chunk and a tail, both new.
+        let sealed = &prepared.groups[0].refs;
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(
+            (
+                sealed[0].sealing_snapshot_id,
+                sealed[0].ordinal,
+                sealed[0].entry_count
+            ),
+            (
+                7,
+                0,
+                u32::try_from(TIMELINE_CHUNK_ENTRIES).expect("chunk fits u32")
+            )
+        );
+        assert_eq!(sealed[0].first_version, CommitVersion::new(100));
+        assert_eq!(sealed[0].last_version, CommitVersion::new(99 + chunk));
+        assert_eq!(
+            (
+                sealed[1].sealing_snapshot_id,
+                sealed[1].ordinal,
+                sealed[1].entry_count
+            ),
+            (7, 1, 2)
+        );
+        // Branch 0x02 re-uses its tail; branch 0x03 is complete and empty.
+        assert_eq!(prepared.groups[1].refs, vec![reused_tail]);
+        assert!(prepared.groups[2].refs.is_empty());
+        // Only the two new segments are written, each exactly as referenced.
+        assert_eq!(prepared.writes.len(), 2);
+        for (write, expected) in prepared.writes.iter().zip(sealed.iter()) {
+            assert_eq!(write.expected, *expected);
+            assert_eq!(write.entries.len(), expected.entry_count as usize);
+        }
+        assert_eq!(
+            prepared.referenced(),
+            [
+                TimelineSegmentId {
+                    sealing_snapshot_id: 4,
+                    ordinal: 9
+                },
+                TimelineSegmentId {
+                    sealing_snapshot_id: 7,
+                    ordinal: 0
+                },
+                TimelineSegmentId {
+                    sealing_snapshot_id: 7,
+                    ordinal: 1
+                },
+            ]
+            .into_iter()
+            .collect()
+        );
+        // Adoption: the full chunk as sealed, the tail separately.
+        let adoption = &prepared.adoptions[0];
+        assert_eq!(adoption.full, vec![sealed[0]]);
+        assert_eq!(adoption.tail, Some(sealed[1]));
+        assert_eq!(prepared.adoptions[1].tail, Some(reused_tail));
+        assert_eq!(prepared.adoptions[2].tail, None);
     }
 }

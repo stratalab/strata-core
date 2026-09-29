@@ -412,7 +412,7 @@ fn snapshot_object(snapshot_id: u64) -> SnapshotServiceResult<ObjectName> {
     ObjectLayout::snapshot(snapshot_id).map_err(|source| SnapshotServiceError::Layout { source })
 }
 
-fn read_snapshot_optional(
+pub(super) fn read_snapshot_optional(
     backend: &dyn Backend,
     object: &ObjectName,
     snapshot_id: u64,
@@ -565,11 +565,13 @@ fn validate_snapshot_header_identity(
 }
 
 mod listing;
+mod timeline_segments;
 pub(crate) use listing::SnapshotDeleteReport;
 pub(crate) use listing::{
     reconcilable_orphan, superseded_snapshot, SnapshotDeleteFailure, SnapshotDeleteOutcome,
     SnapshotObject, SnapshotPruneMode,
 };
+pub(crate) use timeline_segments::{TimelineSegmentPruneMode, TimelineSegmentPruneReport};
 
 #[cfg(test)]
 mod listing_tests;

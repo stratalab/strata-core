@@ -60,7 +60,7 @@ const REF_BYTES: usize = 40;
 const MAX_SEGMENT_REFS: usize = 1 << 20;
 
 /// One reference from a snapshot to a sealed segment object.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct TimelineSegmentRef {
     pub(crate) sealing_snapshot_id: u64,
     pub(crate) ordinal: u32,

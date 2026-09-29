@@ -21,7 +21,7 @@ use crate::commit::{
 };
 use crate::config::mode::DurabilityPolicy;
 use crate::format::DatabaseManifest;
-use crate::layout::{LayoutError, ObjectFamily, ObjectLayout};
+use crate::layout::{LayoutError, ObjectFamily, ObjectLayout, TimelineSegmentId};
 use crate::object::ObjectName;
 use crate::service::{
     verify_wal_segment_inventory, wal_segments_present, BranchCatalogManifestService,
@@ -112,6 +112,11 @@ pub(crate) struct LifecycleDurableLocalServices<'a> {
     quarantine: QuarantineService<'static>,
     assembly_facts: LifecycleDurableAssemblyFacts,
     writer_guard: Option<BackendWriterGuard>,
+    /// #3643: the timeline segments the manifest-live snapshot references —
+    /// seeded at recovery from the attested snapshot and replaced after every
+    /// completed checkpoint. The segment prune spares exactly these.
+    live_timeline_segments:
+        parking_lot::Mutex<(Option<u64>, std::collections::BTreeSet<TimelineSegmentId>)>,
 }
 
 pub(crate) struct LifecycleDurableLocalShell<'a, S = CommitManualTimestampSource> {
@@ -326,6 +331,61 @@ impl<'a> LifecycleDurableLocalServices<'a> {
         &self.snapshot
     }
 
+    /// #3643 (re-review P1): the segments snapshot `live_snapshot_id` — the one
+    /// the manifest attests at the caller's proof — references, or `None` when
+    /// that cannot be established (the prune then deletes no segment).
+    ///
+    /// The cache is keyed by the snapshot it describes and is trusted only for
+    /// that snapshot. A checkpoint whose manifest publication was reported
+    /// uncertain may still have made its snapshot live; then the attested id
+    /// differs from the cached one, and the references are reloaded from the
+    /// attested snapshot itself rather than taken from a stale cache (which
+    /// would let the open reconcile delete the new snapshot's live segments).
+    /// No attested snapshot references nothing.
+    pub(crate) fn timeline_segments_referenced_by(
+        &self,
+        live_snapshot_id: Option<u64>,
+    ) -> Option<std::collections::BTreeSet<TimelineSegmentId>> {
+        let mut cache = self.live_timeline_segments.lock();
+        if cache.0 == live_snapshot_id {
+            return Some(cache.1.clone());
+        }
+        let Some(snapshot_id) = live_snapshot_id else {
+            return Some(std::collections::BTreeSet::new());
+        };
+        let container = self.snapshot.load_required(snapshot_id).ok()?;
+        let mut referenced = std::collections::BTreeSet::new();
+        for section in container.sections() {
+            if section.section_kind() != crate::format::SNAPSHOT_TIMELINE_SEGMENTS_SECTION_KIND {
+                continue;
+            }
+            let groups =
+                crate::format::decode_snapshot_timeline_segments_payload(section.payload()).ok()?;
+            referenced.extend(
+                groups
+                    .iter()
+                    .flat_map(|group| group.refs.iter())
+                    .map(|segment| TimelineSegmentId {
+                        sealing_snapshot_id: segment.sealing_snapshot_id,
+                        ordinal: u64::from(segment.ordinal),
+                    }),
+            );
+        }
+        *cache = (live_snapshot_id, referenced.clone());
+        Some(referenced)
+    }
+
+    /// #3643: record the segments snapshot `snapshot_id` references, now that
+    /// it is live (a completed checkpoint, or the attested snapshot at
+    /// recovery).
+    pub(crate) fn set_live_timeline_segments(
+        &self,
+        snapshot_id: u64,
+        referenced: std::collections::BTreeSet<TimelineSegmentId>,
+    ) {
+        *self.live_timeline_segments.lock() = (Some(snapshot_id), referenced);
+    }
+
     pub(crate) const fn table_object(&self) -> &TableObjectService<'static> {
         &self.table_object
     }
@@ -478,6 +538,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             quarantine: QuarantineService::new(backend),
             assembly_facts,
             writer_guard: Some(writer_guard),
+            live_timeline_segments: parking_lot::Mutex::default(),
         };
 
         state.transition(LifecycleTransitionTrigger::DurableRecoveryRequired)?;

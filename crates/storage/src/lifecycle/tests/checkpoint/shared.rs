@@ -201,6 +201,7 @@ pub(in crate::lifecycle::tests) struct CheckpointTestBackend {
     uncertain_table_object_create_call: AtomicUsize,
     corrupt_table_object_create_call: AtomicUsize,
     uncertain_manifest_replace_call: AtomicUsize,
+    pub(super) manifest_visible_then_uncertain: AtomicBool,
     manifest_replace_calls: AtomicUsize,
     table_manifest_replace_calls: AtomicUsize,
     table_object_create_calls: AtomicUsize,
@@ -261,6 +262,7 @@ impl CheckpointTestBackend {
             uncertain_table_object_create_call: AtomicUsize::new(0),
             corrupt_table_object_create_call: AtomicUsize::new(0),
             uncertain_manifest_replace_call: AtomicUsize::new(0),
+            manifest_visible_then_uncertain: AtomicBool::new(false),
             manifest_replace_calls: AtomicUsize::new(0),
             table_manifest_replace_calls: AtomicUsize::new(0),
             table_object_create_calls: AtomicUsize::new(0),
@@ -819,6 +821,22 @@ impl Backend for CheckpointTestBackend {
         let stored_bytes = self.published_bytes(kind, bytes);
         let byte_count = stored_bytes.len() as u64;
         objects.insert(name.clone(), stored_bytes);
+        if matches!(kind, CheckpointPublishKind::DatabaseRecord)
+            && crate::format::decode_manifest(bytes)
+                .is_ok_and(|manifest| manifest.snapshot_id() == Some(2))
+            && self
+                .manifest_visible_then_uncertain
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(PublishError::new(
+                name.clone(),
+                PublishFailureKind::VisibilityUnknown,
+                BackendError::new(
+                    BackendErrorKind::Unavailable,
+                    "review: manifest visible, final durability uncertain",
+                ),
+            ));
+        }
         Ok(PublishOutcome::new(
             name.clone(),
             BackendMetadata::new(byte_count, None),

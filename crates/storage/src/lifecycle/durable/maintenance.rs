@@ -300,11 +300,11 @@ impl DurableBackgroundMaintenanceBuild<'_> {
             } => {
                 let mut collection = crate::lifecycle::checkpoint::CheckpointCollection::default();
                 for (branch, durable_identities) in &branches {
-                    if let Some(group) = crate::lifecycle::checkpoint::timeline_group_for_branch(
+                    if let Some(plan) = crate::lifecycle::checkpoint::timeline_plan_for_branch(
                         branch,
                         visible_version,
                     ) {
-                        collection.timeline_groups.push(group);
+                        collection.timeline_plans.push(plan);
                     }
                     let (mut branch_rows, branch_has_durable, branch_boundary) =
                         crate::lifecycle::checkpoint::branch_checkpoint_collection(
@@ -1461,7 +1461,13 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         if recovery_health_prevents_listing(request, &health) {
             let proof = retention_proof_from_assembly(request, &self.services, &health);
             let pruning = LifecycleSnapshotPruningRequest::for_request(proof, request)?;
-            let outcome = prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
+            let outcome = prune_snapshots_with_proof(
+                self.services.snapshot(),
+                &pruning,
+                self.services
+                    .timeline_segments_referenced_by(pruning.live_snapshot_id())
+                    .as_ref(),
+            )?;
             self.maintenance
                 .record_reclaim(&outcome.maintenance_outcome());
             return Ok(outcome);
@@ -1480,7 +1486,13 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         let proof = build_retention_proof(request, manifest.as_ref(), &health, snapshot_count);
         let pruning = LifecycleSnapshotPruningRequest::for_request(proof, request)?;
         // Inline verb: not a queued task, so record the prune here.
-        let outcome = prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
+        let outcome = prune_snapshots_with_proof(
+            self.services.snapshot(),
+            &pruning,
+            self.services
+                .timeline_segments_referenced_by(pruning.live_snapshot_id())
+                .as_ref(),
+        )?;
         self.maintenance
             .record_reclaim(&outcome.maintenance_outcome());
         Ok(outcome)
@@ -5736,10 +5748,14 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
             return match request.scope() {
                 LifecycleRetentionScope::SnapshotObjects => {
                     let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
-                    Ok(
-                        prune_snapshots_with_proof(self.services.snapshot(), &pruning)?
-                            .maintenance_outcome(),
-                    )
+                    Ok(prune_snapshots_with_proof(
+                        self.services.snapshot(),
+                        &pruning,
+                        self.services
+                            .timeline_segments_referenced_by(pruning.live_snapshot_id())
+                            .as_ref(),
+                    )?
+                    .maintenance_outcome())
                 }
                 LifecycleRetentionScope::Global
                 | LifecycleRetentionScope::TableObjects { .. }
@@ -5766,16 +5782,25 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
         match request.scope() {
             LifecycleRetentionScope::SnapshotObjects => {
                 let pruning = LifecycleSnapshotPruningRequest::for_request(proof, &request)?;
-                Ok(
-                    prune_snapshots_with_proof(self.services.snapshot(), &pruning)?
-                        .maintenance_outcome(),
-                )
+                Ok(prune_snapshots_with_proof(
+                    self.services.snapshot(),
+                    &pruning,
+                    self.services
+                        .timeline_segments_referenced_by(pruning.live_snapshot_id())
+                        .as_ref(),
+                )?
+                .maintenance_outcome())
             }
             LifecycleRetentionScope::Global => {
                 let pruning =
                     LifecycleSnapshotPruningRequest::for_request(proof.clone(), &request)?;
-                let snapshot_outcome =
-                    prune_snapshots_with_proof(self.services.snapshot(), &pruning)?;
+                let snapshot_outcome = prune_snapshots_with_proof(
+                    self.services.snapshot(),
+                    &pruning,
+                    self.services
+                        .timeline_segments_referenced_by(pruning.live_snapshot_id())
+                        .as_ref(),
+                )?;
                 let retention_outcome = retention_outcome_for_delegated_families(proof)?;
                 let table_retention =
                     table_object_retention_request(self.services, self.branch_id, &self.health)

@@ -5070,3 +5070,537 @@ fn api_zero_close_budget_leaves_an_already_queued_sweep_for_the_next_open() {
         "zero budget must cover already queued reclaim tasks"
     );
 }
+
+// ---- #3643: sealed timeline segments -------------------------------------
+
+/// #3643: every timeline segment object under `root`, as `id/ordinal` names.
+#[cfg(feature = "localfs")]
+fn timeline_segment_files(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+    let mut files = std::collections::BTreeSet::new();
+    let Ok(sealings) = std::fs::read_dir(root.join("timeline")) else {
+        return files;
+    };
+    for sealing in sealings.flatten() {
+        let Ok(segments) = std::fs::read_dir(sealing.path()) else {
+            continue;
+        };
+        for segment in segments.flatten() {
+            if segment.path().is_file() {
+                files.insert(format!(
+                    "{}/{}",
+                    sealing.file_name().to_string_lossy(),
+                    segment.file_name().to_string_lossy()
+                ));
+            }
+        }
+    }
+    files
+}
+
+#[cfg(feature = "localfs")]
+fn open_timeline_runtime(
+    backend: &'static StorageBackend,
+    policy: StorageMaintenanceSchedulingPolicy,
+    strict: bool,
+) -> StorageApiResult<StorageRuntime<'static>> {
+    StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_maintenance_scheduling_policy(policy)
+            .with_strict_recovery(strict),
+        backend,
+    )
+    .map(crate::api::StorageOpenOutcome::into_runtime)
+}
+
+/// #3643: `count` commits to one key, commit `i` (from 0) writing `v{i}` at
+/// logical timestamp `(i + 1) * 10`.
+#[cfg(feature = "localfs")]
+fn commit_timeline_history(runtime: &mut StorageRuntime<'static>, count: u64) {
+    for index in 0..count {
+        runtime
+            .commit_for_test(
+                &put_batch(b"history", format!("v{index}").as_bytes()),
+                strata_core::Timestamp::from_micros((index + 1) * 10),
+            )
+            .expect("commit");
+    }
+}
+
+#[cfg(feature = "localfs")]
+fn read_history_at(runtime: &StorageRuntime<'static>, micros: u64) -> StorageApiResult<Vec<u8>> {
+    runtime
+        .read_point(&PointReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"history"),
+            ReadBound::AtTimestamp(strata_core::Timestamp::from_micros(micros)),
+        ))
+        .map(|outcome| {
+            outcome
+                .row()
+                .expect("history row")
+                .value()
+                .expect("put row")
+                .as_bytes()
+                .to_vec()
+        })
+}
+
+#[cfg(feature = "localfs")]
+fn checkpoint_now(runtime: &mut StorageRuntime<'static>) {
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Checkpoint,
+            MaintenanceScope::Global,
+        ))
+        .expect("checkpoint request");
+    drain_maintenance_to_idle(runtime);
+}
+
+#[cfg(feature = "localfs")]
+fn live_snapshot_id(runtime: &StorageRuntime<'static>) -> Option<u64> {
+    runtime
+        .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+        .expect("diagnostics")
+        .checkpoint()
+        .snapshot_id()
+}
+
+/// #3643 (the P1 of the external #3596 review): once the retained timeline
+/// alone exceeds the checkpoint payload cap, a fully flushed database still
+/// checkpoints — the timeline lives in segments the snapshot only references
+/// — and its history survives a close and reopen exactly.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_timeline_history_above_the_payload_cap_still_checkpoints() {
+    let root = temp_dir_for_api_test("timeline-over-cap");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    // 100 retained commits are 2,400 bytes of timeline entries alone, over a
+    // 2,048-byte cap; the flushed rows leave nothing else in the delta.
+    runtime.set_checkpoint_delta_cap_for_test(2048);
+    commit_timeline_history(&mut runtime, 100);
+    runtime
+        .flush_default_branch_for_test()
+        .expect("all rows flushed");
+    checkpoint_now(&mut runtime);
+
+    assert!(
+        live_snapshot_id(&runtime).is_some(),
+        "the checkpoint published under the cap"
+    );
+    assert!(
+        !timeline_segment_files(&root).is_empty(),
+        "the timeline went to a segment object"
+    );
+
+    runtime.close().expect("close");
+    let reopened = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("reopen");
+    for (micros, expected) in [(10, "v0"), (15, "v0"), (555, "v54"), (1000, "v99")] {
+        assert_eq!(
+            read_history_at(&reopened, micros).expect("history read"),
+            expected.as_bytes(),
+            "as of {micros}"
+        );
+    }
+}
+
+/// #3643: a segment no snapshot references is reclaimed — one a crashed
+/// checkpoint left under a higher id by the open reconcile, one sealed below
+/// the live snapshot by it too — while every referenced segment stays, and
+/// the history reads back exactly.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_reopen_reclaims_timeline_segments_no_snapshot_references() {
+    let root = temp_dir_for_api_test("timeline-orphans");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    commit_timeline_history(&mut runtime, 5);
+    checkpoint_now(&mut runtime);
+    runtime.close().expect("close");
+    let referenced = timeline_segment_files(&root);
+    assert!(!referenced.is_empty());
+
+    // Plant two unreferenced copies of a real segment.
+    let source = root
+        .join("timeline")
+        .join(referenced.iter().next().expect("one"));
+    // The local backend stores an object `name` as `name.object@`.
+    for planted in [
+        "ffffffffffffff00/0000000000000000.object@",
+        "0000000000000001/0000000000000007.object@",
+    ] {
+        let path = root.join("timeline").join(planted);
+        std::fs::create_dir_all(path.parent().expect("dir")).expect("mkdir");
+        std::fs::copy(&source, &path).expect("plant");
+    }
+
+    let mut reopened = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        true,
+    )
+    .expect("reopen");
+    reopened.wait_background_idle_for_test();
+    assert_eq!(
+        timeline_segment_files(&root),
+        referenced,
+        "the open reconcile reclaimed exactly the unreferenced segments"
+    );
+    assert_eq!(read_history_at(&reopened, 35).expect("read"), b"v2");
+    reopened.close().expect("close");
+}
+
+/// #3643: a lost timeline segment is never read as a gap. Strict recovery
+/// refuses the open as corruption; lossy recovery opens degraded and refuses a
+/// timestamp read into the lost history instead of answering it.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_a_missing_timeline_segment_refuses_rather_than_resolves() {
+    let root = temp_dir_for_api_test("timeline-missing");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    commit_timeline_history(&mut runtime, 5);
+    runtime.close().expect("close");
+    let segments = timeline_segment_files(&root);
+    assert!(!segments.is_empty(), "the clean close checkpointed");
+    for segment in &segments {
+        std::fs::remove_file(root.join("timeline").join(segment)).expect("remove");
+    }
+
+    let error = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect_err("strict recovery refuses a missing segment");
+    assert_eq!(
+        error.class(),
+        StorageApiErrorClass::FailedPrecondition,
+        "{error:?}"
+    );
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.recovery_degraded"
+    );
+
+    let lossy = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        false,
+    )
+    .expect("lossy recovery opens");
+    assert_eq!(
+        lossy
+            .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+            .expect("diagnostics")
+            .recovery()
+            .health(),
+        Some(RecoveryHealthSummary::Degraded)
+    );
+    let refused = read_history_at(&lossy, 25).expect_err("lost history is refused");
+    assert_eq!(refused.class(), StorageApiErrorClass::HistoryUnavailable);
+}
+
+/// #3643: a corrupt segment is refused like a missing one — its reference's
+/// CRC no longer matches, so strict recovery fails closed.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_a_corrupt_timeline_segment_fails_strict_recovery_closed() {
+    let root = temp_dir_for_api_test("timeline-corrupt");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    commit_timeline_history(&mut runtime, 5);
+    runtime.close().expect("close");
+    let segment = root.join("timeline").join(
+        timeline_segment_files(&root)
+            .into_iter()
+            .next()
+            .expect("a segment"),
+    );
+    let mut bytes = std::fs::read(&segment).expect("read");
+    bytes[40] ^= 0xff;
+    std::fs::write(&segment, bytes).expect("corrupt");
+
+    let error = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect_err("strict recovery refuses a corrupt segment");
+    assert_eq!(
+        error.class(),
+        StorageApiErrorClass::FailedPrecondition,
+        "{error:?}"
+    );
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.recovery_degraded"
+    );
+}
+
+/// #3643: a segment sealed by an older checkpoint and still referenced by the
+/// live one survives the superseded prune that follows. A forked child's
+/// tail stays unchanged while the parent commits, so the second checkpoint
+/// re-uses the child's segment the first sealed; the prune deletes the first
+/// snapshot and the parent's stale tail, but must keep the child's — else the
+/// strict reopen below would find the live snapshot referencing nothing.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_a_reused_timeline_segment_survives_the_superseded_prune() {
+    let root = temp_dir_for_api_test("timeline-reused-tail");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    commit_timeline_history(&mut runtime, 3);
+    let child = branch_with(0x5c);
+    fork_branch(&mut runtime, child);
+    checkpoint_now(&mut runtime);
+    let first = live_snapshot_id(&runtime).expect("first checkpoint");
+    let first_sealed = timeline_segment_files(&root);
+    assert_eq!(first_sealed.len(), 2, "a tail per branch: {first_sealed:?}");
+
+    runtime
+        .commit_for_test(
+            &put_batch(b"history", b"v3"),
+            strata_core::Timestamp::from_micros(40),
+        )
+        .expect("parent commit");
+    checkpoint_now(&mut runtime);
+    assert!(live_snapshot_id(&runtime).expect("second checkpoint") > first);
+    let after = timeline_segment_files(&root);
+    assert_eq!(
+        after.len(),
+        2,
+        "the parent's stale tail went, its new tail and the child's re-used one stay: {after:?}"
+    );
+    assert_eq!(
+        first_sealed.intersection(&after).count(),
+        1,
+        "exactly the child's first-sealed tail is still referenced: {first_sealed:?} {after:?}"
+    );
+
+    runtime.close().expect("close");
+    let reopened = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("reopen strict: every referenced segment is still on disk");
+    assert_eq!(read_history_at(&reopened, 40).expect("read"), b"v3");
+}
+
+/// #3643: recovery seeds each branch's durable segment refs from that
+/// branch's own kind-5 group. Two branches with different histories (the
+/// child committed after the fork) are checkpointed, the database is reopened,
+/// and only the parent commits: the second checkpoint must re-use the child's
+/// recovered tail and seal only the parent's. A branch seeded from another
+/// branch's group would find nothing that lines up and seal its tail again.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_recovery_seeds_each_branch_with_its_own_timeline_segments() {
+    let root = temp_dir_for_api_test("timeline-per-branch-seed");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    commit_timeline_history(&mut runtime, 3);
+    let child = branch_with(0x5d);
+    fork_branch(&mut runtime, child);
+    runtime
+        .commit_for_test(
+            &put_batch_for(child, b"history", b"child"),
+            strata_core::Timestamp::from_micros(35),
+        )
+        .expect("child commit");
+    checkpoint_now(&mut runtime);
+    let first_sealed = timeline_segment_files(&root);
+    assert_eq!(first_sealed.len(), 2, "a tail per branch: {first_sealed:?}");
+    runtime.close().expect("close");
+
+    let mut reopened = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("reopen strict");
+    reopened
+        .commit_for_test(
+            &put_batch(b"history", b"v3"),
+            strata_core::Timestamp::from_micros(40),
+        )
+        .expect("parent commit");
+    checkpoint_now(&mut reopened);
+    let after = timeline_segment_files(&root);
+    assert_eq!(
+        after.len(),
+        2,
+        "the parent's new tail and the child's recovered one: {after:?}"
+    );
+    assert_eq!(
+        first_sealed.intersection(&after).count(),
+        1,
+        "the child's recovered tail is re-used, not sealed again: {first_sealed:?} {after:?}"
+    );
+    assert_eq!(read_history_at(&reopened, 40).expect("read"), b"v3");
+}
+
+/// #3643: a segment that is internally valid but is not the one the snapshot
+/// references — another database's, with its own CRC — is refused by the
+/// reference check, not silently loaded as this database's history.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_a_substituted_timeline_segment_fails_strict_recovery_closed() {
+    let seal_history = |name: &str, first_ts: u64| {
+        let root = temp_dir_for_api_test(name);
+        let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+        let mut runtime = open_timeline_runtime(
+            backend,
+            StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+            true,
+        )
+        .expect("open");
+        for index in 0..5u64 {
+            runtime
+                .commit_for_test(
+                    &put_batch(b"history", b"v"),
+                    strata_core::Timestamp::from_micros(first_ts + index),
+                )
+                .expect("commit");
+        }
+        runtime.close().expect("close");
+        (root, backend)
+    };
+    let (root, backend) = seal_history("timeline-substituted", 10);
+    let (other_root, _) = seal_history("timeline-substitute-source", 500);
+    let segment = timeline_segment_files(&root)
+        .into_iter()
+        .next()
+        .expect("a segment");
+    let substitute = timeline_segment_files(&other_root)
+        .into_iter()
+        .next()
+        .expect("a substitute");
+    std::fs::copy(
+        other_root.join("timeline").join(substitute),
+        root.join("timeline").join(segment),
+    )
+    .expect("substitute");
+
+    let error = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect_err("strict recovery refuses a substituted segment");
+    assert_eq!(
+        error.class(),
+        StorageApiErrorClass::FailedPrecondition,
+        "{error:?}"
+    );
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.recovery_degraded"
+    );
+}
+
+/// #3643 (re-review P2): a first checkpoint that died after publishing its
+/// timeline segment, before any snapshot existed, leaves segments no snapshot
+/// references. A reopen with no attested snapshot still reconciles them away —
+/// read-only, with nothing to checkpoint.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_a_reopen_without_a_snapshot_reclaims_a_first_checkpoints_orphan_segments() {
+    let root = temp_dir_for_api_test("timeline-first-checkpoint-orphan");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let mut runtime = open_timeline_runtime(
+        backend,
+        StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+        true,
+    )
+    .expect("open");
+    commit_timeline_history(&mut runtime, 5);
+    assert_eq!(live_snapshot_id(&runtime), None);
+    // The durable state at that crash boundary: the segment the first
+    // checkpoint would seal, and no snapshot.
+    let bytes = crate::format::encode_timeline_segment(&[crate::format::SnapshotTimelineEntry {
+        commit_version: strata_core::CommitVersion::new(1),
+        commit_timestamp: strata_core::Timestamp::from_micros(10),
+        committed_at: None,
+    }])
+    .expect("encode");
+    let path = root.join("timeline/0000000000000001/0000000000000000.object@");
+    std::fs::create_dir_all(path.parent().expect("dir")).expect("mkdir");
+    std::fs::write(&path, bytes).expect("plant");
+    runtime
+        .close_with_options(
+            StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+        )
+        .expect("close without a checkpoint");
+    assert!(!timeline_segment_files(&root).is_empty());
+
+    for _ in 0..2 {
+        let mut reopened = open_timeline_runtime(
+            backend,
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+            true,
+        )
+        .expect("reopen");
+        drain_maintenance_to_idle(&mut reopened);
+        assert_eq!(
+            live_snapshot_id(&reopened),
+            None,
+            "read-only: nothing checkpointed"
+        );
+        assert!(
+            timeline_segment_files(&root).is_empty(),
+            "the open reconcile reclaimed the orphan segment"
+        );
+        assert_eq!(
+            reopened
+                .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+                .expect("diagnostics")
+                .recovery()
+                .health(),
+            Some(RecoveryHealthSummary::Healthy),
+            "no telemetry debt from reconciling a snapshot-less database"
+        );
+        reopened
+            .close_with_options(
+                StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+            )
+            .expect("close");
+    }
+}

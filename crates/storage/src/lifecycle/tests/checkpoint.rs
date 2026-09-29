@@ -1139,3 +1139,207 @@ fn wal_truncation_request_rejects_zero_proof() {
         })
     );
 }
+
+/// #3643: the listed timeline segments sealed by snapshot `sealing`.
+fn segments_sealed_by(listed: &[ObjectName], sealing: u64) -> Vec<ObjectName> {
+    listed
+        .iter()
+        .filter(|name| {
+            ObjectLayout::classify_timeline_segment_object(name)
+                .expect("classify")
+                .is_some_and(|id| id.sealing_snapshot_id == sealing)
+        })
+        .cloned()
+        .collect()
+}
+
+/// #3643: a completed checkpoint records its references as the live set, so
+/// the superseded prune that follows needs no read of the new snapshot to know
+/// what it may delete. With that snapshot unreadable, the prune still reclaims
+/// the tail the previous snapshot sealed.
+#[test]
+fn a_completed_checkpoint_records_its_live_segments_for_the_prune() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x73);
+    let mut runtime = open_runtime(branch, backend);
+    for (snapshot_id, value) in [(1, b"one"), (2, b"two")] {
+        runtime
+            .execute_durable_commit(durable_batch(branch, b"live", value), generation_guard())
+            .expect("commit");
+        let request = LifecycleCheckpointRequest::new(
+            branch,
+            snapshot_id,
+            Timestamp::from_micros(20 + snapshot_id),
+        )
+        .expect("request");
+        assert_eq!(
+            runtime.checkpoint(&request).expect("checkpoint").status(),
+            LifecycleCheckpointStatus::Completed
+        );
+    }
+    let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+    let before = backend.list_prefix(&prefix).expect("list");
+    assert!(
+        !segments_sealed_by(&before, 1).is_empty(),
+        "the first checkpoint sealed a tail"
+    );
+    backend.fail_object_on_next_read(ObjectLayout::snapshot(2).expect("snapshot object"));
+    let mut pruned = false;
+    for _ in 0..8 {
+        match runtime
+            .run_next_retention_maintenance()
+            .expect("retention maintenance")
+        {
+            Some(outcome) if outcome.task_kind() == MaintenanceTaskKind::SnapshotPruning => {
+                pruned = true;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(
+        pruned,
+        "the completed checkpoint chained a superseded prune"
+    );
+    let after = backend.list_prefix(&prefix).expect("list");
+    assert!(
+        segments_sealed_by(&after, 1).is_empty(),
+        "the prune knew the live set without reading the snapshot: {after:?}"
+    );
+    assert!(!segments_sealed_by(&after, 2).is_empty());
+}
+
+/// #3643: under strict recovery a snapshot that references a missing timeline
+/// segment is durable corruption: refused at the segment, not recorded as a
+/// fault and refused later as merely degraded health.
+#[test]
+fn strict_recovery_refuses_a_missing_timeline_segment_as_corruption() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x72);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"strict", b"value"),
+            generation_guard(),
+        )
+        .expect("commit");
+    let request =
+        LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(23)).expect("request");
+    assert_eq!(
+        runtime.checkpoint(&request).expect("checkpoint").status(),
+        LifecycleCheckpointStatus::Completed
+    );
+    drop(runtime);
+    let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+    let segments = backend.list_prefix(&prefix).expect("list");
+    assert_eq!(segments.len(), 1, "{segments:?}");
+    backend.delete_object(&segments[0]).expect("delete segment");
+
+    let mut shell = assemble_shell(branch, backend).expect("shell");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    assert_eq!(request.strictness(), RecoveryStrictness::Strict);
+    let error = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect_err("strict recovery refuses the missing segment");
+    assert_eq!(error.code(), "corruption.lifecycle.recovery_corruption");
+}
+
+/// #3643 (re-review P1): a checkpoint whose manifest publication became
+/// visible but was reported uncertain leaves the cached segment references
+/// describing the OLD snapshot. The open's queued `ReconcileToAttested` then
+/// reads the NEW manifest; it must establish the new snapshot's references
+/// (not trust the stale cache), keep every segment the new snapshot
+/// references, and a strict reopen must still find them all.
+#[test]
+fn an_uncertain_but_visible_checkpoint_keeps_its_segments_through_the_open_reconcile() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x71);
+    // Establish a live checkpoint, then reopen with its reconcile task still pending.
+    let mut first = open_runtime(branch, backend);
+    first
+        .execute_durable_commit(durable_batch(branch, b"review", b"old"), generation_guard())
+        .expect("initial commit");
+    let initial =
+        LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(23)).expect("request");
+    assert_eq!(
+        first
+            .checkpoint(&initial)
+            .expect("initial checkpoint")
+            .status(),
+        LifecycleCheckpointStatus::Completed
+    );
+    drop(first);
+    let mut runtime = open_runtime(branch, backend);
+    runtime
+        .execute_durable_commit(
+            durable_batch(branch, b"review", b"value"),
+            generation_guard(),
+        )
+        .expect("commit");
+    backend
+        .manifest_visible_then_uncertain
+        .store(true, Ordering::SeqCst);
+    let request =
+        LifecycleCheckpointRequest::new(branch, 2, Timestamp::from_micros(24)).expect("request");
+    let outcome = runtime.checkpoint(&request).expect("uncertain outcome");
+    assert_eq!(
+        outcome.status(),
+        LifecycleCheckpointStatus::SnapshotVisibilityUncertain
+    );
+    let manifest = DatabaseManifestService::new(backend)
+        .load_required()
+        .expect("visible manifest");
+    assert_eq!(
+        manifest.snapshot_id(),
+        Some(2),
+        "fault happened after visibility"
+    );
+    let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+    let before = backend.list_prefix(&prefix).expect("list");
+    assert!(!before.is_empty(), "checkpoint wrote timeline segments");
+    // Drain the actual retention/reconcile work queued by reopen.
+    let mut reconciled = false;
+    for _ in 0..4 {
+        match runtime
+            .run_next_retention_maintenance()
+            .expect("queued retention")
+        {
+            Some(outcome) if outcome.task_kind() == MaintenanceTaskKind::SnapshotPruning => {
+                reconciled = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(reconciled, "the open's queued reconcile ran");
+    let expected_live = segments_sealed_by(&before, 2);
+    assert!(
+        !expected_live.is_empty(),
+        "checkpoint 2 wrote its new history"
+    );
+    for object in &expected_live {
+        assert!(
+            backend.read_object(object).is_ok(),
+            "reconcile used stale cached refs and deleted manifest-live segment {object:?}"
+        );
+    }
+    // ...and it did establish them rather than give up: the tail the first
+    // snapshot sealed, which the new snapshot no longer references, is gone.
+    assert!(
+        !segments_sealed_by(&before, 1).is_empty(),
+        "the first checkpoint sealed a tail"
+    );
+    let after = backend.list_prefix(&prefix).expect("list");
+    assert!(
+        segments_sealed_by(&after, 1).is_empty(),
+        "the reconcile reclaimed the superseded tail: {after:?}"
+    );
+    // Strict recovery loads every segment the attested snapshot references.
+    drop(runtime);
+    let _reopened = open_runtime(branch, backend);
+}

@@ -395,7 +395,10 @@ mod tests {
         // orphaned-snapshot ending finds a snapshot to copy.
         // Re-pinned for #3622: snapshot prunes now report the bytes they free.
         // Re-pinned for #3619: a sweep's staged bytes no longer count twice.
-        assert_eq!(outcome.bytes_reclaimed(), 24408, "{outcome:?}");
+        // Re-pinned for #3643: the timeline moved out of each snapshot into
+        // sealed segments, so a pruned snapshot frees fewer bytes and its
+        // superseded tail segment frees the rest (every other fact unchanged).
+        assert_eq!(outcome.bytes_reclaimed(), 24024, "{outcome:?}");
         assert_eq!(outcome.clean_closes(), 1, "{outcome:?}");
         assert_eq!(outcome.orphaned_snapshots_planted(), 1, "{outcome:?}");
     }
