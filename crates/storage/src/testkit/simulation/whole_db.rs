@@ -38,8 +38,9 @@ use crate::api::{
     BranchAction, BranchGeneration, BranchRequest, BranchStatus, CommitBatch, CommitOptions,
     DiagnosticsDetail, DiagnosticsFactState, DiagnosticsRequest, DiagnosticsScope,
     MaintenanceRequest, MaintenanceScope, MaintenanceTask, PrefixScanReadRequest, ReadBound,
-    ReclaimBudget, StorageBackend, StorageCloseOptions, StorageDurabilityPolicy,
-    StorageMaintenanceSchedulingPolicy, StorageOpenOptions, StorageOpenSummary, StorageRuntime,
+    ReclaimBudget, RecoveryHealthSummary, StorageBackend, StorageCloseOptions,
+    StorageDurabilityPolicy, StorageMaintenanceSchedulingPolicy, StorageOpenOptions,
+    StorageOpenSummary, StorageRuntime,
 };
 use crate::testkit::recovery_oracle::model::{ExpectedState, OracleDurability, RecordedMutation};
 use crate::testkit::recovery_oracle::verify::{
@@ -954,6 +955,7 @@ impl WholeDbSim {
         &mut self,
         root: &Path,
         epoch: usize,
+        zero_loss_session: bool,
         expect_no_debt: bool,
     ) -> Result<(), TestkitError> {
         let backend = StorageBackend::write_ordering_reordering_local_fs(root.to_path_buf());
@@ -967,6 +969,22 @@ impl WholeDbSim {
         )
         .map_err(|err| self.error(epoch, format!("post-close probe open: {err:?}")))?
         .into_runtime();
+        // #3665: a clean close of a zero-loss session loses nothing, so the
+        // reopen that follows it recovers healthy. Judged on its own, before
+        // the footprint (whose unknown counts a degraded reopen produces).
+        if zero_loss_session {
+            let health = runtime
+                .diagnostics(DiagnosticsRequest::new(DiagnosticsScope::Global))
+                .map_err(|err| self.error(epoch, format!("post-close health: {err:?}")))?
+                .recovery()
+                .health();
+            if health != Some(RecoveryHealthSummary::Healthy) {
+                return Err(self.error(
+                    epoch,
+                    format!("post-close reopen of a clean close is not healthy: {health:?}"),
+                ));
+            }
+        }
         self.audit_footprint(
             &runtime,
             epoch,
@@ -1079,9 +1097,17 @@ impl WholeDbSim {
             .facts
             .reclaim_passes
             .saturating_add(reclaim.total_passes());
-        Ok(reclaim
-            .last_sweep()
-            .is_some_and(|pass| pass.deferral().is_some())
+        // A session that recorded health debt is not the healthy session the
+        // post-close audit judges (#3665): a branch whose table-manifest
+        // publish failed (a `fork_at_version` child still holding its volatile
+        // materialized table cannot build a manifest) keeps its flushed tables
+        // owned in memory until the process ends, the close checkpoint carries
+        // their rows, and the objects become garbage the next open reclaims.
+        let healthy = outcome.recovery().health() == Some(RecoveryHealthSummary::Healthy);
+        Ok(!healthy
+            || reclaim
+                .last_sweep()
+                .is_some_and(|pass| pass.deferral().is_some())
             || reclaim
                 .last_mark()
                 .is_some_and(|pass| pass.deferral().is_some()))
@@ -1219,11 +1245,8 @@ pub(super) fn run_whole_db_sim(
                         TestkitError::new(format!("[seed={seed} epoch={epoch}] close: {err:?}"))
                     })?;
                 drop(runtime);
-                sim.probe_post_close(
-                    root,
-                    epoch,
-                    matches!(session_family, CrashFamily::ZeroLoss) && !deferred,
-                )?;
+                let zero_loss = matches!(session_family, CrashFamily::ZeroLoss);
+                sim.probe_post_close(root, epoch, zero_loss, zero_loss && !deferred)?;
                 family_next_open = CrashFamily::ZeroLoss;
             }
             EpochEnding::OrphanedSnapshot => {

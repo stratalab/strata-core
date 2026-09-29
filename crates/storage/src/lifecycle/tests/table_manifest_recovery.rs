@@ -2280,6 +2280,88 @@ fn durable_table_catalog_tracks_manifest_frontiers_per_branch() {
     );
 }
 
+/// #3665: a table is a durable base only while its OWNING branch's last
+/// confirmed manifest lists it. Catalogued is not enough, and neither is being
+/// listed by another branch's confirmed manifest (a fork child's manifest
+/// naming a parent table as inherited).
+#[test]
+fn durable_base_requires_the_owning_branchs_confirmed_manifest() {
+    let backend: &'static ManifestRecoveryBackend =
+        crate::testkit::leak_static(ManifestRecoveryBackend::new());
+    let branch_a = branch_id(0x54);
+    let branch_b = branch_id(0x55);
+    let table_a1 = publish_manifest_table(
+        backend,
+        branch_a,
+        BranchLevel::ZERO,
+        "durable-base-a1",
+        &[put_row(branch_a, 31, b"durable-base-a1", b"value")],
+    );
+    let table_a2 = publish_manifest_table(
+        backend,
+        branch_a,
+        BranchLevel::ZERO,
+        "durable-base-a2",
+        &[put_row(branch_a, 32, b"durable-base-a2", b"value")],
+    );
+    let manifest_for = |sequence, reference: &TableManifestTableRef| {
+        TableManifest::new(
+            branch_a,
+            None,
+            sequence,
+            vec![
+                TableManifestLevel::new(BranchLevel::ZERO, vec![reference.clone()]).expect("level"),
+            ],
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("manifest")
+    };
+    let a1 = table_a1.reference.table_identity();
+    let a2 = table_a2.reference.table_identity();
+    let names = |references: &[&TableManifestTableRef]| {
+        std::sync::Arc::new(
+            references
+                .iter()
+                .map(|reference| reference.object().clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+        )
+    };
+
+    let mut catalog = LifecycleDurableTableCatalog::new();
+    assert!(!catalog.is_durable_base(a1), "not catalogued");
+
+    catalog
+        .record_manifest(&manifest_for(1, &table_a1.reference))
+        .expect("record a1");
+    assert!(catalog.is_durable_base(a1), "confirmed by its owner");
+
+    catalog
+        .record_manifest(&manifest_for(2, &table_a2.reference))
+        .expect("record a2");
+    assert!(
+        !catalog.is_durable_base(a1),
+        "still catalogued, but the owner's confirmed manifest no longer lists it"
+    );
+    assert!(catalog.is_durable_base(a2));
+
+    catalog.confirm_reserved_manifest_published(branch_b, names(&[&table_a1.reference]));
+    assert!(
+        !catalog.is_durable_base(a1),
+        "another branch's confirmed manifest is not its owner's"
+    );
+
+    catalog.confirm_reserved_manifest_published(branch_a, names(&[&table_a1.reference]));
+    assert!(catalog.is_durable_base(a1));
+    assert!(!catalog.is_durable_base(a2));
+
+    catalog.clear_branch_frontier(branch_a);
+    assert!(
+        !catalog.is_durable_base(a1),
+        "a deleted branch's frontier covers nothing"
+    );
+}
+
 /// #2553: a manifest loaded during recovery seeds the confirmed frontier —
 /// the reclaim mark protects its listed objects from the first post-reopen
 /// sweep onward.
