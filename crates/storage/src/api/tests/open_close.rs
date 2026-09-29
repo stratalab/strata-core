@@ -816,3 +816,177 @@ fn open_durable_local_rejects_pre_v1_layout() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- #3658: the manifest format version gates a downgrade -----------------
+
+/// The on-disk format version of the database manifest under `root`.
+#[cfg(feature = "localfs")]
+fn manifest_format_version(root: &std::path::Path) -> u32 {
+    let bytes = std::fs::read(root.join("manifest/current.object@")).expect("read manifest");
+    u32::from_le_bytes(bytes[4..8].try_into().expect("version field"))
+}
+
+/// Rewrite the manifest's version field (checksum recomputed), as the build
+/// that wrote version `version` would have left it.
+#[cfg(feature = "localfs")]
+fn set_manifest_format_version(root: &std::path::Path, version: u32) {
+    let path = root.join("manifest/current.object@");
+    let mut bytes = std::fs::read(&path).expect("read manifest");
+    bytes[4..8].copy_from_slice(&version.to_le_bytes());
+    let footer = bytes.len() - 4;
+    let crc = crc32fast::hash(&bytes[..footer]);
+    bytes[footer..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, bytes).expect("write manifest");
+}
+
+#[cfg(feature = "localfs")]
+fn put_persisted(runtime: &mut StorageRuntime<'static>, value: &[u8]) {
+    let batch = CommitBatch::new(
+        StorageRuntime::default_branch_id_for_test(),
+        vec![CommitMutation::Put {
+            storage_space: StorageSpaceId::new(vec![0x20]).expect("space"),
+            key: key(b"persisted"),
+            value: StorageValue::new(value.to_vec()),
+            ttl: None,
+        }],
+        CommitOptions::default(),
+    )
+    .expect("batch");
+    runtime.commit(&batch).expect("commit");
+}
+
+#[cfg(feature = "localfs")]
+fn read_persisted(runtime: &StorageRuntime<'static>) -> Option<Vec<u8>> {
+    runtime
+        .read_point(&PointReadRequest::new(
+            StorageRuntime::default_branch_id_for_test(),
+            StorageSpaceId::new(vec![0x20]).expect("space"),
+            key(b"persisted"),
+            ReadBound::Latest,
+        ))
+        .expect("read")
+        .row()
+        .and_then(|row| row.value().map(|value| value.as_bytes().to_vec()))
+}
+
+#[cfg(feature = "localfs")]
+fn file_digests(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.insert(
+                    path.display().to_string(),
+                    std::fs::read(&path).expect("read file"),
+                );
+            }
+        }
+    }
+    files
+}
+
+/// #3658: a new database is written at manifest format version 3, which a
+/// 1.2.5 binary refuses at open.
+#[cfg(feature = "localfs")]
+#[test]
+fn a_new_database_writes_manifest_format_version_3() {
+    let root = temp_dir_for_api_test("manifest-v3-new");
+    let mut runtime = StorageRuntime::open_local(root.clone())
+        .expect("open")
+        .into_runtime();
+    assert_eq!(manifest_format_version(&root), 3);
+    put_persisted(&mut runtime, b"value");
+    runtime.close().expect("close");
+    assert_eq!(manifest_format_version(&root), 3);
+}
+
+/// #3658: a database a 1.2.5 binary wrote (a V1 manifest) opens, and the open
+/// upgrades its manifest to version 3 before admitting a single write — every
+/// fact preserved, the data intact.
+#[cfg(feature = "localfs")]
+#[test]
+fn an_open_upgrades_a_v1_manifest_before_any_write() {
+    let root = temp_dir_for_api_test("manifest-v1-upgrade");
+    let mut runtime = StorageRuntime::open_local(root.clone())
+        .expect("open")
+        .into_runtime();
+    put_persisted(&mut runtime, b"written-before");
+    runtime.close().expect("close");
+    set_manifest_format_version(&root, 1);
+
+    let reopened = StorageRuntime::open_local(root.clone())
+        .expect("a V1 manifest still opens")
+        .into_runtime();
+    assert_eq!(
+        manifest_format_version(&root),
+        3,
+        "upgraded by the open itself, before any commit"
+    );
+    assert_eq!(
+        read_persisted(&reopened).as_deref(),
+        Some(&b"written-before"[..])
+    );
+}
+
+/// #3658: an open that fails leaves a V1 manifest at version 1, so the
+/// database stays openable by the build that wrote it.
+#[cfg(feature = "localfs")]
+#[test]
+fn a_failed_open_leaves_a_v1_manifest_at_version_1() {
+    let root = temp_dir_for_api_test("manifest-v1-failed-open");
+    let mut runtime = StorageRuntime::open_local(root.clone())
+        .expect("open")
+        .into_runtime();
+    put_persisted(&mut runtime, b"value");
+    runtime.close().expect("close checkpoints");
+    set_manifest_format_version(&root, 1);
+    // Lose the attested snapshot: strict recovery refuses the open.
+    for entry in std::fs::read_dir(root.join("snapshots"))
+        .expect("snapshots")
+        .flatten()
+    {
+        std::fs::remove_file(entry.path()).expect("remove snapshot");
+    }
+
+    let error = StorageRuntime::open_local(root.clone()).expect_err("strict recovery refuses");
+    assert_eq!(
+        error.class(),
+        StorageApiErrorClass::FailedPrecondition,
+        "{error:?}"
+    );
+    assert_eq!(
+        manifest_format_version(&root),
+        1,
+        "the failed open upgraded nothing"
+    );
+}
+
+/// #3658: a manifest from a newer build is refused, and the refusal writes
+/// nothing — a downgrade can never damage the newer database.
+#[cfg(feature = "localfs")]
+#[test]
+fn a_newer_manifest_is_refused_without_touching_the_database() {
+    let root = temp_dir_for_api_test("manifest-newer");
+    let mut runtime = StorageRuntime::open_local(root.clone())
+        .expect("open")
+        .into_runtime();
+    put_persisted(&mut runtime, b"value");
+    runtime.close().expect("close");
+    set_manifest_format_version(&root, 4);
+    let before = file_digests(&root);
+
+    assert!(StorageRuntime::open_local(root.clone()).is_err());
+    // The writer lock is the open's own scratch; every durable object must be
+    // byte-identical and none may appear or vanish.
+    let durable = |files: std::collections::BTreeMap<String, Vec<u8>>| {
+        files
+            .into_iter()
+            .filter(|(path, _)| !path.ends_with("writer.object@"))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(durable(file_digests(&root)), durable(before));
+}

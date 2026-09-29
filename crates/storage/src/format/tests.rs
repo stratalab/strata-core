@@ -48,6 +48,10 @@ const STORAGE_ROW_TOMBSTONE: &str =
     include_str!("../../testdata/goldens/storage-format-v1/storage-row-tombstone.hex");
 const DATABASE_IDENTITY: &str =
     include_str!("../../testdata/goldens/storage-format-v1/manifest-identity.hex");
+const DATABASE_IDENTITY_V3: &str =
+    include_str!("../../testdata/goldens/storage-format-v1/manifest-identity-v3.hex");
+const MANIFEST_RECOVERY_FACTS_V3: &str =
+    include_str!("../../testdata/goldens/storage-format-v1/manifest-recovery-facts-v3.hex");
 const BRANCH_CATALOG_MANIFEST_EMPTY: &str =
     include_str!("../../testdata/goldens/storage-format-v1/branch-catalog-manifest-empty.hex");
 const BRANCH_CATALOG_MANIFEST_SINGLE_ACTIVE: &str = include_str!(
@@ -168,10 +172,19 @@ fn manifest_identity_matches_golden_vector() {
     .expect("database format")
     .with_recovery_facts(5, Some(42), Some(3), Some(CommitVersion::new(41)))
     .expect("recovery facts");
-    let golden = parse_hex(DATABASE_IDENTITY);
-
+    // #3658: this build writes format version 3 …
+    let golden = parse_hex(DATABASE_IDENTITY_V3);
     assert_eq!(encode_manifest(&manifest).expect("encode manifest"), golden);
-    assert_eq!(decode_manifest(&golden), Ok(manifest));
+    assert_eq!(
+        super::decode_manifest_with_version(&golden),
+        Ok((manifest.clone(), 3))
+    );
+    // … and still reads the V1 manifest every database through 1.2.5 carries.
+    let legacy = parse_hex(DATABASE_IDENTITY);
+    assert_eq!(
+        super::decode_manifest_with_version(&legacy),
+        Ok((manifest, 1))
+    );
 }
 
 #[test]
@@ -1391,9 +1404,14 @@ fn manifest_recovery_facts_matches_golden_vector() {
         .expect("manifest")
         .with_recovery_facts(9, Some(88), Some(5), Some(CommitVersion::new(87)))
         .expect("recovery facts");
-    let golden = parse_hex(MANIFEST_RECOVERY_FACTS);
+    let golden = parse_hex(MANIFEST_RECOVERY_FACTS_V3);
     assert_eq!(encode_manifest(&manifest).expect("encode manifest"), golden);
-    assert_eq!(decode_manifest(&golden), Ok(manifest));
+    assert_eq!(decode_manifest(&golden), Ok(manifest.clone()));
+    // #3658: the V1 bytes still decode to the same facts.
+    assert_eq!(
+        super::decode_manifest_with_version(&parse_hex(MANIFEST_RECOVERY_FACTS)),
+        Ok((manifest, 1))
+    );
 }
 
 #[test]

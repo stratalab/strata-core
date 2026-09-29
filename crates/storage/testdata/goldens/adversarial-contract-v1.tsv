@@ -9,7 +9,9 @@ immutable-table-two-block	trunc:1026R	flip:1026R	ext1:R	ext8:R
 internal-key-max-version	trunc:32R1A7R	flip:16A8R6A2R8A	ext1:R	ext8:R
 internal-key-ordinary	trunc:32R1A7R	flip:16A8R6A2R8A	ext1:R	ext8:R
 internal-key-zero-user-byte	trunc:33R1A7R	flip:16A9R2A1R2A3R8A	ext1:R	ext8:R
+manifest-identity-v3	trunc:72R	flip:72R	ext1:R	ext8:R
 manifest-identity	trunc:72R	flip:72R	ext1:R	ext8:R
+manifest-recovery-facts-v3	trunc:72R	flip:72R	ext1:R	ext8:R
 manifest-recovery-facts	trunc:72R	flip:72R	ext1:R	ext8:R
 pending-releases-manifest-empty	trunc:40R	flip:40R	ext1:R	ext8:R
 pending-releases-manifest-multi	trunc:119R	flip:119R	ext1:R	ext8:R

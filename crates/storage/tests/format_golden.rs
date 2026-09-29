@@ -22,6 +22,8 @@ fn format_golden_harness_has_storage_format_directory() {
         "internal-key-ordinary.hex",
         "internal-key-zero-user-byte.hex",
         "manifest-identity.hex",
+        "manifest-identity-v3.hex",
+        "manifest-recovery-facts-v3.hex",
         "quarantine-inventory-empty.hex",
         "quarantine-inventory-multi-entry.hex",
         "segment-metadata-sidecar.hex",

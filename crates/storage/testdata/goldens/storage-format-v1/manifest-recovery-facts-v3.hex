@@ -1,0 +1,9 @@
+# format: database_manifest, format_version 3 (#3658)
+# identity manifest carrying recovery facts: active_wal_segment 9,
+# snapshot_watermark 88, snapshot_id 5, flushed_through_commit 87
+# hex:
+53 54 52 4d 03 00 00 00 11 11 11 11 11 11 11 11
+11 11 11 11 11 11 11 11 08 00 00 00 63 6f 64 65
+63 2d 76 31 09 00 00 00 00 00 00 00 58 00 00 00
+00 00 00 00 05 00 00 00 00 00 00 00 57 00 00 00
+00 00 00 00 ec ff 65 09

@@ -1,0 +1,21 @@
+# format: manifest
+# format_version: 3 (#3658: written since 1.2.6; 1 is still read, 2 is pre-V1)
+# database_id: 20212223-2425-2627-2829-2a2b2c2d2e2f
+# codec_id: identity
+# codec_id_len: 8
+# active_wal_segment: 5
+# snapshot_watermark: 42
+# snapshot_id: 3
+# flushed_through_commit_id: 41
+# crc32: 0x7660d02b
+# hex:
+53 54 52 4d
+03 00 00 00
+20 21 22 23 24 25 26 27 28 29 2a 2b 2c 2d 2e 2f
+08 00 00 00
+69 64 65 6e 74 69 74 79
+05 00 00 00 00 00 00 00
+2a 00 00 00 00 00 00 00
+03 00 00 00 00 00 00 00
+29 00 00 00 00 00 00 00
+2b d0 60 76

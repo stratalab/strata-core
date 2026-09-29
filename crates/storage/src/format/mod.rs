@@ -38,7 +38,10 @@ pub(crate) use key::{
     append_internal_key_from_physical, decode_internal_key, encode_internal_key,
     encode_physical_key, internal_key_encoded_len,
 };
-pub(crate) use manifest::{decode_manifest, encode_manifest, DatabaseManifest};
+pub(crate) use manifest::{
+    decode_manifest, decode_manifest_with_version, encode_manifest, DatabaseManifest,
+    DATABASE_MANIFEST_FORMAT_VERSION,
+};
 pub(crate) use pending_releases_manifest::{
     decode_pending_releases_manifest, encode_pending_releases_manifest, PendingReleasesEntry,
     PendingReleasesManifest,
