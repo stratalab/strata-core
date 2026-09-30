@@ -134,7 +134,7 @@ fn clone_flow_fetches_imports_and_records_origin() {
     assert_eq!(fetched, hub.manifest.object_count);
 
     // The clone is queryable and its origin is recorded.
-    let db = Database::open_local(&dest, DurableLocalOpenOptions::new())
+    let mut db = Database::open_local(&dest, DurableLocalOpenOptions::new())
         .expect("clone opens")
         .into_database();
     let mut kv = db
@@ -147,7 +147,10 @@ fn clone_flow_fetches_imports_and_records_origin() {
         .get(&KvKey::new("user:ada").expect("key"))
         .expect("get")
         .is_some());
-    drop(db);
+    drop(kv);
+    // Close, not drop: a dropped handle may leave a detached worker holding
+    // the writer lock past the reopen below (#2837, #3694).
+    db.close().expect("clean close");
 
     let tracking_ref = read_remote_tracking_ref(&dest)
         .expect("read ref")

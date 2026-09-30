@@ -123,7 +123,7 @@ fn clone_over_real_http_reconstitutes_and_records_origin() {
     assert_eq!(outcome.manifest_hash, manifest_hash);
 
     // The clone serves reads and carries its origin, hub URL included.
-    let db = Database::open_local(&dest, DurableLocalOpenOptions::new())
+    let mut db = Database::open_local(&dest, DurableLocalOpenOptions::new())
         .expect("clone opens")
         .into_database();
     let mut kv = db
@@ -137,7 +137,10 @@ fn clone_over_real_http_reconstitutes_and_records_origin() {
         .expect("get")
         .expect("present");
     assert_eq!(value.as_bytes(), b"engineer");
-    drop(db);
+    drop(kv);
+    // Close, not drop: a dropped handle may leave a detached worker holding
+    // the writer lock past the reopen below (#2837, #3694).
+    db.close().expect("clean close");
 
     let tracking_ref = read_remote_tracking_ref(&dest)
         .expect("read ref")
