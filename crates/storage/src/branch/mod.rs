@@ -14,6 +14,8 @@ pub(crate) mod facts;
 pub(crate) mod identity;
 pub(crate) mod pruning;
 pub(crate) mod read;
+#[cfg(all(loom, test))]
+mod reclaim_loom;
 pub(crate) mod snapshot;
 pub(crate) mod state;
 #[cfg(all(loom, test))]
