@@ -774,7 +774,8 @@ fn open_durable_local_owned_with_options(
             reason: "durable local open requires a durable-local mode",
         });
     }
-    let root = root.into();
+    // #3008: a symlinked database path opens the directory it names.
+    let root = crate::backend::local_fs::LocalFsBackend::resolve_root_symlink(root.into());
     reject_pre_v1_layout(&root)?;
     let backend = StorageBackend::local_fs(root);
     open_durable_with_owned_backend_handle(options, backend.into_backend_handle())

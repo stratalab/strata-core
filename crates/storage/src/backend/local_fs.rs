@@ -178,6 +178,33 @@ impl LocalFsBackend {
         &self.root
     }
 
+    /// #3008: resolve a database root whose FINAL component is a symlink to
+    /// the path it names. The caller chose that link (`~/data -> /mnt/…`, a
+    /// shortened deep path), exactly as every other tool follows it; the
+    /// backend refuses a symlinked root only because it refuses symlinks
+    /// *inside* the tree, so the durable open resolves the root once, here,
+    /// before the backend is built. Everything below (writer lock, layout,
+    /// WAL) then operates on the real directory, and the writer lock — an OS
+    /// advisory lock on the lock file's inode — is the same lock through
+    /// either spelling.
+    ///
+    /// Any other root keeps the caller's spelling (a symlinked PARENT is
+    /// already followed by the OS). A link that does not resolve (dangling, a
+    /// loop, permission denied) is also left as given, so the backend's
+    /// path-shape check refuses it with its existing classification; a link
+    /// to a file resolves to the file and is refused as not-a-directory.
+    pub(crate) fn resolve_root_symlink(root: PathBuf) -> PathBuf {
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                // Unresolvable: keep the original spelling (see above).
+                fs::canonicalize(&root).unwrap_or(root)
+            }
+            // Not a symlink, or missing/unreadable: the backend's own stat
+            // reports it with its typed classification.
+            _ => root,
+        }
+    }
+
     fn writer_lock_object() -> BackendResult<ObjectName> {
         // Backend bootstrap exception: the writer lock is the one reserved
         // object-layout name the backend must recognize before services can
@@ -1322,6 +1349,60 @@ mod tests {
             entries.is_empty(),
             "publish left temporary entries: {entries:?}"
         );
+    }
+
+    /// #3008: a root whose final component is a symlink resolves to the
+    /// directory it names.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_root_symlink_follows_a_final_component_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("real dir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        assert_eq!(
+            LocalFsBackend::resolve_root_symlink(link),
+            std::fs::canonicalize(&real).expect("canonical real dir")
+        );
+    }
+
+    /// #3008: only a final-component link is resolved. A root that is not
+    /// itself a link keeps the caller's spelling, even when a PARENT is a
+    /// symlink (the OS already follows it) — canonicalizing every root would
+    /// rewrite paths the caller never asked to have rewritten.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_root_symlink_keeps_the_spelling_of_a_root_that_is_not_a_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_parent = dir.path().join("real-parent");
+        std::fs::create_dir_all(real_parent.join("db")).expect("db dir");
+        let linked_parent = dir.path().join("linked-parent");
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).expect("parent symlink");
+
+        let through_linked_parent = linked_parent.join("db");
+        assert_eq!(
+            LocalFsBackend::resolve_root_symlink(through_linked_parent.clone()),
+            through_linked_parent
+        );
+        let missing = dir.path().join("not-created-yet");
+        assert_eq!(
+            LocalFsBackend::resolve_root_symlink(missing.clone()),
+            missing
+        );
+    }
+
+    /// #3008: a dangling link is left as given, so the backend's path-shape
+    /// check refuses it with its existing classification.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_root_symlink_leaves_a_dangling_link_as_given() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("absent"), &link).expect("symlink");
+
+        assert_eq!(LocalFsBackend::resolve_root_symlink(link.clone()), link);
     }
 
     #[test]
