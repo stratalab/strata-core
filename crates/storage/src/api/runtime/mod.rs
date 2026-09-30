@@ -1473,8 +1473,18 @@ impl<'a> StorageRuntime<'a> {
 
         let resolved = resolve_read_bound(&view, request.bound())?;
         let capped = cap_bound_at_visible(resolved.branch_bound, visible);
+        // #3560: thread the limit into the branch scan, as the Latest arm does. The scan resolves
+        // each key at `capped` before counting it and counts against the same TTL frontier
+        // `map_scan_rows` filters with, so the page stops early yet maps to exactly the rows the
+        // unbounded scan would have produced.
         let rows = view
-            .scan_prefix_including_tombstones(&bounds, capped, request.after_version())
+            .scan_including_tombstones_limited(
+                &bounds,
+                capped,
+                request.after_version(),
+                request.limit().map(ReadLimit::get),
+                resolved.selected_timestamp,
+            )
             .map_err(branch_error)?;
         map_scan_rows(
             rows.iter().map(crate::branch::read::BranchHistoryRow::row),
@@ -1528,8 +1538,15 @@ impl<'a> StorageRuntime<'a> {
 
         let resolved = resolve_read_bound(&view, request.bound())?;
         let capped = cap_bound_at_visible(resolved.branch_bound, visible);
+        // #3560: the limit bounds the branch scan, not just the mapping (see `scan_prefix`).
         let rows = view
-            .scan_range_including_tombstones(&bounds, capped)
+            .scan_including_tombstones_limited(
+                &bounds,
+                capped,
+                None,
+                request.limit().map(ReadLimit::get),
+                resolved.selected_timestamp,
+            )
             .map_err(branch_error)?;
         map_scan_rows(
             rows.iter().map(crate::branch::read::BranchHistoryRow::row),
