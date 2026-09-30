@@ -398,3 +398,72 @@ fn every_engine_size_guard_names_the_size_and_the_limit() {
         );
     }
 }
+
+/// Five 14 MiB values in ONE commit: every row is under the 16 MiB row cap,
+/// but the commit's WAL record (~70 MiB) is over the 64 MiB segment. Before
+/// #3698 durable mode refused it only after allocating the commit version —
+/// `internal.engine.persistence`-class, retry-me, and the next commit skipped
+/// a version — and cache mode accepted it outright. Now both modes refuse it
+/// as the same typed caller error, naming the batch with the measured size
+/// and the limit, and the next commit gets the immediately following version.
+#[test]
+fn a_batch_too_large_for_one_commit_record_is_refused_without_a_version_gap() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut durable = open_durable_database(tempdir.path()).expect("durable open");
+    let mut cache = open_cache_database().expect("cache open");
+
+    for (mode, database) in [("durable", &mut durable), ("cache", &mut cache)] {
+        let mut kv = database
+            .kv(branch("default"), space("default"))
+            .expect("kv service");
+        let before = kv
+            .put(
+                KvKey::new("before").expect("key"),
+                KvValue::new(vec![b'x'; 16]),
+            )
+            .expect("small write before the refusal")
+            .commit()
+            .version();
+
+        let entries = (0..5).map(|index| {
+            (
+                KvKey::new(format!("record-{index}")).expect("key"),
+                KvValue::new(vec![b'x'; 14 * 1024 * 1024]),
+            )
+        });
+        let error = kv
+            .put_batch(entries)
+            .expect_err("a commit record over the WAL segment cannot be appended");
+        assert_refused_as_caller_error(&format!("{mode} oversized batch"), &error);
+        assert_eq!(
+            error.code(),
+            "invalid_argument.engine.persistence",
+            "{mode}"
+        );
+        assert_eq!(detail_text(&error, "field"), Some("batch"), "{mode}");
+        let limit = detail_bytes(&error, "limit_bytes");
+        let actual = detail_bytes(&error, "actual_bytes");
+        assert!(
+            limit < 64 * 1024 * 1024 && limit > 63 * 1024 * 1024,
+            "{mode}: the limit is the 64 MiB segment less its header, got {limit}"
+        );
+        assert!(
+            actual > 70 * 1024 * 1024,
+            "{mode}: the measured record carries all five values, got {actual}"
+        );
+
+        let after = kv
+            .put(
+                KvKey::new("after").expect("key"),
+                KvValue::new(vec![b'x'; 16]),
+            )
+            .expect("small write after the refusal")
+            .commit()
+            .version();
+        assert_eq!(
+            after.as_u64(),
+            before.as_u64() + 1,
+            "{mode}: the refused commit must not consume a commit version"
+        );
+    }
+}

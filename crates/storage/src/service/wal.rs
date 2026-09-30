@@ -17,8 +17,8 @@ use crate::config::mode::DurabilityPolicy;
 use crate::format::{
     decode_wal_record, decode_wal_record_envelope, decode_wal_segment_header, decode_wal_watermark,
     encode_wal_record_envelope_bytes_into, encode_wal_record_into_reusing,
-    encode_wal_segment_header, encode_wal_watermark, FormatError, SegmentMetadata, WalRecord,
-    WalSegmentHeader, WAL_SEGMENT_HEADER_SIZE,
+    encode_wal_segment_header, encode_wal_watermark, wal_record_frame_fits, wal_record_frame_limit,
+    FormatError, SegmentMetadata, WalRecord, WalSegmentHeader,
 };
 use crate::layout::{LayoutError, ObjectLayout, WalObjectClassification};
 use crate::object::ObjectName;
@@ -34,7 +34,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strata_core::CommitVersion;
 
-const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
+/// The format owns the production segment size, because commit admission
+/// sizes records against it without reaching into the WAL service (#3698).
+const DEFAULT_SEGMENT_SIZE: u64 = crate::format::DEFAULT_WAL_SEGMENT_SIZE;
 const MIN_SEGMENT_SIZE: u64 = 1024;
 const IDENTITY_CODEC_ID: &str = "identity";
 const WAL_COMMIT_PAYLOAD_FIXED_BYTES: usize = 12;
@@ -1215,6 +1217,11 @@ impl<'a> WalService<'a> {
             .saturating_sub(self.pending.len() as u64)
     }
 
+    /// The largest record frame [`append`](Self::append) accepts (#3698).
+    pub(crate) fn record_frame_limit(&self) -> u64 {
+        wal_record_frame_limit(self.segment_size)
+    }
+
     pub(crate) fn append(&mut self, record: &WalRecord) -> WalServiceResult<WalAppend> {
         self.append_with_durability(record, WalAppendDurability::PolicyDriven)
             .map_err(|error| self.observe_active_object_loss(error))
@@ -1265,14 +1272,9 @@ impl<'a> WalService<'a> {
             let frame_len = buffers.frame.len() as u64;
             // The segment header consumes part of the configured segment budget, so
             // a single record frame must fit in the remaining capacity before any
-            // backend append is attempted.
-            let max_record_bytes = self
-                .segment_size
-                .checked_sub(WAL_SEGMENT_HEADER_SIZE as u64)
-                .ok_or(WalServiceError::InvalidConfig {
-                    field: "segment_size",
-                })?;
-            if frame_len > max_record_bytes {
+            // backend append is attempted. Commit admission refuses against the
+            // same limit before allocating a version (#3698); this is the backstop.
+            if !wal_record_frame_fits(frame_len, wal_record_frame_limit(self.segment_size)) {
                 return Err(WalServiceError::RecordTooLarge {
                     bytes: frame_len,
                     segment_size: self.segment_size,

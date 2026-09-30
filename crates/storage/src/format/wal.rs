@@ -7,9 +7,10 @@ use strata_core::{BranchId, CommitVersion, Timestamp};
 
 mod commit_payload;
 
+use commit_payload::MAX_WAL_COMMIT_PAYLOAD_BYTES;
 pub(crate) use commit_payload::{
     decode_wal_commit_payload, encode_wal_commit_payload, encode_wal_commit_payload_into,
-    WalCommitPayload, MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
+    wal_commit_payload_len, WalCommitPayload, MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
 };
 
 const WAL_ENVELOPE_FORMAT: &str = "wal_record_envelope";
@@ -17,6 +18,80 @@ const WAL_RECORD_FORMAT: &str = "wal_record";
 const WAL_RECORD_LENGTH_FORMAT: &str = "wal_record_len";
 const WAL_SEGMENT_FORMAT: &str = "wal_segment_header";
 const WAL_SEGMENT_MAGIC: [u8; 4] = *b"STRA";
+/// The `u32` record length written ahead of every encoded record.
+const WAL_RECORD_LEN_PREFIX_BYTES: usize = 4;
+/// Version, length CRC, commit version, branch id, commit timestamp and
+/// `committed_at` — the fixed record header ahead of the commit payload.
+const WAL_RECORD_FIXED_HEADER_BYTES: usize = 1 + 4 + 8 + BranchId::BYTE_LEN + 8 + 8;
+/// The payload CRC that closes every record.
+const WAL_RECORD_CRC_BYTES: usize = 4;
+
+/// The record length the encoder writes in the length prefix for a commit
+/// payload of `commit_payload_len` bytes: everything after the prefix itself.
+fn wal_record_len_after_prefix(commit_payload_len: usize) -> Option<usize> {
+    WAL_RECORD_FIXED_HEADER_BYTES
+        .checked_add(commit_payload_len)?
+        .checked_add(WAL_RECORD_CRC_BYTES)
+}
+
+/// The exact length of the enveloped frame the WAL appends for a commit
+/// payload of `commit_payload_len` bytes: envelope header, record length
+/// prefix, fixed record header, payload and CRC.
+///
+/// Admission's pre-allocation size check and the encoder both derive the
+/// frame from this one layout (#3698). `None` only on `usize` overflow.
+pub(crate) fn wal_record_frame_len(commit_payload_len: usize) -> Option<usize> {
+    WAL_RECORD_ENVELOPE_HEADER_SIZE
+        .checked_add(WAL_RECORD_LEN_PREFIX_BYTES)?
+        .checked_add(wal_record_len_after_prefix(commit_payload_len)?)
+}
+
+/// The exact WAL frame length of a commit whose rows encode to `row_lens`
+/// bytes each. Saturates at `u64::MAX` on overflow, which is above every
+/// limit and therefore still refused.
+pub(crate) fn wal_commit_record_frame_len<I>(row_lens: I) -> u64
+where
+    I: IntoIterator<Item = usize>,
+{
+    wal_commit_payload_len(row_lens)
+        .and_then(wal_record_frame_len)
+        .and_then(|len| u64::try_from(len).ok())
+        .unwrap_or(u64::MAX)
+}
+
+/// The largest commit record frame a WAL with `segment_size`-byte segments
+/// can append (#3698).
+///
+/// Two caps bind a frame and this is the tighter of them: a record never
+/// spans segments, so the frame must fit in a segment after its header; and
+/// the commit payload format caps the payload at
+/// `MAX_WAL_COMMIT_PAYLOAD_BYTES`. The WAL append enforces the same value, so
+/// a batch admitted against it is a batch the append accepts.
+pub(crate) fn wal_record_frame_limit(segment_size: u64) -> u64 {
+    let segment_room = segment_size.saturating_sub(WAL_SEGMENT_HEADER_SIZE as u64);
+    let format_room = wal_record_frame_len(MAX_WAL_COMMIT_PAYLOAD_BYTES)
+        .and_then(|len| u64::try_from(len).ok())
+        .unwrap_or(u64::MAX);
+    segment_room.min(format_room)
+}
+
+/// The production WAL segment size. The WAL service opens with it unless a
+/// test seam overrides it, and commit admission sizes every record against
+/// its limit in EVERY durability mode, so cache mode refuses what a default
+/// durable database could not append (#3391, #3698).
+pub(crate) const DEFAULT_WAL_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
+
+/// [`wal_record_frame_limit`] for the production segment.
+pub(crate) fn default_wal_record_frame_limit() -> u64 {
+    wal_record_frame_limit(DEFAULT_WAL_SEGMENT_SIZE)
+}
+
+/// The admission decision for a commit record's size: whether a frame of
+/// `frame_len` bytes fits under `limit` (from [`wal_record_frame_limit`]).
+/// A frame exactly at the limit fits.
+pub(crate) const fn wal_record_frame_fits(frame_len: u64, limit: u64) -> bool {
+    frame_len <= limit
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WalSegmentHeader {
@@ -220,20 +295,10 @@ pub(crate) fn encode_wal_record_into_reusing(
     // record_len includes the versioned payload and trailing payload CRC, but
     // excludes the 4-byte length prefix itself. The separate length CRC lets
     // readers reject impossible lengths before allocating or slicing payloads.
-    let payload_len = 1usize
-        .checked_add(4)
-        .and_then(|len| len.checked_add(8))
-        .and_then(|len| len.checked_add(BranchId::BYTE_LEN))
-        .and_then(|len| len.checked_add(8))
-        // committed_at (#3112 S2)
-        .and_then(|len| len.checked_add(8))
-        .and_then(|len| len.checked_add(payload_bytes.len()))
-        .ok_or(FormatError::InvalidLength {
-            field: WAL_RECORD_FORMAT,
-        })?;
-    let record_len = payload_len
-        .checked_add(4)
-        .ok_or(FormatError::InvalidLength {
+    // The fixed header carries `committed_at` since #3112 S2. The layout is
+    // shared with admission's pre-allocation size check (#3698).
+    let record_len =
+        wal_record_len_after_prefix(payload_bytes.len()).ok_or(FormatError::InvalidLength {
             field: WAL_RECORD_FORMAT,
         })?;
     let record_len = u32::try_from(record_len).map_err(|_| FormatError::InvalidLength {
@@ -241,7 +306,7 @@ pub(crate) fn encode_wal_record_into_reusing(
     })?;
     let record_len_bytes = record_len.to_le_bytes();
 
-    let capacity = 4usize
+    let capacity = WAL_RECORD_LEN_PREFIX_BYTES
         .checked_add(record_len as usize)
         .ok_or(FormatError::InvalidLength {
             field: WAL_RECORD_FORMAT,
@@ -575,8 +640,13 @@ mod tests {
         WalRecordEnvelope, WalSegmentHeader, WAL_ENVELOPE_FORMAT, WAL_RECORD_FORMAT,
         WAL_RECORD_LENGTH_FORMAT, WAL_SEGMENT_FORMAT,
     };
+    use super::{
+        wal_commit_payload_len, wal_commit_record_frame_len, wal_record_frame_fits,
+        wal_record_frame_len, wal_record_frame_limit, MAX_WAL_COMMIT_PAYLOAD_BYTES,
+    };
     use crate::format::{
-        FormatError, WAL_RECORD_FORMAT_VERSION, WAL_SEGMENT_FORMAT_VERSION, WAL_SEGMENT_HEADER_SIZE,
+        storage_row_encoded_len, FormatError, WAL_RECORD_FORMAT_VERSION,
+        WAL_SEGMENT_FORMAT_VERSION, WAL_SEGMENT_HEADER_SIZE,
     };
     use crate::row::{PhysicalKey, StorageRow, StorageSpaceId};
     use strata_core::{BranchId, CommitVersion, Timestamp};
@@ -1159,5 +1229,229 @@ mod tests {
                 actual: bytes.len() - 1
             })
         );
+    }
+
+    // ---- #3698: the pre-allocation record size and the encoder agree ----
+
+    /// Encodes `record` exactly as the WAL append does and returns the
+    /// enveloped frame length.
+    fn encoded_frame_len(record: &WalRecord) -> usize {
+        let mut record_bytes = Vec::new();
+        let mut payload_bytes = Vec::new();
+        let mut row_bytes = Vec::new();
+        let mut frame = Vec::new();
+        encode_wal_record_into_reusing(
+            record,
+            &mut record_bytes,
+            &mut payload_bytes,
+            &mut row_bytes,
+        )
+        .expect("encode record");
+        encode_wal_record_envelope_bytes_into(&record_bytes, &mut frame).expect("encode envelope");
+        frame.len()
+    }
+
+    fn record_of(rows: Vec<StorageRow>, committed_at: Option<Timestamp>) -> WalRecord {
+        let commit_version = CommitVersion::new(41);
+        let commit_timestamp = Timestamp::from_micros(1_700_000_000_123_456);
+        WalRecord::new(
+            commit_version,
+            branch_id(),
+            commit_timestamp,
+            WalCommitPayload::new(rows).expect("commit payload"),
+        )
+        .expect("WAL record")
+        .with_committed_at(committed_at)
+    }
+
+    /// The length admission computes from the rows alone.
+    fn computed_frame_len(record: &WalRecord) -> u64 {
+        wal_commit_record_frame_len(
+            record
+                .commit_payload()
+                .rows()
+                .iter()
+                .map(|row| storage_row_encoded_len(row.physical_key(), row.value().len())),
+        )
+    }
+
+    /// Admission refuses a batch from `wal_commit_record_frame_len` before
+    /// any byte is encoded; if it disagreed with the encoder, admission would
+    /// either refuse a record the WAL accepts or let through one it refuses
+    /// after the version is allocated (#3698). Generated rows: puts and
+    /// tombstones, keys that need escaping, empty and non-empty values, with
+    /// and without a `committed_at`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn wal_commit_record_frame_len_matches_the_encoder() {
+        use proptest::collection::vec;
+        use proptest::prelude::any;
+        use proptest::prop_assert_eq;
+        use proptest::test_runner::{Config, TestRunner};
+
+        let row = (
+            vec(any::<u8>(), 0..48),
+            any::<bool>(),
+            vec(any::<u8>(), 0..300),
+        );
+        let strategy = (vec(row, 1..=24), any::<bool>());
+        let mut runner = TestRunner::new(Config {
+            failure_persistence: None,
+            ..Config::default()
+        });
+        runner
+            .run(&strategy, |(specs, stamped)| {
+                let rows = specs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (mut user_key, tombstone, value))| {
+                        // Distinct keys; the index byte keeps generated keys apart.
+                        user_key.push(u8::try_from(index).expect("index fits u8"));
+                        if tombstone {
+                            StorageRow::tombstone(
+                                physical_key(&user_key),
+                                CommitVersion::new(41),
+                                Timestamp::from_micros(1_700_000_000_123_456),
+                            )
+                        } else {
+                            StorageRow::put(
+                                physical_key(&user_key),
+                                CommitVersion::new(41),
+                                Timestamp::from_micros(1_700_000_000_123_456),
+                                Timestamp::from_micros(9),
+                                value,
+                            )
+                        }
+                    })
+                    .collect();
+                let committed_at = stamped.then(|| Timestamp::from_micros(1_800_000_000_000_000));
+                let record = record_of(rows, committed_at);
+                prop_assert_eq!(
+                    computed_frame_len(&record),
+                    u64::try_from(encoded_frame_len(&record)).expect("frame fits u64")
+                );
+                Ok(())
+            })
+            .expect("frame length property");
+    }
+
+    /// Truth table for the limit: the tighter of the segment's room after its
+    /// header and the frame of a maximal commit payload.
+    #[test]
+    fn wal_record_frame_limit_is_the_tighter_of_segment_and_payload_caps() {
+        let header = WAL_SEGMENT_HEADER_SIZE as u64;
+        let format_frame =
+            u64::try_from(wal_record_frame_len(MAX_WAL_COMMIT_PAYLOAD_BYTES).expect("frame"))
+                .expect("fits u64");
+        let cases: [(u64, u64); 6] = [
+            // Test-seam segment from the #3698 repro.
+            (1024, 1024 - header),
+            // Production segment: the segment binds, just below the payload cap.
+            (64 * 1024 * 1024, 64 * 1024 * 1024 - header),
+            // A segment exactly large enough for the maximal payload's frame.
+            (format_frame + header, format_frame),
+            // A larger segment: the payload format cap binds instead.
+            (format_frame + header + 1, format_frame),
+            (1024 * 1024 * 1024, format_frame),
+            // Degenerate: no room at all, so every frame is refused.
+            (header, 0),
+        ];
+        for (segment_size, expected) in cases {
+            assert_eq!(
+                wal_record_frame_limit(segment_size),
+                expected,
+                "segment size {segment_size}"
+            );
+        }
+    }
+
+    /// Truth table for the fit decision, at limit-1 / limit / limit+1.
+    #[test]
+    fn wal_record_frame_fits_truth_table() {
+        let cases: [(u64, u64, bool); 7] = [
+            (987, 988, true),
+            (988, 988, true),
+            (989, 988, false),
+            (0, 0, true),
+            (1, 0, false),
+            (u64::MAX, u64::MAX, true),
+            (u64::MAX, u64::MAX - 1, false),
+        ];
+        for (frame_len, limit, fits) in cases {
+            assert_eq!(
+                wal_record_frame_fits(frame_len, limit),
+                fits,
+                "frame {frame_len} against limit {limit}"
+            );
+        }
+    }
+
+    /// The payload format cap, the one limit the encoder enforces itself, at
+    /// its exact boundary: a payload of exactly `MAX_WAL_COMMIT_PAYLOAD_BYTES`
+    /// encodes, and its frame is exactly the limit a large segment reports;
+    /// one byte more is refused by the encoder, and its computed frame is one
+    /// over that limit. So the limit admission checks is the encoder's.
+    #[test]
+    fn wal_record_frame_limit_matches_the_encoder_at_the_payload_cap() {
+        // Four 15 MiB rows, then a last row whose value absorbs the remainder
+        // so the payload lands exactly on the cap. Every row stays under the
+        // 16 MiB row cap, so only the whole-payload cap can refuse.
+        let big = 15 * 1024 * 1024;
+        let keys: [&[u8]; 5] = [b"a", b"b", b"c", b"d", b"e"];
+        let row_len =
+            |key: &[u8], value_len: usize| storage_row_encoded_len(&physical_key(key), value_len);
+        let payload_len_without_last_value = wal_commit_payload_len(
+            keys[..4]
+                .iter()
+                .map(|key| row_len(key, big))
+                .chain([row_len(keys[4], 0)]),
+        )
+        .expect("payload len");
+        let last_value = MAX_WAL_COMMIT_PAYLOAD_BYTES - payload_len_without_last_value;
+        let limit = wal_record_frame_limit(u64::MAX);
+
+        for (extra, accepted) in [(0usize, true), (1, false)] {
+            let mut rows: Vec<StorageRow> = keys[..4]
+                .iter()
+                .map(|key| {
+                    StorageRow::put(
+                        physical_key(key),
+                        CommitVersion::new(41),
+                        Timestamp::from_micros(1_700_000_000_123_456),
+                        Timestamp::EPOCH,
+                        vec![0x5a; big],
+                    )
+                })
+                .collect();
+            rows.push(StorageRow::put(
+                physical_key(keys[4]),
+                CommitVersion::new(41),
+                Timestamp::from_micros(1_700_000_000_123_456),
+                Timestamp::EPOCH,
+                vec![0x5a; last_value + extra],
+            ));
+            let record = record_of(rows, None);
+            let computed = computed_frame_len(&record);
+            assert_eq!(computed, limit + extra as u64, "extra {extra}");
+            assert_eq!(
+                wal_record_frame_fits(computed, limit),
+                accepted,
+                "extra {extra}"
+            );
+
+            let mut record_bytes = Vec::new();
+            let mut payload_bytes = Vec::new();
+            let mut row_bytes = Vec::new();
+            let encoded = encode_wal_record_into_reusing(
+                &record,
+                &mut record_bytes,
+                &mut payload_bytes,
+                &mut row_bytes,
+            );
+            assert_eq!(encoded.is_ok(), accepted, "extra {extra}: {encoded:?}");
+            if accepted {
+                assert_eq!(computed, encoded_frame_len(&record) as u64);
+            }
+        }
     }
 }

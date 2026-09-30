@@ -125,10 +125,16 @@ pub(crate) use wal::{decode_wal_commit_payload, encode_wal_commit_payload, WalCo
 // Kept out of the `expect(unused_imports)` block above: commit admission reads
 // this on every mutation, so it is never unused in any configuration.
 pub(crate) use wal::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES;
+// Commit admission sizes every batch's WAL record against the append's own
+// cap before a version is allocated (#3698); the WAL append enforces it.
 pub(crate) use wal::{
     decode_wal_record, decode_wal_record_envelope, decode_wal_segment_header,
     encode_wal_record_envelope_bytes_into, encode_wal_record_into_reusing,
     encode_wal_segment_header, WalRecord, WalSegmentHeader,
+};
+pub(crate) use wal::{
+    default_wal_record_frame_limit, wal_commit_record_frame_len, wal_record_frame_fits,
+    wal_record_frame_limit, DEFAULT_WAL_SEGMENT_SIZE,
 };
 pub(crate) use wal_watermark::{decode_wal_watermark, encode_wal_watermark};
 #[cfg(any(test, feature = "testkit"))]

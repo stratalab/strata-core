@@ -1089,6 +1089,114 @@ fn commit_batch_sizes_a_delete_by_its_key_alone() {
     ));
 }
 
+/// A multi-row batch whose rows each fit the 16 MiB row cap but whose WHOLE
+/// WAL record frame does not fit the production segment (#3698). Before the
+/// fix admission let it through and the WAL append refused it after the
+/// commit version was allocated — burning the version and surfacing as an
+/// internal lower-layer failure. Validation runs in every durability mode, so
+/// this pins cache and durable at once. Probed at limit-1, limit and limit+1.
+#[test]
+fn commit_batch_refuses_a_record_over_the_wal_frame_limit_though_every_row_fits() {
+    const ROW_VALUE: usize = 15 * 1024 * 1024;
+    let branch = branch_id(64);
+    let keys: Vec<PhysicalKey> = (0u8..5)
+        .map(|index| physical_key(branch, 0x20, vec![b'r', index]))
+        .collect();
+    let limit = crate::format::default_wal_record_frame_limit();
+    // Four full rows plus a last row with an empty value; the last value then
+    // grows byte-for-byte with the frame.
+    let base_frame =
+        crate::format::wal_commit_record_frame_len(keys.iter().enumerate().map(|(index, key)| {
+            let value_len = if index < 4 { ROW_VALUE } else { 0 };
+            crate::format::storage_row_encoded_len(key, value_len)
+        }));
+    let last_value_at_limit =
+        usize::try_from(limit - base_frame).expect("remaining frame room fits usize");
+    assert!(
+        crate::format::storage_row_encoded_len(&keys[4], last_value_at_limit)
+            < crate::format::MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
+        "fixture must keep every row under the row cap, so only the record cap can refuse"
+    );
+    let batch_with_last_value = |last_value: usize| {
+        let mutations = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let value_len = if index < 4 { ROW_VALUE } else { last_value };
+                CommitMutation::put(
+                    key.clone(),
+                    vec![b'x'; value_len],
+                    CommitExpiry::None,
+                    CommitRetentionHint::Append,
+                )
+            })
+            .collect();
+        CommitBatch::mutating(
+            branch,
+            mutations,
+            CommitValidationFacts::empty(),
+            CommitBatchOptions::default(),
+        )
+    };
+
+    for (offset, frame_len) in [(-1_i64, limit - 1), (0, limit)] {
+        let last_value = if offset < 0 {
+            last_value_at_limit - 1
+        } else {
+            last_value_at_limit
+        };
+        let validated = batch_with_last_value(last_value)
+            .validate(&CommitRuntimeConfig::default())
+            .expect("a record at or under the frame limit is admitted");
+        assert_eq!(validated.wal_record_frame_len(), frame_len);
+    }
+
+    let refusal = batch_with_last_value(last_value_at_limit + 1)
+        .validate(&CommitRuntimeConfig::default())
+        .expect_err("one byte past the frame limit cannot be appended");
+    assert_eq!(
+        refusal,
+        CommitRuntimeError::CommitRecordTooLarge {
+            record_len: limit + 1,
+            max_record_len: limit,
+        }
+    );
+    assert_eq!(refusal.code(), "invalid_argument.commit.record_size");
+}
+
+/// Truth table for the admission decision the durable runtime applies against
+/// its configured segment before allocating a version (#3698).
+#[test]
+fn require_wal_record_fits_truth_table() {
+    let cases: [(u64, u64, Result<(), CommitRuntimeError>); 4] = [
+        (987, 988, Ok(())),
+        (988, 988, Ok(())),
+        (
+            989,
+            988,
+            Err(CommitRuntimeError::CommitRecordTooLarge {
+                record_len: 989,
+                max_record_len: 988,
+            }),
+        ),
+        (
+            u64::MAX,
+            988,
+            Err(CommitRuntimeError::CommitRecordTooLarge {
+                record_len: u64::MAX,
+                max_record_len: 988,
+            }),
+        ),
+    ];
+    for (frame_len, limit, expected) in cases {
+        assert_eq!(
+            crate::commit::require_wal_record_fits(frame_len, limit),
+            expected,
+            "frame {frame_len} against limit {limit}"
+        );
+    }
+}
+
 /// `CommitRuntimeError` hand-rolls `PartialEq`, and every assertion in this
 /// suite that compares a returned error against an expected one rests on it.
 /// Those assertions are all `assert_eq!` on a *matching* pair, so an equality
@@ -1161,6 +1269,33 @@ fn commit_runtime_error_equality_distinguishes_every_field() {
     // And the row refusal and the key refusal are not each other, even at
     // identical sizes: they send the caller to change different things.
     assert_ne!(refusal, key_refusal);
+    // #3698: the record refusal's two fields each break equality alone.
+    let record_refusal = CommitRuntimeError::CommitRecordTooLarge {
+        record_len: 100,
+        max_record_len: 64,
+    };
+    assert_eq!(
+        record_refusal,
+        CommitRuntimeError::CommitRecordTooLarge {
+            record_len: 100,
+            max_record_len: 64,
+        }
+    );
+    assert_ne!(
+        record_refusal,
+        CommitRuntimeError::CommitRecordTooLarge {
+            record_len: 101,
+            max_record_len: 64,
+        }
+    );
+    assert_ne!(
+        record_refusal,
+        CommitRuntimeError::CommitRecordTooLarge {
+            record_len: 100,
+            max_record_len: 65,
+        }
+    );
+    assert_ne!(record_refusal, refusal);
     assert_ne!(
         CommitRuntimeError::InvalidBatch { reason: "a" },
         CommitRuntimeError::InvalidBatch { reason: "b" }

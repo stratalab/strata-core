@@ -1110,3 +1110,196 @@ fn ordinary_commits_stay_monotonic_after_commit_at() {
         "clock never regresses below an explicit stamp"
     );
 }
+
+// ---- #3698: an oversized commit RECORD is a caller error that burns no version ----
+
+/// A batch of `rows` puts, each carrying `value_len` bytes, as one commit.
+fn multi_put_batch(prefix: &str, rows: usize, value_len: usize) -> CommitBatch {
+    let mutations = (0..rows)
+        .map(|index| {
+            put_mutation(
+                format!("{prefix}-{index}").as_bytes(),
+                &vec![b'x'; value_len],
+            )
+        })
+        .collect();
+    CommitBatch::new(branch(), mutations, CommitOptions::default()).expect("valid multi-put batch")
+}
+
+/// The typed record-size refusal: `invalid_argument`, field `batch`, the
+/// measured frame and the limit. Returns the measured frame length.
+fn assert_record_size_refusal(error: &StorageApiError, expected_limit: u64) -> u64 {
+    assert_eq!(
+        error.class(),
+        StorageApiErrorClass::InvalidArgument,
+        "{error:?}"
+    );
+    assert_eq!(error.code(), "invalid_argument.storage_api.argument");
+    match error {
+        StorageApiError::SizeLimitExceeded {
+            field,
+            actual_bytes,
+            limit_bytes,
+            ..
+        } => {
+            assert_eq!(*field, "batch");
+            assert_eq!(*limit_bytes, expected_limit);
+            assert!(
+                actual_bytes > limit_bytes,
+                "the refused frame {actual_bytes} must be over the limit {limit_bytes}"
+            );
+            *actual_bytes
+        }
+        other => panic!("expected a typed record-size refusal, got {other:?}"),
+    }
+}
+
+/// Five rows of 15 MiB: every row fits the 16 MiB row cap, the whole record
+/// does not fit the 64 MiB production segment.
+const OVERSIZED_RECORD_ROWS: usize = 5;
+const OVERSIZED_RECORD_ROW_VALUE: usize = 15 * 1024 * 1024;
+
+/// The same refusal, with the same limit, in cache mode and in default
+/// durable mode — and in both the refused commit consumes no version: the
+/// next commit gets the immediately following one (#3698). Cache mode never
+/// reaches a WAL (hard rule 14); it refuses because a default durable
+/// database could not append the record (#3391).
+fn assert_oversized_record_refused_without_a_version_gap(runtime: &StorageRuntime<'_>) {
+    let limit = crate::format::default_wal_record_frame_limit();
+    let before = runtime
+        .commit(&put_batch(b"before", b"v"))
+        .expect("small commit before the refusal")
+        .commit_version();
+
+    let error = runtime
+        .commit(&multi_put_batch(
+            "oversized",
+            OVERSIZED_RECORD_ROWS,
+            OVERSIZED_RECORD_ROW_VALUE,
+        ))
+        .expect_err("a record over the WAL frame limit is refused");
+    assert_record_size_refusal(&error, limit);
+
+    let after = runtime
+        .commit(&put_batch(b"after", b"v"))
+        .expect("small commit after the refusal")
+        .commit_version();
+    assert_eq!(
+        after,
+        CommitVersion::new(before.as_u64() + 1),
+        "the refused commit must not consume a commit version"
+    );
+    assert!(read_latest(runtime, b"oversized-0").row().is_none());
+}
+
+#[test]
+fn cache_oversized_commit_record_is_a_typed_caller_error_without_a_version_gap() {
+    let runtime = open_runtime();
+    assert_oversized_record_refused_without_a_version_gap(&runtime);
+}
+
+#[test]
+#[cfg(feature = "localfs")]
+fn durable_oversized_commit_record_is_a_typed_caller_error_without_a_version_gap() {
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(temp_dir_for_api_test(
+        "oversized-record-default-segment",
+    )));
+    let mut runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+        backend,
+    )
+    .expect("durable open")
+    .into_runtime();
+    assert_oversized_record_refused_without_a_version_gap(&runtime);
+    runtime.close().expect("durable close");
+}
+
+/// The #3698 repro, with the test-seam segment small enough that ordinary
+/// values reach the record cap: a single 4000-byte value (well under the row
+/// cap) and a multi-row batch are both refused before allocation, typed, with
+/// the configured segment's limit — and neither leaves a version gap, before
+/// or after a reopen. Then the boundary at limit-1 / limit / limit+1: the
+/// frames at and under the limit are really appended (and survive reopen), so
+/// the pre-allocation size and the WAL append agree on where the limit is.
+#[test]
+#[cfg(feature = "localfs")]
+fn durable_small_segment_refuses_oversized_records_before_allocation_at_the_exact_limit() {
+    const SEGMENT: u64 = 1024;
+    let root = temp_dir_for_api_test("oversized-record-small-segment");
+    let options = || {
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_wal_segment_size_for_test(SEGMENT)
+    };
+    let open = || {
+        StorageRuntime::open_with_backend(
+            options(),
+            crate::testkit::leak_static(StorageBackend::local_fs(root.clone())),
+        )
+        .expect("durable open")
+    };
+    let limit = crate::format::wal_record_frame_limit(SEGMENT);
+
+    let mut runtime = open().into_runtime();
+    let mut last = CommitVersion::ZERO;
+    for index in 0..4_u8 {
+        last = runtime
+            .commit(&put_batch(&[b'k', index], &[0x61; 96]))
+            .expect("small commit")
+            .commit_version();
+    }
+    assert_eq!(last, CommitVersion::new(4));
+
+    // One row, under the 16 MiB row cap, over this segment's record cap.
+    let single = runtime
+        .commit(&put_batch(b"single", &[0x62; 4000]))
+        .expect_err("a record larger than the segment is refused");
+    let single_frame = assert_record_size_refusal(&single, limit);
+
+    // Several rows, each small, together over the record cap.
+    let multi = runtime
+        .commit(&multi_put_batch("multi", 4, 300))
+        .expect_err("a multi-row record larger than the segment is refused");
+    assert_record_size_refusal(&multi, limit);
+
+    // Neither refusal consumed a version.
+    last = runtime
+        .commit(&put_batch(b"after-refusals", b"v"))
+        .expect("commit after the refusals")
+        .commit_version();
+    assert_eq!(last, CommitVersion::new(5));
+
+    // Frame length grows one-for-one with the value, so the refused single
+    // row's measured frame locates the exact boundary.
+    let excess = usize::try_from(single_frame - limit).expect("excess fits usize");
+    let at_limit = 4000 - excess;
+    let over = runtime
+        .commit(&put_batch(b"single", &vec![0x63; at_limit + 1]))
+        .expect_err("one byte over the limit is refused");
+    assert_eq!(assert_record_size_refusal(&over, limit), limit + 1);
+    for (value_len, expected) in [(at_limit - 1, 6_u64), (at_limit, 7)] {
+        last = runtime
+            .commit(&put_batch(b"single", &vec![0x63; value_len]))
+            .unwrap_or_else(|error| {
+                panic!("a {value_len}-byte value at or under the limit is appended: {error:?}")
+            })
+            .commit_version();
+        assert_eq!(last, CommitVersion::new(expected), "no version gap");
+    }
+    runtime.close().expect("close");
+    drop(runtime);
+
+    let reopened = open();
+    assert_eq!(
+        reopened.summary().recovery_health(),
+        RecoveryHealthSummary::Healthy
+    );
+    let reopened = reopened.into_runtime();
+    let row = read_latest(&reopened, b"single");
+    let row = row.row().expect("the at-limit record survives reopen");
+    assert_eq!(row.commit_version(), CommitVersion::new(7));
+    let next = reopened
+        .commit(&put_batch(b"after-reopen", b"v"))
+        .expect("commit after reopen")
+        .commit_version();
+    assert_eq!(next, CommitVersion::new(8), "no version gap across reopen");
+}

@@ -9,7 +9,13 @@ const WAL_COMMIT_PAYLOAD_FORMAT: &str = "wal_commit_payload";
 const WAL_COMMIT_PAYLOAD_MAGIC: [u8; 4] = *b"STCP";
 const WAL_COMMIT_PAYLOAD_FORMAT_VERSION: u32 = 1;
 const MAX_WAL_COMMIT_PAYLOAD_ROWS: usize = 4096;
-const MAX_WAL_COMMIT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// The largest encoded commit payload. Pub(crate) because the WAL record
+/// frame cap every commit is admitted against is derived from it (#3698).
+pub(crate) const MAX_WAL_COMMIT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// Magic, format version and row count, written ahead of the rows.
+const WAL_COMMIT_PAYLOAD_HEADER_BYTES: usize = 12;
+/// Each row is written as a `u32` length prefix followed by the row bytes.
+const WAL_COMMIT_PAYLOAD_ROW_PREFIX_BYTES: usize = 4;
 /// The largest single encoded storage row a commit payload can carry.
 ///
 /// Enforced here at encode time, and — because cache mode never reaches this
@@ -61,6 +67,26 @@ impl WalCommitPayload {
     }
 }
 
+/// The exact encoded length of a commit payload whose rows encode to
+/// `row_lens` bytes each — what [`encode_wal_commit_payload_into`] writes for
+/// those rows, without encoding them.
+///
+/// Commit admission sizes a batch's whole WAL record from this before a commit
+/// version is allocated (#3698), so it must never disagree with the encoder;
+/// `wal_commit_payload_len_matches_the_encoder` pins the two together. `None`
+/// only when the sum overflows `usize`, which no admissible batch reaches.
+pub(crate) fn wal_commit_payload_len<I>(row_lens: I) -> Option<usize>
+where
+    I: IntoIterator<Item = usize>,
+{
+    row_lens
+        .into_iter()
+        .try_fold(WAL_COMMIT_PAYLOAD_HEADER_BYTES, |len, row_len| {
+            len.checked_add(WAL_COMMIT_PAYLOAD_ROW_PREFIX_BYTES)?
+                .checked_add(row_len)
+        })
+}
+
 pub(crate) fn encode_wal_commit_payload(
     payload: &WalCommitPayload,
 ) -> Result<Vec<u8>, FormatError> {
@@ -92,7 +118,7 @@ pub(crate) fn encode_wal_commit_payload_into(
 
         let required_len = bytes
             .len()
-            .checked_add(4)
+            .checked_add(WAL_COMMIT_PAYLOAD_ROW_PREFIX_BYTES)
             .and_then(|len| len.checked_add(row_bytes.len()))
             .ok_or(FormatError::InvalidLength {
                 field: WAL_COMMIT_PAYLOAD_FORMAT,

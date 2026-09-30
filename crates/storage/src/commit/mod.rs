@@ -35,6 +35,7 @@ pub(crate) use allocator::{
     CommitTimestampAllocationSource, CommitTimestampGuard, CommitTimestampSource,
     CommitVersionAllocator,
 };
+pub(crate) use batch::require_wal_record_fits;
 #[allow(
     unused_imports,
     reason = "commit scaffold exports define the local surface for later slices"
