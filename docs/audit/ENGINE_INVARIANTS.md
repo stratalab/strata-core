@@ -1234,11 +1234,57 @@ LSM write amplification directly impacts SD card write endurance. The theoretica
 for the default configuration MUST be documented. On flash storage, total write amplification
 (user writes × LSM amplification × filesystem/FTL amplification) determines device lifetime.
 
-**Audit**: Current shape: L0 trigger 4 (`LEVEL_ZERO_COMPACTION_THRESHOLD`), growth factor 10
-(`NONZERO_LEVEL_TARGET_GROWTH_FACTOR`), 8 levels (`DEFAULT_MAX_LEVEL_COUNT`,
-`branch/config.rs`). The live regression gate is `SCALED_COMPACTION_AMPLIFICATION_GATE = 4`
-(`api/tests/mod.rs`) — verify it still gates. RECORDED GAP (#2906): the endurance derivation
-document this entry requires does not exist yet.
+The derivation lives in `docs/architecture/storage/write-amplification-and-flash-endurance.md`
+(#2906):
+
+```text
+WA = W_wal + W_ckpt + c × (1 + W_L0 + Σ W_mid + W_term)
+```
+
+- `W_wal ≈ 1`: the WAL is written once and is not compressed.
+- `W_ckpt ≤ 0.25`: at most a 64 MiB delta per 256 MiB of retained WAL, plus one per clean close.
+- `c` is the Zstd table ratio.
+- `W_L0 ≤ 1 + |L1| / (P − |L1|)`.
+- Each of the five middle crossings costs 0 (a metadata-only move) to `1 + 3T/S`.
+- `W_term ≈ 1 + D / P`, where `D` is the terminal-level bytes and `P ≈ min(256 MiB, 4R + |L1|)` is
+  the L0 pass size.
+
+The terminal term is **linear** in the dataset rather than the textbook `≈ 10`. At the maintenance
+fixed point, the non-final table-count trigger holds L1-L6 to ≤ 3 tables each, so almost all data
+sits in L7 and each `P`-sized batch rewrites its share of it. This is derived and unmeasured; #3710
+tracks measuring it and deciding the trigger.
+
+Worked at the defaults (512 MiB budget, uniform keys, `c = 1`):
+
+- 1 GiB of writes into an empty database: WA ≈ 6-27.
+- The same 1 GiB into a 10 GiB database: WA ≈ 44-65.
+- The 10 GiB case at a 64 MiB edge budget: WA ≈ 260-280.
+- Time-ordered keys: WA ≈ 1.25 + 2c.
+
+The operator levers are key locality, `memory_budget` (sets `R`, `T`, `P`) and `version_retention`.
+The doc gives the SD/TBW envelope for each.
+
+**Audit**: Current shape:
+
+| Setting | Value | Anchor |
+|---|---|---|
+| L0 trigger | 4 | `LEVEL_ZERO_COMPACTION_THRESHOLD` |
+| Non-final nonzero trigger | 4 tables **or** bytes ≥ target | `NONZERO_LEVEL_COMPACTION_THRESHOLD` |
+| Growth factor | 10 | `NONZERO_LEVEL_TARGET_GROWTH_FACTOR` |
+| L0 pass bound | 256 MiB | `L0_PASS_MAX_INPUT_BYTES` |
+| Grandparent cut | 256 MiB | `OUTPUT_GRANDPARENT_OVERLAP_MAX_BYTES` |
+| Output table | `min(64 MiB, artifact pool / 2)` | `table_compaction_config_with_storage_budget`, all in `lifecycle/compaction.rs` |
+| Levels | 8 | `DEFAULT_MAX_LEVEL_COUNT`, `branch/config.rs` |
+| Rotation | `min(active pool, 64 MiB)` | `lifecycle/budget.rs` |
+
+If any of these moves, re-derive the doc's table and worked example.
+
+`SCALED_COMPACTION_AMPLIFICATION_GATE = 4` (`api/tests/mod.rs`) is a small-workload observation
+(~7 MB, where `D / P ≈ 0`), not a bound at scale. KNOWN GAP (#3709): it is also enforced nowhere.
+Its only caller is the `#[ignore]`d cache closed-loop test in `api/tests/background_scale.rs`,
+which the nightly perf-trace lane runs without `--ignored`, and `tests/lifecycle_source_guard.rs`
+only checks that the string exists. No harness measures write amplification at a scale where the
+terminal term matters.
 
 ### SCALE-006: Maintenance pressure control is deferral + throttle + lanes, not a bandwidth limiter
 

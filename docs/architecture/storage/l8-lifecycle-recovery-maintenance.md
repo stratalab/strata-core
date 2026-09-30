@@ -93,6 +93,11 @@ table compaction layers. L8 records deeper-overlap bytes and a deferred
 split-budget fact, but metadata-promotion eligibility does not imply lifecycle
 ownership of output splitting.
 
+The write amplification these shape rules produce is derived term by term, with
+the SD/flash endurance envelope and the operator levers, in
+[Write Amplification And Flash Endurance](./write-amplification-and-flash-endurance.md)
+(SCALE-005, #2906).
+
 ### Resource Throttling And Memory Release
 
 Lifecycle compaction records table bytes read for rewrite operations, output
