@@ -86,9 +86,11 @@ fn validate_branch_name(name: &str) -> Result<(), EngineError> {
         ));
     }
     if name.len() > MAX_BRANCH_NAME_BYTES {
-        return Err(EngineError::invalid_input(
+        return Err(EngineError::size_limit_exceeded(
             "invalid_argument.engine.branch_name",
             "branch name is too long",
+            name.len(),
+            MAX_BRANCH_NAME_BYTES,
         ));
     }
     if name.chars().any(char::is_control) {

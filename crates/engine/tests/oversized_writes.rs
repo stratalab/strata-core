@@ -21,7 +21,9 @@
 mod common;
 
 use strata_engine::{
-    Database, EngineError, EngineErrorClass, EventPayload, EventType, RetryPolicy,
+    BranchName, Database, EmbeddingModelId, EngineError, EngineErrorClass, ErrorDetail,
+    EventPayload, EventType, GraphName, GraphProperties, JsonDocumentId, JsonValue, ProductSpace,
+    RetryPolicy, VectorCollectionName, VectorMetadata,
 };
 use strata_engine::{KvKey, KvValue};
 
@@ -238,4 +240,161 @@ fn an_oversized_key_and_an_oversized_value_are_different_refusals() {
         "an oversized key and an oversized value report identically, so neither \
          names the field a caller has to change"
     );
+}
+
+/// One structured detail of an error, parsed as the byte count it carries.
+fn detail_bytes(error: &EngineError, key: &str) -> u64 {
+    let value = detail_text(error, key).unwrap_or_else(|| {
+        panic!(
+            "{}: no `{key}` detail in {:?}",
+            error.code(),
+            error.details()
+        )
+    });
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("{}: `{key}` is not a byte count: {value:?}", error.code()))
+}
+
+fn detail_text<'a>(error: &'a EngineError, key: &str) -> Option<&'a str> {
+    error
+        .details()
+        .iter()
+        .find(|detail| detail.key() == key)
+        .map(ErrorDetail::value)
+}
+
+/// #3397: a size refusal names the size it refused and the limit it refused
+/// against, as typed details, so the caller knows whether to trim 40 bytes or
+/// 4 MiB. The row cap in particular is not a number a caller can guess: it is
+/// 16 MiB minus an overhead that depends on the key, so a value trimmed to
+/// exactly 16 MiB is still refused. Both modes, both storage caps.
+#[test]
+fn a_storage_size_refusal_names_the_size_and_the_limit() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut durable = open_durable_database(tempdir.path()).expect("durable open");
+    let mut cache = open_cache_database().expect("cache open");
+
+    for (mode, database) in [("durable", &mut durable), ("cache", &mut cache)] {
+        let value =
+            put_value_of(database, "sized", 16 * 1024 * 1024).expect_err("row over the cap");
+        assert_eq!(
+            value.code(),
+            "invalid_argument.engine.persistence",
+            "{mode}"
+        );
+        assert_eq!(detail_text(&value, "field"), Some("row"), "{mode}");
+        assert_eq!(
+            detail_bytes(&value, "limit_bytes"),
+            16 * 1024 * 1024,
+            "{mode}"
+        );
+        // The value alone is 16 MiB; the encoded row is that plus the key and
+        // framing, so the measured size is strictly more than the value.
+        assert!(
+            detail_bytes(&value, "actual_bytes") > 16 * 1024 * 1024,
+            "{mode}: the encoded row size must include the value and its overhead"
+        );
+
+        let key = put_key_of(database, 128 * 1024).expect_err("key over the table cap");
+        assert_eq!(key.code(), "invalid_argument.engine.persistence", "{mode}");
+        assert_eq!(detail_text(&key, "field"), Some("key"), "{mode}");
+        assert_eq!(detail_bytes(&key, "limit_bytes"), 64 * 1024, "{mode}");
+        assert!(
+            detail_bytes(&key, "actual_bytes") >= 128 * 1024,
+            "{mode}: the encoded key is at least the caller's key"
+        );
+    }
+}
+
+/// #3397: the engine's own per-primitive guards carry the same two details
+/// under the same keys as the storage caps, so a client reads one pair of
+/// keys whichever layer refused. Each row: what was refused, the refusal, the
+/// size the caller sent, and the documented cap.
+#[test]
+fn every_engine_size_guard_names_the_size_and_the_limit() {
+    let cases: Vec<(&str, EngineError, u64, u64)> = vec![
+        (
+            "event type",
+            EventType::new("t".repeat(300)).expect_err("event type over 256 bytes"),
+            300,
+            256,
+        ),
+        (
+            "branch name",
+            BranchName::new("b".repeat(300)).expect_err("branch name over 255 bytes"),
+            300,
+            255,
+        ),
+        (
+            "product space",
+            ProductSpace::new("s".repeat(70_000)).expect_err("space over 65535 bytes"),
+            70_000,
+            65_535,
+        ),
+        (
+            "vector collection name",
+            VectorCollectionName::new("c".repeat(300)).expect_err("collection over 256 bytes"),
+            300,
+            256,
+        ),
+        (
+            "embedding model",
+            EmbeddingModelId::new("m".repeat(300)).expect_err("model id over 256 bytes"),
+            300,
+            256,
+        ),
+        (
+            "graph name",
+            GraphName::new("g".repeat(300)).expect_err("graph name over 256 bytes"),
+            300,
+            256,
+        ),
+        (
+            "JSON document id",
+            JsonDocumentId::new("d".repeat(70_000)).expect_err("document id over 65535 bytes"),
+            70_000,
+            65_535,
+        ),
+    ];
+    for (what, error, sent, limit) in cases {
+        assert_eq!(error.class(), EngineErrorClass::InvalidInput, "{what}");
+        assert_eq!(detail_bytes(&error, "actual_bytes"), sent, "{what}");
+        assert_eq!(detail_bytes(&error, "limit_bytes"), limit, "{what}");
+    }
+
+    // The encoded-size guards measure the value's JSON encoding — the string
+    // plus its object framing — so the size is strictly over the cap, and the
+    // cap is exact.
+    let over = || serde_json::json!({ "d": "x".repeat(16 * 1024 * 1024) });
+    let encoded: Vec<(&str, EngineError)> = vec![
+        (
+            "event payload",
+            EventPayload::new(over()).expect_err("payload over the cap"),
+        ),
+        (
+            "JSON document",
+            JsonValue::new(over()).expect_err("document over the cap"),
+        ),
+        (
+            "vector metadata",
+            VectorMetadata::new(over()).expect_err("metadata over the cap"),
+        ),
+        (
+            "graph properties",
+            GraphProperties::new(over()).expect_err("properties over the cap"),
+        ),
+    ];
+    for (what, error) in encoded {
+        assert_eq!(error.class(), EngineErrorClass::InvalidInput, "{what}");
+        assert_eq!(
+            detail_bytes(&error, "limit_bytes"),
+            16 * 1024 * 1024,
+            "{what}"
+        );
+        assert!(
+            detail_bytes(&error, "actual_bytes") > 16 * 1024 * 1024,
+            "{what}: the encoded size is over the cap it was refused against"
+        );
+    }
 }

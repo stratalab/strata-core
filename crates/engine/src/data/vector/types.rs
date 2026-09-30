@@ -224,9 +224,11 @@ impl VectorMetadata {
             })?
             .len();
         if size > MAX_METADATA_BYTES {
-            return Err(EngineError::invalid_input(
+            return Err(EngineError::size_limit_exceeded(
                 "invalid_argument.engine.vector_metadata_too_large",
                 "vector metadata exceeds the maximum encoded size",
+                size,
+                MAX_METADATA_BYTES,
             ));
         }
         Ok(Self(value))
@@ -306,9 +308,11 @@ impl EmbeddingModelId {
             ));
         }
         if id.len() > MAX_EMBEDDING_MODEL_BYTES {
-            return Err(EngineError::invalid_input(
+            return Err(EngineError::size_limit_exceeded(
                 "invalid_argument.engine.embedding_model",
                 "embedding model is too long",
+                id.len(),
+                MAX_EMBEDDING_MODEL_BYTES,
             ));
         }
         if id.bytes().any(|byte| byte == 0 || byte == b'\n') {
@@ -788,9 +792,11 @@ fn validate_text_component(
         ));
     }
     if value.len() > max_bytes {
-        return Err(EngineError::invalid_input(
+        return Err(EngineError::size_limit_exceeded(
             code,
             format!("{label} is too long"),
+            value.len(),
+            max_bytes,
         ));
     }
     if value.bytes().any(|byte| byte == 0) {

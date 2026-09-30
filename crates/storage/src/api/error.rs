@@ -62,6 +62,20 @@ pub enum StorageApiError {
         field: &'static str,
         reason: &'static str,
     },
+    /// A caller-supplied argument is larger than a fixed encodable-size cap.
+    ///
+    /// Same code and class as [`Self::InvalidArgument`] — it is the same
+    /// permanent caller error — but it carries the quantity it refused on:
+    /// `actual_bytes` is what the argument encoded to and `limit_bytes` the
+    /// cap, so the caller knows how much to trim without reading the source
+    /// (#3397). Distinct from [`Self::ResourceExhausted`], whose limit is a
+    /// configurable budget a retry may clear; this limit never moves.
+    SizeLimitExceeded {
+        field: &'static str,
+        actual_bytes: u64,
+        limit_bytes: u64,
+        reason: &'static str,
+    },
     UnsupportedCapability {
         capability: &'static str,
         reason: &'static str,
@@ -172,7 +186,9 @@ pub enum StorageApiError {
 impl StorageApiError {
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::InvalidArgument { .. } => "invalid_argument.storage_api.argument",
+            Self::InvalidArgument { .. } | Self::SizeLimitExceeded { .. } => {
+                "invalid_argument.storage_api.argument"
+            }
             Self::UnsupportedCapability { .. } => "unsupported.storage_api.capability",
             Self::InvalidRuntimeState { .. } => "failed_precondition.storage_api.state",
             Self::WriterLockHeld => "failed_precondition.storage_api.writer_lock",
@@ -214,6 +230,9 @@ impl StorageApiError {
         match self {
             Self::InvalidArgument { .. } => {
                 "Correct the named argument to satisfy its documented constraint and retry the call."
+            }
+            Self::SizeLimitExceeded { .. } => {
+                "Reduce the named argument to at most limit_bytes encoded bytes and retry the call."
             }
             Self::UnsupportedCapability { .. } => {
                 "Open the database in a storage mode or with a backend that supports the requested capability."
@@ -274,7 +293,9 @@ impl StorageApiError {
 
     pub const fn class(&self) -> StorageApiErrorClass {
         match self {
-            Self::InvalidArgument { .. } => StorageApiErrorClass::InvalidArgument,
+            Self::InvalidArgument { .. } | Self::SizeLimitExceeded { .. } => {
+                StorageApiErrorClass::InvalidArgument
+            }
             Self::UnsupportedCapability { .. } => StorageApiErrorClass::Unsupported,
             Self::InvalidRuntimeState { .. }
             | Self::WriterLockHeld
@@ -362,11 +383,24 @@ impl StorageApiError {
 }
 
 impl fmt::Display for StorageApiError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive arm per public variant keeps every message in one registry"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidArgument { field, reason } => {
                 write!(formatter, "invalid storage API argument {field}: {reason}")
             }
+            Self::SizeLimitExceeded {
+                field,
+                actual_bytes,
+                limit_bytes,
+                reason,
+            } => write!(
+                formatter,
+                "invalid storage API argument {field}: {reason} ({actual_bytes} bytes, limit {limit_bytes})"
+            ),
             Self::UnsupportedCapability { capability, reason } => {
                 write!(
                     formatter,

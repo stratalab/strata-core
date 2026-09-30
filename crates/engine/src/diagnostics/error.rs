@@ -125,6 +125,36 @@ impl ErrorDetail {
     }
 }
 
+/// Detail key for the size a refused argument measured, in bytes (#3397).
+pub(crate) const ACTUAL_BYTES_DETAIL: &str = "actual_bytes";
+
+/// Detail key for the fixed cap a refused argument exceeded, in bytes. The
+/// same key `resource_exhausted` refusals use for their (configurable) limit.
+pub(crate) const LIMIT_BYTES_DETAIL: &str = "limit_bytes";
+
+/// The two structured facts every size refusal carries, engine-level guard
+/// and storage-level cap alike, so a client reads one pair of keys whichever
+/// layer refused (#3397).
+pub(crate) fn size_limit_details(actual_bytes: u64, limit_bytes: u64) -> Vec<ErrorDetail> {
+    vec![
+        ErrorDetail::new(ACTUAL_BYTES_DETAIL, actual_bytes.to_string()),
+        ErrorDetail::new(LIMIT_BYTES_DETAIL, limit_bytes.to_string()),
+    ]
+}
+
+/// `message` with the refused size and the cap appended, for the reader who
+/// sees the message but not the details.
+pub(crate) fn with_size_suffix(message: &str, actual_bytes: u64, limit_bytes: u64) -> String {
+    format!("{message} ({actual_bytes} bytes; the limit is {limit_bytes})")
+}
+
+/// A measured in-memory length as a `u64` byte count. `usize` is at most 64
+/// bits on every supported target, so this never saturates in practice;
+/// saturating keeps it total without a panic path.
+fn byte_count(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
 /// Engine-owned status facts before executor boundary rendering.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EngineErrorStatus {
@@ -350,6 +380,36 @@ impl EngineError {
     /// Creates an invalid-input error.
     pub fn invalid_input(code: &'static str, message: impl Into<String>) -> Self {
         Self::of_class(EngineErrorClass::InvalidInput, code, message)
+    }
+
+    /// Creates an invalid-input error for an argument over a fixed size cap.
+    ///
+    /// A size refusal that does not carry the quantity it refused on cannot
+    /// be acted on without reading the source (#3397): the caller cannot tell
+    /// whether to trim 40 bytes or 4 MiB. This carries both numbers as
+    /// structured details ([`size_limit_details`]) and appends them to
+    /// `message` for the reader who never sees the details.
+    pub(crate) fn size_limit_exceeded(
+        code: &'static str,
+        message: impl AsRef<str>,
+        actual_bytes: usize,
+        limit_bytes: usize,
+    ) -> Self {
+        let actual_bytes = byte_count(actual_bytes);
+        let limit_bytes = byte_count(limit_bytes);
+        let error = Self::build(
+            code,
+            with_size_suffix(message.as_ref(), actual_bytes, limit_bytes),
+            size_limit_details(actual_bytes, limit_bytes),
+            Vec::new(),
+            None,
+        );
+        debug_assert!(
+            error.class == EngineErrorClass::InvalidInput,
+            "size refusal code `{code}` is registered under {:?}, not InvalidInput",
+            error.class
+        );
+        error
     }
 
     #[must_use]
@@ -602,6 +662,37 @@ mod tests {
         assert!(error.source_arc().is_some());
         assert_eq!(row_mismatches(&error, code), Vec::<String>::new());
         assert_ne!(error.suggested_fix(), "Site-specific remediation.");
+    }
+
+    /// #3397: a size refusal carries the refused size and the cap as details
+    /// under the shared keys, keeps the registry row, and puts both numbers in
+    /// the message for the reader who never sees the details. The message
+    /// assertions pin the site's own text and the two values — the data a
+    /// caller acts on — not wording of this constructor's (Hard Rule 29).
+    #[test]
+    fn test_size_limit_exceeded_carries_the_size_and_the_limit() {
+        let code = "invalid_argument.engine.branch_name";
+        let error = EngineError::size_limit_exceeded(code, "probe", 300, 255);
+
+        assert_eq!(
+            error.details(),
+            [
+                ErrorDetail::new(super::ACTUAL_BYTES_DETAIL, "300"),
+                ErrorDetail::new(super::LIMIT_BYTES_DETAIL, "255"),
+            ]
+        );
+        assert_eq!(row_mismatches(&error, code), Vec::<String>::new());
+        assert!(error.hints().is_empty());
+        assert!(error.source_arc().is_none());
+        let message = error.message();
+        assert!(
+            message.starts_with("probe"),
+            "the site's message leads: {message:?}"
+        );
+        assert!(
+            message.contains("300") && message.contains("255"),
+            "both sizes must reach the message: {message:?}"
+        );
     }
 
     /// Direction control for the row lookup: a persistence code whose row
