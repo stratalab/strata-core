@@ -1824,7 +1824,17 @@ converse is absolute: an active segment holding ANY commit above the proof's
 watermark is the only copy of that data and is never sealed away by reclaim.
 Truncation failures surface TYPED: a failed segment delete is a Failed
 outcome with a source error; a failed best-effort sidecar delete stays
-Completed but carries the source (never a silent absorb).
+Completed but carries the source (never a silent absorb). The delete pass
+trims a strict oldest-first PREFIX (#3697): it stops at the first segment it
+does not remove (uncovered, or its delete failed) and protects everything
+above it unread, so a failure — or a vacuously covered empty segment above an
+uncovered one — can never open the interior hole the #2690 inventory check
+reads as segment loss. A later pass resumes from the lowest remaining segment.
+Pins: `delete_failure_stops_the_pass_so_no_interior_hole_opens`,
+`uncovered_segment_stops_the_pass_before_a_vacuously_covered_empty_one`
+(`service/wal/tests/fault_windows.rs`),
+`checkpoint_truncation_delete_failure_leaves_a_strictly_reopenable_log`
+(`lifecycle/tests/checkpoint/remaining.rs`).
 
 This entry establishes the reclaim MECHANISM (seal a covered active segment so
 the existing truncation delete pass can free it) and its safety envelope. What

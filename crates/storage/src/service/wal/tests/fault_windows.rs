@@ -357,8 +357,14 @@ fn read_failure_during_read_returns_backend_read_error() {
     );
 }
 
+/// #3697: retention trims a strictly oldest-first prefix and STOPS at the
+/// first failed delete. Before the fix the pass skipped the failure and
+/// deleted segment two, leaving {1, 3} — an interior hole the #2690
+/// inventory check reads as out-of-band loss, so the next strict open
+/// refused a database that had lost nothing. The reopen half below is the
+/// consequence the old assertions never looked at.
 #[test]
-fn delete_failure_records_failed_segment_without_hiding_other_results() {
+fn delete_failure_stops_the_pass_so_no_interior_hole_opens() {
     let backend = FaultWindowBackend::new();
     let segment_one = ObjectLayout::wal_segment(1).expect("segment one");
     let segment_two = ObjectLayout::wal_segment(2).expect("segment two");
@@ -393,17 +399,102 @@ fn delete_failure_records_failed_segment_without_hiding_other_results() {
         .expect("delete covered segments");
 
     assert_eq!(report.failed_segments(), &[1]);
-    assert_eq!(report.deleted_segments(), &[2]);
-    assert_eq!(report.protected_segments(), &[3]);
-    assert!(backend.object_metadata(&segment_one).is_ok());
     assert_eq!(
-        backend
-            .object_metadata(&segment_two)
-            .expect_err("segment two should be deleted")
-            .kind(),
-        BackendErrorKind::NotFound
+        report.deleted_segments(),
+        &[] as &[u64],
+        "no segment newer than the failed one may be deleted"
+    );
+    assert_eq!(report.protected_segments(), &[2, 3]);
+    assert!(backend.object_metadata(&segment_one).is_ok());
+    assert!(
+        backend.object_metadata(&segment_two).is_ok(),
+        "segment two must survive the stopped pass"
     );
     assert!(backend.object_metadata(&segment_three).is_ok());
+
+    // Reopen: the open-time inventory check sees a contiguous log and every
+    // record is still readable.
+    super::super::verify_wal_segment_inventory(&backend)
+        .expect("a stopped pass leaves a contiguous inventory");
+    let reopened = WalService::open(
+        &backend,
+        database_id(),
+        3,
+        DurabilityPolicy::Standard,
+        WalServiceConfig::default(),
+    )
+    .expect("reopen WAL");
+    let versions: Vec<u64> = reopened
+        .read_all()
+        .expect("read reopened WAL")
+        .records()
+        .iter()
+        .map(|record| record.commit_version().as_u64())
+        .collect();
+    assert_eq!(versions, vec![1, 2]);
+
+    // A later pass resumes from the lowest remaining covered segment and
+    // finishes the trim.
+    let resumed = reopened
+        .delete_covered_segments(WalRetentionProof::snapshot_watermark(CommitVersion::new(2)))
+        .expect("resumed pass");
+    assert_eq!(resumed.failed_segments(), &[] as &[u64]);
+    assert_eq!(resumed.deleted_segments(), &[1, 2]);
+    let outcomes = resumed.delete_outcomes();
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes[0].segment_id(), 1);
+    assert_eq!(outcomes[0].object(), &segment_one);
+    assert_eq!(outcomes[1].segment_id(), 2);
+    assert_eq!(outcomes[1].object(), &segment_two);
+    assert_eq!(
+        outcomes[1].outcome().durability(),
+        crate::backend::DeleteDurability::Durable
+    );
+    assert_eq!(resumed.protected_segments(), &[3]);
+    super::super::verify_wal_segment_inventory(&backend)
+        .expect("the finished trim is a contiguous suffix");
+}
+
+/// #3697: an EMPTY sealed segment is vacuously "covered", so a pass that
+/// skipped past the first uncovered segment used to delete an empty segment
+/// above it — the same interior hole without any injected fault. The trim
+/// stops at the first uncovered segment instead.
+#[test]
+fn uncovered_segment_stops_the_pass_before_a_vacuously_covered_empty_one() {
+    let backend = FaultWindowBackend::new();
+    let segment_one = ObjectLayout::wal_segment(1).expect("segment one");
+    let segment_two = ObjectLayout::wal_segment(2).expect("segment two");
+    let segment_three = ObjectLayout::wal_segment(3).expect("segment three");
+    backend
+        .write_object(
+            &segment_one,
+            &segment_bytes(1, &[record(5, b"above the proof".to_vec())]),
+        )
+        .expect("seed segment one");
+    backend
+        .write_object(&segment_two, &segment_bytes(2, &[]))
+        .expect("seed empty sealed segment two");
+    backend
+        .write_object(&segment_three, &segment_bytes(3, &[]))
+        .expect("seed active segment");
+    let service = WalService::open(
+        &backend,
+        database_id(),
+        3,
+        DurabilityPolicy::Standard,
+        WalServiceConfig::default(),
+    )
+    .expect("open WAL");
+
+    let report = service
+        .delete_covered_segments(WalRetentionProof::snapshot_watermark(CommitVersion::new(2)))
+        .expect("delete covered segments");
+
+    assert_eq!(report.deleted_segments(), &[] as &[u64]);
+    assert_eq!(report.failed_segments(), &[] as &[u64]);
+    assert_eq!(report.protected_segments(), &[1, 2, 3]);
+    assert!(backend.object_metadata(&segment_two).is_ok());
+    super::super::verify_wal_segment_inventory(&backend).expect("the inventory stays contiguous");
 }
 
 /// #3603: a covered segment listed at the start of the delete pass can be gone

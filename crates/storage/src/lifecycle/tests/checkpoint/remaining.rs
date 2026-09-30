@@ -924,6 +924,76 @@ fn checkpoint_with_truncation_keeps_tail_records_after_watermark() {
     assert_eq!(reopened.visible_version(), CommitVersion::new(16));
 }
 
+/// #3697 at runtime scale: a checkpoint's WAL truncation whose delete of the
+/// OLDEST covered segment fails must not delete any newer segment. Before the
+/// fix the pass kept going, the surviving log had an interior hole, and the
+/// next strict open refused on the #2690 segment-inventory check although
+/// nothing was lost. Now the strict reopen is healthy with every row, and a
+/// later truncation pass resumes from the lowest remaining covered segment.
+#[test]
+fn checkpoint_truncation_delete_failure_leaves_a_strictly_reopenable_log() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x3e);
+    let mut runtime = open_runtime_with_wal_segment_size(branch, backend, 1024);
+    commit_many_to_rotate(&mut runtime, branch, 24);
+    assert!(
+        runtime.services().wal().active_segment_id() > 3,
+        "setup must seal several covered segments"
+    );
+    backend.fail_delete_on_call(1);
+    let outcome = runtime
+        .checkpoint(
+            &LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(21))
+                .expect("request")
+                .with_wal_truncation_after_checkpoint(true),
+        )
+        .expect("checkpoint");
+    let truncation = outcome.wal_truncation().expect("truncation");
+    assert_eq!(truncation.failed_segments(), 1);
+    assert_eq!(
+        truncation.deleted_segments(),
+        0,
+        "no segment newer than the failed oldest one may be deleted"
+    );
+    commit_many_range(&mut runtime, branch, 24, 28, 128);
+    drop(runtime);
+
+    let mut shell = assemble_shell_with_wal_segment_size(branch, backend, 1024)
+        .expect("strict reopen assembles: the log has no interior hole");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let recovered = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect("strict recovery");
+    assert!(recovered.health().is_healthy(), "reopen must be healthy");
+    let mut reopened = shell.complete_recovery(&recovered).expect("open runtime");
+    for index in 0u8..28 {
+        let key = dynamic_physical_key(branch, format!("rotated-commit-{index}").into_bytes());
+        let row = reopened
+            .read_view()
+            .expect("read view")
+            .latest(&key)
+            .expect("read latest")
+            .unwrap_or_else(|| panic!("row {index} must survive"));
+        assert_eq!(row.row().value(), vec![index; 128].as_slice());
+    }
+
+    // A later pass resumes the trim from the lowest remaining segment.
+    let resumed = reopened
+        .checkpoint(
+            &LifecycleCheckpointRequest::new(branch, 2, Timestamp::from_micros(40))
+                .expect("request")
+                .with_wal_truncation_after_checkpoint(true),
+        )
+        .expect("second checkpoint");
+    let resumed_truncation = resumed.wal_truncation().expect("resumed truncation");
+    assert_eq!(resumed_truncation.failed_segments(), 0);
+    assert!(resumed_truncation.deleted_segments() > 1);
+    drop(reopened);
+    let _ = open_runtime_with_wal_segment_size(branch, backend, 1024);
+}
+
 #[test]
 fn checkpoint_with_truncation_records_checkpoint_and_delete_facts() {
     let backend: &'static CheckpointTestBackend =

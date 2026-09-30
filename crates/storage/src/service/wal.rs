@@ -620,6 +620,32 @@ pub(crate) const fn active_segment_is_reclaimable(
     record_count > 0 && max_commit_version.as_u64() <= covered_through.as_u64()
 }
 
+/// #3697: what one step of a retention pass did to the oldest segment it has
+/// not yet trimmed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetentionTrimStep {
+    /// The segment was deleted durably.
+    Deleted,
+    /// The segment was already gone (another covered-segment pass got it).
+    AlreadyMissing,
+    /// The segment was covered but its delete failed; it is still on disk.
+    DeleteFailed,
+    /// The segment holds a record above the retention proof.
+    NotCovered,
+}
+
+/// #3697: whether a retention pass may go on to the next-newer segment. Only a
+/// segment that is now gone keeps the trim going. Stopping at the first
+/// segment still on disk keeps the surviving log a contiguous suffix: a
+/// delete failure (or a vacuously covered EMPTY segment above an uncovered
+/// one) can never open an interior hole.
+pub(crate) const fn retention_trim_continues_after(step: RetentionTrimStep) -> bool {
+    matches!(
+        step,
+        RetentionTrimStep::Deleted | RetentionTrimStep::AlreadyMissing
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WalGrowthFacts {
     retained_segments: usize,
@@ -2047,13 +2073,20 @@ impl<'a> WalService<'a> {
     pub(crate) fn delete_covered_segments(
         &self,
         retention_proof: WalRetentionProof,
-    ) -> WalServiceResult<WalDeleteReport> {
+    ) -> Result<WalDeleteReport, WalServiceError> {
         require_capability(&self.backend, BackendCapability::DeleteObject)?;
         let mut report = WalDeleteReport::new();
         let covered_through = retention_proof.covered_through();
 
+        // #3697: the trim is a strict oldest-first PREFIX. `trimming` drops
+        // the moment a segment is not removed (uncovered, or its delete
+        // failed); every segment above it is then protected unread, so a
+        // pass can never leave an interior hole — the shape the #2690
+        // inventory check at open reads as out-of-band loss. A later pass
+        // resumes from the lowest remaining segment.
+        let mut trimming = true;
         for (segment_id, object) in list_segments(&self.backend)? {
-            if segment_id >= self.active_segment_id {
+            if !trimming || segment_id >= self.active_segment_id {
                 report.protected.push(segment_id);
                 continue;
             }
@@ -2088,11 +2121,12 @@ impl<'a> WalService<'a> {
                     if let Some(sidecar) = self.delete_segment_sidecar_best_effort(segment_id) {
                         report.record_sidecar_delete(sidecar);
                     }
+                    trimming = retention_trim_continues_after(RetentionTrimStep::AlreadyMissing);
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            if read
+            let step = if read
                 .records
                 .iter()
                 .all(|record| record.commit_version() <= covered_through)
@@ -2104,9 +2138,11 @@ impl<'a> WalService<'a> {
                         if let Some(sidecar) = self.delete_segment_sidecar_best_effort(segment_id) {
                             report.record_sidecar_delete(sidecar);
                         }
+                        RetentionTrimStep::Deleted
                     }
                     Ok(outcome) => {
                         report.record_failed(segment_id, durable_cleanup_failure(&outcome));
+                        RetentionTrimStep::DeleteFailed
                     }
                     Err(error) if error.source_error().kind() == BackendErrorKind::NotFound => {
                         report.record_deleted(
@@ -2119,12 +2155,18 @@ impl<'a> WalService<'a> {
                         if let Some(sidecar) = self.delete_segment_sidecar_best_effort(segment_id) {
                             report.record_sidecar_delete(sidecar);
                         }
+                        RetentionTrimStep::AlreadyMissing
                     }
-                    Err(error) => report.record_failed(segment_id, error),
+                    Err(error) => {
+                        report.record_failed(segment_id, error);
+                        RetentionTrimStep::DeleteFailed
+                    }
                 }
             } else {
                 report.protected.push(segment_id);
-            }
+                RetentionTrimStep::NotCovered
+            };
+            trimming = retention_trim_continues_after(step);
         }
 
         // Deleting sealed segments invalidates this service's cached retention

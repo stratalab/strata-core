@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::{Backend, DeleteDurability, DeleteOutcome, DeleteStatus, PublishFailureKind};
+use crate::backend::{Backend, DeleteOutcome, DeleteStatus, PublishFailureKind};
 use crate::format::FormatError;
 use crate::service::wal::WalOperation;
 use strata_core::CommitVersion;
@@ -99,16 +99,21 @@ fn retention_deletes_only_covered_old_segments_and_sorts_report() {
 
     // The seed of 3 is stale (segment 4 exists): open reconciles the writer to
     // the on-disk tail (#2555), so sealed segment 3 sits below the active
-    // boundary and, being fully covered, is deletable alongside 1. Segment 2
-    // stays protected by its above-watermark record; 4 is the active tail.
+    // boundary. Segment 2 stays protected by its above-watermark record, and
+    // #3697: the trim is a strict oldest-first prefix, so it STOPS there —
+    // deleting the fully covered segment 3 above it would leave an interior
+    // hole ({2, 4}) that the next open refuses as segment loss. 4 is the
+    // active tail.
     assert_eq!(service.active_segment_id(), 4);
-    assert_eq!(report.deleted_segments(), &[1, 3]);
-    assert_eq!(report.protected_segments(), &[2, 4]);
-    assert_eq!(report.failed_segments(), &[]);
+    assert_eq!(report.deleted_segments(), &[1]);
+    assert_eq!(report.protected_segments(), &[2, 3, 4]);
+    assert_eq!(report.failed_segments(), &[] as &[u64]);
     assert_segment_missing(&backend, &segment_one);
     assert_segment_present(&backend, &segment_two);
-    assert_segment_missing(&backend, &segment_three);
+    assert_segment_present(&backend, &segment_three);
     assert_segment_present(&backend, &segment_four);
+    crate::service::wal::verify_wal_segment_inventory(&backend)
+        .expect("the surviving log is a contiguous suffix");
     assert_eq!(
         backend.read_object(&manifest).expect("manifest bytes"),
         b"not a WAL segment"
@@ -317,8 +322,11 @@ fn retention_then_reopen_reads_only_remaining_segments() {
     );
 }
 
+/// #3697: a failed delete stops the oldest-first trim — the failure is
+/// reported, and nothing newer than the failed segment is deleted (deleting
+/// segment two would leave the interior hole {1, 3}).
 #[test]
-fn retention_records_delete_failure_without_hiding_other_results() {
+fn retention_records_delete_failure_and_stops_the_trim() {
     let backend = StoredWalBackend::new();
     let segment_one = seed_segment(&backend, 1, &[record(1, b"failed delete".to_vec())]);
     let segment_two = seed_segment(&backend, 2, &[record(2, b"deleted".to_vec())]);
@@ -342,15 +350,9 @@ fn retention_records_delete_failure_without_hiding_other_results() {
         .delete_covered_segments(WalRetentionProof::snapshot_watermark(CommitVersion::new(2)))
         .expect("delete covered WAL segments");
 
-    assert_eq!(report.deleted_segments(), &[2]);
-    assert_eq!(report.delete_outcomes().len(), 1);
-    assert_eq!(report.delete_outcomes()[0].segment_id(), 2);
-    assert_eq!(report.delete_outcomes()[0].object(), &segment_two);
-    assert_eq!(
-        report.delete_outcomes()[0].outcome().durability(),
-        DeleteDurability::Durable
-    );
-    assert_eq!(report.protected_segments(), &[3]);
+    assert_eq!(report.deleted_segments(), &[] as &[u64]);
+    assert!(report.delete_outcomes().is_empty());
+    assert_eq!(report.protected_segments(), &[2, 3]);
     assert_eq!(report.failed_segments(), &[1]);
     assert_eq!(report.delete_failures().len(), 1);
     assert_eq!(report.delete_failures()[0].segment_id(), 1);
@@ -360,8 +362,10 @@ fn retention_records_delete_failure_without_hiding_other_results() {
         BackendErrorKind::Unavailable
     );
     assert_segment_present(&backend, &segment_one);
-    assert_segment_missing(&backend, &segment_two);
+    assert_segment_present(&backend, &segment_two);
     assert_segment_present(&backend, &segment_three);
+    crate::service::wal::verify_wal_segment_inventory(&backend)
+        .expect("a stopped trim leaves a contiguous log");
 }
 
 #[test]
