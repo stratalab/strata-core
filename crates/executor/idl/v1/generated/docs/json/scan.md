@@ -1,7 +1,7 @@
 ---
 title: "Scan JSON documents"
 description: "Scan JSON documents with values and version facts."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: json
 ---
 

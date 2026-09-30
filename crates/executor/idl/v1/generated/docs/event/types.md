@@ -1,7 +1,7 @@
 ---
 title: "List event types"
 description: "List distinct event types in the log."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: event
 ---
 

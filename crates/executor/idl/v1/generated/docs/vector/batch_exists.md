@@ -1,7 +1,7 @@
 ---
 title: "Batch check vector existence"
 description: "Check existence for multiple vector keys."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: vector
 ---
 

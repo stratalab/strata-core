@@ -1,7 +1,7 @@
 ---
 title: "List events"
 description: "List events with optional type filter and cursor."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: event
 ---
 

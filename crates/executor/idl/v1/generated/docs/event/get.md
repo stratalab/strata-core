@@ -1,7 +1,7 @@
 ---
 title: "Get event"
 description: "Read one event by sequence number."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: event
 ---
 

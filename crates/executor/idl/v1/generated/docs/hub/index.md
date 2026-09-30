@@ -1,7 +1,7 @@
 ---
 title: "hub commands"
 description: "Command reference for the hub family."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: hub
 ---
 
