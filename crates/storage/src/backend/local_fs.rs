@@ -15,10 +15,11 @@
 //! | operation | behavior under a concurrent mutator |
 //! |---|---|
 //! | `read_object` / `read_range` / `object_metadata` | absence-propagating: a racer's delete surfaces as `NotFound`, a replace serves the new bytes; the symlink/dir prechecks are best-effort classifiers, not guards |
-//! | `write_object` | last-writer-wins: a raced delete is recreated; a raced parent-directory delete fails `NotFound` (the owner is gone) |
-//! | `delete_object` | idempotent: losing any window (parent walk, stat, or the stat→unlink gap) reports `already_missing`; the winner's parent fsync carries removal durability |
+//! | `write_object` | last-writer-wins: a raced delete is recreated; a parent directory an emptied-directory prune removes between parent creation and file creation is re-created and the write retried (bounded, #3692) |
+//! | `delete_object` | idempotent: losing any window (parent walk, stat, or the stat→unlink gap) reports `already_missing`; the winner's parent fsync carries removal durability; the winner then `rmdir`s the directories it emptied below the family root — a non-empty or vanished directory stops or skips the climb, never fails the delete (#3692) |
+//! | `remove_empty_dirs_under` | fuzzy sweep: `rmdir` refuses a directory a racer refilled, a vanished directory is skipped; never removes a family root or the database root (#3692) |
 //! | `list_prefix` / `collect_files` | fuzzy snapshot: concurrently created/deleted entries may or may not appear, a vanished entry or directory is skipped, and the walk itself never fails on absence |
-//! | `publish_object` | atomic install: parent-dir creation tolerates a racer's `EEXIST` with post-verify (#2799), temp files retry collisions, create-mode no-clobber maps a raced final link to `PreconditionFailed`, and partial failures classify by visibility |
+//! | `publish_object` | atomic install: parent-dir creation tolerates a racer's `EEXIST` with post-verify (#2799), a parent removed before the temp file lands is re-created and the create retried (#3692), temp files retry collisions, create-mode no-clobber maps a raced final link to `PreconditionFailed`, and partial failures classify by visibility |
 //! | `acquire_writer_lock` | fail-fast BY CONTRACT: contention is the "another live opener" signal and must never be retried here (harness-side retry policy lives in `testkit::reopen_retry`) |
 //! | `append_object` / `open_append_handle` / `sync_object` | single-writer by the lifecycle writer-lock contract; a raced delete of the target fails `NotFound` deliberately (#2766: name-based loss detection) |
 //! | `sync_publish_parent` / `sync_delete_parent` | fail-safe ambiguity: a vanished parent reports durability-unconfirmed — visibility is known, durability of the rename/unlink genuinely is not |
@@ -161,6 +162,26 @@ pub(crate) struct LocalFsBackend {
     publish_fault: Arc<Mutex<Option<(LocalFsPublishStep, Option<String>)>>>,
     #[cfg(all(test, unix))]
     delete_fault: Arc<Mutex<Option<LocalFsDeleteStep>>>,
+    /// #3692 race seam: how many upcoming object-creation attempts first have
+    /// their (empty) parent directory removed, exactly as a concurrent delete's
+    /// emptied-directory pruning would between parent creation and file
+    /// creation.
+    #[cfg(all(test, unix))]
+    parent_race: Arc<Mutex<(u32, LocalFsParentRace)>>,
+}
+
+/// #3692 race seam: what a fired race does to the creation's parent directory.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalFsParentRace {
+    /// Remove the empty parent — a concurrent emptied-directory prune.
+    Prune,
+    /// Prune, then make the family root read-only, so re-creating the parent
+    /// fails for a real reason (`PermissionDenied`). The test restores it.
+    PruneAndLockFamily,
+    /// Replace the parent with a file, so the creation itself fails for a
+    /// reason other than absence.
+    ReplaceWithFile,
 }
 
 impl LocalFsBackend {
@@ -171,6 +192,8 @@ impl LocalFsBackend {
             publish_fault: Arc::new(Mutex::new(None)),
             #[cfg(all(test, unix))]
             delete_fault: Arc::new(Mutex::new(None)),
+            #[cfg(all(test, unix))]
+            parent_race: Arc::new(Mutex::new((0, LocalFsParentRace::Prune))),
         }
     }
 
@@ -429,6 +452,163 @@ impl LocalFsBackend {
         None
     }
 
+    /// #3692: arm the race seam for the next `attempts` object creations.
+    #[cfg(all(test, unix))]
+    fn arm_parent_race(&self, attempts: u32) {
+        self.arm_parent_race_with(attempts, LocalFsParentRace::Prune);
+    }
+
+    /// #3692: arm the race seam with a specific race.
+    #[cfg(all(test, unix))]
+    fn arm_parent_race_with(&self, attempts: u32, race: LocalFsParentRace) {
+        *self.parent_race.lock().expect("parent race seam lock") = (attempts, race);
+    }
+
+    /// #3692: the armed race seam's remaining count (a test reads it to prove
+    /// the seam fired on exactly the attempts the retry made).
+    #[cfg(all(test, unix))]
+    fn parent_race_remaining(&self) -> u32 {
+        self.parent_race.lock().expect("parent race seam lock").0
+    }
+
+    /// #3692: fire the race seam — remove the (empty) parent directory the
+    /// creation is about to use, as a concurrent emptied-directory prune can.
+    /// Written without a comparison so no mutant of it can fire unarmed: an
+    /// unarmed seam returns before touching the filesystem.
+    #[cfg(all(test, unix))]
+    fn injected_parent_race(&self, parent: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut armed = self.parent_race.lock().expect("parent race seam lock");
+        let (attempts, race) = *armed;
+        let Some(remaining) = attempts.checked_sub(1) else {
+            return;
+        };
+        armed.0 = remaining;
+        fs::remove_dir(parent).expect("race seam prunes the empty parent");
+        match race {
+            LocalFsParentRace::Prune => {}
+            LocalFsParentRace::PruneAndLockFamily => {
+                let family = parent.parent().expect("family root");
+                fs::set_permissions(family, fs::Permissions::from_mode(0o555))
+                    .expect("race seam locks the family root");
+            }
+            LocalFsParentRace::ReplaceWithFile => {
+                fs::write(parent, b"").expect("race seam plants a file");
+            }
+        }
+    }
+
+    /// #3692: one creation attempt — the race seam (tests only), then `create`.
+    fn attempt_object_creation<T>(
+        &self,
+        parent: &Path,
+        create: &mut impl FnMut() -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        #[cfg(all(test, unix))]
+        self.injected_parent_race(parent);
+        // Outside tests the seam compiles away, and `self` and `parent` have
+        // no other use (the method stays one, so the seam can read its state).
+        #[cfg(not(all(test, unix)))]
+        let _ = (&self.root, parent);
+        create()
+    }
+
+    /// #3692: run `create` — a file creation inside `parent`, which the caller
+    /// has already created — and, when it fails `NotFound`, re-create the
+    /// parent chain and try again, at most [`OBJECT_CREATION_ATTEMPTS`]
+    /// attempts in all. A delete that empties a directory removes it
+    /// (`prune_emptied_ancestors`), so a concurrent delete can win the window
+    /// between this call's parent creation and its file creation; the
+    /// directory's absence then is a lost race, not the owner being gone. A
+    /// re-creation that itself fails `NotFound` (an intermediate directory
+    /// pruned mid-walk) is the same race and spends an attempt; any other
+    /// failure is final. The bound is the loop's own range, so no retry
+    /// decision can make it spin. Directory creation keeps its existing
+    /// semantics (`ensure_parent_dirs`), so a re-created directory is exactly
+    /// as durable as a first-time one: the object's own parent fsync
+    /// (publish) covers its entry.
+    fn create_with_parent_retry<T>(
+        &self,
+        parent: &Path,
+        mut create: impl FnMut() -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let mut outcome = self.attempt_object_creation(parent, &mut create);
+        for _ in 1..OBJECT_CREATION_ATTEMPTS {
+            match &outcome {
+                Err(error) if should_retry_object_creation(error.kind()) => {}
+                _ => return outcome,
+            }
+            outcome = self
+                .ensure_parent_dirs(parent, true)
+                .and_then(|()| self.attempt_object_creation(parent, &mut create));
+        }
+        outcome
+    }
+
+    /// #3692: after an object's file is unlinked, remove the directories it
+    /// leaves empty, deepest first, stopping at the first directory that is
+    /// kept. Only directories strictly below the object's top-level family
+    /// directory are candidates ([`prunable_ancestors`]): the database root and
+    /// the family roots (`timeline/`, `tables/`, ...) are never removed.
+    ///
+    /// `rmdir` semantics: `fs::remove_dir` refuses a non-empty directory, so a
+    /// sibling object, a racing publish's temporary file, or a racing creation
+    /// always keeps its directory. Every removal failure is ignored by design
+    /// (see [`ancestor_removal_step`]): the object is already deleted, and an
+    /// empty directory left behind is garbage the open-time reconcile sweeps
+    /// (`remove_empty_dirs_under`), never a correctness fact.
+    ///
+    /// No parent-directory fsync follows a removal. This is garbage removal,
+    /// not a durability commitment: the object's unlink was already made
+    /// durable by `sync_delete_parent`, and a crash that forgets the `rmdir`
+    /// resurrects only an empty directory — no object, no listing entry.
+    fn prune_emptied_ancestors(&self, object_path: &Path) {
+        let Some(parent) = object_path.parent() else {
+            return;
+        };
+        // A parent outside the root is impossible for a `path_for` path; were it
+        // ever to happen, removing nothing is the only safe answer.
+        let Ok(relative) = parent.strip_prefix(&self.root) else {
+            return;
+        };
+        for dir in prunable_ancestors(relative) {
+            let removal = fs::remove_dir(self.root.join(dir));
+            if ancestor_removal_step(&removal) == AncestorRemovalStep::Stop {
+                break;
+            }
+        }
+    }
+
+    /// #3692: walk `dir` depth-first and remove every empty directory below
+    /// the family root (post-order, so a chain of empty directories goes in
+    /// one pass). Returns how many were removed. Symlinks are never followed.
+    /// A directory that vanishes or is (re)filled concurrently is skipped;
+    /// only a failure to read a directory that exists is an error.
+    fn remove_empty_dirs_in(&self, dir: &Path) -> Result<u64, BackendError> {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(map_io_error(&error)),
+        };
+        let mut removed = 0_u64;
+        for entry in entries {
+            let entry = entry.map_err(|err| map_io_error(&err))?;
+            let Some(file_type) = classify_entry_type(entry.file_type())? else {
+                continue;
+            };
+            if file_type.is_dir() {
+                removed = removed.saturating_add(self.remove_empty_dirs_in(&entry.path())?);
+            }
+        }
+        let prunable = dir.strip_prefix(&self.root).is_ok_and(dir_is_prunable);
+        // Non-empty, vanished or otherwise refused: kept, and not an error —
+        // the sweep is best-effort garbage removal (see `prune_emptied_ancestors`).
+        if prunable && fs::remove_dir(dir).is_ok() {
+            removed = removed.saturating_add(1);
+        }
+        Ok(removed)
+    }
+
     fn path_for(&self, name: &ObjectName) -> PathBuf {
         // Object bytes live in a suffixed file so `tables/a` and
         // `tables/a/child` can coexist on filesystems where a path cannot be
@@ -641,7 +821,13 @@ impl LocalFsBackend {
             ));
         }
 
-        let (temp_path, mut file) = Self::create_temporary_file(final_path).map_err(|error| {
+        let created = match final_path.parent() {
+            Some(parent) => {
+                self.create_with_parent_retry(parent, || Self::create_temporary_file(final_path))
+            }
+            None => Self::create_temporary_file(final_path),
+        };
+        let (temp_path, mut file) = created.map_err(|error| {
             Self::publish_error(name, PublishFailureKind::FailedBeforeVisibility, error)
         })?;
 
@@ -983,7 +1169,12 @@ impl Backend for LocalFsBackend {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(map_io_error(&error)),
         }
-        fs::write(&path, bytes).map_err(|err| map_io_error(&err))?;
+        match path.parent() {
+            Some(parent) => self.create_with_parent_retry(parent, || {
+                fs::write(&path, bytes).map_err(|err| map_io_error(&err))
+            })?,
+            None => fs::write(&path, bytes).map_err(|err| map_io_error(&err))?,
+        }
         Ok(BackendMetadata::new(bytes.len() as u64, None))
     }
 
@@ -1064,7 +1255,28 @@ impl Backend for LocalFsBackend {
             }
             Err(err) => return Err(DeleteError::removal_unknown(name, map_io_error(&err))),
         }
-        self.sync_delete_parent(name, &path)
+        // The unlink's durability is settled (or reported unconfirmed) BEFORE
+        // any emptied directory goes, so the parent fsync never races its own
+        // directory's removal; the object is gone either way, so the emptied
+        // directories are pruned whatever the sync reported (#3692).
+        let outcome = self.sync_delete_parent(name, &path);
+        self.prune_emptied_ancestors(&path);
+        outcome
+    }
+
+    fn remove_empty_dirs_under(&self, prefix: &ObjectPrefix) -> Result<u64, BackendError> {
+        let mut dir = self.root.clone();
+        for component in prefix.as_str().split('/').filter(|part| !part.is_empty()) {
+            dir.push(component);
+        }
+        match fs::symlink_metadata(&dir) {
+            Ok(metadata) if metadata.is_dir() => self.remove_empty_dirs_in(&dir),
+            // Absent (nothing ever written under it), or not a real directory
+            // (a symlink is never followed): nothing to sweep.
+            Ok(_) => Ok(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(map_io_error(&error)),
+        }
     }
 
     fn list_prefix(&self, prefix: &ObjectPrefix) -> BackendResult<Vec<ObjectName>> {
@@ -1213,6 +1425,57 @@ impl Backend for LocalFsBackend {
             PublishDurability::Durable,
         ))
     }
+}
+
+/// #3692: whether a directory (relative to the backend root) may be removed
+/// when empty. The root (no components) and the top-level family directories
+/// (`timeline`, `tables`, `wal`, ... — one component) are permanent; every
+/// directory below a family root exists only to hold objects.
+fn dir_is_prunable(relative: &Path) -> bool {
+    relative.components().count() >= 2
+}
+
+/// #3692: the ancestors of an object whose parent directory is `relative_parent`
+/// (relative to the backend root) that a delete may try to remove, deepest
+/// first. Stops at — and excludes — the family root.
+fn prunable_ancestors(relative_parent: &Path) -> Vec<&Path> {
+    relative_parent
+        .ancestors()
+        .take_while(|dir| dir_is_prunable(dir))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AncestorRemovalStep {
+    /// The directory is gone (removed now, or by a racer): try its parent.
+    Climb,
+    /// The directory is kept (non-empty, or any other refusal): stop.
+    Stop,
+}
+
+/// #3692: what one ancestor `rmdir` result means for the climb. `NotFound` is
+/// a racer having removed it first — still climb, since the racer may have
+/// stopped on a directory this delete just emptied. Every other failure
+/// (non-empty, permission, I/O) keeps the directory and is not an error: the
+/// object is already deleted.
+fn ancestor_removal_step(result: &std::io::Result<()>) -> AncestorRemovalStep {
+    match result {
+        Ok(()) => AncestorRemovalStep::Climb,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => AncestorRemovalStep::Climb,
+        Err(_) => AncestorRemovalStep::Stop,
+    }
+}
+
+/// #3692: how many times an object creation is attempted before its parent's
+/// absence is surfaced. Each retry answers one concurrent emptied-directory
+/// prune; a directory removed this many times in a row is not a race to ride.
+const OBJECT_CREATION_ATTEMPTS: u32 = 4;
+
+/// #3692: whether a failed object creation re-creates its parent directories
+/// and tries again (within [`OBJECT_CREATION_ATTEMPTS`]). Only `NotFound` — the
+/// parent vanished — is the race; every other failure is final.
+fn should_retry_object_creation(kind: BackendErrorKind) -> bool {
+    kind == BackendErrorKind::NotFound
 }
 
 /// The fuzzy-snapshot rule for a directory entry's type probe: a vanished
@@ -2593,6 +2856,516 @@ mod tests {
                 .expect_err("list")
                 .kind(),
             BackendErrorKind::Corruption
+        );
+    }
+
+    // ---- #3692: emptied directories -------------------------------------
+
+    /// Every directory under `root` (excluding `root` itself) that holds no
+    /// entry at all, relative to `root`.
+    fn empty_dirs_under(root: &std::path::Path) -> Vec<String> {
+        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+            let entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("read dir")
+                .map(|entry| entry.expect("entry"))
+                .collect();
+            if entries.is_empty() && dir != root {
+                out.push(
+                    dir.strip_prefix(root)
+                        .expect("under root")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            for entry in entries {
+                if entry.file_type().expect("file type").is_dir() {
+                    walk(root, &entry.path(), out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn dir_is_prunable_truth_table() {
+        use super::dir_is_prunable;
+        use std::path::Path;
+        // (relative dir, prunable): the root and a family root are permanent.
+        let cases = [
+            ("", false),
+            ("timeline", false),
+            ("tables", false),
+            ("timeline/0000000000000001", true),
+            ("tables/branch", true),
+            ("tables/branch/l0001", true),
+        ];
+        for (dir, prunable) in cases {
+            assert_eq!(dir_is_prunable(Path::new(dir)), prunable, "{dir:?}");
+        }
+    }
+
+    #[test]
+    fn prunable_ancestors_truth_table() {
+        use super::prunable_ancestors;
+        use std::path::Path;
+        // (object's parent dir, candidates deepest-first): never the family
+        // root, never the database root.
+        let cases: [(&str, &[&str]); 5] = [
+            ("", &[]),
+            ("wal", &[]),
+            ("timeline/0000000000000001", &["timeline/0000000000000001"]),
+            (
+                "tables/branch/l0001",
+                &["tables/branch/l0001", "tables/branch"],
+            ),
+            ("a/b/c/d", &["a/b/c/d", "a/b/c", "a/b"]),
+        ];
+        for (parent, expected) in cases {
+            let got = prunable_ancestors(Path::new(parent));
+            let expected: Vec<&Path> = expected.iter().map(Path::new).collect();
+            assert_eq!(got, expected, "{parent:?}");
+        }
+    }
+
+    #[test]
+    fn ancestor_removal_step_truth_table() {
+        use super::{ancestor_removal_step, AncestorRemovalStep};
+        use std::io::{Error, ErrorKind};
+        let cases = [
+            (Ok(()), AncestorRemovalStep::Climb),
+            (
+                Err(Error::from(ErrorKind::NotFound)),
+                AncestorRemovalStep::Climb,
+            ),
+            (
+                Err(Error::from(ErrorKind::DirectoryNotEmpty)),
+                AncestorRemovalStep::Stop,
+            ),
+            // POSIX lets rmdir report a non-empty directory as EEXIST.
+            (
+                Err(Error::from(ErrorKind::AlreadyExists)),
+                AncestorRemovalStep::Stop,
+            ),
+            (
+                Err(Error::from(ErrorKind::PermissionDenied)),
+                AncestorRemovalStep::Stop,
+            ),
+            (
+                Err(Error::from(ErrorKind::NotADirectory)),
+                AncestorRemovalStep::Stop,
+            ),
+        ];
+        for (result, expected) in cases {
+            let label = format!("{result:?}");
+            assert_eq!(ancestor_removal_step(&result), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn should_retry_object_creation_truth_table() {
+        use super::{should_retry_object_creation, OBJECT_CREATION_ATTEMPTS};
+        assert_eq!(OBJECT_CREATION_ATTEMPTS, 4);
+        let cases = [
+            (BackendErrorKind::NotFound, true),
+            (BackendErrorKind::AlreadyExists, false),
+            (BackendErrorKind::Corruption, false),
+            (BackendErrorKind::PermissionDenied, false),
+            (BackendErrorKind::Unknown, false),
+        ];
+        for (kind, retry) in cases {
+            assert_eq!(should_retry_object_creation(kind), retry, "{kind:?}");
+        }
+    }
+
+    /// (d) A delete removes the directory it empties, and only that: a
+    /// directory still holding a sibling object (or any other entry) is kept,
+    /// and the family root and the database root are never removed.
+    #[test]
+    fn delete_removes_emptied_directories_below_the_family_root_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let backend = LocalFsBackend::new(root);
+        let first = ObjectName::new("timeline/0000000000000001/0000000000000000").expect("name");
+        let second = ObjectName::new("timeline/0000000000000001/0000000000000001").expect("name");
+        backend.write_object(&first, b"a").expect("write");
+        backend.write_object(&second, b"b").expect("write");
+
+        backend.delete_object(&first).expect("delete first");
+        assert!(
+            root.join("timeline/0000000000000001").is_dir(),
+            "a directory still holding a sibling object is kept"
+        );
+        assert_eq!(
+            backend.read_object(&second).expect("sibling survives"),
+            b"b"
+        );
+
+        backend.delete_object(&second).expect("delete second");
+        assert!(
+            !root.join("timeline/0000000000000001").exists(),
+            "the emptied segment directory goes"
+        );
+        assert!(root.join("timeline").is_dir(), "the family root stays");
+        assert!(root.is_dir(), "the database root stays");
+
+        // A multi-level chain goes in one delete, up to (not including) the
+        // family root.
+        let nested = ObjectName::new("tables/branch/l0001/table").expect("name");
+        backend.write_object(&nested, b"t").expect("write");
+        backend.delete_object(&nested).expect("delete nested");
+        assert!(!root.join("tables/branch").exists(), "the chain goes");
+        assert!(root.join("tables").is_dir(), "the family root stays");
+
+        // A top-level object's only parent is its family root: kept.
+        let top = ObjectName::new("meta/database").expect("name");
+        backend.write_object(&top, b"m").expect("write");
+        backend.delete_object(&top).expect("delete top-level");
+        assert!(root.join("meta").is_dir(), "the family root stays");
+
+        // A non-object entry (a stale publish temp file) keeps its directory.
+        let kept = ObjectName::new("timeline/0000000000000002/0000000000000000").expect("name");
+        backend.write_object(&kept, b"k").expect("write");
+        std::fs::write(
+            root.join("timeline/0000000000000002/0000000000000000.object@.tmp.1.0"),
+            b"stale",
+        )
+        .expect("stale temp");
+        backend.delete_object(&kept).expect("delete");
+        assert!(
+            root.join("timeline/0000000000000002").is_dir(),
+            "rmdir refuses a directory holding any entry"
+        );
+
+        assert_eq!(
+            empty_dirs_under(root),
+            vec!["meta".to_owned(), "tables".to_owned()],
+            "only family roots may be left empty"
+        );
+    }
+
+    /// (d) A delete whose parent fsync is faulted still reports the fault and
+    /// still prunes the emptied directory: the object is gone either way.
+    #[cfg(unix)]
+    #[test]
+    fn delete_prunes_the_emptied_directory_even_when_the_parent_sync_faults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        let name = ObjectName::new("timeline/0000000000000003/0000000000000000").expect("name");
+        backend.write_object(&name, b"x").expect("write");
+        backend
+            .arm_delete_fault(LocalFsDeleteStep::ParentSync)
+            .expect("arm");
+        let error = backend
+            .delete_object(&name)
+            .expect_err("parent sync faults");
+        assert_eq!(
+            error.kind(),
+            DeleteFailureKind::RemovedDurabilityUnconfirmed
+        );
+        assert!(!dir.path().join("timeline/0000000000000003").exists());
+        assert!(dir.path().join("timeline").is_dir());
+    }
+
+    /// (c) The race: a concurrent delete's emptied-directory prune removes the
+    /// parent between this write's parent creation and its file creation. The
+    /// write re-creates the parent and lands; only a parent removed on every
+    /// bounded attempt surfaces `NotFound`.
+    #[cfg(unix)]
+    #[test]
+    fn write_survives_its_parent_being_pruned_before_the_file_lands() {
+        use super::OBJECT_CREATION_ATTEMPTS;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+
+        // Every attempt short of the bound rides the race; the seam proves it
+        // fired on exactly that many attempts (the count drains to zero).
+        for (ordinal, raced) in [(0x40_u64, 1), (0x41, OBJECT_CREATION_ATTEMPTS - 1)] {
+            let name =
+                ObjectName::new(format!("timeline/{ordinal:016x}/0000000000000000")).expect("name");
+            backend.arm_parent_race(raced);
+            backend
+                .write_object(&name, b"raced")
+                .expect("write rides the race");
+            assert_eq!(backend.parent_race_remaining(), 0, "{raced} races fired");
+            assert_eq!(backend.read_object(&name).expect("read"), b"raced");
+        }
+
+        // A parent removed on every attempt surfaces NotFound after exactly
+        // OBJECT_CREATION_ATTEMPTS attempts — one armed race is left unspent.
+        let exhausted =
+            ObjectName::new("timeline/0000000000000005/0000000000000000").expect("name");
+        backend.arm_parent_race(OBJECT_CREATION_ATTEMPTS + 1);
+        assert_eq!(
+            backend
+                .write_object(&exhausted, b"x")
+                .expect_err("bounded retry")
+                .kind(),
+            BackendErrorKind::NotFound
+        );
+        assert_eq!(backend.parent_race_remaining(), 1, "exactly the bound");
+        backend.arm_parent_race(0);
+
+        // Unarmed, the seam never races: a write into an existing directory
+        // leaves the count at zero and the directory in place.
+        let plain = ObjectName::new("timeline/0000000000000041/0000000000000001").expect("name");
+        backend.write_object(&plain, b"p").expect("plain write");
+        assert_eq!(backend.parent_race_remaining(), 0);
+    }
+
+    /// #3692: the retry answers only `NotFound`. A creation that fails for a
+    /// real reason is final and surfaces as itself; so is a re-creation of the
+    /// parent that fails for a real reason.
+    #[cfg(unix)]
+    #[test]
+    fn write_retry_surfaces_real_errors_as_themselves() {
+        use super::LocalFsParentRace;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+
+        // The parent became a file: the creation fails not-a-directory
+        // (`Unknown`), which is no race — retrying would instead report the
+        // re-creation's `Corruption`.
+        let blocked = ObjectName::new("timeline/0000000000000042/0000000000000000").expect("name");
+        backend.arm_parent_race_with(1, LocalFsParentRace::ReplaceWithFile);
+        assert_eq!(
+            backend
+                .write_object(&blocked, b"x")
+                .expect_err("blocked")
+                .kind(),
+            BackendErrorKind::Unknown
+        );
+        assert_eq!(backend.parent_race_remaining(), 0);
+
+        // The parent was pruned (a race: retried) and re-creating it fails
+        // PermissionDenied — final, surfaced as itself, not the NotFound that
+        // started the retry.
+        let locked = ObjectName::new("timeline/0000000000000043/0000000000000000").expect("name");
+        backend.arm_parent_race_with(1, LocalFsParentRace::PruneAndLockFamily);
+        let result = backend.write_object(&locked, b"x");
+        std::fs::set_permissions(
+            dir.path().join("timeline"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("restore permissions");
+        assert_eq!(
+            result.expect_err("locked").kind(),
+            BackendErrorKind::PermissionDenied
+        );
+        assert_eq!(backend.parent_race_remaining(), 0);
+    }
+
+    /// (c) The same race on the durable publish path, in both modes: the temp
+    /// file's creation is the step that needs the parent.
+    #[cfg(unix)]
+    #[test]
+    fn publish_survives_its_parent_being_pruned_before_the_temp_file_lands() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        for (ordinal, mode) in [(6_u64, PublishMode::Replace), (7, PublishMode::Create)] {
+            let name =
+                ObjectName::new(format!("timeline/{ordinal:016x}/0000000000000000")).expect("name");
+            backend.arm_parent_race(1);
+            let outcome = backend
+                .publish_object(&name, b"published", mode)
+                .expect("publish rides the race");
+            assert_eq!(outcome.durability(), PublishDurability::Durable);
+            assert_eq!(backend.read_object(&name).expect("read"), b"published");
+            assert_no_temporary_entries(&backend, &name);
+        }
+
+        let exhausted =
+            ObjectName::new("timeline/0000000000000008/0000000000000000").expect("name");
+        backend.arm_parent_race(super::OBJECT_CREATION_ATTEMPTS + 1);
+        let error = backend
+            .publish_object(&exhausted, b"x", PublishMode::Replace)
+            .expect_err("bounded retry");
+        assert_eq!(error.kind(), PublishFailureKind::FailedBeforeVisibility);
+        assert_eq!(error.source_error().kind(), BackendErrorKind::NotFound);
+        assert_eq!(backend.parent_race_remaining(), 1, "exactly the bound");
+        backend.arm_parent_race(0);
+    }
+
+    /// (b, backend half) The reconcile sweep removes every empty directory
+    /// below the family root — including a chain — and nothing else.
+    #[test]
+    fn remove_empty_dirs_under_sweeps_only_empty_dirs_below_the_family_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let backend = LocalFsBackend::new(root);
+        let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+
+        assert_eq!(
+            backend.remove_empty_dirs_under(&prefix).expect("absent"),
+            0,
+            "a family never written is nothing to sweep"
+        );
+
+        let live = ObjectName::new("timeline/00000000000000c0/0000000000000000").expect("name");
+        backend.write_object(&live, b"live").expect("write");
+        for id in 1..=5_u64 {
+            std::fs::create_dir_all(root.join(format!("timeline/{id:016x}"))).expect("leftover");
+        }
+        std::fs::create_dir_all(root.join("timeline/0000000000000009/deeper/still"))
+            .expect("chain");
+        std::fs::create_dir_all(root.join("tables/branch/l0001")).expect("other family");
+
+        assert_eq!(
+            backend.remove_empty_dirs_under(&prefix).expect("sweep"),
+            8,
+            "five leftovers plus a three-directory chain"
+        );
+        assert!(root.join("timeline").is_dir(), "the family root stays");
+        assert_eq!(backend.read_object(&live).expect("live"), b"live");
+        assert!(
+            root.join("tables/branch/l0001").is_dir(),
+            "another family is out of the sweep's scope"
+        );
+        assert_eq!(
+            backend.remove_empty_dirs_under(&prefix).expect("again"),
+            0,
+            "nothing left to sweep"
+        );
+    }
+
+    /// The sweep never follows a symlink out of the tree.
+    #[cfg(unix)]
+    #[test]
+    fn remove_empty_dirs_under_never_follows_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir(outside.path().join("empty")).expect("outside empty dir");
+        std::fs::create_dir_all(dir.path().join("timeline")).expect("family");
+        symlink(outside.path(), dir.path().join("timeline/link")).expect("symlink");
+        let backend = LocalFsBackend::new(dir.path());
+        let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+
+        assert_eq!(backend.remove_empty_dirs_under(&prefix).expect("sweep"), 0);
+        assert!(outside.path().join("empty").is_dir());
+    }
+
+    /// #3692: the sweep's own guards. A directory that vanished before the
+    /// walk reached it counts nothing (not an error); one that cannot be read
+    /// is a real error.
+    #[cfg(unix)]
+    #[test]
+    fn remove_empty_dirs_in_separates_a_vanished_dir_from_an_unreadable_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        assert_eq!(
+            backend
+                .remove_empty_dirs_in(&dir.path().join("timeline/0000000000000001"))
+                .expect("vanished"),
+            0
+        );
+
+        let locked = dir.path().join("timeline/0000000000000002");
+        std::fs::create_dir_all(locked.join("child")).expect("dirs");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable");
+        let result = backend.remove_empty_dirs_under(&ObjectLayout::timeline_prefix().expect("p"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("restore permissions");
+        assert_eq!(
+            result.expect_err("unreadable").kind(),
+            BackendErrorKind::PermissionDenied
+        );
+    }
+
+    /// #3692: the sweep's entry guards. A family path that is a file or a
+    /// symlink is nothing to sweep (never followed); a family path that cannot
+    /// be probed is a real error.
+    #[cfg(unix)]
+    #[test]
+    fn remove_empty_dirs_under_guards_the_family_path() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+
+        let file_root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(file_root.path().join("timeline"), b"not a dir").expect("file");
+        assert_eq!(
+            LocalFsBackend::new(file_root.path())
+                .remove_empty_dirs_under(&prefix)
+                .expect("a file is nothing to sweep"),
+            0
+        );
+
+        let link_root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir_all(outside.path().join("a/b")).expect("outside empties");
+        symlink(outside.path(), link_root.path().join("timeline")).expect("symlink");
+        assert_eq!(
+            LocalFsBackend::new(link_root.path())
+                .remove_empty_dirs_under(&prefix)
+                .expect("a symlinked family is never followed"),
+            0
+        );
+        assert!(outside.path().join("a/b").is_dir());
+
+        let locked = tempfile::tempdir().expect("tempdir");
+        let db = locked.path().join("db");
+        std::fs::create_dir_all(db.join("timeline/0000000000000001")).expect("dirs");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600))
+            .expect("unsearchable root");
+        let result = LocalFsBackend::new(&db).remove_empty_dirs_under(&prefix);
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o755))
+            .expect("restore permissions");
+        assert_eq!(
+            result.expect_err("unprobeable").kind(),
+            BackendErrorKind::PermissionDenied
+        );
+    }
+
+    /// #3692: every wrapper forwards the sweep and its exact count, and a
+    /// backend without directories keeps the trait default (nothing swept).
+    #[test]
+    fn remove_empty_dirs_under_count_is_forwarded_by_every_wrapper() {
+        use crate::backend::memory::MemoryBackend;
+        use crate::backend::BackendHandle;
+        use crate::testkit::{FaultScript, FaultingBackend, WriteOrderingWatchdog};
+
+        fn plant(root: &std::path::Path) {
+            for id in 1..=3_u64 {
+                std::fs::create_dir_all(root.join(format!("timeline/{id:016x}")))
+                    .expect("leftover");
+            }
+        }
+        let prefix = ObjectLayout::timeline_prefix().expect("prefix");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        plant(dir.path());
+        let local = LocalFsBackend::new(dir.path());
+        assert_eq!(
+            BackendHandle::borrowed(&local)
+                .remove_empty_dirs_under(&prefix)
+                .expect("handle"),
+            3
+        );
+
+        plant(dir.path());
+        let faulting = FaultingBackend::new(LocalFsBackend::new(dir.path()), FaultScript::empty());
+        assert_eq!(
+            faulting.remove_empty_dirs_under(&prefix).expect("faulting"),
+            3
+        );
+
+        plant(dir.path());
+        let watchdog = WriteOrderingWatchdog::new(LocalFsBackend::new(dir.path()));
+        assert_eq!(
+            watchdog.remove_empty_dirs_under(&prefix).expect("watchdog"),
+            3
+        );
+
+        assert_eq!(
+            MemoryBackend::new()
+                .remove_empty_dirs_under(&prefix)
+                .expect("default"),
+            0
         );
     }
 }

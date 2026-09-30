@@ -2040,6 +2040,21 @@ their own facts (`timeline_segment_*`, included in the total), superseded
 exactly when the next `Superseded` prune would delete them; the whole-database
 simulation's oracle and the engine ratchet both require none superseded.
 
+Directories are reclaimed with the objects they held (#3692). Segments nest
+one directory per checkpoint (`timeline/<sealing id>/`), and 1.2.6 left every
+emptied one behind: 4 KiB each on ext4, unbounded, invisible to the byte
+ledger. The local-fs delete now `rmdir`s the directories an unlink empties,
+deepest first, never a family root (`timeline/`, `tables/`, ...) or the
+database root; `rmdir` refuses a non-empty directory, so nothing holding an
+object or a publish's temp file is ever removed, and a removal failure never
+fails the delete. The removal is garbage collection, not a durability
+commitment: the unlink is fsynced first and a forgotten `rmdir` resurrects only
+an empty directory, so no parent fsync follows it. Object creation re-creates a
+parent a concurrent prune removed and retries (bounded). The open
+`ReconcileToAttested` prune also sweeps the timeline family's empty directories
+(`remove_empty_dirs_under`), which reclaims a 1.2.6 database's leftovers on the
+wake, never inline in `open`. No object name or durable format changes.
+
 Every destructive reclaim acts only on a database manifest **confirmed durable**
 in the current session (#3671): a manifest replacement can be visible while its
 directory sync failed, and a crash may then restore the previous manifest, so
@@ -2093,7 +2108,10 @@ every reclaim pass reports what it freed (#3622).
 `should_service_low_tier_truth_table`, `reopen_owes_quarantine_purge_truth_table`,
 `family_frees_disk_truth_table`, `reclaim_waits_on_reader_truth_table`,
 `round_asks_idle_wake_truth_table`, `timeline_segment_is_dead_truth_table`,
-`timeline_segment_prune_mode_truth_table`. Call sites (`crates/storage/src/api/tests/maintenance.rs`):
+`timeline_segment_prune_mode_truth_table`, `timeline_prune_sweeps_empty_dirs_truth_table`,
+`dir_is_prunable_truth_table`, `prunable_ancestors_truth_table`,
+`ancestor_removal_step_truth_table`, `should_retry_object_creation_truth_table`
+(`backend/local_fs.rs`, with the delete/race call-site tests beside them). Call sites (`crates/storage/src/api/tests/maintenance.rs`):
 `api_close_reclaim_is_bounded_by_the_budget`,
 `api_close_reclaim_truncates_the_wal_behind_the_close_checkpoint`,
 `api_close_flushes_a_large_delta_into_tables_before_its_checkpoint`,
@@ -2109,10 +2127,13 @@ every reclaim pass reports what it freed (#3622).
 `api_reader_release_with_nothing_owed_arms_no_wake`,
 `api_close_cancels_an_armed_idle_wake`,
 `api_reopen_reclaims_timeline_segments_no_snapshot_references`,
-`api_a_reused_timeline_segment_survives_the_superseded_prune`. Engine:
+`api_a_reused_timeline_segment_survives_the_superseded_prune`,
+`api_clean_close_loop_leaves_no_empty_directories`,
+`api_reopen_reconcile_sweeps_leftover_empty_timeline_dirs`. Engine:
 `clean_close_checkpoints_every_branch_and_truncates_the_wal`,
 `clean_close_then_reopen_replays_nothing`,
-`two_user_branches_with_durable_bases_checkpoint_and_reclaim_wal`. Oracles: the
+`two_user_branches_with_durable_bases_checkpoint_and_reclaim_wal`,
+`put_close_loop_leaves_no_empty_timeline_directories`. Oracles: the
 whole-database simulation's footprint audits and their sabotage twins
 (`sabotage_unreclaimed_debt_is_caught`, `sabotage_superseded_snapshot_is_caught`,
 `sabotage_unreferenced_timeline_segment_is_caught`), and
