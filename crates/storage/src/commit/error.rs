@@ -44,6 +44,14 @@ pub(crate) enum CommitRuntimeError {
         key_len: usize,
         max_key_len: usize,
     },
+    /// A batch whose WHOLE encoded WAL record frame is larger than the WAL
+    /// can append, though every row in it fits the row cap. Refused at
+    /// admission, before a commit version is allocated, so the refusal burns
+    /// no version (#3698). `record_len` and `max_record_len` are frame bytes.
+    CommitRecordTooLarge {
+        record_len: u64,
+        max_record_len: u64,
+    },
     InvalidValidationFacts {
         reason: &'static str,
     },
@@ -179,6 +187,7 @@ impl CommitRuntimeError {
             Self::InvalidMutation { .. } => "invalid_argument.commit.mutation",
             Self::MutationTooLarge { .. } => "invalid_argument.commit.mutation_row_size",
             Self::MutationKeyTooLarge { .. } => "invalid_argument.commit.mutation_key_size",
+            Self::CommitRecordTooLarge { .. } => "invalid_argument.commit.record_size",
             Self::InvalidValidationFacts { .. } => "invalid_argument.commit.validation_facts",
             Self::InvalidTimelineFact { .. } => "failed_precondition.commit.timeline_fact",
             Self::TimelineConflict { .. } => "conflict.commit.timeline",
@@ -352,6 +361,16 @@ impl PartialEq for CommitRuntimeError {
                     max_row_len: right_max,
                 },
             ) => left_row_len == right_row_len && left_max == right_max,
+            (
+                Self::CommitRecordTooLarge {
+                    record_len: left_record_len,
+                    max_record_len: left_max,
+                },
+                Self::CommitRecordTooLarge {
+                    record_len: right_record_len,
+                    max_record_len: right_max,
+                },
+            ) => left_record_len == right_record_len && left_max == right_max,
             (
                 Self::MutationKeyTooLarge {
                     key_len: left_key_len,
@@ -571,6 +590,15 @@ impl fmt::Display for CommitRuntimeError {
                     "commit mutation key encodes to {key_len} bytes, above the {max_key_len}-byte key limit"
                 )
             }
+            Self::CommitRecordTooLarge {
+                record_len,
+                max_record_len,
+            } => {
+                write!(
+                    formatter,
+                    "commit batch encodes to a {record_len}-byte WAL record, above the {max_record_len}-byte record limit"
+                )
+            }
             Self::InvalidValidationFacts { reason } => {
                 write!(formatter, "commit validation facts are invalid: {reason}")
             }
@@ -782,6 +810,7 @@ impl Error for CommitRuntimeError {
             | Self::InvalidMutation { .. }
             | Self::MutationTooLarge { .. }
             | Self::MutationKeyTooLarge { .. }
+            | Self::CommitRecordTooLarge { .. }
             | Self::InvalidValidationFacts { .. }
             | Self::InvalidTimelineFact { .. }
             | Self::TimelineConflict { .. }

@@ -3,14 +3,14 @@
 use super::cache::prepare_commit_rows;
 use super::durable_gate::CommitUnresolvedDurableAdmission;
 use super::{
-    admit_mutating_commit, commit_conflict_validation_needs_source, validate_commit_conflicts,
-    validate_commit_conflicts_without_source, CommitBatch, CommitBatchKind,
-    CommitBranchGenerationGuard, CommitBranchGuardSet, CommitBranchReadViewConflictSource,
-    CommitBranchRegistry, CommitDurabilityClass, CommitDurabilityMode, CommitFactAllocation,
-    CommitFactAllocator, CommitLowerLayer, CommitOutcome, CommitRuntimeConfig, CommitRuntimeError,
-    CommitRuntimeResult, CommitStamp, CommitTimestampSource, CommitUnresolvedDurable,
-    CommitUnresolvedDurableGate, CommitVisibilityFacts, ValidatedCommitBatch,
-    VisibleVersionPublish, VisibleVersionTracker,
+    admit_mutating_commit, commit_conflict_validation_needs_source, require_wal_record_fits,
+    validate_commit_conflicts, validate_commit_conflicts_without_source, CommitBatch,
+    CommitBatchKind, CommitBranchGenerationGuard, CommitBranchGuardSet,
+    CommitBranchReadViewConflictSource, CommitBranchRegistry, CommitDurabilityClass,
+    CommitDurabilityMode, CommitFactAllocation, CommitFactAllocator, CommitLowerLayer,
+    CommitOutcome, CommitRuntimeConfig, CommitRuntimeError, CommitRuntimeResult, CommitStamp,
+    CommitTimestampSource, CommitUnresolvedDurable, CommitUnresolvedDurableGate,
+    CommitVisibilityFacts, ValidatedCommitBatch, VisibleVersionPublish, VisibleVersionTracker,
 };
 use crate::branch::read::BranchReadView;
 use crate::branch::state::BranchLocalState;
@@ -50,6 +50,15 @@ pub(crate) struct CommitWalAppendError {
 
 pub(crate) trait CommitWalAppender {
     fn durability_policy(&self) -> DurabilityPolicy;
+
+    /// The largest record frame this appender accepts. The durable runtime
+    /// refuses a larger batch before allocating its commit version (#3698).
+    /// Defaults to the production segment's limit for appenders with no
+    /// segment of their own (test fakes).
+    fn record_frame_limit(&self) -> u64 {
+        crate::format::default_wal_record_frame_limit()
+    }
+
     fn append_commit_record(
         &mut self,
         record: &WalRecord,
@@ -367,6 +376,11 @@ where
                 reason: "durable commit executor requires matching WAL durability policy",
             });
         }
+        // Before the durable gate, the branch guard and above all the version
+        // allocator: an oversized record is a permanent caller error, and
+        // refusing it here burns no commit version (#3698). Validation already
+        // checked the production segment; this is the configured one.
+        require_wal_record_fits(batch.wal_record_frame_len(), self.wal.record_frame_limit())?;
         if branch_id != self.branch.branch_id() {
             return Err(CommitRuntimeError::BranchMismatch {
                 expected: branch_id,
@@ -717,6 +731,10 @@ impl CommitWalAppendError {
 impl CommitWalAppender for WalService<'_> {
     fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy()
+    }
+
+    fn record_frame_limit(&self) -> u64 {
+        WalService::record_frame_limit(self)
     }
 
     fn append_commit_record(

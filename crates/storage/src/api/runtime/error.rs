@@ -81,6 +81,35 @@ const ROW_TOO_LARGE_REASON: &str = "a single committed row exceeds the maximum e
 /// for it — the caller has to shorten the key.
 const KEY_TOO_LARGE_REASON: &str = "a committed key exceeds the maximum encodable size";
 
+/// The WAL's cap on a whole commit record, which a batch of individually
+/// legal rows can still breach. Named for the batch because splitting the
+/// batch — not trimming one row — is what clears it (#3698).
+const BATCH_TOO_LARGE_REASON: &str = "a commit batch exceeds the maximum encodable WAL record size";
+
+/// Surface a WAL record too large for its segment as the same typed
+/// `invalid_argument` size refusal commit admission returns.
+///
+/// Admission refuses every oversized record, with its sizes, before a commit
+/// version is allocated (#3698), so this is the backstop, not the path a
+/// caller sees: were it reached, the refusal would still be a permanent caller
+/// error rather than the retryable lower-layer failure it arrived as. The
+/// limit is recomputed from the segment size by the same function admission
+/// uses, so both report one number.
+fn record_too_large_to_api(error: &WalServiceError) -> Option<StorageApiError> {
+    match error {
+        WalServiceError::RecordTooLarge {
+            bytes,
+            segment_size,
+        } => Some(StorageApiError::SizeLimitExceeded {
+            field: "batch",
+            actual_bytes: *bytes,
+            limit_bytes: crate::format::wal_record_frame_limit(*segment_size),
+            reason: BATCH_TOO_LARGE_REASON,
+        }),
+        _ => None,
+    }
+}
+
 /// A measured in-memory length as the API's `u64` byte count. `usize` is at
 /// most 64 bits on every supported target, so this never saturates in
 /// practice; saturating keeps it total without a panic path.
@@ -149,6 +178,18 @@ pub(super) fn commit_error(error: crate::commit::CommitRuntimeError) -> StorageA
             actual_bytes: byte_count(key_len),
             limit_bytes: byte_count(max_key_len),
             reason: KEY_TOO_LARGE_REASON,
+        },
+        // #3698: a batch whose whole WAL record is over the append's cap,
+        // refused before allocation. Same field, reason and limit as the
+        // append's backstop in `record_too_large_to_api`.
+        crate::commit::CommitRuntimeError::CommitRecordTooLarge {
+            record_len,
+            max_record_len,
+        } => StorageApiError::SizeLimitExceeded {
+            field: "batch",
+            actual_bytes: record_len,
+            limit_bytes: max_record_len,
+            reason: BATCH_TOO_LARGE_REASON,
         },
         crate::commit::CommitRuntimeError::DuplicateMutationKey { .. } => {
             StorageApiError::InvalidArgument {
@@ -246,7 +287,7 @@ pub(super) fn commit_error(error: crate::commit::CommitRuntimeError) -> StorageA
             let mapped = source
                 .as_deref()
                 .and_then(|inner| inner.downcast_ref::<WalServiceError>())
-                .and_then(row_too_large_to_api);
+                .and_then(|wal| row_too_large_to_api(wal).or_else(|| record_too_large_to_api(wal)));
             mapped.unwrap_or(StorageApiError::LowerLayer {
                 layer: StorageApiLowerLayer::Commit,
                 inner_code: Some(crate::commit::CommitLowerLayer::WalService.code()),
@@ -519,7 +560,8 @@ pub(crate) fn map_maintenance_outcome_for_test(
 #[cfg(test)]
 mod tests {
     use super::{
-        branch_error, commit_error, map_lifecycle_error, KEY_TOO_LARGE_REASON, ROW_TOO_LARGE_REASON,
+        branch_error, commit_error, map_lifecycle_error, BATCH_TOO_LARGE_REASON,
+        KEY_TOO_LARGE_REASON, ROW_TOO_LARGE_REASON,
     };
     use crate::api::{StorageApiError, StorageApiErrorClass, StorageApiLowerLayer};
     use crate::branch::error::BranchRuntimeError;
@@ -724,6 +766,53 @@ mod tests {
             KEY_TOO_LARGE_REASON, ROW_TOO_LARGE_REASON,
             "the two refusals must not be indistinguishable: their remedies differ"
         );
+    }
+
+    /// A commit record too large for the WAL is a caller error naming the
+    /// batch, with the measured frame and the limit — whether admission
+    /// refused it before allocation or, as a backstop, the WAL append did.
+    /// Both routes report the same field, reason and limit (#3698). Unmapped,
+    /// the append's refusal was `internal.storage_api.commit`.
+    #[test]
+    fn an_oversized_commit_record_maps_to_the_same_caller_error_from_either_layer() {
+        use crate::commit::{CommitLowerLayer, CommitRuntimeError};
+        use crate::service::WalServiceError;
+        use std::sync::Arc;
+
+        let limit = crate::format::wal_record_frame_limit(1024);
+        let admission = commit_error(CommitRuntimeError::CommitRecordTooLarge {
+            record_len: 4061,
+            max_record_len: limit,
+        });
+        let append = commit_error(CommitRuntimeError::LowerLayer {
+            layer: CommitLowerLayer::WalService,
+            reason: "WAL append failed before commit visibility",
+            source: Some(Arc::new(WalServiceError::RecordTooLarge {
+                bytes: 4061,
+                segment_size: 1024,
+            })),
+        });
+
+        for mapped in [admission, append] {
+            assert_eq!(mapped.code(), "invalid_argument.storage_api.argument");
+            assert_eq!(
+                mapped.class(),
+                super::super::StorageApiErrorClass::InvalidArgument
+            );
+            assert!(
+                matches!(
+                    mapped,
+                    StorageApiError::SizeLimitExceeded {
+                        field: "batch",
+                        actual_bytes: 4061,
+                        limit_bytes,
+                        reason,
+                    } if limit_bytes == limit && reason == BATCH_TOO_LARGE_REASON
+                ),
+                "{mapped:?}"
+            );
+        }
+        assert_ne!(BATCH_TOO_LARGE_REASON, ROW_TOO_LARGE_REASON);
     }
 
     /// A fork source with live recovery-dependent children crosses the

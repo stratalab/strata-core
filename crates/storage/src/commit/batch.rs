@@ -4,7 +4,8 @@ use super::{
     CommitAdmissionPressureFacts, CommitRuntimeConfig, CommitRuntimeError, CommitRuntimeResult,
 };
 use crate::format::{
-    internal_key_encoded_len, storage_row_encoded_len, MAX_TABLE_KEY_BYTES,
+    default_wal_record_frame_limit, internal_key_encoded_len, storage_row_encoded_len,
+    wal_commit_record_frame_len, wal_record_frame_fits, MAX_TABLE_KEY_BYTES,
     MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
 };
 use crate::observability::perf_trace;
@@ -141,6 +142,10 @@ pub(crate) struct CommitStamp {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidatedCommitBatch {
     batch: CommitBatch,
+    /// The exact frame length the WAL would append for this batch, measured
+    /// at validation so the durable runtime can refuse an oversized record
+    /// against its configured segment before allocating a version (#3698).
+    wal_record_frame_len: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -219,8 +224,11 @@ impl CommitBatch {
         let timer = perf_trace::start_timer();
         let result = (|| {
             config.validate()?;
-            validate_batch_shape(&self, config)?;
-            Ok(ValidatedCommitBatch { batch: self })
+            let wal_record_frame_len = validate_batch_shape(&self, config)?;
+            Ok(ValidatedCommitBatch {
+                batch: self,
+                wal_record_frame_len,
+            })
         })();
         perf_trace::record_runtime_batch_validate_elapsed(timer);
         result
@@ -489,6 +497,11 @@ impl ValidatedCommitBatch {
         &self.batch
     }
 
+    /// The exact WAL frame length this batch encodes to (#3698).
+    pub(crate) const fn wal_record_frame_len(&self) -> u64 {
+        self.wal_record_frame_len
+    }
+
     pub(crate) fn admission_pressure_facts(
         &self,
         config: &CommitRuntimeConfig,
@@ -581,10 +594,11 @@ fn approximate_mutation_bytes(mutation: &CommitMutation) -> usize {
         .saturating_add(value_bytes)
 }
 
+/// Validates the batch and returns the exact WAL frame length it encodes to.
 fn validate_batch_shape(
     batch: &CommitBatch,
     config: &CommitRuntimeConfig,
-) -> CommitRuntimeResult<()> {
+) -> CommitRuntimeResult<u64> {
     match batch.kind {
         CommitBatchKind::Mutating if batch.mutations.is_empty() => {
             return Err(CommitRuntimeError::InvalidBatch {
@@ -624,8 +638,32 @@ fn validate_batch_shape(
     validate_duplicate_cas_facts(batch.validation.cas_set())?;
     validate_observed_versions(&batch.validation)?;
     validate_mutation_expiry(&batch.mutations)?;
-    validate_mutation_encodable_size(&batch.mutations)?;
-    Ok(())
+    let wal_record_frame_len = validate_mutation_encodable_size(&batch.mutations)?;
+    // Against the production segment in EVERY durability mode: cache mode
+    // never reaches the WAL (hard rule 14), so without this it would accept a
+    // batch a default durable database cannot append (#3391, #3698). The
+    // durable runtime re-checks against its own configured segment.
+    require_wal_record_fits(wal_record_frame_len, default_wal_record_frame_limit())?;
+    Ok(wal_record_frame_len)
+}
+
+/// Refuse a commit whose encoded WAL record frame would exceed `limit`.
+///
+/// Runs before a commit version is allocated. Left to the WAL append, an
+/// oversized record was refused only after allocation — burning the version
+/// and surfacing as an internal lower-layer failure instead of the permanent
+/// caller error it is (#3698). `frame_len` comes from
+/// `wal_commit_record_frame_len` and `limit` from
+/// `wal_record_frame_limit`, the same layout and cap the append enforces.
+pub(crate) fn require_wal_record_fits(frame_len: u64, limit: u64) -> CommitRuntimeResult<()> {
+    if wal_record_frame_fits(frame_len, limit) {
+        Ok(())
+    } else {
+        Err(CommitRuntimeError::CommitRecordTooLarge {
+            record_len: frame_len,
+            max_record_len: limit,
+        })
+    }
 }
 
 fn validate_mutation_branches(
@@ -767,27 +805,50 @@ fn validate_mutation_expiry(mutations: &[CommitMutation]) -> CommitRuntimeResult
 /// Both durability modes reach this through `CommitBatch::validate`, and both
 /// lengths are exact rather than upper bounds, so this refuses no write that
 /// durable mode would have accepted.
-fn validate_mutation_encodable_size(mutations: &[CommitMutation]) -> CommitRuntimeResult<()> {
-    for mutation in mutations {
-        let key_len = internal_key_encoded_len(mutation.physical_key());
-        if key_len > MAX_TABLE_KEY_BYTES {
-            return Err(CommitRuntimeError::MutationKeyTooLarge {
-                key_len,
-                max_key_len: MAX_TABLE_KEY_BYTES,
-            });
+///
+/// Returns the exact frame length of the WAL record the batch encodes to,
+/// built from the same per-row lengths, so the whole-record cap is checked
+/// from what the row caps already measured (#3698).
+fn validate_mutation_encodable_size(mutations: &[CommitMutation]) -> CommitRuntimeResult<u64> {
+    // One pass, no allocation: the frame length folds the row lengths as the
+    // row caps measure them, and the first refused row stops the fold.
+    let mut refusal: Option<CommitRuntimeError> = None;
+    let frame_len = wal_commit_record_frame_len(mutations.iter().map_while(|mutation| {
+        match mutation_encoded_row_len(mutation) {
+            Ok(row_len) => Some(row_len),
+            Err(error) => {
+                refusal = Some(error);
+                None
+            }
         }
-        let row_len = storage_row_encoded_len(
-            mutation.physical_key(),
-            mutation.value().map_or(0, <[u8]>::len),
-        );
-        if row_len > MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES {
-            return Err(CommitRuntimeError::MutationTooLarge {
-                row_len,
-                max_row_len: MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
-            });
-        }
+    }));
+    match refusal {
+        Some(error) => Err(error),
+        None => Ok(frame_len),
     }
-    Ok(())
+}
+
+/// The exact encoded WAL row length of one mutation, refused when either the
+/// key or the row exceeds its cap.
+fn mutation_encoded_row_len(mutation: &CommitMutation) -> CommitRuntimeResult<usize> {
+    let key_len = internal_key_encoded_len(mutation.physical_key());
+    if key_len > MAX_TABLE_KEY_BYTES {
+        return Err(CommitRuntimeError::MutationKeyTooLarge {
+            key_len,
+            max_key_len: MAX_TABLE_KEY_BYTES,
+        });
+    }
+    let row_len = storage_row_encoded_len(
+        mutation.physical_key(),
+        mutation.value().map_or(0, <[u8]>::len),
+    );
+    if row_len > MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES {
+        return Err(CommitRuntimeError::MutationTooLarge {
+            row_len,
+            max_row_len: MAX_WAL_COMMIT_PAYLOAD_ROW_BYTES,
+        });
+    }
+    Ok(row_len)
 }
 
 fn require_branch(branch_id: BranchId, key: &PhysicalKey) -> CommitRuntimeResult<()> {
