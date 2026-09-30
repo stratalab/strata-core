@@ -7,8 +7,9 @@ use super::state::compaction::{BranchCompactionCandidate, BranchCompactionRetent
 use super::state::BranchLocalState;
 use crate::row::PhysicalKey;
 use crate::table::{
-    MergeTableCursor, TableCompactionDecision, TableCompactionDropReason, TableCompactionPolicy,
-    TableCompactionRowContext, TableCursor, TableIdentity, TableRow, TableRuntimeResult,
+    MergeTableCursor, OutputContentHasher, TableCompactionDecision, TableCompactionDropReason,
+    TableCompactionPolicy, TableCompactionRowContext, TableCursor, TableIdentity, TableRow,
+    TableRuntimeResult,
 };
 use strata_core::{BranchId, CommitVersion, Timestamp};
 
@@ -463,6 +464,51 @@ impl TableCompactionPolicy for BranchCompactionPruningPolicy {
             self.record_keep(row);
         }
         Ok(decision)
+    }
+}
+
+impl BranchCompactionPruningProof {
+    /// #3469: fold the proof fields [`BranchCompactionPruningPolicy`] reads
+    /// into a rewrite output's content-complete identity — they decide which
+    /// rows the output keeps. The freshness/safety gates (epochs, state
+    /// fingerprint, coverage, attestations) only admit or refuse the run and
+    /// never change a kept row, so they stay OUT: a retry whose proof was
+    /// re-derived at a new epoch but with the same floors keeps its id and
+    /// still dedupes against its earlier attempt. The exhaustive destructure
+    /// makes a new proof field a compile error here, forcing that call.
+    pub(crate) fn hash_output_content(&self, hasher: &mut OutputContentHasher) {
+        let Self {
+            branch_id,
+            proof_epoch: _,
+            recovery_health_epoch: _,
+            branch_state_fingerprint: _,
+            retained_version_floor,
+            retained_timestamp_floor,
+            visible_version: _,
+            pinned_view_floor: _,
+            table_manifest_coverage_floor: _,
+            tombstone_elision_safe: _,
+            ttl_expired_at_or_before,
+            max_versions_per_key,
+            no_readable_inherited_layers: _,
+            candidate_tables_not_shared: _,
+            recovery_health: _,
+        } = self;
+        hasher.bytes(branch_id.as_bytes());
+        hasher.word(retained_version_floor.as_u64());
+        hash_optional_word(hasher, retained_timestamp_floor.map(Timestamp::as_micros));
+        hash_optional_word(hasher, ttl_expired_at_or_before.map(Timestamp::as_micros));
+        hash_optional_word(hasher, max_versions_per_key.map(|max| max as u64));
+    }
+}
+
+fn hash_optional_word(hasher: &mut OutputContentHasher, value: Option<u64>) {
+    match value {
+        None => hasher.word(0),
+        Some(value) => {
+            hasher.word(1);
+            hasher.word(value);
+        }
     }
 }
 

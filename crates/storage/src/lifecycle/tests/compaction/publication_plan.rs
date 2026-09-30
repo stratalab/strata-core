@@ -713,6 +713,76 @@ fn adopted_rewrite_output_with_conflicting_bytes_still_fails_closed() {
     );
 }
 
+/// #3469: a retried candidate whose byte-affecting build input changed (here
+/// the table codec — the same leg as data-block size, grandparent cuts and the
+/// pruning proof's floors) must not collide with the abandoned attempt's
+/// leftover output. The output identity is content-complete, so the retry
+/// derives a DISTINCT name, publishes it fresh, installs, and survives reopen;
+/// the leftover is never overwritten (create-if-absent) and is left for the
+/// sweep's reachability proof.
+#[test]
+fn retried_rewrite_with_changed_codec_publishes_distinct_output_instead_of_failing() {
+    let branch = branch_id(0xf4);
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    {
+        // The abandoned attempt: uncompressed outputs, published under the
+        // candidate's identity.
+        let mut runtime = open_runtime(branch, backend);
+        install_compaction_inputs(runtime.branch_state_mut(), branch, "codec-retry");
+        runtime
+            .compact_branch_tables(
+                &compaction_request(branch, "codec-retry")
+                    .with_table_compression(crate::format::TableCompression::Uncompressed),
+            )
+            .expect("first compaction");
+    }
+    let leftovers = backend.table_object_names();
+    assert_eq!(leftovers.len(), 1, "one leftover output: {leftovers:?}");
+    let leftover = leftovers[0].clone();
+    let leftover_bytes = backend
+        .object_snapshot()
+        .get(&leftover)
+        .cloned()
+        .expect("leftover bytes");
+
+    let mut runtime = open_runtime(branch, backend);
+    *runtime.branch_state_mut() = BranchLocalState::empty(branch);
+    install_compaction_inputs(runtime.branch_state_mut(), branch, "codec-retry");
+    runtime
+        .compact_branch_tables(
+            &compaction_request(branch, "codec-retry")
+                .with_table_compression(crate::format::TableCompression::Zstd),
+        )
+        .expect("a retry with a changed codec is a distinct output, not a byte conflict");
+
+    let objects = backend.table_object_names();
+    assert_eq!(
+        objects.len(),
+        2,
+        "retry published a distinct output: {objects:?}"
+    );
+    assert_eq!(
+        backend.object_snapshot().get(&leftover),
+        Some(&leftover_bytes),
+        "the leftover is never overwritten"
+    );
+    assert_eq!(
+        latest_value_from_state(runtime.branch_state(), branch, b"left"),
+        Some(b"old".to_vec())
+    );
+    drop(runtime);
+    let reopened = open_runtime(branch, backend);
+    assert_eq!(
+        latest_value_from_state(reopened.branch_state(), branch, b"left"),
+        Some(b"old".to_vec())
+    );
+    assert_eq!(
+        latest_value_from_state(reopened.branch_state(), branch, b"right"),
+        Some(b"new".to_vec())
+    );
+}
+
 #[test]
 fn fresh_rewrite_output_vanishing_mid_build_still_fails_closed() {
     // Learn the deterministic output name from a scout run on a separate
@@ -1197,10 +1267,13 @@ fn rewrite_install_failure_after_publish_names_orphan_outputs() {
     install_compaction_inputs(runtime.branch_state_mut(), branch, "install-collision");
     let output_identity =
         predicted_compaction_output_identity(&runtime, branch, "install-collision");
+    // L2, not L1: an L1 table is the L0 rewrite's grandparent level, whose
+    // cut hints are part of the content-complete output identity (#3469), so
+    // planting there would change the very identity it means to collide with.
     install_owned_table(
         runtime.branch_state_mut(),
         branch,
-        BranchLevel::new(1),
+        BranchLevel::new(2),
         output_identity.as_str(),
         vec![put_row(branch, b"collision", 99, 99_000, b"colliding")],
     );
@@ -1236,10 +1309,11 @@ fn rewrite_install_failure_after_publish_does_not_delete_outputs() {
     );
     let output_identity =
         predicted_compaction_output_identity(&runtime, branch, "install-collision-no-delete");
+    // L2: outside the grandparent level (see the sibling test).
     install_owned_table(
         runtime.branch_state_mut(),
         branch,
-        BranchLevel::new(1),
+        BranchLevel::new(2),
         output_identity.as_str(),
         vec![put_row(branch, b"collision", 99, 99_000, b"colliding")],
     );
@@ -2121,19 +2195,20 @@ fn predicted_compaction_output_identity(
     branch: strata_core::BranchId,
     seed: &str,
 ) -> crate::table::TableIdentity {
-    let branch_request =
-        BranchCompactionRequest::new(branch, BranchCompactionKind::CompactL0, seed)
-            .expect("branch request");
-    let plan = runtime
-        .branch_state()
-        .plan_branch_compaction(&branch_request)
-        .expect("plan");
-    let (artifacts, _) = runtime
-        .branch_state()
-        .prepare_branch_compaction_plan(&branch_request, &plan)
-        .expect("prepare")
-        .expect("prepared output");
-    artifacts[0].facts().identity().clone()
+    // #3469: the output identity is content-complete (builder/compaction
+    // config, budget-derived split target, cut hints, policy), so learn the
+    // durable path's exact name from a scout run over identical state on a
+    // separate backend instead of re-deriving it from a bare branch request.
+    let scout_backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let mut scout = open_runtime(branch, scout_backend);
+    *scout.branch_state_mut() = runtime.branch_state().clone();
+    let outcome = scout
+        .compact_branch_tables(&compaction_request(branch, seed))
+        .expect("scout compaction");
+    let object = outcome.durable_output_objects()[0].clone();
+    crate::table::TableIdentity::new(object.as_str().rsplit('/').next().expect("object leaf"))
+        .expect("scout identity")
 }
 
 fn publish_output_then_stale_install(

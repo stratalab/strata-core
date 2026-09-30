@@ -10,7 +10,7 @@ use crate::backend::{
 use crate::branch::config::BranchRuntimeConfig;
 use crate::branch::facts::{BranchLevel, BranchTableDescriptor};
 use crate::branch::read::BranchOwnedTable;
-use crate::branch::state::compaction::{BranchCompactionKind, BranchCompactionRequest};
+use crate::branch::state::compaction::BranchCompactionKind;
 use crate::branch::state::BranchLocalState;
 use crate::commit::{CommitBranchGeneration, CommitManualTimestampSource, CommitRuntimeConfig};
 use crate::lifecycle::{
@@ -483,37 +483,41 @@ fn check_install_failure_after_publish(
         vec![put_row(branch, b"shared", 2, 2_000, b"newer")?],
     )?;
     let seed = format!("rewrite-install-fail-{}", script_byte(script, 18));
-    let branch_request =
-        BranchCompactionRequest::new(branch, BranchCompactionKind::CompactL0, seed.as_str())
-            .map_err(rewrite_error)?;
-    let plan = runtime
-        .branch_state()
-        .plan_branch_compaction(&branch_request)
-        .map_err(rewrite_error)?;
-    let (artifacts, _) = runtime
-        .branch_state()
-        .prepare_branch_compaction_plan(&branch_request, &plan)
-        .map_err(rewrite_error)?
-        .ok_or_else(|| TestkitError::new("expected prepared compaction output"))?;
-    let predicted_identity = artifacts
-        .first()
-        .ok_or_else(|| TestkitError::new("expected table artifact"))?
-        .facts()
-        .identity()
-        .clone();
-    // Plant a colliding table at the next level with the predicted output
-    // identity so the lifecycle install fails AFTER output publication,
-    // producing a RewritePublicationOrphaned that names the orphan object.
-    install_owned_table_at_level(
-        runtime.branch_state_mut(),
-        branch,
-        BranchLevel::new(1),
-        predicted_identity.as_str(),
-        vec![put_row(branch, b"collision", 99, 99_000, b"collision")?],
-    )?;
     let request =
         LifecycleCompactionRequest::new(branch, BranchCompactionKind::CompactL0, seed.as_str())
             .map_err(rewrite_error)?;
+    // #3469: the output identity is content-complete (builder/compaction
+    // config, budget-derived split target, cut hints, policy), so learn the
+    // durable path's exact output name from a scout run over identical state
+    // on a separate backend rather than re-deriving it from a bare request.
+    let scout_backend: &'static RewriteBackend = crate::testkit::leak_static(RewriteBackend::new());
+    let mut scout = open_runtime(branch, scout_backend)?;
+    *scout.branch_state_mut() = runtime.branch_state().clone();
+    let scout_outcome = scout
+        .compact_branch_tables(&request)
+        .map_err(rewrite_error)?;
+    let scout_object = scout_outcome
+        .durable_output_objects()
+        .first()
+        .ok_or_else(|| TestkitError::new("expected scout output object"))?;
+    let predicted_identity = scout_object
+        .as_str()
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| TestkitError::new("expected scout output object leaf"))?
+        .to_owned();
+    // Plant a colliding table with the predicted output identity so the
+    // lifecycle install fails AFTER output publication, producing a
+    // RewritePublicationOrphaned that names the orphan object. L2, not L1: L1
+    // is the L0 rewrite's grandparent level, whose cut hints are part of the
+    // output identity, so planting there would change the identity itself.
+    install_owned_table_at_level(
+        runtime.branch_state_mut(),
+        branch,
+        BranchLevel::new(2),
+        predicted_identity.as_str(),
+        vec![put_row(branch, b"collision", 99, 99_000, b"collision")?],
+    )?;
 
     let error = runtime
         .compact_branch_tables(&request)
@@ -895,5 +899,23 @@ struct RewriteWriterGuard {
 impl Drop for RewriteWriterGuard {
     fn drop(&mut self) {
         self.locked.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default-lane pin (#3469): the install-after-publish orphan scenario
+    /// (scout-predicted output identity, collision planted outside the
+    /// grandparent level) must hold and count outside the feature-gated
+    /// `lifecycle_properties` target.
+    #[test]
+    fn install_failure_after_publish_scenario_holds_and_counts() {
+        let mut outcome = LifecycleTableRewriteContractOutcome::default();
+        check_install_failure_after_publish(b"rewrite-default-lane-pin", &mut outcome)
+            .expect("install failure after publish scenario holds");
+        assert_eq!(outcome.install_failed_after_publish_cases(), 1);
+        assert_eq!(outcome.orphan_output_recorded_cases(), 1);
     }
 }

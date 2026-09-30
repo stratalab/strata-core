@@ -2162,3 +2162,125 @@ fn streaming_compaction_output_ranges_are_sorted_and_non_overlapping() {
     assert_artifact_facts_match_rows(&output, "stream-output-ranges");
     assert_eq!(output_storage_rows(&output), sorted_storage_rows(&rows));
 }
+
+/// #3469 truth table: a rewrite output's identity is content-complete. Each
+/// row varies exactly one byte-affecting compactor input against the base and
+/// must derive a DIFFERENT first-output identity; the identical re-run must
+/// derive the SAME one (retry dedupe). Only id-equal => byte-equal lets the
+/// adoption path treat a byte mismatch as corruption.
+#[test]
+fn compaction_output_identity_covers_every_byte_affecting_compactor_input() {
+    fn first_identity(compactor: &TableCompactor) -> String {
+        let rows = [put_row(b"alpha".to_vec(), 1), put_row(b"bravo".to_vec(), 2)];
+        let mut policy = keep_all_policy();
+        compactor
+            .compact(
+                &identity("content-identity"),
+                &[source("content-identity", &rows)],
+                &mut policy,
+            )
+            .expect("compaction")
+            .artifacts()[0]
+            .facts()
+            .identity()
+            .as_str()
+            .to_owned()
+    }
+    fn with_builder(builder: TableBuilderConfig) -> TableCompactor {
+        TableCompactor::new(
+            TableCompactionConfig::new(1 << 20, 8).expect("config"),
+            builder,
+        )
+        .expect("compactor")
+    }
+    let base_builder =
+        TableBuilderConfig::new(512, 2, TableCompression::Uncompressed).expect("builder config");
+    let base_identity = first_identity(&with_builder(base_builder));
+
+    assert_eq!(
+        first_identity(&with_builder(base_builder)),
+        base_identity,
+        "identical inputs keep the identity (retry dedupe)"
+    );
+    let hints = |max_overlap_bytes: u64, byte_count: u64| {
+        CompactionOutputCutHints::new(
+            vec![CompactionCutBoundary::new(b"m".to_vec(), byte_count)],
+            max_overlap_bytes,
+        )
+        .expect("hints")
+    };
+    let varied: [(&str, TableCompactor); 11] = [
+        (
+            "codec",
+            with_builder(
+                TableBuilderConfig::new(512, 2, TableCompression::Zstd).expect("builder config"),
+            ),
+        ),
+        (
+            "data block size",
+            with_builder(
+                TableBuilderConfig::new(1024, 2, TableCompression::Uncompressed)
+                    .expect("builder config"),
+            ),
+        ),
+        (
+            "rows per block",
+            with_builder(
+                TableBuilderConfig::new(512, 3, TableCompression::Uncompressed)
+                    .expect("builder config"),
+            ),
+        ),
+        (
+            "filter frame",
+            with_builder(base_builder.with_filter_bits_per_key(Some(10))),
+        ),
+        (
+            "filter bits per key",
+            with_builder(base_builder.with_filter_bits_per_key(Some(12))),
+        ),
+        (
+            "output size target",
+            TableCompactor::new(
+                TableCompactionConfig::new(1 << 21, 8).expect("config"),
+                base_builder,
+            )
+            .expect("compactor"),
+        ),
+        (
+            "output table bound",
+            TableCompactor::new(
+                TableCompactionConfig::new(1 << 20, 9).expect("config"),
+                base_builder,
+            )
+            .expect("compactor"),
+        ),
+        (
+            "grandparent cut hints present",
+            with_builder(base_builder).with_output_cut_hints(hints(64, 32)),
+        ),
+        (
+            "grandparent overlap bound",
+            with_builder(base_builder).with_output_cut_hints(hints(128, 32)),
+        ),
+        (
+            "grandparent boundary weight",
+            with_builder(base_builder).with_output_cut_hints(hints(64, 33)),
+        ),
+        (
+            "caller salt (policy / bounds)",
+            with_builder(base_builder).with_output_identity_salt(1),
+        ),
+    ];
+    let mut seen = std::collections::BTreeSet::from([base_identity.clone()]);
+    for (input, compactor) in &varied {
+        let varied_identity = first_identity(compactor);
+        assert_ne!(
+            varied_identity, base_identity,
+            "changing the {input} must change the output identity"
+        );
+        assert!(
+            seen.insert(varied_identity),
+            "the {input} row collides with another row's identity"
+        );
+    }
+}

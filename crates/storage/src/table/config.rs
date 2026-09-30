@@ -144,6 +144,31 @@ impl TableBuilderConfig {
         }
         Ok(())
     }
+
+    /// #3469: every field, as output-identity fingerprint words. The builder
+    /// config decides a compaction output's bytes (block cuts, codec, filter
+    /// frame), so it is part of the output's content-complete identity. The
+    /// exhaustive destructure makes a new field a compile error here rather
+    /// than a silent identity hole.
+    pub(super) fn output_content_words(self) -> [u64; 5] {
+        let Self {
+            target_data_block_size,
+            rows_per_block,
+            compression,
+            filter_bits_per_key,
+        } = self;
+        let compression_word = match compression {
+            TableCompression::Uncompressed => 0,
+            TableCompression::Zstd => 1,
+        };
+        [
+            u64::from(target_data_block_size),
+            rows_per_block as u64,
+            compression_word,
+            u64::from(filter_bits_per_key.is_some()),
+            filter_bits_per_key.map_or(0, |bits| bits as u64),
+        ]
+    }
 }
 
 impl Default for TableBuilderConfig {
@@ -308,6 +333,17 @@ impl TableCompactionConfig {
             });
         }
         Ok(())
+    }
+
+    /// #3469: every field, as output-identity fingerprint words (the output
+    /// size target decides where outputs split; see
+    /// [`TableBuilderConfig::output_content_words`]).
+    pub(super) fn output_content_words(self) -> [u64; 2] {
+        let Self {
+            target_output_bytes,
+            max_output_tables,
+        } = self;
+        [target_output_bytes, max_output_tables as u64]
     }
 }
 
