@@ -583,6 +583,37 @@ fn a_queued_task_whose_lane_is_active_leaves_the_drain_with_work_it_cannot_start
     );
 }
 
+/// #3687: `lane_at_capacity_for_kind` is the pre-enqueue answer to "would
+/// `start_next_matching` refuse this kind right now". Truth table over the
+/// held lane x the asked kind: only the held lane's own kinds are refused.
+#[test]
+fn lane_at_capacity_for_kind_answers_only_for_the_held_lane() {
+    let preheat = MaintenanceTask::new_for_test(9, MaintenanceTaskRequest::cache_preheat())
+        .expect("preheat task");
+    let health =
+        MaintenanceTask::new_for_test(7, health_request(MaintenanceTaskPolicy::ordinary()))
+            .expect("health task");
+    for (held, kind, expected) in [
+        (None, MaintenanceTaskKind::CachePreheat, false),
+        (None, MaintenanceTaskKind::HealthCollection, false),
+        (Some(preheat), MaintenanceTaskKind::CachePreheat, true),
+        (Some(preheat), MaintenanceTaskKind::HealthCollection, false),
+        (Some(health), MaintenanceTaskKind::CachePreheat, false),
+        (Some(health), MaintenanceTaskKind::HealthCollection, true),
+    ] {
+        let mut executor = LifecycleMaintenanceExecutor::new(4).expect("executor");
+        if let Some(task) = held {
+            executor.set_active_for_test(task);
+        }
+        assert_eq!(
+            executor.lane_at_capacity_for_kind(kind),
+            expected,
+            "held {:?}, asked {kind:?}",
+            held.map(MaintenanceTask::kind)
+        );
+    }
+}
+
 #[test]
 fn cancel_pending_does_not_cancel_active_task() {
     let closing = closing_state();
