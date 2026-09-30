@@ -51,6 +51,8 @@ pub(crate) use footprint::{
     LifecycleFootprintWatermark, WalSegmentClass,
 };
 pub(crate) use inflight::{InFlightOutputsGuard, InFlightTableOutputs};
+#[cfg(test)]
+pub(crate) use maintenance::inventory_listing_seam;
 pub(crate) use maintenance::TABLE_OBJECT_SWEEP_MAX_OBJECTS;
 
 #[cfg(test)]

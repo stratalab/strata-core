@@ -257,9 +257,12 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         &self,
         health: &RecoveryHealth,
     ) -> LifecycleResult<Option<(Tally, Tally)>> {
-        let request =
-            table_object_retention_request(&self.services, self.initial_branch_id, health)?
-                .with_pinned_objects(self.reclaim_pinned_table_objects());
+        let request = table_object_retention_request(
+            &self.services,
+            self.initial_branch_id,
+            health,
+            &self.reclaim_pinned_table_objects(),
+        )?;
         let outcome = table_object_retention_outcome(&request)?;
         if outcome.retention().status() != LifecycleRetentionStatus::Completed {
             return Ok(None);
