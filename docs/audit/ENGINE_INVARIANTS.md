@@ -1557,7 +1557,18 @@ every trajectory and fail on any CONFIRMED violation.
 The durable watermark (`meta/wal-watermark`) is published only AFTER the sync it attests,
 never regresses, and recovery refuses any state the watermark proves incomplete (missing
 attested segments; sole-segment deletion). Torn final WAL records are provably unacked and
-repairable without violating this.
+repairable without violating this. Above the checkpoint/flush floor the WAL must hold the
+attested record ITSELF (#2768 partial, `attested_commit_is_recoverable`): a surviving record
+above the watermark proves nothing, because deleting the lowest sealed segments leaves a
+contiguous suffix whose max passes. The watermark names a real sealed record, never a burned
+(allocated-but-failed) version, so the check cannot false-positive on a version gap. KNOWN GAP
+until the parked format change (#2768): losing segments BELOW the one holding the attested
+record while it survives (e.g. the lowest of several sealed segments above the checkpoint)
+is still undetected. Pins: `deleting_the_watermark_record_segment_refuses_strict_recovery`
+and the burned-version control `burned_version_at_the_checkpoint_boundary_recovers_healthy`
+(a clean WAL append failure burns checkpoint+1; `lifecycle/tests/checkpoint/remaining.rs`),
+the `wal_segment_loss` testkit lane's watermark-record refusal and its direction controls
+(crash with the record present, close seal+truncate, multi-branch, cache mode).
 
 **Audit**: the #2769 watermark tests + `wal_segment_loss` testkit lane + the promoted 4.9a
 pins (permanent contracts since the fix). Verify `verify_commit_watermark_recoverable` runs

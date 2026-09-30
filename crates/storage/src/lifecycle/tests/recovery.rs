@@ -4943,3 +4943,28 @@ fn durable_base_branch_set_decode_truth_table() {
         "two sets fail closed"
     );
 }
+
+/// #2768 (partial) truth table: at or below the recoverable floor the
+/// checkpoint/manifest holds the attested commit; above it only the replayed
+/// attested record itself does — never a surviving record above it.
+#[test]
+fn attested_commit_recoverability_truth_table() {
+    use crate::lifecycle::recovery::attested_commit_is_recoverable;
+    // (attested, floor, record replayed) -> recoverable
+    let table = [
+        (5, 9, false, true),   // below the floor, record trimmed: covered
+        (9, 9, false, true),   // exactly the floor: covered
+        (10, 9, false, false), // above the floor, record gone: loss
+        (10, 9, true, true),   // above the floor, record replayed
+        (10, 0, true, true),   // no checkpoint, record replayed
+        (1, 0, false, false),  // no checkpoint, the only record gone
+        (9, 9, true, true),    // at the floor and replayed
+    ];
+    for (attested, floor, replayed, recoverable) in table {
+        assert_eq!(
+            attested_commit_is_recoverable(attested, floor, replayed),
+            recoverable,
+            "attested={attested} floor={floor} replayed={replayed}"
+        );
+    }
+}

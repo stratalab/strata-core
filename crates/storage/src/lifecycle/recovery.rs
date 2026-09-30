@@ -510,32 +510,35 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
     /// without them. The comparison is checkpoint-aware by construction (a
     /// dropped segment whose data the snapshot covers satisfies it), which is
     /// what the earlier segment-id marker could not express.
+    ///
+    /// #2768 (partial): above the checkpoint/flush floor, the WAL must hold the
+    /// attested record ITSELF — a surviving record above it does not prove it
+    /// survived (see [`attested_commit_is_recoverable`]).
     fn verify_commit_watermark_recoverable(
         &mut self,
         request: &LifecycleRecoveryRequest,
         checkpoint: &LifecycleRecoveredCheckpoint,
         trusted_flush_watermark: Option<CommitVersion>,
         replay_start: CommitVersion,
-        wal_max: u64,
+        watermark_record_replayed: bool,
         faults: &mut Vec<RecoveryFault>,
-    ) -> LifecycleResult<()> {
+    ) -> Result<(), LifecycleError> {
         let Some(attested) = self.shell.services().wal().durable_commit_watermark() else {
             return Ok(());
         };
-        let recoverable = [
+        let recoverable_floor = [
             Some(replay_start.as_u64()),
             checkpoint.trusted_watermark().map(CommitVersion::as_u64),
             trusted_flush_watermark.map(CommitVersion::as_u64),
-            Some(wal_max),
         ]
         .into_iter()
         .flatten()
         .max()
         .unwrap_or(0);
-        if attested > recoverable {
+        if !attested_commit_is_recoverable(attested, recoverable_floor, watermark_record_replayed) {
             if request.strictness() == RecoveryStrictness::Strict {
                 return Err(LifecycleError::recovery_corruption(
-                    "durable WAL commit watermark attests commits above every recoverable source",
+                    "durable WAL commit watermark attests a commit no recovery source holds",
                 ));
             }
             push_fault(
@@ -562,7 +565,10 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
         // transient that tracked the unreclaimed WAL and OOM-killed the
         // 18 GiB field reopen. Replay itself streams again in bootstrap
         // (`replay_wal_into_catalog`), bounded by the ceiling computed here.
-        let mut wal_max: u64 = 0;
+        // #2768 (partial): whether the record the durable commit watermark
+        // attests is among the records replay will see.
+        let attested = self.shell.services().wal().durable_commit_watermark();
+        let mut attested_record_seen = false;
         let mut contiguous_upper: u64 = replay_start.as_u64();
         let mut record_count: usize = 0;
         let truncation = self
@@ -571,7 +577,9 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
             .wal()
             .visit_records_after(replay_start, &mut |record| {
                 let version = record.commit_version().as_u64();
-                wal_max = wal_max.max(version);
+                if attested == Some(version) {
+                    attested_record_seen = true;
+                }
                 // The replay stream is strictly ascending (bootstrap refuses
                 // otherwise), so the contiguous run from `replay_start + 1`
                 // is a single forward walk — no version set required. An
@@ -602,16 +610,16 @@ impl<'shell, 'backend, S> LifecycleRecoveryRuntime<'shell, 'backend, S> {
         // the attestation must see only the REPLAYED max — an orphaned tail
         // above the fence is dropped, so letting it satisfy the #2690
         // watermark would silently reopen without attested commits.
-        let attestable_wal_max = match replay_ceiling {
-            Some(ceiling) => wal_max.min(ceiling.as_u64()),
-            None => wal_max,
-        };
+        let watermark_record_replayed = attested_record_seen
+            && attested.is_some_and(|attested| {
+                replay_ceiling.is_none_or(|ceiling| attested <= ceiling.as_u64())
+            });
         self.verify_commit_watermark_recoverable(
             request,
             checkpoint,
             trusted_flush_watermark,
             replay_start,
-            attestable_wal_max,
+            watermark_record_replayed,
             faults,
         )?;
 
@@ -1356,6 +1364,28 @@ fn checkpoint_delta_scan_failed() -> LifecycleError {
     LifecycleError::RecoveryFailed {
         reason: "checkpoint delta cursor scan failed",
     }
+}
+
+/// #2690 / #2768 (partial): whether the commit the durable WAL watermark
+/// attests is reproducible at recovery. At or below the recoverable floor (the
+/// replay start, the trusted checkpoint and flush watermarks) the checkpoint or
+/// table manifest holds it. Above the floor only the WAL can, and it must hold
+/// the attested record ITSELF: the watermark is published only from a sealed,
+/// synced record — never from an allocated-but-failed (burned) version — so
+/// its absence is loss. A surviving record ABOVE the watermark proves nothing:
+/// deleting the lowest sealed segments leaves a contiguous suffix whose max
+/// passes the old `attested <= max(sources)` comparison.
+///
+/// Still undetected without a durable-format change (#2768, parked): losing
+/// segments that sit below the one holding the attested record — e.g. the
+/// lowest of several sealed segments above the checkpoint while a newer
+/// sealed segment (holding the watermark record) survives.
+pub(crate) const fn attested_commit_is_recoverable(
+    attested: u64,
+    recoverable_floor: u64,
+    watermark_record_replayed: bool,
+) -> bool {
+    attested <= recoverable_floor || watermark_record_replayed
 }
 
 fn trusted_replay_start(

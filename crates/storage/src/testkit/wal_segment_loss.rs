@@ -239,4 +239,229 @@ mod tests {
             );
         }
     }
+
+    // ---- #2768 (partial): the attested watermark record must survive ----
+
+    fn put_on(
+        runtime: &StorageRuntime<'_>,
+        branch_id: BranchId,
+        index: u32,
+        value_len: usize,
+    ) -> crate::api::StorageApiResult<crate::api::CommitSummary> {
+        let key = StorageKey::new(format!("acked-{index:04}").into_bytes()).expect("key");
+        let batch = CommitBatch::new(
+            branch_id,
+            vec![CommitMutation::Put {
+                storage_space: space(),
+                key,
+                value: StorageValue::new(vec![b'v'; value_len]),
+                ttl: None,
+            }],
+            CommitOptions::default(),
+        )
+        .expect("commit batch");
+        runtime.commit(&batch)
+    }
+
+    fn assert_all_present(
+        runtime: &StorageRuntime<'_>,
+        branch_id: BranchId,
+        indices: std::ops::Range<u32>,
+    ) {
+        for index in indices {
+            let key = StorageKey::new(format!("acked-{index:04}").into_bytes()).expect("key");
+            let read = runtime
+                .read_point(&PointReadRequest::new(
+                    branch_id,
+                    space(),
+                    key,
+                    ReadBound::Latest,
+                ))
+                .expect("read succeeds");
+            assert!(read.row().is_some(), "acked key {index} must survive");
+        }
+    }
+
+    /// Stage: 4 puts, a checkpoint, then enough puts to seal several
+    /// segments, and a CRASH (drop, no close): the durable watermark is the
+    /// max commit of the newest SEALED segment, and the active segment above
+    /// it holds later commits.
+    fn stage_sealed_watermark_crash(root: &Path) -> usize {
+        let mut runtime = StorageRuntime::open_durable_local_with_options(root, options())
+            .expect("durable open")
+            .into_runtime();
+        for index in 0u32..4 {
+            put(&mut runtime, index);
+        }
+        checkpoint(&mut runtime);
+        for index in 4u32..24 {
+            put(&mut runtime, index);
+        }
+        drop(runtime);
+        let segments = wal_segment_paths(root);
+        assert!(
+            segments.len() >= 3,
+            "the stage must seal several segments; found {}",
+            segments.len()
+        );
+        segments.len()
+    }
+
+    /// #2768: deleting every segment below the active one — the newest
+    /// sealed segment among them holds the record the durable watermark
+    /// attests — leaves a contiguous inventory (only the active segment) whose
+    /// surviving records sit ABOVE the watermark, so the #2690 max comparison
+    /// passes. Recovery must still refuse: the attested record itself is
+    /// unrecoverable. Before the fix this opened Healthy with acked keys gone.
+    #[test]
+    fn deleting_the_sealed_segment_holding_the_watermark_record_refuses_open() {
+        let root = temp_root("watermark-record");
+        stage_sealed_watermark_crash(&root);
+        let segments = wal_segment_paths(&root);
+        for segment in &segments[..segments.len() - 1] {
+            std::fs::remove_file(segment).expect("delete sealed segment");
+        }
+
+        let error = StorageRuntime::open_durable_local_with_options(&root, options())
+            .expect_err("the attested watermark record was deleted");
+        assert_eq!(
+            error.code(),
+            "failed_precondition.storage_api.recovery_degraded",
+            "a missing attested record surfaces the recovery-degraded code"
+        );
+    }
+
+    /// Lossy recovery degrades (data loss recorded) instead of refusing.
+    #[test]
+    fn lossy_recovery_degrades_when_the_watermark_record_is_missing() {
+        let root = temp_root("watermark-record-lossy");
+        stage_sealed_watermark_crash(&root);
+        let segments = wal_segment_paths(&root);
+        for segment in &segments[..segments.len() - 1] {
+            std::fs::remove_file(segment).expect("delete sealed segment");
+        }
+
+        let outcome = StorageRuntime::open_durable_local_with_options(
+            &root,
+            options().with_strict_recovery(false),
+        )
+        .expect("lossy recovery salvages");
+        assert_eq!(
+            outcome.summary().recovery_health(),
+            crate::api::RecoveryHealthSummary::Degraded,
+            "the salvage must be reported as degraded, never healthy"
+        );
+    }
+
+    /// Direction control: the same crashed stage with nothing deleted opens
+    /// Healthy with every acked key (the watermark record is present).
+    #[test]
+    fn crashed_stage_with_the_watermark_record_present_opens_healthy() {
+        let root = temp_root("watermark-record-present");
+        stage_sealed_watermark_crash(&root);
+        let outcome = StorageRuntime::open_durable_local_with_options(&root, options())
+            .expect("nothing was lost");
+        assert_eq!(
+            outcome.summary().recovery_health(),
+            crate::api::RecoveryHealthSummary::Healthy
+        );
+        assert_all_present(&outcome.into_runtime(), branch(), 0..24);
+    }
+
+    /// Direction control: the clean close's seal + checkpoint + truncate
+    /// (DUR-019) removes the segment holding the watermark record — the
+    /// checkpoint covers it, so reopen is Healthy. Reopened twice so the
+    /// close-left empty active segment is exercised as the whole log.
+    #[test]
+    fn close_checkpoint_seal_and_truncate_reopens_healthy() {
+        let root = temp_root("watermark-close");
+        {
+            let mut runtime = StorageRuntime::open_durable_local_with_options(&root, options())
+                .expect("durable open")
+                .into_runtime();
+            for index in 0u32..24 {
+                put(&mut runtime, index);
+            }
+            runtime
+                .close()
+                .expect("clean close checkpoints and truncates");
+        }
+        for _ in 0..2 {
+            let outcome = StorageRuntime::open_durable_local_with_options(&root, options())
+                .expect("covered watermark record");
+            assert_eq!(
+                outcome.summary().recovery_health(),
+                crate::api::RecoveryHealthSummary::Healthy
+            );
+            let mut runtime = outcome.into_runtime();
+            assert_all_present(&runtime, branch(), 0..24);
+            runtime
+                .close_with_options(
+                    StorageCloseOptions::graceful().with_reclaim_budget(ReclaimBudget::Disabled),
+                )
+                .expect("close without new writes");
+        }
+    }
+
+    /// Direction control: two branches interleaving commits across sealed
+    /// segments, a checkpoint in the middle, then a crash.
+    #[test]
+    fn multi_branch_crash_reopens_healthy() {
+        let root = temp_root("watermark-multi-branch");
+        let other = BranchId::from_bytes([0x02; BranchId::BYTE_LEN]);
+        {
+            let mut runtime = StorageRuntime::open_durable_local_with_options(&root, options())
+                .expect("durable open")
+                .into_runtime();
+            runtime
+                .branch(&crate::api::BranchRequest::new(
+                    other,
+                    crate::api::BranchAction::Create,
+                    Some(crate::api::BranchGeneration::new(1)),
+                ))
+                .expect("create second branch");
+            for index in 0u32..8 {
+                put_on(&runtime, branch(), index, 96).expect("put main");
+                put_on(&runtime, other, index, 96).expect("put other");
+            }
+            runtime
+                .maintenance(&MaintenanceRequest::new(
+                    MaintenanceTask::Checkpoint,
+                    MaintenanceScope::Global,
+                ))
+                .expect("checkpoint");
+            for index in 8u32..20 {
+                put_on(&runtime, branch(), index, 96).expect("put main");
+                put_on(&runtime, other, index, 96).expect("put other");
+            }
+            drop(runtime);
+        }
+        assert!(
+            wal_segment_paths(&root).len() >= 3,
+            "the stage must seal segments"
+        );
+        let outcome = StorageRuntime::open_durable_local_with_options(&root, options())
+            .expect("nothing was lost");
+        assert_eq!(
+            outcome.summary().recovery_health(),
+            crate::api::RecoveryHealthSummary::Healthy
+        );
+        let runtime = outcome.into_runtime();
+        assert_all_present(&runtime, branch(), 0..20);
+        assert_all_present(&runtime, other, 0..20);
+    }
+
+    /// Direction control: cache mode has no WAL and no watermark; it opens
+    /// and serves writes unaffected.
+    #[test]
+    fn cache_mode_is_unaffected() {
+        let runtime = StorageRuntime::open(StorageOpenOptions::cache())
+            .expect("cache open")
+            .into_runtime();
+        let cache_branch = StorageRuntime::default_branch_id_for_test();
+        for index in 0u32..8 {
+            put_on(&runtime, cache_branch, index, 96).expect("cache put");
+        }
+        assert_all_present(&runtime, cache_branch, 0..8);
+    }
 }
