@@ -731,9 +731,11 @@ Every public error type must have an exhaustive per-variant contract test that
 asserts the layer-owned half of the Stripe-grade surface. For storage this
 is `crates/storage/tests/api_error_contract.rs`:
 
-1. A fixture samples every variant; a count backstop plus the lib's exhaustive
-   `code()`/`class()`/`remediation()`/`Display` matches force a new variant to be
-   handled before it can ship.
+1. A fixture samples every variant; the test parses the variants declared in
+   `pub enum StorageApiError` from its source file and requires the fixture's
+   variant set to equal it (no hand-typed count), and the lib's exhaustive
+   `code()`/`class()`/`remediation()`/`Display` matches force a new variant to
+   be handled before it can ship.
 2. Each code is `<class>.<area>.<detail>`, lowercase snake_case, three segments,
    URL-path-safe (doc-linkable).
 3. Each code's class prefix agrees with `class()`.

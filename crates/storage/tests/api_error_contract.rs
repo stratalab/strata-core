@@ -16,6 +16,7 @@
 
 #![deny(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use strata_storage::api::{
@@ -23,11 +24,57 @@ use strata_storage::api::{
     StorageApiErrorClass, StorageApiLowerLayer,
 };
 
-/// Number of public `StorageApiError` variants. The lib's `code()`, `class()`,
-/// `remediation()`, and `Display` are exhaustive matches, so a new variant is a
-/// compile error there until handled; this count is the test-level backstop
-/// ensuring the conformance fixture below is extended in lockstep.
-const EXPECTED_VARIANT_COUNT: usize = 16;
+/// The source file that defines `StorageApiError`. The fixture's coverage is
+/// checked against the variants *declared here*, not against a hand-typed
+/// count: an integration test cannot match the `#[non_exhaustive]` enum
+/// exhaustively, so the declaration itself is the code truth (#3701). The
+/// lib's exhaustive `code()`/`class()`/`remediation()`/`Display` matches force
+/// a new variant to be handled; this forces it to be sampled below.
+const ERROR_SOURCE: &str = include_str!("../src/api/error.rs");
+
+/// Variant names declared in `pub enum StorageApiError { .. }`, parsed from
+/// [`ERROR_SOURCE`]. A variant is an identifier that opens a line at brace
+/// depth 1 of the enum body; doc comments, attributes, and field lines (depth
+/// 2) are skipped.
+fn declared_variant_names() -> BTreeSet<String> {
+    let start = ERROR_SOURCE
+        .find("pub enum StorageApiError {")
+        .expect("StorageApiError declaration must stay in src/api/error.rs");
+    let mut names = BTreeSet::new();
+    let mut depth = 0_usize;
+    for line in ERROR_SOURCE[start..].lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if depth == 1 && !trimmed.starts_with('#') {
+            let ident: String = trimmed
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if ident.starts_with(|c: char| c.is_ascii_uppercase()) {
+                names.insert(ident);
+            }
+        }
+        depth += trimmed.matches('{').count();
+        depth = depth
+            .checked_sub(trimmed.matches('}').count())
+            .expect("unbalanced braces while parsing StorageApiError");
+        if depth == 0 {
+            return names;
+        }
+    }
+    panic!("StorageApiError declaration never closed");
+}
+
+/// The variant a sample actually constructs, read from its derived `Debug`
+/// (`Variant { .. }` / `Variant`), so a fixture row cannot be mislabelled.
+fn variant_name(error: &StorageApiError) -> String {
+    format!("{error:?}")
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
+}
 
 /// Substrings that must never appear in a public message or remediation hint.
 /// The full redaction matrix lives at the command/CLI/SDK surfaces; this is the
@@ -204,6 +251,38 @@ fn sample_errors() -> Vec<(&'static str, StorageApiError, StorageApiErrorClass, 
             false,
         ),
         (
+            "WriterLockHeld",
+            StorageApiError::WriterLockHeld,
+            StorageApiErrorClass::FailedPrecondition,
+            false,
+        ),
+        (
+            "BranchHasDependentChildren",
+            StorageApiError::BranchHasDependentChildren {
+                branch_id: branch(),
+            },
+            StorageApiErrorClass::FailedPrecondition,
+            false,
+        ),
+        (
+            "IncompatibleLayout",
+            StorageApiError::IncompatibleLayout {
+                reason: "pre-V1 layout marker present",
+            },
+            StorageApiErrorClass::FailedPrecondition,
+            false,
+        ),
+        (
+            "IncompatibleFormat",
+            StorageApiError::IncompatibleFormat {
+                format: "manifest",
+                version: 9,
+                max_supported: 1,
+            },
+            StorageApiErrorClass::FailedPrecondition,
+            false,
+        ),
+        (
             "LowerLayer",
             StorageApiError::lower_layer_with(
                 StorageApiLowerLayer::Commit,
@@ -256,11 +335,32 @@ fn contains_redacted_secret(text: &str) -> Option<&'static str> {
 
 #[test]
 fn error_contract_fixture_covers_every_variant() {
-    assert_eq!(
-        sample_errors().len(),
-        EXPECTED_VARIANT_COUNT,
-        "the error-contract fixture must sample every StorageApiError variant; \
-         update sample_errors() and EXPECTED_VARIANT_COUNT together when a variant is added"
+    let declared = declared_variant_names();
+    // Parser floor: a parser that silently found nothing would let the set
+    // comparison below agree with an equally empty fixture.
+    for anchor in ["InvalidArgument", "WriterLockHeld", "LowerLayer"] {
+        assert!(
+            declared.contains(anchor),
+            "variant parser lost `{anchor}`; parsed {declared:?}"
+        );
+    }
+
+    let mut sampled = BTreeSet::new();
+    for (name, error, _, _) in sample_errors() {
+        let actual = variant_name(&error);
+        assert_eq!(
+            name, actual,
+            "fixture row labelled `{name}` constructs `{actual}`"
+        );
+        assert!(sampled.insert(actual), "variant `{name}` is sampled twice");
+    }
+
+    let missing: Vec<_> = declared.difference(&sampled).collect();
+    let unknown: Vec<_> = sampled.difference(&declared).collect();
+    assert!(
+        missing.is_empty() && unknown.is_empty(),
+        "the error-contract fixture must sample exactly the declared StorageApiError variants; \
+         add a sample_errors() row for each missing one. missing: {missing:?}, unknown: {unknown:?}"
     );
 }
 
@@ -386,7 +486,7 @@ fn each_lower_layer_has_a_distinct_boundary_code() {
         StorageApiLowerLayer::Commit,
         StorageApiLowerLayer::Lifecycle,
     ];
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     for layer in layers {
         let error = StorageApiError::lower_layer_with(layer, "failed", io_source());
         let code = error.code();
@@ -482,8 +582,6 @@ fn two_branch_failures_are_distinguishable_at_the_boundary() {
 )]
 #[test]
 fn every_storage_api_code_is_pinned_as_a_literal() {
-    use std::collections::BTreeSet;
-
     // Top-level variants (one per `code()` arm).
     let top_level = [
         StorageApiError::InvalidArgument {
@@ -533,6 +631,25 @@ fn every_storage_api_code_is_pinned_as_a_literal() {
         StorageApiError::RecoveryDegraded { reason: "r" }.code(),
         StorageApiError::MaintenanceRejected { reason: "r" }.code(),
         StorageApiError::IncompatibleLayout { reason: "r" }.code(),
+        StorageApiError::WriterLockHeld.code(),
+        StorageApiError::BranchHasDependentChildren {
+            branch_id: branch(),
+        }
+        .code(),
+        StorageApiError::IncompatibleFormat {
+            format: "f",
+            version: 2,
+            max_supported: 1,
+        }
+        .code(),
+        StorageApiError::StoragePressure {
+            branch_id: branch(),
+            severity: CommitAdmissionPressureSeverity::Blocking,
+            pressure_reason: CommitAdmissionPressureReason::NonZeroLevelTableBacklog,
+            reason: "r",
+            retryable: true,
+        }
+        .code(),
     ];
     // Assert the exact literals so a rename fails here (and the guard sees them).
     let expected_top: BTreeSet<&str> = [
@@ -549,6 +666,10 @@ fn every_storage_api_code_is_pinned_as_a_literal() {
         "failed_precondition.storage_api.recovery_degraded",
         "failed_precondition.storage_api.maintenance",
         "failed_precondition.storage_api.incompatible_layout",
+        "failed_precondition.storage_api.writer_lock",
+        "failed_precondition.storage_api.branch_dependent_children",
+        "failed_precondition.storage_api.incompatible_format",
+        "failed_precondition.storage_api.storage_pressure",
     ]
     .into_iter()
     .collect();
@@ -587,9 +708,8 @@ fn every_storage_api_code_is_pinned_as_a_literal() {
         );
     }
 
-    // Two codes the top-level array cannot express through `code()` alone:
-    // StoragePressure and ResourceExhausted both live behind structured
-    // constructors; assert their literals directly.
+    // ResourceExhausted's literal is asserted directly (its structured
+    // fields make the array row noisy).
     assert_eq!(
         StorageApiError::ResourceExhausted {
             resource: "r",
