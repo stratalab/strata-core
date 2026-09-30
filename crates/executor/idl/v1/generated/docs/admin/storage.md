@@ -1,7 +1,7 @@
 ---
 title: "Read storage footprint"
 description: "Read the database's on-disk footprint."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: admin
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "inference commands"
 description: "Command reference for the inference family."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: inference
 ---
 

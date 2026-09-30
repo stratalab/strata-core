@@ -1,7 +1,7 @@
 ---
 title: "Delete vector"
 description: "Delete one vector key."
-source: strata-core@1.2.6
+source: strata-core@1.2.7
 section: vector
 ---
 

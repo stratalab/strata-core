@@ -4,6 +4,73 @@ All notable changes to StrataDB are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.7] - 2026-09-30
+
+A storage follow-up to 1.2.6. The headline fix: 1.2.6 left one empty
+directory under `timeline/` for every checkpoint, so on ext4 a database with
+45 KB of data could occupy 1.7 MB on disk. 1.2.7 removes those directories as
+it goes and cleans up the ones an existing database already has the next time
+it opens. The release also cuts compaction's writes to disk, closes a race
+that could delete a table a background build had just written, and hardens
+WAL retention and recovery.
+
+No database-format change: 1.2.7 opens databases written by 1.2.6, and 1.2.6
+can open databases 1.2.7 writes.
+
+### Changed
+
+- **Compaction writes much less on the local filesystem.** A table that
+  compaction retires is now hard-linked into quarantine instead of copied.
+  At steady state the copy was 43–46% of all bytes compaction wrote, and it
+  now writes none (#3721). Other storage backends still copy.
+- **Historical scans stop at the page limit.** An `as_of` prefix or range
+  scan used to resolve every key under the prefix before cutting the page;
+  it now stops once the page is full, with the same rows (#3560).
+- **Size refusals name the size and the limit.** "Too large" errors for rows,
+  keys, batches, event payloads, names and documents now carry the refused
+  size and the limit as `actual_bytes` / `limit_bytes` details and in the
+  message. Error codes are unchanged (#3397).
+
+### Fixed
+
+- **Empty `timeline/` directories no longer pile up** (#3692). Deleting an
+  object removes the directories it empties, and reopening a 1.2.6 database
+  removes the directories it left behind. For the example above, 401 commits
+  now take 108 KB on disk instead of 1.7 MB.
+- **A cleanup pass could delete a table a background build had just
+  written.** The cleanup listed the files on disk after it took its list of
+  in-progress builds, so a build that finished in between lost its output
+  and failed with `rewrite_publication_orphan` or `flush_publication_orphan`.
+  No committed data was lost. The same race was behind #3353 and #3382
+  (#3720).
+- **An off-lock scan could fail after compaction** with
+  `failed_precondition.branch.state`. The root cause is now confirmed, and a
+  regression test and loom models of the read and cleanup protocol cover it
+  (#3047, #3048).
+- **WAL retention could leave a gap in the log.** A failed delete of an old
+  segment no longer lets newer segments be deleted, which used to make the
+  next strict open refuse a database that had lost nothing (#3697).
+- **Recovery refuses a missing commit record.** If the WAL segment holding
+  the last recorded commit disappears, strict recovery refuses and lossy
+  recovery reports data loss, instead of opening as Healthy with committed
+  rows missing (#2768; a full fix for a deleted lower segment needs a format
+  change and is deferred).
+- **An oversized commit is refused before it uses a version number**, with a
+  typed `invalid_argument` size error instead of a retryable
+  `internal.storage_api.commit` (#3698).
+- **A re-forked branch name no longer inherits the deleted branch's
+  timeline** from a checkpoint (#2856).
+- **A retried table rewrite no longer hard-fails on a byte mismatch**:
+  output names now cover every input that affects the output bytes (#3469).
+- **A queued cache preheat could stall writers under backpressure**. A
+  preheat that lost a race for its lane stayed queued, and that stopped the
+  forced flush or compaction a waiting writer needed (#3687).
+- **A writer lock could outlive `close()`** when another thread spawned a
+  subprocess at the same moment; the lock is now released explicitly (#3609).
+- **A database path that is a symlink to a directory now opens** (#3008).
+- Sanitizer and nightly-lane fixes (#3495, #3496, #3623) and flaky tests
+  (#3513, #3546, #3652, #3655, #2837).
+
 ## [1.2.6] - 2026-09-29
 
 A storage-footprint release. A database written through the Python SDK
