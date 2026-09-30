@@ -3327,6 +3327,258 @@ fn table_object_mark_and_sweep_run_during_active_build() {
     }
 }
 
+/// #3720: when an off-lock build's output lands relative to the table-object
+/// mark. A build reserves its output name, then publishes the bytes; the mark
+/// lists the table inventory and filters it by the pinned set. The rows are
+/// where the reserve-then-publish falls against that listing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MarkTimeBuildOutput {
+    /// Reserved and published before the mark started.
+    ReservedBeforeMark,
+    /// Reserved and published while the mark runs, before it lists the
+    /// inventory — the window a concurrent off-lock build can hit.
+    ReservedDuringMark,
+    /// Published during the mark by a build that has already dropped its
+    /// reservation (an abandoned attempt): legitimate garbage.
+    ReleasedDuringMark,
+    /// Published with no reservation at all: garbage.
+    NeverReserved,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MarkSweepEntry {
+    /// `start_next_background_quarantine_sweep`: the mark under the lock, the
+    /// staging off-lock.
+    Background,
+    /// `run_next_quarantine_maintenance`: the inline sweep runner.
+    Inline,
+}
+
+/// Run one sweep with a build output landing at `timing`, plus a pre-written
+/// unreserved bait object. Returns (output survived, bait survived).
+fn sweep_with_build_output(timing: MarkTimeBuildOutput, entry: MarkSweepEntry) -> (bool, bool) {
+    use crate::lifecycle::durable::{inventory_listing_seam, InFlightOutputsGuard};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x3e);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    let bait = ObjectLayout::table_object(&branch.to_string(), 0, "mark-bait").expect("bait");
+    backend
+        .write_object(&bait, b"bait-table")
+        .expect("bait write");
+    let output =
+        ObjectLayout::table_object(&branch.to_string(), 1, "mark-time-output").expect("output");
+
+    let registry = runtime.inflight_table_outputs().clone();
+    // The build's reservation, held across the sweep like a real in-flight
+    // build holds its guard until install.
+    let held: Rc<RefCell<Option<InFlightOutputsGuard>>> = Rc::new(RefCell::new(None));
+    let publish = {
+        let registry = registry.clone();
+        let held = Rc::clone(&held);
+        let output = output.clone();
+        move |reserve: bool, keep: bool| {
+            let guard = registry.guard();
+            if reserve {
+                // Reserve-then-publish: the order every build publish site uses.
+                guard.reserve(output.clone());
+            }
+            backend
+                .write_object(&output, b"build-output-table")
+                .expect("build output write");
+            if keep {
+                *held.borrow_mut() = Some(guard);
+            }
+        }
+    };
+    match timing {
+        MarkTimeBuildOutput::ReservedBeforeMark => publish(true, true),
+        MarkTimeBuildOutput::ReservedDuringMark => {
+            inventory_listing_seam::install_once(move || publish(true, true));
+        }
+        MarkTimeBuildOutput::ReleasedDuringMark => {
+            inventory_listing_seam::install_once(move || publish(true, false));
+        }
+        MarkTimeBuildOutput::NeverReserved => {
+            inventory_listing_seam::install_once(move || publish(false, false));
+        }
+    }
+
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::quarantine())
+        .expect("enqueue sweep");
+    match entry {
+        MarkSweepEntry::Background => {
+            let Some(DurableBackgroundMaintenanceStep::SweepStage(inputs)) = runtime
+                .start_next_background_quarantine_sweep()
+                .expect("start sweep")
+            else {
+                panic!("the bait makes the mark stage a sweep");
+            };
+            runtime
+                .finish_quarantine_sweep(inputs.stage())
+                .expect("finish sweep");
+        }
+        MarkSweepEntry::Inline => {
+            let sweep = runtime
+                .run_next_quarantine_maintenance()
+                .expect("run sweep")
+                .expect("sweep outcome");
+            assert_eq!(sweep.status(), MaintenanceOutcomeStatus::Completed);
+        }
+    }
+    assert!(
+        !inventory_listing_seam::is_armed(),
+        "the hook fired inside the mark (non-vacuous timing)"
+    );
+    drop(held);
+    (
+        backend.object_metadata(&output).is_ok(),
+        backend.object_metadata(&bait).is_ok(),
+    )
+}
+
+/// #3720 truth table, through both sweep entry points: an output whose build
+/// holds its reservation survives the sweep no matter when, relative to the
+/// mark's inventory listing, it was published; an unreserved or released one
+/// is reclaimed. The `ReservedDuringMark` row is the regression — the mark
+/// snapshotted the in-flight pins BEFORE listing, so a build that reserved
+/// and published in between was listed but not pinned, the sweep deleted
+/// the fresh output mid-build, and the build's read-back failed closed as
+/// `ambiguous_commit.lifecycle.rewrite_publication_orphan` (flush:
+/// `flush_publication_orphan`).
+#[test]
+fn a_reserved_build_output_survives_the_sweep_whenever_it_lands() {
+    use MarkTimeBuildOutput::{
+        NeverReserved, ReleasedDuringMark, ReservedBeforeMark, ReservedDuringMark,
+    };
+    let table = [
+        (ReservedBeforeMark, true),
+        (ReservedDuringMark, true),
+        (ReleasedDuringMark, false),
+        (NeverReserved, false),
+    ];
+    for entry in [MarkSweepEntry::Background, MarkSweepEntry::Inline] {
+        for (timing, survives) in table {
+            let (output_survived, bait_survived) = sweep_with_build_output(timing, entry);
+            assert_eq!(
+                output_survived, survives,
+                "{entry:?} sweep, build output {timing:?}"
+            );
+            assert!(
+                !bait_survived,
+                "{entry:?} sweep, {timing:?}: the unreserved bait is reclaimed (the mark ran)"
+            );
+        }
+    }
+}
+
+/// #3720 at the call site, with a real build: an L0→L1 compaction whose
+/// off-lock build reserves and publishes its fresh output while a background
+/// sweep's mark is running (before it lists the inventory) keeps that output
+/// through the sweep and installs it `Completed`. Before the fix the mark had
+/// already snapshotted the in-flight pins, so it staged the fresh output as
+/// garbage and deleted it; the install then deferred on the vanished object
+/// (or, had the delete landed during the build's own read-back, the build
+/// failed closed as a publication orphan).
+#[test]
+fn a_compaction_publishing_during_the_sweep_mark_installs_its_output() {
+    use crate::lifecycle::durable::inventory_listing_seam;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    // The build result and the output names it reserved, captured inside the mark.
+    type BuiltInsideMark = Option<(DurableBackgroundMaintenanceBuilt, Vec<ObjectName>)>;
+
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x3f);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+    for value in [&b"value-1"[..], &b"value-2"[..]] {
+        let (built, _) = build_flush_for_frontier_tests(&mut runtime, branch, b"mark-key", value);
+        publish_to_confirmation(&mut runtime, built);
+    }
+    assert!(
+        runtime.inflight_table_outputs().snapshot().is_empty(),
+        "the confirmed flushes hold no reservations"
+    );
+    let bait = ObjectLayout::table_object(&branch.to_string(), 0, "mark-bait").expect("bait");
+    backend
+        .write_object(&bait, b"bait-table")
+        .expect("bait write");
+
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::compaction(branch, 0))
+        .expect("enqueue compaction");
+    let DurableBackgroundMaintenanceStep::Build(pending) = runtime
+        .start_next_background_table_rewrite_maintenance()
+        .expect("start compaction")
+        .expect("compaction step")
+    else {
+        panic!("expected a compaction build step");
+    };
+    let registry = runtime.inflight_table_outputs().clone();
+    let built: Rc<RefCell<BuiltInsideMark>> = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&built);
+    inventory_listing_seam::install_once(move || {
+        let output = pending.build().expect("off-lock compaction build");
+        *slot.borrow_mut() = Some((output, registry.snapshot()));
+    });
+
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::quarantine())
+        .expect("enqueue sweep");
+    let Some(DurableBackgroundMaintenanceStep::SweepStage(inputs)) = runtime
+        .start_next_background_quarantine_sweep()
+        .expect("start sweep")
+    else {
+        panic!("the bait makes the mark stage a sweep");
+    };
+    runtime
+        .finish_quarantine_sweep(inputs.stage())
+        .expect("finish sweep");
+    let (built, outputs) = built
+        .borrow_mut()
+        .take()
+        .expect("the compaction built inside the mark");
+    assert!(!outputs.is_empty(), "the compaction published an output");
+    assert!(
+        backend.object_metadata(&bait).is_err(),
+        "the sweep ran and reclaimed the unreserved bait"
+    );
+    for output in &outputs {
+        assert!(
+            backend.object_metadata(output).is_ok(),
+            "the in-flight compaction output {output} must survive the sweep"
+        );
+    }
+
+    let outcome = match runtime
+        .begin_publish_phase(built)
+        .expect("begin compaction publish")
+    {
+        PreparedPublishStep::Done(result) => result.expect("compaction publish"),
+        PreparedPublishStep::OffLock(prepared) => {
+            let (prepared, write_result) = prepared.persist_off_lock();
+            runtime
+                .finish_publish_phase(prepared, write_result)
+                .expect("finish compaction publish")
+        }
+    };
+    assert_eq!(
+        outcome.status(),
+        MaintenanceOutcomeStatus::Completed,
+        "the compaction installs its surviving output: {outcome:?}"
+    );
+    assert!(
+        runtime.recent_maintenance_failures().is_empty(),
+        "no maintenance failure recorded"
+    );
+}
+
 /// #3382: a background build whose adopted output a concurrent table-object
 /// sweep deleted mid-read reports the typed race, and the dispatcher DEFERS
 /// the task — the build-phase analog of the #2553 install-time arm. A

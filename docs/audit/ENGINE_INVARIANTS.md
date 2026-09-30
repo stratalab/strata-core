@@ -1894,6 +1894,26 @@ directions `fresh_flush_output_vanishing_mid_build_still_fails_closed`,
 `retried_rewrite_with_changed_codec_publishes_distinct_output_instead_of_failing`, and
 the dedupe direction `durable_compaction_output_identities_are_retry_stable`.
 
+**The fresh-output pin is an ORDERING (#3720).** Builds reserve an output name before
+publishing its bytes, but off the runtime lock — concurrently with a mark. The pin holds
+only if the mark reads the in-flight registry AFTER it lists the inventory it filters: then
+every listed build output was reserved first. A mark that snapshotted the registry BEFORE
+listing (every mark site did, until #3720) saw a build that reserved and published in
+between as listed-but-unpinned, and the sweep deleted a fresh output mid-build — the build's
+read-back then failed closed as `ambiguous_commit.lifecycle.rewrite_publication_orphan`
+(flush: `flush_publication_orphan`), the #3353/#3720 flake. `ReclaimPins` carries the
+in-flight component unresolved and `table_object_retention_request` — the one request
+builder every mark site uses (background and inline sweeps, retention mark, inline
+`Reclaim`, close sweep, footprint audit) — resolves it only after its listing.
+**Audit**: in `table_object_retention_request` (`lifecycle/durable/maintenance.rs`),
+`pins.resolve_after_listing()` must follow `list_inventory()`, and no mark site may call
+`with_pinned_objects` on its own. Tests: the truth table
+`a_reserved_build_output_survives_the_sweep_whenever_it_lands` (both sweep entry points;
+the `ReservedDuringMark` row lands a reserve-then-publish between the mark's start and its
+listing via `inventory_listing_seam`) and the call site
+`a_compaction_publishing_during_the_sweep_mark_installs_its_output` (a real L0→L1 build
+inside the mark keeps its output and installs `Completed`).
+
 ### DUR-017: Recovery memory is bounded — streamed reads, flushed installs
 
 Recovery must never materialize the unreclaimed WAL tail: the decoded-record

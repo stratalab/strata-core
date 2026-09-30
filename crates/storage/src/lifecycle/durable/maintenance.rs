@@ -1394,9 +1394,9 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
         if let LifecycleRetentionScope::TableObjects { branch_id } = request.scope() {
             // #2553 rider: this entry previously omitted the in-flight output pins the other
             // mark sites carried; the unified helper closes that gap too.
-            let pinned_objects = self.reclaim_pinned_table_objects();
-            let table_request = table_object_retention_request(&self.services, branch_id, &health)?
-                .with_pinned_objects(pinned_objects);
+            let pins = self.reclaim_pinned_table_objects();
+            let table_request =
+                table_object_retention_request(&self.services, branch_id, &health, &pins)?;
             let outcome = table_object_retention_outcome(&table_request)?;
             // The public Reclaim verb performs reclaim, not just a report: chain the sweep
             // (Quarantine → Purge) for the marked candidates. Unconditional like the queued
@@ -2437,18 +2437,18 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
     /// in-flight build outputs (#2531), and the manifest frontier — objects the last
     /// durably-confirmed manifest or a built-but-unconfirmed publication still lists (#2553).
     /// Every mark entry point MUST use this helper; a mark missing any component can classify
-    /// a recovery-relevant object as garbage.
-    pub(super) fn reclaim_pinned_table_objects(&self) -> Vec<crate::object::ObjectName> {
-        let mut pinned = in_memory_pinned_table_objects(&self.branch_catalog, &self.table_catalog);
-        pinned.extend(published_view_pinned_table_objects(
+    /// a recovery-relevant object as garbage. The in-flight component is resolved by
+    /// [`table_object_retention_request`] only AFTER it lists the inventory (#3720).
+    pub(super) fn reclaim_pinned_table_objects(&self) -> ReclaimPins {
+        let mut locked = in_memory_pinned_table_objects(&self.branch_catalog, &self.table_catalog);
+        locked.extend(published_view_pinned_table_objects(
             &self.snapshot_publisher.current_views(),
             &self.table_catalog,
         ));
-        pinned.extend(self.inflight_outputs.snapshot());
         let frontier = self.table_catalog.manifest_frontier_pinned_objects();
         crate::observability::perf_trace::record_table_object_frontier_pins(frontier.len() as u64);
-        pinned.extend(frontier);
-        pinned
+        locked.extend(frontier);
+        ReclaimPins::new(locked, self.inflight_outputs.clone())
     }
 
     /// #3047 test seam: the objects the currently published views pin.
@@ -4368,8 +4368,8 @@ impl<'a, S> LifecycleDurableLocalRuntime<'a, S> {
             &self.services,
             self.initial_branch_id,
             &self.current_recovery_health,
+            &pinned_objects,
         )
-        .map(|request| request.with_pinned_objects(pinned_objects))
         .and_then(|request| table_object_retention_outcome(&request));
         let candidates: Vec<crate::object::ObjectName> = match candidates {
             Ok(outcome) => outcome
@@ -5675,7 +5675,7 @@ struct DurableRetentionMaintenanceRunner<'a, 'b> {
     /// In-memory-reachable table objects plus in-flight build outputs
     /// (#2524), pinned live in the mark so the report matches what the sweep
     /// will actually reclaim.
-    pinned_objects: Vec<crate::object::ObjectName>,
+    pinned_objects: ReclaimPins,
 }
 
 impl DurableRetentionMaintenanceRunner<'_, '_> {
@@ -5784,10 +5784,13 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
             self.publish_pending_releases()?;
         }
         if let LifecycleRetentionScope::TableObjects { branch_id } = request.scope() {
-            let table_retention =
-                table_object_retention_request(self.services, branch_id, &self.health)
-                    .map(|request| request.with_pinned_objects(self.pinned_objects.clone()))
-                    .and_then(|request| table_object_retention_outcome(&request))?;
+            let table_retention = table_object_retention_request(
+                self.services,
+                branch_id,
+                &self.health,
+                &self.pinned_objects,
+            )
+            .and_then(|request| table_object_retention_outcome(&request))?;
             return Ok(append_released_table_names(
                 table_retention.retention().maintenance_outcome(),
                 &drained,
@@ -5848,10 +5851,13 @@ impl MaintenanceTaskRunner for DurableRetentionMaintenanceRunner<'_, '_> {
                         .as_ref(),
                 )?;
                 let retention_outcome = retention_outcome_for_delegated_families(proof)?;
-                let table_retention =
-                    table_object_retention_request(self.services, self.branch_id, &self.health)
-                        .map(|request| request.with_pinned_objects(self.pinned_objects.clone()))
-                        .and_then(|request| table_object_retention_outcome(&request))?;
+                let table_retention = table_object_retention_request(
+                    self.services,
+                    self.branch_id,
+                    &self.health,
+                    &self.pinned_objects,
+                )
+                .and_then(|request| table_object_retention_outcome(&request))?;
                 Ok(append_released_table_names(
                     global_retention_maintenance_outcome(
                         &snapshot_outcome,
@@ -5963,7 +5969,7 @@ pub(super) struct DurableTableObjectSweepRunner<'a, 'b> {
     pub(super) codec_id: LifecycleCodecId,
     pub(super) staged_at: Timestamp,
     pub(super) retired_readers_alive: bool,
-    pub(super) pinned_objects: Vec<crate::object::ObjectName>,
+    pub(super) pinned_objects: ReclaimPins,
     /// Out: objects staged into quarantine this pass (drives the follow-up Purge enqueue).
     pub(super) quarantined_objects: usize,
     /// Out: bytes of the source objects staged this pass (the reclaim ledger's bytes).
@@ -5983,8 +5989,12 @@ impl MaintenanceTaskRunner for DurableTableObjectSweepRunner<'_, '_> {
         }
         // Fresh mark under this lock hold (metadata-only: inventory listing + manifest decode,
         // never table data).
-        let request = table_object_retention_request(self.services, self.branch_id, &self.health)?
-            .with_pinned_objects(self.pinned_objects.clone());
+        let request = table_object_retention_request(
+            self.services,
+            self.branch_id,
+            &self.health,
+            &self.pinned_objects,
+        )?;
         let outcome = table_object_retention_outcome(&request)?;
         let candidates: Vec<crate::object::ObjectName> = outcome
             .decisions()
@@ -6323,15 +6333,90 @@ fn global_retention_maintenance_outcome(
     outcome
 }
 
+/// #3720 test seam: run a hook on the marking thread immediately before the
+/// table-object inventory listing, so a test can land an off-lock build's
+/// reserve-then-publish inside the mark exactly where a concurrent build can.
+/// Thread-local and one-shot: it fires for the next listing on the installing
+/// thread only, so parallel tests cannot observe each other's hooks.
+#[cfg(test)]
+pub(crate) mod inventory_listing_seam {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static BEFORE_LISTING: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn install_once(hook: impl FnOnce() + 'static) {
+        BEFORE_LISTING.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(crate) fn is_armed() -> bool {
+        BEFORE_LISTING.with(|slot| slot.borrow().is_some())
+    }
+
+    pub(super) fn fire() {
+        let hook = BEFORE_LISTING.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+/// #3720: a table-object mark's pinned set, split by whether it can move while the
+/// mark holds the runtime lock.
+///
+/// Off-lock builds (flush, compaction, materialization) reserve each output name in the
+/// in-flight registry BEFORE publishing its bytes (#2524), but they do so WITHOUT the runtime
+/// lock, concurrently with a mark. Reserve-before-publish protects an output only if the mark
+/// reads the registry AFTER it lists the inventory: every listed output was then reserved
+/// first, so it is pinned. Snapshotting the registry before the listing (as every mark did)
+/// left a window where a build reserved and published in between, listed but not pinned, so
+/// the sweep deleted a fresh output mid-build and the build failed closed as a publication
+/// orphan. The in-flight component is therefore carried unresolved and read only by
+/// [`table_object_retention_request`], after its listing.
+#[derive(Clone, Debug)]
+pub(super) struct ReclaimPins {
+    /// In-memory branch tables, published-view tables and the manifest frontier: these change
+    /// only under the runtime lock, which the mark holds from snapshot through listing.
+    locked: Vec<crate::object::ObjectName>,
+    /// The in-flight build-output registry, reserved into off-lock.
+    inflight: super::inflight::InFlightTableOutputs,
+}
+
+impl ReclaimPins {
+    pub(super) const fn new(
+        locked: Vec<crate::object::ObjectName>,
+        inflight: super::inflight::InFlightTableOutputs,
+    ) -> Self {
+        Self { locked, inflight }
+    }
+
+    /// The pinned set for an inventory listing that has ALREADY been read. Must not be called
+    /// before the listing it filters (#3720).
+    fn resolve_after_listing(&self) -> Vec<crate::object::ObjectName> {
+        let mut pinned = self.locked.clone();
+        pinned.extend(self.inflight.snapshot());
+        pinned
+    }
+}
+
+/// A table-object mark request: the manifests, the inventory listing and the quarantine
+/// inventories, filtered by `pins` resolved AFTER the listing (#3720). Every mark site builds
+/// its request here, so none can snapshot in-flight build outputs before listing them.
 pub(super) fn table_object_retention_request(
     services: &crate::lifecycle::LifecycleDurableLocalServices<'_>,
     branch_id: strata_core::BranchId,
     health: &RecoveryHealth,
-) -> LifecycleResult<LifecycleTableObjectRetentionRequest> {
+    pins: &ReclaimPins,
+) -> Result<LifecycleTableObjectRetentionRequest, LifecycleError> {
     let manifests = services
         .table_manifest()
         .load_all_current()
         .map_err(manifest_error)?;
+    #[cfg(test)]
+    inventory_listing_seam::fire();
     let inventory = services
         .table_object()
         .list_inventory()
@@ -6339,6 +6424,10 @@ pub(super) fn table_object_retention_request(
         .into_iter()
         .map(|(object, byte_count)| LifecycleTableObjectInventoryEntry::new(object, byte_count))
         .collect::<LifecycleResult<Vec<_>>>()?;
+    // #3720: only now, with the listing in hand, read the in-flight reservations. A build
+    // reserves before it publishes, so every output this listing saw is reserved by now,
+    // or its build already installed it under the lock this mark holds, or abandoned it.
+    let pinned_objects = pins.resolve_after_listing();
     // Inventory is global (`tables/` prefix); to avoid re-classifying another
     // branch's already-quarantined object as a fresh candidate, load the
     // quarantine inventory for every branch that owns a known table manifest,
@@ -6397,7 +6486,8 @@ pub(super) fn table_object_retention_request(
         inventory,
         quarantined_objects,
     )?
-    .with_own_quarantined_objects(own_quarantined_objects))
+    .with_own_quarantined_objects(own_quarantined_objects)
+    .with_pinned_objects(pinned_objects))
 }
 
 fn table_object_proof_epochs(

@@ -688,7 +688,7 @@ struct DurableCloseMaintenanceRunner<'a, 'b> {
     database_id: [u8; 16],
     codec_id: LifecycleCodecId,
     retired_readers_alive: bool,
-    pinned_objects: Vec<crate::object::ObjectName>,
+    pinned_objects: super::maintenance::ReclaimPins,
     /// The last sweep's facts, read back by the close-time reclaim drive.
     last_sweep: Option<CloseSweepFacts>,
 }
