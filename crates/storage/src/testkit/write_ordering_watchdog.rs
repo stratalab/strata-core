@@ -411,6 +411,13 @@ impl<B: Backend> Backend for WriteOrderingWatchdog<B> {
         self.inner.object_metadata(name)
     }
 
+    fn remove_empty_dirs_under(
+        &self,
+        prefix: &ObjectPrefix,
+    ) -> Result<u64, crate::backend::BackendError> {
+        self.inner.remove_empty_dirs_under(prefix)
+    }
+
     fn acquire_writer_lock(&self, name: &ObjectName) -> BackendResult<BackendWriterGuard> {
         self.inner.acquire_writer_lock(name)
     }

@@ -5860,3 +5860,166 @@ fn pressure_wait_still_forces_maintenance_after_a_preheat_lane_race() {
         assert_eq!(pending, kinds.len());
     }
 }
+
+// ---- #3692: emptied directories ------------------------------------------
+
+/// #3692: every empty directory under `root` (never `root` itself), relative
+/// to it, split into the permanent family roots (one component) and the
+/// directories below them.
+#[cfg(feature = "localfs")]
+fn empty_dirs(root: &std::path::Path) -> (Vec<String>, Vec<String>) {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+        let entries: Vec<_> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("dir entry"))
+            .collect();
+        if entries.is_empty() && dir != root {
+            out.push(
+                dir.strip_prefix(root)
+                    .expect("under root")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        for entry in entries {
+            if entry.file_type().expect("file type").is_dir() {
+                walk(root, &entry.path(), out);
+            }
+        }
+    }
+    let mut all = Vec::new();
+    walk(root, root, &mut all);
+    all.sort();
+    all.into_iter().partition(|dir| !dir.contains('/'))
+}
+
+/// #3692: the directories directly under `timeline/`, by name.
+#[cfg(feature = "localfs")]
+fn timeline_dirs(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(root.join("timeline")).map_or_else(
+        |_| std::collections::BTreeSet::new(),
+        |entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        },
+    )
+}
+
+/// #3692: `sessions` open → commit → clean-close cycles on one database, each
+/// its own session exactly as a CLI loop of `strata <db> kv put` is.
+#[cfg(feature = "localfs")]
+fn run_put_close_sessions(backend: &'static StorageBackend, sessions: u64) {
+    for index in 0..sessions {
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            backend,
+        )
+        .expect("open durable runtime")
+        .into_runtime();
+        runtime
+            .commit(&put_batch(b"k", format!("v{index}").as_bytes()))
+            .expect("commit");
+        runtime.close().expect("clean close");
+    }
+}
+
+/// #3692 (a): every clean close checkpoints, seals timeline segments into a
+/// new `timeline/<sealing id>/` directory and prunes the superseded ones. A
+/// loop of sessions leaves no empty directory below any family root — before
+/// the fix, one per checkpoint (4 KiB each on ext4) accumulated forever.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_clean_close_loop_leaves_no_empty_directories() {
+    const SESSIONS: u64 = 12;
+    let root = temp_dir_for_api_test("empty-dirs-close-loop");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    run_put_close_sessions(backend, SESSIONS);
+
+    let segments = timeline_segment_files(&root);
+    assert!(
+        !segments.is_empty(),
+        "the loop sealed timeline segments (the test is not vacuous)"
+    );
+    let (_family_roots, below) = empty_dirs(&root);
+    assert_eq!(below, Vec::<String>::new(), "no emptied directory survives");
+    let holding: std::collections::BTreeSet<String> = segments
+        .iter()
+        .filter_map(|segment| segment.split('/').next().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        timeline_dirs(&root),
+        holding,
+        "every timeline directory holds a live segment ({SESSIONS} checkpoints)"
+    );
+
+    let reopened = reopen_and_drain(backend);
+    assert_eq!(
+        read_value(&reopened, b"k"),
+        Some(format!("v{}", SESSIONS - 1).into_bytes())
+    );
+}
+
+/// #3692 (b): a 1.2.6 database carries one empty `timeline/<id>/` per past
+/// checkpoint. The reopen's reconcile prune (queued by bootstrap, run by the
+/// open reclaim wake — never inline in `open`) sweeps them; the live segments
+/// stay and the data reads back. A reopen with no leftovers changes nothing.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_reopen_reconcile_sweeps_leftover_empty_timeline_dirs() {
+    let root = temp_dir_for_api_test("empty-dirs-reopen-sweep");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    run_put_close_sessions(backend, 3);
+    let live_segments = timeline_segment_files(&root);
+    let live_dirs = timeline_dirs(&root);
+    assert!(!live_segments.is_empty(), "the sessions sealed segments");
+
+    // Plant what 1.2.6 left behind: empty sealing directories, the shape
+    // `timeline_segment` names.
+    let planted: Vec<String> = (0x100_u64..0x110)
+        .map(|id| format!("{id:016x}"))
+        .filter(|name| !live_dirs.contains(name))
+        .collect();
+    for name in &planted {
+        std::fs::create_dir(root.join("timeline").join(name)).expect("plant leftover");
+    }
+    assert_eq!(empty_dirs(&root).1.len(), planted.len(), "planted");
+
+    // `open` itself removes nothing (DUR-018/DUR-019): the sweep rides the
+    // reconcile prune the open reclaim wake runs.
+    let mut runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+            .with_maintenance_scheduling_policy(
+                StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+            ),
+        backend,
+    )
+    .expect("reopen")
+    .into_runtime();
+    assert_eq!(
+        empty_dirs(&root).1.len(),
+        planted.len(),
+        "open is not a reclaim pass"
+    );
+    drain_maintenance_to_idle(&mut runtime);
+    assert_eq!(
+        empty_dirs(&root).1,
+        Vec::<String>::new(),
+        "the reconcile swept every leftover"
+    );
+    assert_eq!(timeline_segment_files(&root), live_segments);
+    assert_eq!(timeline_dirs(&root), live_dirs);
+    assert_eq!(read_value(&runtime, b"k"), Some(b"v2".to_vec()));
+    runtime.close().expect("close");
+
+    // No leftovers: a reopen + drain leaves the timeline tree as it found it.
+    let segments_before = timeline_segment_files(&root);
+    let dirs_before = timeline_dirs(&root);
+    let reopened = reopen_and_drain(backend);
+    assert_eq!(timeline_segment_files(&root), segments_before);
+    assert_eq!(timeline_dirs(&root), dirs_before);
+    assert_eq!(empty_dirs(&root).1, Vec::<String>::new());
+    drop(reopened);
+}

@@ -669,6 +669,15 @@ mod fault {
             self.inner.object_metadata(name)
         }
 
+        // Forwarded but not fault-targeted (#3692): empty-directory removal is
+        // garbage collection with no object-level effect to fault.
+        fn remove_empty_dirs_under(
+            &self,
+            prefix: &ObjectPrefix,
+        ) -> Result<u64, crate::backend::BackendError> {
+            self.inner.remove_empty_dirs_under(prefix)
+        }
+
         // Forwarded but not fault-targeted: the single-writer lock is acquired at
         // open and is not one of the swept I/O operations.
         fn acquire_writer_lock(

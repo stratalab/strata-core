@@ -48,6 +48,18 @@ pub(crate) fn timeline_segment_is_dead(
     }
 }
 
+/// #3692: whether a segment prune also sweeps the timeline family's empty
+/// directories. Only the open-time reconcile does: it runs where no publish is
+/// in flight, and it is the pass that reclaims directories a 1.2.6 database
+/// left behind. A `Superseded` prune's own deletes already remove the
+/// directories they empty (the backend's delete contract).
+pub(crate) const fn timeline_prune_sweeps_empty_dirs(mode: TimelineSegmentPruneMode) -> bool {
+    match mode {
+        TimelineSegmentPruneMode::Superseded => false,
+        TimelineSegmentPruneMode::ReconcileToAttested => true,
+    }
+}
+
 /// What a segment prune did: deletions with their bytes, and failures (left
 /// for the next prune).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -207,6 +219,17 @@ impl SnapshotService<'_> {
                 Ok(_) | Err(_) => report.failed += 1,
             }
         }
+        if timeline_prune_sweeps_empty_dirs(mode) {
+            let prefix = ObjectLayout::timeline_prefix()
+                .map_err(|source| SnapshotServiceError::Layout { source })?;
+            // #3692: best-effort garbage removal. Each segment directory
+            // (`timeline/<sealing id>/`) is per-checkpoint, and 1.2.6 deletes
+            // left every emptied one behind; this sweep reclaims them. A sweep
+            // failure frees no object bytes and strands none, so it is neither
+            // a prune failure nor health debt — the next reopen's reconcile
+            // sweeps again.
+            let _ = self.backend.remove_empty_dirs_under(&prefix);
+        }
         Ok(report)
     }
 }
@@ -304,6 +327,18 @@ mod tests {
                 expected,
                 "{mode:?} {segment:?}"
             );
+        }
+    }
+
+    /// #3692: only the open-time reconcile sweeps empty timeline directories;
+    /// a `Superseded` prune's deletes remove the directories they empty.
+    #[test]
+    fn timeline_prune_sweeps_empty_dirs_truth_table() {
+        for (mode, expected) in [
+            (TimelineSegmentPruneMode::Superseded, false),
+            (TimelineSegmentPruneMode::ReconcileToAttested, true),
+        ] {
+            assert_eq!(timeline_prune_sweeps_empty_dirs(mode), expected, "{mode:?}");
         }
     }
 }

@@ -222,3 +222,79 @@ fn two_user_branches_with_durable_bases_checkpoint_and_reclaim_wal() {
         db.close().expect("a second clean close with nothing new");
     }
 }
+
+/// Every empty directory below a family root (`timeline/<id>`, `tables/<b>`,
+/// ...), relative to `root`. Family roots themselves are permanent.
+fn empty_dirs_below_family_roots(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
+        let entries: Vec<_> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("dir entry"))
+            .collect();
+        if entries.is_empty() && depth >= 2 {
+            out.push(
+                dir.strip_prefix(root)
+                    .expect("under root")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        for entry in entries {
+            if entry.file_type().expect("file type").is_dir() {
+                walk(root, &entry.path(), depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, 0, &mut out);
+    out.sort();
+    out
+}
+
+/// #3692: the issue's repro — a loop of single-put sessions, each a clean
+/// close that checkpoints, seals timeline segments under a new
+/// `timeline/<sealing id>/` and prunes the superseded ones. In 1.2.6 every
+/// pruned segment left its directory behind (4 KiB each on ext4: 45 KB of data
+/// in 1.7 MB after 401 puts). Now no emptied directory survives, and the
+/// timeline keeps only the directories that hold a live segment.
+#[test]
+fn put_close_loop_leaves_no_empty_timeline_directories() {
+    const SESSIONS: u32 = 20;
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path().join("db");
+    for index in 0..SESSIONS {
+        let mut db = open_durable_database(&root).expect("durable open");
+        let mut kv = db.kv(branch("default"), space("app")).expect("kv opens");
+        kv.put(key(b"k"), value(format!("v{index}").as_bytes()))
+            .expect("put");
+        drop(kv);
+        db.close().expect("clean close");
+    }
+
+    let timeline_dirs: Vec<_> = std::fs::read_dir(root.join("timeline"))
+        .expect("the loop sealed timeline segments")
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+    assert!(
+        !timeline_dirs.is_empty(),
+        "the loop sealed timeline segments (the test is not vacuous)"
+    );
+    assert!(
+        timeline_dirs.len() < 4,
+        "only live sealing directories remain after {SESSIONS} checkpoints: {} dirs",
+        timeline_dirs.len()
+    );
+    assert_eq!(
+        empty_dirs_below_family_roots(&root),
+        Vec::<String>::new(),
+        "no emptied directory survives the loop"
+    );
+
+    let mut db = open_durable_database(&root).expect("reopen");
+    let mut kv = db.kv(branch("default"), space("app")).expect("kv opens");
+    let read = kv.get(&key(b"k")).expect("read").expect("row");
+    assert_eq!(read.as_bytes(), format!("v{}", SESSIONS - 1).as_bytes());
+    drop(kv);
+    db.close().expect("close");
+}

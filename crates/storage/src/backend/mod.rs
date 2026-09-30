@@ -419,6 +419,15 @@ pub(crate) trait Backend: Send + Sync {
 
     fn object_metadata(&self, name: &ObjectName) -> BackendResult<BackendMetadata>;
 
+    // #3692: remove every empty directory below the family root named by
+    // `prefix` (a directory prefix such as `timeline/`), returning how many
+    // went. Garbage removal for backends whose object names nest into real
+    // directories; object-keyed backends have no directories, so the default
+    // is a no-op. Never removes the family root or anything holding an object.
+    fn remove_empty_dirs_under(&self, _prefix: &ObjectPrefix) -> Result<u64, BackendError> {
+        Ok(0)
+    }
+
     // The returned guard is the lock lifetime. Dropping it releases the
     // backend-specific single-writer primitive.
     fn acquire_writer_lock(&self, _name: &ObjectName) -> BackendResult<BackendWriterGuard> {
@@ -570,6 +579,10 @@ impl Backend for BackendHandle<'_> {
 
     fn object_metadata(&self, name: &ObjectName) -> BackendResult<BackendMetadata> {
         self.as_backend().object_metadata(name)
+    }
+
+    fn remove_empty_dirs_under(&self, prefix: &ObjectPrefix) -> Result<u64, BackendError> {
+        self.as_backend().remove_empty_dirs_under(prefix)
     }
 
     fn acquire_writer_lock(&self, name: &ObjectName) -> BackendResult<BackendWriterGuard> {
