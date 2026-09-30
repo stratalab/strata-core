@@ -774,39 +774,11 @@ fn open_durable_local_owned_with_options(
             reason: "durable local open requires a durable-local mode",
         });
     }
-    let root = resolve_database_root_symlink(root.into());
+    // #3008: a symlinked database path opens the directory it names.
+    let root = crate::backend::local_fs::LocalFsBackend::resolve_root_symlink(root.into());
     reject_pre_v1_layout(&root)?;
     let backend = StorageBackend::local_fs(root);
     open_durable_with_owned_backend_handle(options, backend.into_backend_handle())
-}
-
-/// #3008: a database path whose final component is a symlink names the
-/// directory it resolves to — the caller chose that link (`~/data -> /mnt/…`,
-/// a shortened deep path), exactly as every other tool on the system follows
-/// it. The backend refuses a symlinked root because it refuses symlinks
-/// *inside* the tree, so the link is resolved here, once, before the backend
-/// is built; everything below it (writer lock, layout, WAL) then operates on
-/// the real directory. The writer lock is an OS advisory lock on the lock
-/// file's inode, so a handle opened through the link and one opened through
-/// the real path contend on the same lock either way.
-///
-/// A link that does not resolve (dangling, a loop, permission denied) is left
-/// unresolved so the backend's path-shape refusal classifies it exactly as it
-/// did before; a link that resolves to a file resolves to that file and is
-/// refused as not-a-directory by the same check.
-#[cfg(feature = "localfs")]
-fn resolve_database_root_symlink(root: std::path::PathBuf) -> std::path::PathBuf {
-    let is_symlink = std::fs::symlink_metadata(&root)
-        .map(|metadata| metadata.file_type().is_symlink())
-        // A missing or unreadable path is not a symlink to resolve; the
-        // backend's own stat reports it with its typed classification.
-        .unwrap_or(false);
-    if !is_symlink {
-        return root;
-    }
-    // An unresolvable link keeps its original spelling so the backend refuses
-    // it with the existing path-shape classification (see above).
-    std::fs::canonicalize(&root).unwrap_or(root)
 }
 
 /// V1 cutover (hard rule 42): pre-V1 development databases are rejected with
