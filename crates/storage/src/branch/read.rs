@@ -1534,6 +1534,7 @@ impl BranchReadView {
         self.scan(bounds, bound)
     }
 
+    #[cfg(test)]
     pub(crate) fn scan_prefix_including_tombstones(
         &self,
         bounds: &BranchScanBounds,
@@ -1628,6 +1629,42 @@ impl BranchReadView {
             after_version,
             None,
             effective_own_read_bound(bound).max_commit_timestamp(),
+            true,
+        )
+    }
+
+    /// Resolved-bound (`as_of` / `after_version`) scan including tombstones with a visible-row
+    /// limit, for the off-lock `scan_prefix`/`scan_range` historical arms (#3560).
+    ///
+    /// The merge resolves each key to its newest version at or below `bound` (and above
+    /// `after_version`) before the limit is consulted, so the limit counts per-key *resolved*
+    /// rows — never raw versions — and a tombstone or a row TTL-expired at
+    /// `visible_limit_timestamp` never counts (see [`row_counts_toward_visible_limit`]). The
+    /// merge stops at the `visible_limit`-th counted row instead of walking the whole range.
+    /// `visible_limit_timestamp` must be the TTL frontier the caller filters the returned rows
+    /// with, so every counted row is one the caller keeps.
+    pub(crate) fn scan_including_tombstones_limited(
+        &self,
+        bounds: &BranchScanBounds,
+        bound: BranchReadBound,
+        after_version: Option<CommitVersion>,
+        visible_limit: Option<usize>,
+        visible_limit_timestamp: Option<Timestamp>,
+    ) -> BranchRuntimeResult<Vec<BranchHistoryRow>> {
+        self.require_matching_branch(bounds.branch_id())?;
+        self.require_timestamp_coverage(bound)?;
+        let active = self.pinned_active();
+        scan_including_tombstones_from_sources(
+            self.branch_id,
+            &active,
+            &self.frozen,
+            &self.owned_levels,
+            &self.inherited_layers,
+            bounds,
+            bound,
+            after_version,
+            visible_limit,
+            visible_limit_timestamp,
             true,
         )
     }
@@ -3595,7 +3632,7 @@ fn scan_heap_sources_including_tombstones(
         if let Some(row) = selected {
             let emit_timer = perf_trace::start_timer();
             let counts_for_limit =
-                !row.row().is_tombstone() && !row_is_expired_at(row.row(), visible_limit_timestamp);
+                row_counts_toward_visible_limit(row.row(), visible_limit_timestamp);
             rows.push(row);
             if counts_for_limit {
                 visible_rows = visible_rows.saturating_add(1);
@@ -3653,7 +3690,7 @@ fn scan_single_source_including_tombstones(
         if let Some(row) = selected {
             let emit_timer = perf_trace::start_timer();
             let counts_for_limit =
-                !row.row().is_tombstone() && !row_is_expired_at(row.row(), visible_limit_timestamp);
+                row_counts_toward_visible_limit(row.row(), visible_limit_timestamp);
             rows.push(row);
             if counts_for_limit {
                 visible_rows = visible_rows.saturating_add(1);
@@ -4217,6 +4254,26 @@ fn select_visible_row_or_tombstone(
     } else {
         Some(candidate_into_history_row(candidate))
     }
+}
+
+/// Does a merge-selected scan row count toward a scan's `visible_limit`?
+///
+/// Only a live row that is not TTL-expired at `visible_limit_timestamp` counts: a tombstone is
+/// emitted (callers need the delete fact) but never fills a page slot, and an expired row is one
+/// the caller drops. Truth table (`expired` = non-EPOCH expiry `<=` the timestamp):
+///
+/// | tombstone | timestamp | expired at timestamp  | counts |
+/// |-----------|-----------|-----------------------|--------|
+/// | yes       | any       | n/a                   | no     |
+/// | no        | `None`    | n/a (TTL not applied) | yes    |
+/// | no        | `Some`    | no                    | yes    |
+/// | no        | `Some`    | yes                   | no     |
+#[inline]
+pub(crate) fn row_counts_toward_visible_limit(
+    row: &StorageRow,
+    visible_limit_timestamp: Option<Timestamp>,
+) -> bool {
+    !row.is_tombstone() && !row_is_expired_at(row, visible_limit_timestamp)
 }
 
 fn row_is_expired_at(row: &StorageRow, read_timestamp: Option<Timestamp>) -> bool {

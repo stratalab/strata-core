@@ -24,6 +24,7 @@ mod diagnostics;
 mod disk_resident_reads;
 #[cfg(feature = "localfs")]
 mod fork_reopen;
+mod historical_scan_limit;
 mod liveness_matrix;
 mod maintenance;
 mod off_lock_concurrency;

@@ -138,6 +138,66 @@ fn list_nodes_page_scans_page_sized_work() {
     }
 }
 
+/// #3560: a versioned `list_nodes_at_version` page returns the graph as of that
+/// version at the same page-sized cost. Nodes added after the version are
+/// absent from every page. (This counter sees the rows storage hands the
+/// engine; the storage merge's own work bound is pinned by the storage
+/// `historical_scan_limit` suite.)
+#[test]
+fn list_nodes_at_version_page_scans_page_sized_work() {
+    let db = open_cache_database().expect("cache database opens");
+    let mut graph = open_graph(&db);
+    let before: Vec<String> = (0..600)
+        .filter(|index| index % 2 == 0)
+        .map(|index| format!("n{index:04}"))
+        .collect();
+    let as_of = graph
+        .bulk_insert(
+            &graph_name(),
+            &before
+                .iter()
+                .map(|id| (node(id), GraphNodeData::default()))
+                .collect::<Vec<_>>(),
+            &[],
+            None,
+        )
+        .expect("nodes ingest")
+        .last_commit()
+        .expect("ingest commits")
+        .version();
+    let after: Vec<String> = (0..600)
+        .filter(|index| index % 2 == 1)
+        .map(|index| format!("n{index:04}"))
+        .collect();
+    seed_nodes(&mut graph, &after);
+    let limit = 20usize;
+
+    for (cursor, expected_first) in [
+        (None, "n0000"),
+        (Some("n0299"), "n0300"),
+        (Some("n0558"), "n0560"),
+    ] {
+        db.reset_scanned_rows_for_test();
+        let page = graph
+            .list_nodes_at_version(&graph_name(), None, cursor.map(node).as_ref(), limit, as_of)
+            .expect("page");
+        let scanned = db.scanned_rows_for_test();
+        assert_eq!(page.nodes().len(), limit);
+        assert_eq!(page.nodes()[0].node_id().as_str(), expected_first);
+        assert!(
+            page.nodes()
+                .iter()
+                .all(|listed| before.iter().any(|id| id == listed.node_id().as_str())),
+            "a node added after the version leaked into the page after {cursor:?}"
+        );
+        assert_page_sized(
+            scanned,
+            limit,
+            &format!("the versioned page after {cursor:?}"),
+        );
+    }
+}
+
 /// A `nodes_by_type` page is bounded the same way, and never touches rows of
 /// another type.
 #[test]

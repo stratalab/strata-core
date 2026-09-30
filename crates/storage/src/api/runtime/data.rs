@@ -762,3 +762,77 @@ pub(super) fn flush_request_for_boundary(
     )
     .map_err(map_lifecycle_error)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        row_is_expired_at_selected_frontier, CommitVersion, PhysicalKey, StorageRow, Timestamp,
+    };
+    use crate::branch::read::row_counts_toward_visible_limit;
+    use crate::row::StorageSpaceId as RowStorageSpaceId;
+
+    fn key() -> PhysicalKey {
+        PhysicalKey::new(
+            super::super::StorageRuntime::default_branch_id_for_test(),
+            "default".to_owned(),
+            RowStorageSpaceId::engine(0x20).expect("engine storage space"),
+            b"k".to_vec(),
+        )
+        .expect("valid physical key")
+    }
+
+    fn put(expires_at: u64) -> StorageRow {
+        StorageRow::put(
+            key(),
+            CommitVersion::new(1),
+            Timestamp::from_micros(10),
+            Timestamp::from_micros(expires_at),
+            b"v".to_vec(),
+        )
+    }
+
+    fn tombstone() -> StorageRow {
+        StorageRow::tombstone(key(), CommitVersion::new(1), Timestamp::from_micros(10))
+    }
+
+    /// #3560 truth table for the branch scan's limit count (see `row_counts_toward_visible_limit`).
+    #[test]
+    fn row_counts_toward_visible_limit_truth_table() {
+        let at = |micros| Some(Timestamp::from_micros(micros));
+        let cases: [(&str, StorageRow, Option<Timestamp>, bool); 7] = [
+            ("tombstone, no frontier", tombstone(), None, false),
+            ("tombstone, frontier", tombstone(), at(50), false),
+            ("live, no frontier, expired-looking", put(20), None, true),
+            ("live, no expiry, frontier", put(0), at(50), true),
+            ("live, expires after frontier", put(51), at(50), true),
+            ("live, expires at frontier", put(50), at(50), false),
+            ("live, expired before frontier", put(20), at(50), false),
+        ];
+        for (name, row, frontier, counts) in cases {
+            assert_eq!(
+                row_counts_toward_visible_limit(&row, frontier),
+                counts,
+                "{name}"
+            );
+        }
+    }
+
+    /// The coupling the limited historical scan relies on: every row the branch scan counts toward
+    /// the limit is one `map_scan_rows` keeps at the same frontier. Were it not, the scan could
+    /// stop on rows the mapping then drops and return a short page.
+    #[test]
+    fn a_counted_row_is_never_dropped_by_the_scan_mapping() {
+        let frontiers = [None, Some(Timestamp::from_micros(50))];
+        let rows = [tombstone(), put(0), put(20), put(50), put(51)];
+        for frontier in frontiers {
+            for row in &rows {
+                if row_counts_toward_visible_limit(row, frontier) {
+                    assert!(
+                        !row_is_expired_at_selected_frontier(row, frontier),
+                        "counted row {row:?} dropped at {frontier:?}"
+                    );
+                }
+            }
+        }
+    }
+}
