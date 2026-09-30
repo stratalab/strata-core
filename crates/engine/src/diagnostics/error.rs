@@ -664,6 +664,37 @@ mod tests {
         assert_ne!(error.suggested_fix(), "Site-specific remediation.");
     }
 
+    /// #3397: a size refusal carries the refused size and the cap as details
+    /// under the shared keys, keeps the registry row, and puts both numbers in
+    /// the message for the reader who never sees the details. The message
+    /// assertions pin the site's own text and the two values — the data a
+    /// caller acts on — not wording of this constructor's (Hard Rule 29).
+    #[test]
+    fn test_size_limit_exceeded_carries_the_size_and_the_limit() {
+        let code = "invalid_argument.engine.branch_name";
+        let error = EngineError::size_limit_exceeded(code, "probe", 300, 255);
+
+        assert_eq!(
+            error.details(),
+            [
+                ErrorDetail::new(super::ACTUAL_BYTES_DETAIL, "300"),
+                ErrorDetail::new(super::LIMIT_BYTES_DETAIL, "255"),
+            ]
+        );
+        assert_eq!(row_mismatches(&error, code), Vec::<String>::new());
+        assert!(error.hints().is_empty());
+        assert!(error.source_arc().is_none());
+        let message = error.message();
+        assert!(
+            message.starts_with("probe"),
+            "the site's message leads: {message:?}"
+        );
+        assert!(
+            message.contains("300") && message.contains("255"),
+            "both sizes must reach the message: {message:?}"
+        );
+    }
+
     /// Direction control for the row lookup: a persistence code whose row
     /// differs from its class fallback (per-code retry and commit arms) gets
     /// the per-code row through the plain constructor too, not only through

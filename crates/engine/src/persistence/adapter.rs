@@ -2154,6 +2154,15 @@ mod tests {
         assert_eq!(detail(ACTUAL_BYTES_DETAIL).as_deref(), Some("65600"));
         assert_eq!(detail(LIMIT_BYTES_DETAIL).as_deref(), Some("65536"));
         assert!(error.source_arc().is_some());
+
+        // The human rendering shows the message and hides the details, so the
+        // numbers must reach the message too. This pins the two values — data
+        // the caller acts on — not the wording around them (Hard Rule 29).
+        assert!(
+            error.message().contains("65600") && error.message().contains("65536"),
+            "a reader who never sees the details must still see both sizes: {:?}",
+            error.message()
+        );
     }
 
     #[test]
