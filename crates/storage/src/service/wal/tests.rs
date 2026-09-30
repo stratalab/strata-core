@@ -26,6 +26,22 @@ enum AppendReportFault {
     WrongMetadataSize,
 }
 
+/// #3697 truth table: only a step that left the segment gone keeps the trim
+/// going; a segment still on disk (delete failed, or not covered) stops it.
+#[test]
+fn retention_trim_continues_only_past_a_segment_that_is_gone() {
+    use super::{retention_trim_continues_after, RetentionTrimStep};
+    let table = [
+        (RetentionTrimStep::Deleted, true),
+        (RetentionTrimStep::AlreadyMissing, true),
+        (RetentionTrimStep::DeleteFailed, false),
+        (RetentionTrimStep::NotCovered, false),
+    ];
+    for (step, continues) in table {
+        assert_eq!(retention_trim_continues_after(step), continues, "{step:?}");
+    }
+}
+
 #[test]
 fn wal_retention_proof_records_durable_source() {
     let snapshot = WalRetentionProof::snapshot_watermark(CommitVersion::new(7));
