@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (17, one retired), SCALE (13), DUR (18) = 90 entries, 89 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (18, one retired), SCALE (13), DUR (19) = 92 entries, 91 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -1162,6 +1162,78 @@ ordinary write, cleared and un-doubled by the re-run, true at the cut's version)
 `tests/engine_graph_bulk_resume.rs` (a one-commit import never pending; a many-commit
 import pending at every inner version and not before or after), and
 `metadata_import_watermark_round_trips_and_is_omitted_when_clear` (`record.rs`).
+
+### ARCH-018: A graph edge's forward and reverse rows are one pair, written and deleted in one commit
+
+Every graph edge is two rows carrying the same encoded record: the authored forward row
+(`RowClass::GraphEdge`, keyed `graph ‖ src ‖ type ‖ dst`) and the derived reverse row
+(`RowClass::GraphReverseEdge`, keyed `graph ‖ dst ‖ type ‖ src`). Every writer that puts or
+tombstones one puts or tombstones the other in the same `MutationMap` / mutation list, so
+the pair shares one commit version (ARCH-002) and the reverse rows are an exact mirror of
+the forward rows at every version a reader can select — latest, `as_of`, a fork child,
+recovery. The one place the two halves of a pair may land in different commits is a
+chunked deletion sweep (ARCH-015's graph sweep, which tombstones reverse rows before
+forward rows, and ARCH-017's space sweep): there the graph or space is already absent to
+every reader and writer from the marking commit, so no read observes the split.
+
+The roles are asymmetric. The forward row decides **existence**: `get_edge`, `list_edges`,
+the `created` / `deleted` decision of `upsert_edge`, `delete_edge` and every `batch_write`
+edge op (`edge_record`, `overlay_edge`), `graph_info`'s scan fallback, the analytics
+adjacency snapshot (ARCH-013) and branch compare (the graph adapters in
+`data/graph/adapter.rs` cover metadata, node, edge and ontology rows only; reverse rows have
+no adapter and are excluded as derived) all read forward rows and never reverse ones. The reverse row is trusted, without consulting its forward twin, as the **incoming
+adjacency** on exactly two paths: `neighbor_leg`'s incoming leg (#3489) and
+`stored_incident_edges` (#3472), which feeds the node-delete cascade of `delete_node`,
+`batch_write`'s `DeleteNode` and the binding `Cascade` policy, and therefore the edge-count
+delta ARCH-014 writes into the metadata row. A reverse row is validated only against
+itself on read — `edge_record_from_reverse_row` decodes its key and
+`decode_graph_edge_record` refuses a record whose identity does not match that key
+(`data_loss.engine.graph_edge_record`). Reverse rows are engine bookkeeping:
+`commit_batch_maintaining` counts only authored rows, so one edge upsert reports one put.
+
+The cascade deliberately keeps trusting the mirror, as `neighbors` does, rather than
+point-reading the forward twin of every incoming edge: that cross-check would add one read
+per incoming edge to every node delete (against SCALE-013) to defend against a state no
+engine path produces. A diverged pair is corruption, and its consequences are documented
+rather than defended: an orphan reverse row surfaces as a phantom incoming neighbor and is
+counted by the cascade (an over-decrement ARCH-014 catches as `data_loss.engine.graph_metadata`
+only when it would go below zero); an orphan forward row is listed by `get_edge` /
+`list_edges` but is invisible to its destination's cascade, so deleting the destination
+leaves it dangling. The regression is an edge writer that emits one half of the pair, a
+pair split across commits outside a marked-absent sweep, or an existence decision taken
+from a reverse row.
+
+**Audit**: In `data/graph/service.rs`, every `RowClass::GraphEdge` put or tombstone has its
+`RowClass::GraphReverseEdge` twin in the same batch: `upsert_edge` and the edge loop of
+`bulk_insert_limited` build the pair inline; `batch_write`'s `UpsertEdge` goes through
+`put_edge_mutations`; `delete_edge`, `delete_node`, `batch_write`'s `DeleteEdge` /
+`DeleteNode` and `apply_binding_delete_policy`'s `Cascade` go through
+`delete_edge_mutations`; `graph_row_tombstones` (graph sweep) and
+`control/space.rs`'s space-sweep class list include both classes. Grep
+`edge_address(` / `reverse_edge_address(` — a call to one without the other in the same
+mutation set is the violation. Verify `get_edge_with_selector`, `list_edges_with_selector`,
+`edge_record`, `overlay_edge`, `scan_graph_state` and `adjacency_index_with_selector` read
+`GraphEdge` rows only, and that `GraphReverseEdge` is read only by `neighbor_leg`,
+`stored_incident_edges` and the sweep. Tests — each write site's twin, observed by a later
+stored read of the incoming adjacency: `upsert_edge` by
+`graph_lifecycle_node_edge_and_binding_contract_runs_in_cache_and_durable_modes`
+(`tests/engine_graph.rs`); the `delete_node` cascade by
+`graph_dense_edges_self_loop_and_neighbor_pages_run_in_cache_and_durable_modes`;
+`bulk_insert` by `both_direction_walk_crosses_legs_and_holds_at_version`
+(`tests/engine_graph_cursor_contract.rs`); `put_edge_mutations` by
+`batch_delete_then_recreate_reports_the_edge_as_created_again` and
+`delete_edge_mutations` by `batch_delete_node_ignores_tombstoned_incident_edges` (a
+surviving reverse row would be recounted by the later cascade), both in
+`tests/engine_graph_batch_overlay.rs`, which also pins the cascade's identity dedup
+(`batch_delete_node_cascades_every_stored_incident_edge_once`,
+`binding_cascade_removes_an_edge_between_two_cascaded_nodes_once`,
+`single_delete_node_cascades_every_stored_incident_edge_once`); the sweep by
+`a_graph_larger_than_one_commit_can_still_be_deleted_in_cache_and_durable_modes`
+(`tests/engine_graph_delete.rs`); the derived rows' exclusion from commit counts by
+`graph_commit_counts_exclude_derived_rows_in_cache_and_durable_modes`. KNOWN GAP (#3705):
+no test asserts the pairing structurally (forward-identity set == reverse-identity set
+after a mixed workload), and no test plants a lone forward or reverse row to pin the
+divergence behavior above — the coverage is per write site and behavioral only.
 
 ---
 
