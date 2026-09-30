@@ -16,8 +16,8 @@ use crate::observability::perf_trace;
 use crate::table::TableInternalKeyBytes;
 use crate::table::{
     BuiltTableArtifact, CompactionCutBoundary, CompactionOutputCutHints, ImmutableTableReader,
-    TableBuilderConfig, TableCompactionConfig, TableCompactionDecision, TableCompactionInput,
-    TableCompactionPolicy, TableCompactionReport, TableCompactionRowContext,
+    OutputContentHasher, TableBuilderConfig, TableCompactionConfig, TableCompactionDecision,
+    TableCompactionInput, TableCompactionPolicy, TableCompactionReport, TableCompactionRowContext,
     TableCompactionSourceId, TableCompactor, TableCursor, TableIdentity, TableKeyBounds,
     TablePhysicalKeyBound, TablePhysicalKeyBytes, TableReaderConfig, TableRow, TableRuntimeResult,
 };
@@ -29,6 +29,37 @@ const BRANCH_COMPACTION_SOURCE_METADATA_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 fn keep_all_policy() -> impl TableCompactionPolicy {
     |_: &TableCompactionRowContext<'_>, _: &TableRow| Ok(TableCompactionDecision::Keep)
+}
+
+/// #3469: the branch-owned half of a rewrite output's content-complete
+/// identity — the byte-affecting inputs the table compactor cannot see: which
+/// row policy runs (and, for a pruning policy, the proof floors it reads) and
+/// the subcompaction key range. `KeepAll` runs `keep_all_policy` and ignores
+/// any proof, so the proof is folded in only for a pruning policy. Pure: the
+/// same inputs always give the same salt (retry dedupe), and changing any
+/// byte-affecting input changes it (no same-id/different-bytes adoption).
+pub(crate) fn rewrite_output_identity_salt(
+    retention_policy: BranchCompactionRetentionPolicy,
+    pruning_proof: Option<&BranchCompactionPruningProof>,
+    bounds: Option<&TableKeyBounds>,
+) -> u64 {
+    let mut hasher = OutputContentHasher::new();
+    let policy_word = match retention_policy {
+        BranchCompactionRetentionPolicy::KeepAll => 0,
+        BranchCompactionRetentionPolicy::DropOlderVersions => 1,
+        BranchCompactionRetentionPolicy::DropTombstones => 2,
+        BranchCompactionRetentionPolicy::DropExpired => 3,
+    };
+    hasher.word(policy_word);
+    match (retention_policy, pruning_proof) {
+        (BranchCompactionRetentionPolicy::KeepAll, _) | (_, None) => hasher.word(0),
+        (_, Some(proof)) => {
+            hasher.word(1);
+            proof.hash_output_content(&mut hasher);
+        }
+    }
+    hasher.key_bounds(bounds);
+    hasher.finish()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -607,6 +638,12 @@ impl BranchLocalState {
             Some(hints) => compactor.with_output_cut_hints(hints),
             None => compactor,
         };
+        // #3469: the row policy and the key range decide output bytes too.
+        let compactor = compactor.with_output_identity_salt(rewrite_output_identity_salt(
+            request.retention_policy(),
+            request.pruning_proof().as_ref(),
+            bounds,
+        ));
         // Salt the output-table identity seed per subcompaction so parallel ranges (each of which
         // restarts its output index at 0) never produce colliding output-table identities.
         let output_identity_seed = if subcompaction_index == 0 {

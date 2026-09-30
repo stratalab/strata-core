@@ -196,7 +196,15 @@ fn expected_keep_all_compaction_output_identity(
             TableCompactionSource::from_rows(source_id, table_rows).expect("source rows")
         })
         .collect::<Vec<_>>();
-    let compactor = TableCompactor::default();
+    // #3469: mirror the branch layer's content-complete identity — a default
+    // `KeepAll`, unbounded request salts with its policy and bounds.
+    let compactor = TableCompactor::default().with_output_identity_salt(
+        super::state::compaction::rewrite_output_identity_salt(
+            BranchCompactionRetentionPolicy::KeepAll,
+            None,
+            None,
+        ),
+    );
     let mut policy = keep_all_policy();
     let output = compactor
         .compact(output_seed, &sources, &mut policy)

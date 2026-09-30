@@ -1720,6 +1720,15 @@ object (#3382 — exact-bytes, reader reopen, cache warm, row verify). Fail-clos
 for everything else: a FRESH output's read failure (its name is sweep-pinned by the
 in-flight registry, so it cannot legally vanish) and an adopted object that still EXISTS
 with conflicting bytes (a content conflict on a content-deterministic id is corruption).
+That last arm is sound only because rewrite output ids are CONTENT-COMPLETE (#3469):
+the id hash folds every input that decides the output's bytes — source table ids, the
+compaction and builder configs (split target, output bound, block size, rows per block,
+codec, filter frame), the grandparent cut hints, the row policy with the proof floors it
+reads (version/timestamp floor, TTL cutoff, max versions, proof branch), and the
+subcompaction key bounds — so id-equal implies byte-equal, and a retry whose inputs
+drifted derives a DISTINCT id instead of adopting a stale orphan. Proof freshness gates
+(epochs, state fingerprint, coverage, attestations) stay out: they never change a kept
+row, and keeping them out preserves retry dedupe.
 
 **Audit**: Flush — `adopted_output_swept` (`lifecycle/flush.rs`) guards the reader-open,
 warm, and row-verify arms of both prepare paths, and `publish_or_load_existing` returns
@@ -1735,7 +1744,14 @@ the typed race through unwrapped. Dispatcher — `is_rewrite_output_sweep_race` 
 `background_build_sweep_race_defers_instead_of_recording_failure`, and the fail-closed
 directions `fresh_flush_output_vanishing_mid_build_still_fails_closed`,
 `fresh_rewrite_output_vanishing_mid_build_still_fails_closed`,
-`adopted_rewrite_output_with_conflicting_bytes_still_fails_closed`.
+`adopted_rewrite_output_with_conflicting_bytes_still_fails_closed`. Content-complete ids:
+`output_content_identity` (`table/compaction.rs`) and `rewrite_output_identity_salt`
+(`branch/state/compaction.rs`), pinned by the truth tables
+`compaction_output_identity_covers_every_byte_affecting_compactor_input` and
+`rewrite_output_identity_salt_truth_table`, the call sites
+`pruned_retry_of_keep_all_candidate_derives_distinct_output_identity` and
+`retried_rewrite_with_changed_codec_publishes_distinct_output_instead_of_failing`, and
+the dedupe direction `durable_compaction_output_identities_are_retry_stable`.
 
 ### DUR-017: Recovery memory is bounded — streamed reads, flushed installs
 

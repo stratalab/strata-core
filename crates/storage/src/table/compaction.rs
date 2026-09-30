@@ -3,8 +3,8 @@
 use super::{
     validate_strictly_sorted_unique_rows, BuiltTableArtifact, ImmutableTableBuilder,
     ImmutableTableStreamingBuilder, TableBuilderConfig, TableCompactionConfig, TableCursor,
-    TableIdentity, TableInternalKeyBytes, TableRow, TableRuntimeError, TableRuntimeResult,
-    MERGE_HEAP_THRESHOLD,
+    TableIdentity, TableInternalKeyBytes, TableKeyBound, TableKeyBounds, TablePhysicalKeyBound,
+    TableRow, TableRuntimeError, TableRuntimeResult, MERGE_HEAP_THRESHOLD,
 };
 use crate::observability::perf_trace;
 use std::cmp::Ordering;
@@ -18,6 +18,10 @@ pub(crate) struct TableCompactor {
     config: TableCompactionConfig,
     builder_config: TableBuilderConfig,
     output_cut_hints: Option<CompactionOutputCutHints>,
+    /// #3469: fingerprint of the caller-owned inputs that decide output bytes
+    /// but that this layer cannot see (the row policy's parameters, the
+    /// subcompaction key bounds). Folded into every output identity.
+    output_identity_salt: u64,
 }
 
 impl TableCompactor {
@@ -31,7 +35,15 @@ impl TableCompactor {
             config,
             builder_config,
             output_cut_hints: None,
+            output_identity_salt: 0,
         })
+    }
+
+    /// #3469: fold the caller's byte-affecting inputs (see
+    /// [`OutputContentHasher`]) into every output identity.
+    pub(crate) const fn with_output_identity_salt(mut self, salt: u64) -> Self {
+        self.output_identity_salt = salt;
+        self
     }
 
     /// W1.3a: cut output tables so each spans a bounded number of bytes of the
@@ -806,7 +818,7 @@ fn compact_table_inputs_into(
 ) -> TableRuntimeResult<TableCompactionReport> {
     let builder = ImmutableTableBuilder::new(compactor.builder_config)?;
     let mut report = TableCompactionReport::new(sources.len());
-    let source_identity = output_source_identity(sources);
+    let source_identity = output_content_identity(compactor, sources);
     let mut merged = TableCompactionMergeCursor::new(sources)?;
     if global_duplicate_validation == GlobalDuplicateValidation::Run {
         validate_no_global_duplicate_internal_keys(&mut merged)?;
@@ -1445,13 +1457,144 @@ fn output_identity(
     ))
 }
 
-fn output_source_identity(sources: &[&dyn TableCompactionInput]) -> u64 {
-    let mut hash = OUTPUT_IDENTITY_METADATA_HASH_OFFSET;
-    hash_metadata_u64(&mut hash, sources.len() as u64);
+/// #3469: the content hash in a compaction output's identity. Output ids are
+/// create-if-absent and a retry ADOPTS an existing id after a byte-exact check
+/// (DUR-016), so the id must be content-complete: every input that decides
+/// the output's bytes is folded in, making id-equal imply byte-equal. That
+/// keeps a byte mismatch on adoption meaning corruption (fail-closed is
+/// right), and gives a retry whose byte-affecting inputs drifted (codec,
+/// block size, split target, grandparent cuts, pruning floors, subcompaction
+/// bounds) a DISTINCT name instead of a hard failure on the stale orphan.
+///
+/// Inputs: the source tables (immutable, named by content-derived source
+/// ids), the compaction and builder configs, the grandparent cut hints, and
+/// the caller's salt for what this layer cannot see. The output index is
+/// appended separately by [`output_identity`].
+fn output_content_identity(
+    compactor: &TableCompactor,
+    sources: &[&dyn TableCompactionInput],
+) -> u64 {
+    let TableCompactor {
+        config,
+        builder_config,
+        output_cut_hints,
+        output_identity_salt,
+    } = compactor;
+    let mut hasher = OutputContentHasher::new();
+    hasher.word(sources.len() as u64);
     for source in sources {
-        hash_metadata_bytes(&mut hash, source.id().as_str().as_bytes());
+        hasher.bytes(source.id().as_str().as_bytes());
     }
-    hash
+    for word in config.output_content_words() {
+        hasher.word(word);
+    }
+    for word in builder_config.output_content_words() {
+        hasher.word(word);
+    }
+    match output_cut_hints {
+        None => hasher.word(0),
+        Some(CompactionOutputCutHints {
+            boundaries,
+            max_overlap_bytes,
+        }) => {
+            hasher.word(1);
+            hasher.word(*max_overlap_bytes);
+            hasher.word(boundaries.len() as u64);
+            for CompactionCutBoundary {
+                start_physical_key,
+                byte_count,
+            } in boundaries
+            {
+                hasher.bytes(start_physical_key);
+                hasher.word(*byte_count);
+            }
+        }
+    }
+    hasher.word(*output_identity_salt);
+    hasher.finish()
+}
+
+/// #3469: a length-prefixed FNV-1a accumulator for output-identity content
+/// fingerprints (words and byte strings are length-framed, so distinct input
+/// sequences cannot concatenate to the same stream).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutputContentHasher {
+    hash: u64,
+}
+
+impl OutputContentHasher {
+    pub(crate) const fn new() -> Self {
+        Self {
+            hash: OUTPUT_IDENTITY_METADATA_HASH_OFFSET,
+        }
+    }
+
+    pub(crate) fn word(&mut self, value: u64) {
+        hash_metadata_u64(&mut self.hash, value);
+    }
+
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) {
+        hash_metadata_bytes(&mut self.hash, bytes);
+    }
+
+    /// The key range a (sub)compaction reads decides which rows its outputs
+    /// hold, so it is part of the output content.
+    pub(crate) fn key_bounds(&mut self, bounds: Option<&TableKeyBounds>) {
+        match bounds {
+            None => self.word(0),
+            Some(TableKeyBounds::Range { lower, upper }) => {
+                self.word(1);
+                self.internal_bound(lower);
+                self.internal_bound(upper);
+            }
+            Some(TableKeyBounds::Prefix(prefix)) => {
+                self.word(2);
+                self.bytes(prefix);
+            }
+            Some(TableKeyBounds::PhysicalRange {
+                physical_prefix,
+                lower,
+                upper,
+            }) => {
+                self.word(3);
+                self.bytes(physical_prefix);
+                self.physical_bound(lower);
+                self.physical_bound(upper);
+            }
+        }
+    }
+
+    fn internal_bound(&mut self, bound: &TableKeyBound) {
+        match bound {
+            TableKeyBound::Unbounded => self.word(0),
+            TableKeyBound::Included(key) => {
+                self.word(1);
+                self.bytes(key.as_slice());
+            }
+            TableKeyBound::Excluded(key) => {
+                self.word(2);
+                self.bytes(key.as_slice());
+            }
+        }
+    }
+
+    fn physical_bound(&mut self, bound: &TablePhysicalKeyBound) {
+        match bound {
+            TablePhysicalKeyBound::Unbounded => self.word(0),
+            TablePhysicalKeyBound::Included(key) => {
+                self.word(1);
+                self.bytes(key.as_slice());
+            }
+            TablePhysicalKeyBound::Excluded(key) => {
+                self.word(2);
+                self.bytes(key.as_slice());
+            }
+        }
+    }
+
+    pub(crate) const fn finish(self) -> u64 {
+        self.hash
+    }
 }
 
 fn hash_metadata_u64(hash: &mut u64, value: u64) {

@@ -874,20 +874,31 @@ fn durable_compaction_rejects_existing_output_with_conflicting_bytes() {
         "durable-collision",
     )
     .expect("request");
-    let branch_request =
-        BranchCompactionRequest::new(branch, BranchCompactionKind::CompactL0, "durable-collision")
-            .expect("branch request");
+    let branch_request = request.branch_request().expect("branch request");
     let plan = runtime
         .branch_state()
         .plan_branch_compaction(&branch_request)
         .expect("plan");
-    let (artifacts, _) = runtime
-        .branch_state()
-        .prepare_branch_compaction_plan(&branch_request, &plan)
-        .expect("prepare")
-        .expect("candidate");
-    let artifact = &artifacts[0];
-    let identity = artifact.facts().identity().clone();
+    // #3469: the output identity is content-complete (builder/compaction
+    // config, budget-derived split target, cut hints, policy), so learn the
+    // exact durable-path name from a scout run over identical inputs on a
+    // separate backend rather than re-deriving it from a bare request.
+    let scout_backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let mut scout = open_runtime(branch, scout_backend);
+    *scout.branch_state_mut() = runtime.branch_state().clone();
+    let scout_outcome = scout
+        .compact_branch_tables(&request)
+        .expect("scout compaction");
+    let scout_object = scout_outcome.durable_output_objects()[0].clone();
+    let identity = TableIdentity::new(
+        scout_object
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("object leaf"),
+    )
+    .expect("scout identity");
     let mut wrong_rows = vec![
         TableRow::new(put_row(branch, b"xxxx", 1, 1_000, b"left")),
         TableRow::new(put_row(branch, b"yyyyy", 2, 2_000, b"right")),

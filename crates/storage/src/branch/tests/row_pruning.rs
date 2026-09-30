@@ -1164,6 +1164,393 @@ fn ttl_state(
     state
 }
 
+/// #3469 truth table for the branch-owned half of the rewrite output identity:
+/// the row policy, the proof floors that policy reads, and the subcompaction
+/// bounds each change the salt; the proof's freshness/safety gates (epochs,
+/// state fingerprint, visible version, coverage, attestations) and a proof
+/// attached to a `KeepAll` request do not — those never change a kept row, and
+/// keeping them out preserves retry dedupe across re-derived proofs.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one truth table: every row stays in view beside the base"
+)]
+fn rewrite_output_identity_salt_truth_table() {
+    use crate::branch::state::compaction::rewrite_output_identity_salt;
+    use crate::table::TableKeyBounds;
+    use BranchCompactionRetentionPolicy::{
+        DropExpired, DropOlderVersions, DropTombstones, KeepAll,
+    };
+
+    let branch = branch_id(0xa9);
+    let proof = |epoch: u64, fingerprint: u64, floor: u64, visible: u64| {
+        BranchCompactionPruningProof::new(
+            branch,
+            epoch,
+            epoch,
+            fingerprint,
+            CommitVersion::new(floor),
+            CommitVersion::new(visible),
+        )
+        .expect("proof")
+    };
+    let base_proof = proof(1, 7, 5, 9);
+    let salt = rewrite_output_identity_salt;
+    let base = salt(DropOlderVersions, Some(&base_proof), None);
+
+    // Equal rows: identical inputs, and inputs that never change a kept row.
+    let equal: [(&str, u64); 6] = [
+        (
+            "identical",
+            salt(DropOlderVersions, Some(&base_proof), None),
+        ),
+        (
+            "re-derived proof epoch + state fingerprint",
+            salt(DropOlderVersions, Some(&proof(4, 99, 5, 9)), None),
+        ),
+        (
+            "visible version",
+            salt(DropOlderVersions, Some(&proof(1, 7, 5, 12)), None),
+        ),
+        (
+            "tombstone-elision gate",
+            salt(
+                DropOlderVersions,
+                Some(&base_proof.with_tombstone_elision().expect("gate")),
+                None,
+            ),
+        ),
+        (
+            "safety attestations",
+            salt(
+                DropOlderVersions,
+                Some(
+                    &base_proof
+                        .with_no_readable_inherited_layers()
+                        .expect("gate")
+                        .with_candidate_tables_not_shared()
+                        .expect("gate")
+                        .with_recovery_health(BranchRecoveryHealthAttestation::Healthy)
+                        .expect("gate"),
+                ),
+                None,
+            ),
+        ),
+        (
+            "manifest coverage floor",
+            salt(
+                DropOlderVersions,
+                Some(
+                    &base_proof
+                        .with_table_manifest_coverage_floor(CommitVersion::new(4))
+                        .expect("coverage"),
+                ),
+                None,
+            ),
+        ),
+    ];
+    for (input, value) in equal {
+        assert_eq!(value, base, "{input} must NOT change the salt");
+    }
+    assert_eq!(
+        salt(KeepAll, Some(&base_proof), None),
+        salt(KeepAll, None, None),
+        "KeepAll never reads the proof"
+    );
+
+    // Distinct rows: every byte-affecting input moves the salt, pairwise.
+    let other_branch_proof = BranchCompactionPruningProof::new(
+        branch_id(0xaa),
+        1,
+        1,
+        7,
+        CommitVersion::new(5),
+        CommitVersion::new(9),
+    )
+    .expect("proof");
+    let distinct: [(&str, u64); 11] = [
+        ("base", base),
+        ("KeepAll policy", salt(KeepAll, None, None)),
+        (
+            "DropTombstones policy",
+            salt(DropTombstones, Some(&base_proof), None),
+        ),
+        (
+            "DropExpired policy",
+            salt(DropExpired, Some(&base_proof), None),
+        ),
+        (
+            "retained version floor",
+            salt(DropOlderVersions, Some(&proof(1, 7, 6, 9)), None),
+        ),
+        (
+            "retained timestamp floor",
+            salt(
+                DropOlderVersions,
+                Some(
+                    &base_proof
+                        .with_retained_timestamp_floor(Timestamp::from_micros(50))
+                        .expect("timestamp floor"),
+                ),
+                None,
+            ),
+        ),
+        (
+            "TTL cutoff",
+            salt(
+                DropOlderVersions,
+                Some(
+                    &base_proof
+                        .with_ttl_elision(Timestamp::from_micros(50))
+                        .expect("ttl"),
+                ),
+                None,
+            ),
+        ),
+        (
+            "max versions per key",
+            salt(
+                DropOlderVersions,
+                Some(
+                    &base_proof
+                        .with_max_versions_per_key(2)
+                        .expect("max versions"),
+                ),
+                None,
+            ),
+        ),
+        (
+            "proof branch",
+            salt(DropOlderVersions, Some(&other_branch_proof), None),
+        ),
+        (
+            "subcompaction bounds",
+            salt(
+                DropOlderVersions,
+                Some(&base_proof),
+                Some(&TableKeyBounds::prefix(b"a".to_vec())),
+            ),
+        ),
+        (
+            "different subcompaction bounds",
+            salt(
+                DropOlderVersions,
+                Some(&base_proof),
+                Some(&TableKeyBounds::prefix(b"b".to_vec())),
+            ),
+        ),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for (input, value) in distinct {
+        assert!(
+            seen.insert(value),
+            "the {input} row must derive a distinct salt"
+        );
+    }
+}
+
+/// #3469 truth table, key-bound leg: every bound shape a subcompaction range
+/// can take — internal-key ranges and physical-key ranges, each end
+/// unbounded / included / excluded, at different keys — derives a distinct
+/// salt, so two attempts over different ranges never share an output id.
+#[test]
+fn rewrite_output_identity_salt_distinguishes_every_key_bound_shape() {
+    use crate::branch::state::compaction::rewrite_output_identity_salt;
+    use crate::table::{
+        TableInternalKeyBytes, TableKeyBound, TableKeyBounds, TablePhysicalKeyBound,
+        TablePhysicalKeyBytes,
+    };
+
+    let branch = branch_id(0xac);
+    let internal = |key: &[u8]| {
+        TableInternalKeyBytes::from_physical_key_version(
+            &physical_key(branch, key.to_vec()),
+            CommitVersion::new(1),
+        )
+    };
+    let physical =
+        |key: &[u8]| TablePhysicalKeyBytes::from_physical_key(&physical_key(branch, key.to_vec()));
+    let prefix = TablePhysicalKeyBytes::from_physical_key_prefix(&physical_key(branch, Vec::new()));
+    let range = |lower, upper| TableKeyBounds::range(lower, upper).expect("range bounds");
+    let physical_range = |lower, upper| {
+        TableKeyBounds::physical_range(&prefix, lower, upper).expect("physical bounds")
+    };
+    let bounds: [(&str, Option<TableKeyBounds>); 11] = [
+        ("no bounds", None),
+        (
+            "internal unbounded",
+            Some(range(TableKeyBound::Unbounded, TableKeyBound::Unbounded)),
+        ),
+        (
+            "internal lower included",
+            Some(range(
+                TableKeyBound::Included(internal(b"a")),
+                TableKeyBound::Unbounded,
+            )),
+        ),
+        (
+            "internal lower excluded",
+            Some(range(
+                TableKeyBound::Excluded(internal(b"a")),
+                TableKeyBound::Unbounded,
+            )),
+        ),
+        (
+            "internal lower at another key",
+            Some(range(
+                TableKeyBound::Included(internal(b"b")),
+                TableKeyBound::Unbounded,
+            )),
+        ),
+        (
+            "internal upper included",
+            Some(range(
+                TableKeyBound::Unbounded,
+                TableKeyBound::Included(internal(b"b")),
+            )),
+        ),
+        (
+            "physical unbounded",
+            Some(physical_range(
+                TablePhysicalKeyBound::Unbounded,
+                TablePhysicalKeyBound::Unbounded,
+            )),
+        ),
+        (
+            "physical lower included",
+            Some(physical_range(
+                TablePhysicalKeyBound::Included(physical(b"a")),
+                TablePhysicalKeyBound::Unbounded,
+            )),
+        ),
+        (
+            "physical lower excluded",
+            Some(physical_range(
+                TablePhysicalKeyBound::Excluded(physical(b"a")),
+                TablePhysicalKeyBound::Unbounded,
+            )),
+        ),
+        (
+            "physical lower at another key",
+            Some(physical_range(
+                TablePhysicalKeyBound::Included(physical(b"b")),
+                TablePhysicalKeyBound::Unbounded,
+            )),
+        ),
+        (
+            "physical upper excluded",
+            Some(physical_range(
+                TablePhysicalKeyBound::Unbounded,
+                TablePhysicalKeyBound::Excluded(physical(b"b")),
+            )),
+        ),
+    ];
+    let keep_all = BranchCompactionRetentionPolicy::KeepAll;
+    let mut seen = std::collections::BTreeSet::new();
+    for (shape, bound) in &bounds {
+        let value = rewrite_output_identity_salt(keep_all, None, bound.as_ref());
+        assert!(
+            seen.insert(value),
+            "the {shape} row must derive a distinct salt"
+        );
+    }
+}
+
+/// #3469 call site: the same candidate built once under `KeepAll` and retried
+/// under `DropOlderVersions` + proof (the issue's repro — pruning floors moved
+/// between attempts) produces different bytes, so it must derive a different
+/// output identity; an identical retry keeps the identity.
+#[test]
+fn pruned_retry_of_keep_all_candidate_derives_distinct_output_identity() {
+    let branch = branch_id(0xab);
+    let mut state = BranchLocalState::empty(branch);
+    install_l0_table(
+        &mut state,
+        branch,
+        "retry-identity-high",
+        vec![storage_row_with(
+            branch,
+            b"retry-identity".to_vec(),
+            9,
+            90,
+            Timestamp::EPOCH,
+            b"v9".to_vec(),
+        )],
+    )
+    .expect("install high");
+    install_l0_table(
+        &mut state,
+        branch,
+        "retry-identity-low",
+        vec![
+            storage_row_with(
+                branch,
+                b"retry-identity".to_vec(),
+                4,
+                40,
+                Timestamp::EPOCH,
+                b"v4".to_vec(),
+            ),
+            storage_row_with(
+                branch,
+                b"retry-identity".to_vec(),
+                2,
+                20,
+                Timestamp::EPOCH,
+                b"v2".to_vec(),
+            ),
+        ],
+    )
+    .expect("install low");
+    state.set_timestamp_coverage(BranchTimestampCoverage::complete());
+    let keep_all =
+        BranchCompactionRequest::new(branch, BranchCompactionKind::CompactL0, "retry-identity")
+            .expect("request");
+    let proof = BranchCompactionPruningProof::from_branch_state(&state, CommitVersion::new(5))
+        .expect("proof")
+        .with_retained_timestamp_floor(Timestamp::from_micros(50))
+        .expect("timestamp proof")
+        .with_no_readable_inherited_layers()
+        .expect("inheritance proof")
+        .with_candidate_tables_not_shared()
+        .expect("shared-table proof")
+        .with_recovery_health(BranchRecoveryHealthAttestation::Healthy)
+        .expect("recovery health proof");
+    let pruned = keep_all
+        .clone()
+        .with_retention_policy(BranchCompactionRetentionPolicy::DropOlderVersions)
+        .with_pruning_proof(proof);
+    let build = |request: &BranchCompactionRequest| {
+        let plan = state.plan_branch_compaction(request).expect("plan");
+        let (artifacts, report) = state
+            .prepare_branch_compaction_plan(request, &plan)
+            .expect("prepare")
+            .expect("candidate");
+        assert_eq!(artifacts.len(), 1);
+        (
+            artifacts[0].facts().identity().clone(),
+            artifacts[0].bytes().to_vec(),
+            report.dropped_rows(),
+        )
+    };
+
+    let (keep_identity, keep_bytes, keep_dropped) = build(&keep_all);
+    let (pruned_identity, pruned_bytes, pruned_dropped) = build(&pruned);
+    let (retry_identity, retry_bytes, _) = build(&pruned);
+
+    assert_eq!((keep_dropped, pruned_dropped), (0, 1));
+    assert_ne!(keep_bytes, pruned_bytes, "the attempts' bytes differ");
+    assert_ne!(
+        keep_identity, pruned_identity,
+        "different bytes must never share an output identity"
+    );
+    assert_eq!(
+        (retry_identity, retry_bytes),
+        (pruned_identity, pruned_bytes),
+        "an identical retry keeps its identity and bytes (dedupe)"
+    );
+}
+
 fn history_for(state: &BranchLocalState, branch: BranchId, key: &[u8]) -> Vec<u64> {
     let view = state.capture_read_view().expect("view");
     history_versions(
