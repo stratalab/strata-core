@@ -27,7 +27,7 @@ use strata_storage::api::{
 
 use crate::branch::catalog::{DEFAULT_BRANCH_GENERATION, SYSTEM_BRANCH_ID};
 use crate::commit::CommitOutcome;
-use crate::diagnostics::{EngineError, ErrorDetail};
+use crate::diagnostics::{size_limit_details, with_size_suffix, EngineError, ErrorDetail};
 use crate::time_compat::{SystemTime, UNIX_EPOCH};
 
 use super::fault::FaultOp;
@@ -1372,7 +1372,29 @@ pub(crate) fn map_storage_error(error: StorageApiError) -> EngineError {
     let details = storage_error_details(&error);
     let hints = persistence_hints(&error);
     let (code, message) = persistence_code(&error);
+    let message = persistence_message(&error, message);
     EngineError::with_context(code, message, details, hints, error)
+}
+
+/// The user-facing message for a mapped storage error: the code's own
+/// message, plus — for a size refusal — what was too large and by how much,
+/// so a reader who never sees the structured details can still act (#3397).
+/// The storage `reason` stays in the details: it is mechanical wording, not
+/// phrasing for a reader.
+fn persistence_message(error: &StorageApiError, message: &'static str) -> String {
+    match error {
+        StorageApiError::SizeLimitExceeded {
+            field,
+            actual_bytes,
+            limit_bytes,
+            ..
+        } => with_size_suffix(
+            &format!("{message}: the {field} is too large to encode"),
+            *actual_bytes,
+            *limit_bytes,
+        ),
+        _ => message.to_owned(),
+    }
 }
 
 const fn persistence_code(error: &StorageApiError) -> (&'static str, &'static str) {
@@ -1481,6 +1503,26 @@ fn persistence_hints(error: &StorageApiError) -> Vec<String> {
     vec![hint.to_owned()]
 }
 
+/// #3397: the argument a storage size cap refused, the mechanical reason, and
+/// the two numbers every size refusal carries — what it measured and the cap.
+fn size_refusal_details(error: &StorageApiError) -> Vec<ErrorDetail> {
+    let StorageApiError::SizeLimitExceeded {
+        field,
+        actual_bytes,
+        limit_bytes,
+        reason,
+    } = error
+    else {
+        return Vec::new();
+    };
+    let mut details = vec![
+        ErrorDetail::new("field", *field),
+        ErrorDetail::new("reason", *reason),
+    ];
+    details.extend(size_limit_details(*actual_bytes, *limit_bytes));
+    details
+}
+
 /// #3659: the format a newer Strata wrote, its version, and the newest
 /// version this build reads.
 fn format_details(error: &StorageApiError) -> Vec<ErrorDetail> {
@@ -1499,6 +1541,10 @@ fn format_details(error: &StorageApiError) -> Vec<ErrorDetail> {
     ]
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per storage error variant keeps the detail mapping in one registry"
+)]
 fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
     let mut details = Vec::new();
     match error {
@@ -1506,6 +1552,7 @@ fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
             details.push(ErrorDetail::new("field", *field));
             details.push(ErrorDetail::new("reason", *reason));
         }
+        StorageApiError::SizeLimitExceeded { .. } => details.extend(size_refusal_details(error)),
         StorageApiError::UnsupportedCapability { capability, reason } => {
             details.push(ErrorDetail::new("capability", *capability));
             details.push(ErrorDetail::new("reason", *reason));
@@ -1648,6 +1695,16 @@ mod tests {
             (
                 StorageApiError::InvalidArgument {
                     field: "test field",
+                    reason: "test reason",
+                },
+                "invalid_argument.engine.persistence",
+                &[],
+            ),
+            (
+                StorageApiError::SizeLimitExceeded {
+                    field: "row",
+                    actual_bytes: 16_777_217,
+                    limit_bytes: 16_777_216,
                     reason: "test reason",
                 },
                 "invalid_argument.engine.persistence",
@@ -2062,6 +2119,40 @@ mod tests {
             RetryPolicy::Never,
             CommitOutcomeStatus::NotStarted,
         );
+        assert!(error.source_arc().is_some());
+    }
+
+    /// #3397: a storage size refusal keeps the plain invalid-argument
+    /// contract — same code, class, retry policy — and carries what was too
+    /// large and by how much as structured details, not only as prose.
+    #[test]
+    fn storage_size_refusal_carries_actual_and_limit_bytes() {
+        use crate::diagnostics::{ACTUAL_BYTES_DETAIL, LIMIT_BYTES_DETAIL};
+
+        let error = map_storage_error(StorageApiError::SizeLimitExceeded {
+            field: "key",
+            actual_bytes: 65_600,
+            limit_bytes: 65_536,
+            reason: "test reason",
+        });
+        assert_eq!(error.class(), EngineErrorClass::InvalidInput);
+        assert_eq!(error.code(), "invalid_argument.engine.persistence");
+        assert_v1_status(
+            &error,
+            ErrorClass::InvalidArgument,
+            RetryPolicy::Never,
+            CommitOutcomeStatus::NotStarted,
+        );
+        let detail = |key: &str| {
+            error
+                .details()
+                .iter()
+                .find(|detail| detail.key() == key)
+                .map(|detail| detail.value().to_owned())
+        };
+        assert_eq!(detail("field").as_deref(), Some("key"));
+        assert_eq!(detail(ACTUAL_BYTES_DETAIL).as_deref(), Some("65600"));
+        assert_eq!(detail(LIMIT_BYTES_DETAIL).as_deref(), Some("65536"));
         assert!(error.source_arc().is_some());
     }
 

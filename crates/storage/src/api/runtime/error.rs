@@ -50,6 +50,12 @@ fn budget_exceeded_to_api(error: &LifecycleError) -> Option<StorageApiError> {
 /// decode-side check: on a read, an oversized `row_len` means the stored bytes
 /// are corrupt, which must keep its corruption classification. Only the encode
 /// direction is a caller error.
+///
+/// Stays a plain `InvalidArgument`, without the sizes `SizeLimitExceeded`
+/// carries (#3397): the encoder's `FormatError::InvalidLength` records no
+/// length, and commit admission refuses every oversized row, with its sizes,
+/// before a batch can reach the encoder. This is the backstop, not the path a
+/// caller sees.
 fn row_too_large_to_api(error: &WalServiceError) -> Option<StorageApiError> {
     match error {
         WalServiceError::Format {
@@ -74,6 +80,13 @@ const ROW_TOO_LARGE_REASON: &str = "a single committed row exceeds the maximum e
 /// the whole row. Named distinctly because trimming the value does nothing
 /// for it — the caller has to shorten the key.
 const KEY_TOO_LARGE_REASON: &str = "a committed key exceeds the maximum encodable size";
+
+/// A measured in-memory length as the API's `u64` byte count. `usize` is at
+/// most 64 bits on every supported target, so this never saturates in
+/// practice; saturating keeps it total without a panic path.
+fn byte_count(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
 
 pub(super) fn branch_error(error: crate::branch::error::BranchRuntimeError) -> StorageApiError {
     match error {
@@ -114,21 +127,29 @@ pub(super) fn commit_error(error: crate::commit::CommitRuntimeError) -> StorageA
                 reason,
             }
         }
-        // Word-for-word what `row_too_large_to_api` returns for the WAL
-        // encoder's own refusal, so the caller sees one contract regardless of
-        // which layer caught the oversized row (#3383, #3391).
-        crate::commit::CommitRuntimeError::MutationTooLarge { .. } => {
-            StorageApiError::InvalidArgument {
-                field: "row",
-                reason: ROW_TOO_LARGE_REASON,
-            }
-        }
-        crate::commit::CommitRuntimeError::MutationKeyTooLarge { .. } => {
-            StorageApiError::InvalidArgument {
-                field: "key",
-                reason: KEY_TOO_LARGE_REASON,
-            }
-        }
+        // The same field, reason, code and class as `row_too_large_to_api`
+        // returns for the WAL encoder's own refusal, so the caller sees one
+        // contract regardless of which layer caught the oversized row (#3383,
+        // #3391) — plus the encoded size and the cap, which only admission
+        // measured (#3397).
+        crate::commit::CommitRuntimeError::MutationTooLarge {
+            row_len,
+            max_row_len,
+        } => StorageApiError::SizeLimitExceeded {
+            field: "row",
+            actual_bytes: byte_count(row_len),
+            limit_bytes: byte_count(max_row_len),
+            reason: ROW_TOO_LARGE_REASON,
+        },
+        crate::commit::CommitRuntimeError::MutationKeyTooLarge {
+            key_len,
+            max_key_len,
+        } => StorageApiError::SizeLimitExceeded {
+            field: "key",
+            actual_bytes: byte_count(key_len),
+            limit_bytes: byte_count(max_key_len),
+            reason: KEY_TOO_LARGE_REASON,
+        },
         crate::commit::CommitRuntimeError::DuplicateMutationKey { .. } => {
             StorageApiError::InvalidArgument {
                 field: "mutations",
@@ -658,11 +679,14 @@ mod tests {
             super::super::StorageApiErrorClass::InvalidArgument
         );
         // Same field and wording as `row_too_large_to_api`, so a caller cannot
-        // tell which layer refused.
+        // tell which layer refused — and the sizes admission measured, so the
+        // caller knows how much to trim (#3397).
         assert!(matches!(
             admission,
-            StorageApiError::InvalidArgument {
+            StorageApiError::SizeLimitExceeded {
                 field: "row",
+                actual_bytes: 16_777_217,
+                limit_bytes: 16_777_216,
                 reason,
             } if reason == ROW_TOO_LARGE_REASON
         ));
@@ -689,8 +713,10 @@ mod tests {
         );
         assert!(matches!(
             refusal,
-            StorageApiError::InvalidArgument {
+            StorageApiError::SizeLimitExceeded {
                 field: "key",
+                actual_bytes: 65_537,
+                limit_bytes: 65_536,
                 reason,
             } if reason == KEY_TOO_LARGE_REASON
         ));

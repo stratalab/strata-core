@@ -29,9 +29,11 @@ impl ProductSpace {
             ));
         }
         if space.len() > MAX_PRODUCT_SPACE_BYTES {
-            return Err(EngineError::invalid_input(
+            return Err(EngineError::size_limit_exceeded(
                 "invalid_argument.engine.product_space",
                 "product space is too long",
+                space.len(),
+                MAX_PRODUCT_SPACE_BYTES,
             ));
         }
         if space.bytes().any(|byte| byte == 0 || byte == b'\n') {

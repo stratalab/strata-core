@@ -30,9 +30,11 @@ impl EventType {
             ));
         }
         if event_type.len() > MAX_EVENT_TYPE_BYTES {
-            return Err(EngineError::invalid_input(
+            return Err(EngineError::size_limit_exceeded(
                 "invalid_argument.engine.event_type",
                 "event type exceeds the maximum length",
+                event_type.len(),
+                MAX_EVENT_TYPE_BYTES,
             ));
         }
         if event_type.bytes().any(|byte| byte == 0) {
@@ -126,9 +128,11 @@ impl EventPayload {
             })?
             .len();
         if size > MAX_EVENT_PAYLOAD_BYTES {
-            return Err(EngineError::invalid_input(
+            return Err(EngineError::size_limit_exceeded(
                 "invalid_argument.engine.event_payload_too_large",
                 "event payload exceeds the maximum encoded size",
+                size,
+                MAX_EVENT_PAYLOAD_BYTES,
             ));
         }
         Ok(Self(value))

@@ -27,7 +27,7 @@ use strata_storage::api::{
 /// `remediation()`, and `Display` are exhaustive matches, so a new variant is a
 /// compile error there until handled; this count is the test-level backstop
 /// ensuring the conformance fixture below is extended in lockstep.
-const EXPECTED_VARIANT_COUNT: usize = 15;
+const EXPECTED_VARIANT_COUNT: usize = 16;
 
 /// Substrings that must never appear in a public message or remediation hint.
 /// The full redaction matrix lives at the command/CLI/SDK surfaces; this is the
@@ -66,6 +66,17 @@ fn sample_errors() -> Vec<(&'static str, StorageApiError, StorageApiErrorClass, 
             StorageApiError::InvalidArgument {
                 field: "maintenance_scheduling_policy",
                 reason: "must select an owned backend handle",
+            },
+            StorageApiErrorClass::InvalidArgument,
+            false,
+        ),
+        (
+            "SizeLimitExceeded",
+            StorageApiError::SizeLimitExceeded {
+                field: "row",
+                actual_bytes: 16 * 1024 * 1024 + 1,
+                limit_bytes: 16 * 1024 * 1024,
+                reason: "a single committed row exceeds the maximum encodable size",
             },
             StorageApiErrorClass::InvalidArgument,
             false,

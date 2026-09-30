@@ -362,9 +362,11 @@ impl GraphProperties {
             })?
             .len();
         if size > MAX_GRAPH_PROPERTIES_BYTES {
-            return Err(EngineError::invalid_input(
+            return Err(EngineError::size_limit_exceeded(
                 "invalid_argument.engine.graph_properties_too_large",
                 "graph properties exceed the maximum encoded size",
+                size,
+                MAX_GRAPH_PROPERTIES_BYTES,
             ));
         }
         Ok(Self(value))
@@ -685,9 +687,11 @@ pub(super) fn validate_text_component(
         ));
     }
     if value.len() > max_bytes {
-        return Err(EngineError::invalid_input(
+        return Err(EngineError::size_limit_exceeded(
             code,
             format!("{label} exceeds the maximum length"),
+            value.len(),
+            max_bytes,
         ));
     }
     if value.chars().any(char::is_control) {

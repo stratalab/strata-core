@@ -171,9 +171,11 @@ impl JsonValue {
             })?
             .len();
         if size > MAX_DOCUMENT_BYTES {
-            return Err(EngineError::invalid_input(
+            return Err(EngineError::size_limit_exceeded(
                 "invalid_argument.engine.json_document_too_large",
                 "JSON document exceeds the maximum encoded size",
+                size,
+                MAX_DOCUMENT_BYTES,
             ));
         }
         let array_size = max_array_size(&self.0);
@@ -765,9 +767,11 @@ fn validate_component(
         ));
     }
     if value.len() > max_bytes {
-        return Err(EngineError::invalid_input(
+        return Err(EngineError::size_limit_exceeded(
             code,
             format!("{label} is too long"),
+            value.len(),
+            max_bytes,
         ));
     }
     if value.bytes().any(|byte| byte == 0 || byte == b'\n') {
