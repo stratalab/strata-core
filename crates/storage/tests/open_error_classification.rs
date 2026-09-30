@@ -8,12 +8,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use strata_core::BranchId;
 use strata_storage::api::{
     CommitBatch, CommitMutation, CommitOptions, MaintenanceRequest, MaintenanceScope,
-    MaintenanceSummaryStatus, MaintenanceTask, StorageApiErrorClass, StorageDurabilityPolicy,
-    StorageKey, StorageRuntime, StorageSpaceId, StorageValue,
+    MaintenanceSummaryStatus, MaintenanceTask, StorageApiError, StorageApiErrorClass,
+    StorageApiResult, StorageDurabilityPolicy, StorageKey, StorageRuntime, StorageSpaceId,
+    StorageValue,
 };
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -29,6 +31,28 @@ fn temp_root(name: &str) -> PathBuf {
         std::fs::remove_dir_all(&path).expect("clear old temp dir");
     }
     path
+}
+
+/// Reopens a path whose previous runtime was DROPPED rather than closed.
+///
+/// A drop detaches a background worker that misses the 250 ms quiesce
+/// window, and the detached worker keeps the writer lock until its task
+/// finishes — seconds on a loaded runner — so an immediate reopen can be
+/// refused with `WriterLockHeld` (#2837, #3694). This retries ONLY that
+/// refusal, within a 30 s wall-clock deadline, and returns every other
+/// outcome (the classifications these tests assert) unchanged at once. It
+/// mirrors the crate-private `testkit::reopen_retry` policy, which a
+/// default-feature integration target cannot reach.
+fn reopen_after_drop<T>(mut open: impl FnMut() -> StorageApiResult<T>) -> StorageApiResult<T> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match open() {
+            Err(StorageApiError::WriterLockHeld) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            outcome => return outcome,
+        }
+    }
 }
 
 fn default_branch() -> BranchId {
@@ -104,8 +128,10 @@ fn corrupt_wal_record_reports_permanent_corruption_not_transient_outage() {
     }
     std::fs::write(&segment, &bytes).expect("write corrupted wal segment");
 
-    let error = StorageRuntime::open_durable_local(&root, StorageDurabilityPolicy::Always)
-        .expect_err("a byte-corrupted WAL must fail to open, not silently recover");
+    let error = reopen_after_drop(|| {
+        StorageRuntime::open_durable_local(&root, StorageDurabilityPolicy::Always)
+    })
+    .expect_err("a byte-corrupted WAL must fail to open, not silently recover");
 
     assert_eq!(
         error.class(),
@@ -403,9 +429,11 @@ fn unattested_store_with_missing_wal_still_opens_fresh() {
     }
     delete_all_wal_segments(&root);
 
-    let runtime = StorageRuntime::open_durable_local(&root, StorageDurabilityPolicy::Standard)
-        .expect("an unattested store recreates its log")
-        .into_runtime();
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_durable_local(&root, StorageDurabilityPolicy::Standard)
+    })
+    .expect("an unattested store recreates its log")
+    .into_runtime();
     drop(runtime);
 }
 
@@ -519,8 +547,10 @@ fn unlinking_active_wal_makes_close_report_permanent_corruption() {
     );
     drop(runtime);
 
-    let reopen = StorageRuntime::open_durable_local(&root, StorageDurabilityPolicy::Standard)
-        .expect_err("reopen after the loss must refuse, never present a healthy empty store");
+    let reopen = reopen_after_drop(|| {
+        StorageRuntime::open_durable_local(&root, StorageDurabilityPolicy::Standard)
+    })
+    .expect_err("reopen after the loss must refuse, never present a healthy empty store");
     assert_eq!(
         reopen.code(),
         "failed_precondition.storage_api.recovery_degraded"

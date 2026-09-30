@@ -205,7 +205,8 @@ fn assert_off_lock_manifest_fsync_fault_recovers(before_visibility: bool, name: 
     // Phase 3: reopen and assert the durable manifest did NOT advance (the faulted publish left no
     // durable manifest — proof the fault fired) and that every committed row recovered.
     {
-        let reopened = StorageRuntime::open_local(root).expect("reopen after crash");
+        let reopened = reopen_after_drop(|| StorageRuntime::open_local(root.clone()))
+            .expect("reopen after crash");
         assert_eq!(
             reopened.summary().disposition(),
             StorageOpenDisposition::OpenedExisting

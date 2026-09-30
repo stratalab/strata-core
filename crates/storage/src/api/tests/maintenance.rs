@@ -1018,10 +1018,12 @@ fn test_fork_child_inherited_floor_persists_across_reopen() {
         .expect("legal fork at/above the floor");
     // Close and reopen against the same backend.
     drop(runtime);
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
 
@@ -3286,7 +3288,7 @@ fn api_reopen_purges_quarantine_a_prior_session_left_unpurged() {
         .with_maintenance_scheduling_policy(
             StorageMaintenanceSchedulingPolicy::DeterministicInline,
         );
-    let mut runtime = StorageRuntime::open_with_backend(inline, backend)
+    let mut runtime = reopen_after_drop(|| StorageRuntime::open_with_backend(inline, backend))
         .expect("reopen durable runtime")
         .into_runtime();
     runtime.wait_background_idle_for_test();

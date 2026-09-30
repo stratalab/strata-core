@@ -1340,10 +1340,12 @@ fn durable_branch_delete_allows_reopen_after_process_drop() {
     drop(runtime);
 
     let backend = StorageBackend::local_fs(root);
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("durable reopen after branch delete")
     .into_runtime();
     let described = runtime
@@ -1536,10 +1538,12 @@ fn fork_parent_deletion_cannot_brick_recovery() {
     }
 
     let backend = StorageBackend::local_fs(root);
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen after refused parent delete")
     .into_runtime();
     assert_eq!(
@@ -1693,10 +1697,12 @@ fn fork_onto_deleted_name_does_not_resurrect_predecessor_rows_after_reopen() {
         put_at(&mut runtime, victim, b"fresh", b"alive", 30);
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -1758,10 +1764,12 @@ fn recreate_after_delete_does_not_resurrect_predecessor_rows_after_reopen() {
         put_at(&mut runtime, victim, b"fresh", b"alive", 20);
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -1828,10 +1836,12 @@ fn recreate_after_checkpoint_does_not_resurrect_predecessor_rows() {
         put_at(&mut runtime, victim, b"fresh", b"alive", 20);
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -1897,10 +1907,12 @@ fn recreate_after_flush_does_not_resurrect_predecessor_tables() {
         put_at(&mut runtime, victim, b"fresh", b"alive", 20);
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -1966,10 +1978,12 @@ fn legitimate_flushed_branch_survives_reopen_with_created_at_stamped() {
         runtime.drain_maintenance().expect("drain checkpoint");
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -2027,10 +2041,12 @@ fn recreated_branch_refuses_dead_generation_timestamps_after_reopen() {
         runtime.drain_maintenance().expect("drain checkpoint");
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     let error = runtime
@@ -2101,10 +2117,12 @@ fn fork_child_keeps_inherited_era_timestamps_after_reopen() {
         runtime.drain_maintenance().expect("drain checkpoint");
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     let outcome = runtime
@@ -2178,10 +2196,12 @@ fn checkpoint_then_flush_of_non_seeded_branch_survives_reopen() {
         put_at(&mut runtime, victim, b"tail", b"walled", 20);
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen must combine the checkpoint with the flushed base, not refuse")
     .into_runtime();
     assert_eq!(
@@ -2275,10 +2295,12 @@ fn eager_fork_checkpoint_then_flush_survives_reopen() {
         runtime.drain_maintenance().expect("drain flush");
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen must combine the checkpoint with the flushed fork base")
     .into_runtime();
     assert_eq!(
@@ -2392,10 +2414,12 @@ fn eager_refork_over_deleted_name_recovers_current_lineage() {
             "live: gen 2 inherits root-new via mid"
         );
     }
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -2461,10 +2485,12 @@ fn eager_fork_on_fresh_name_recovers_current_lineage() {
             .expect("eager fork leaf from mid on a fresh name");
         put_at(&mut runtime, leaf, b"leaf-own", b"own-v", 20);
     }
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -2517,10 +2543,12 @@ fn recovered_commit_clock_stays_above_surviving_catalog_anchors() {
             .expect("materialize crash");
     }
 
-    let mut runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let mut runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen after crash")
     .into_runtime();
     // Precondition, not the oracle: the crash must actually shed the
@@ -2571,10 +2599,12 @@ fn post_crash_commits_survive_the_next_reopen_despite_catalog_anchors() {
             .expect("materialize crash");
     }
     {
-        let mut runtime = StorageRuntime::open_with_backend(
-            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-            &backend,
-        )
+        let mut runtime = reopen_after_drop(|| {
+            StorageRuntime::open_with_backend(
+                StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+                &backend,
+            )
+        })
         .expect("reopen after crash")
         .into_runtime();
         // An acked commit on the anchor branch after the lossy reopen.
@@ -2582,10 +2612,12 @@ fn post_crash_commits_survive_the_next_reopen_despite_catalog_anchors() {
         // Clean close: this row is durable.
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("clean reopen")
     .into_runtime();
     assert_eq!(
@@ -2632,10 +2664,12 @@ fn recovered_commit_clock_stays_above_deleted_branch_anchors() {
             .expect("materialize crash");
     }
 
-    let mut runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let mut runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen after crash")
     .into_runtime();
     assert_eq!(
@@ -2706,10 +2740,12 @@ fn fork_current_captures_content_that_outlives_timeline_coverage() {
             .expect("materialize crash");
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen after crash")
     .into_runtime();
     // Precondition, not the oracle: the flushed post-checkpoint content must
@@ -2804,10 +2840,12 @@ fn fork_at_version_inside_surviving_timeline_coverage_succeeds_after_lossy_crash
             .expect("materialize crash");
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            &backend,
+        )
+    })
     .expect("reopen after crash")
     .into_runtime();
     assert_eq!(
@@ -2936,13 +2974,15 @@ fn refork_of_a_deleted_name_does_not_resurrect_dead_generation_checkpoint_rows()
         // defer checkpoints as manifest-publish debt).
     }
     {
-        let mut runtime = StorageRuntime::open_with_backend(
-            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
-                .with_maintenance_scheduling_policy(
-                    crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
-                ),
-            &backend,
-        )
+        let mut runtime = reopen_after_drop(|| {
+            StorageRuntime::open_with_backend(
+                StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
+                    .with_maintenance_scheduling_policy(
+                        crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                    ),
+                &backend,
+            )
+        })
         .expect("first reopen")
         .into_runtime();
         // The checkpoint records the victim's gen-1 rows (inherited + own).
@@ -2969,10 +3009,12 @@ fn refork_of_a_deleted_name_does_not_resurrect_dead_generation_checkpoint_rows()
         // Clean close: the stale checkpoint is the latest one on disk.
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -3032,13 +3074,15 @@ fn fork_child_own_rows_survive_reopen_through_the_checkpoint() {
         // manifest-publish debt (a live eager fork defers checkpoints).
     }
     {
-        let mut runtime = StorageRuntime::open_with_backend(
-            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
-                .with_maintenance_scheduling_policy(
-                    crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
-                ),
-            &backend,
-        )
+        let mut runtime = reopen_after_drop(|| {
+            StorageRuntime::open_with_backend(
+                StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
+                    .with_maintenance_scheduling_policy(
+                        crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                    ),
+                &backend,
+            )
+        })
         .expect("first reopen")
         .into_runtime();
         // An own row ABOVE created_at, then a checkpoint covering it.
@@ -3052,10 +3096,12 @@ fn fork_child_own_rows_survive_reopen_through_the_checkpoint() {
         runtime.drain_maintenance().expect("drain checkpoint");
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -3138,13 +3184,15 @@ fn refork_of_a_deleted_name_does_not_seed_dead_generation_checkpoint_timeline() 
         (base_two, dead_own)
     };
     let (parent_after_delete, new_own) = {
-        let mut runtime = StorageRuntime::open_with_backend(
-            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
-                .with_maintenance_scheduling_policy(
-                    crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
-                ),
-            &backend,
-        )
+        let mut runtime = reopen_after_drop(|| {
+            StorageRuntime::open_with_backend(
+                StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
+                    .with_maintenance_scheduling_policy(
+                        crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                    ),
+                &backend,
+            )
+        })
         .expect("first reopen")
         .into_runtime();
         // The checkpoint records the victim's gen-1 timeline group
@@ -3175,10 +3223,12 @@ fn refork_of_a_deleted_name_does_not_seed_dead_generation_checkpoint_timeline() 
         (parent_after_delete, new_own)
     };
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -3239,13 +3289,15 @@ fn fork_child_own_timeline_survives_reopen_through_the_checkpoint() {
         base
     };
     let own = {
-        let mut runtime = StorageRuntime::open_with_backend(
-            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
-                .with_maintenance_scheduling_policy(
-                    crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
-                ),
-            &backend,
-        )
+        let mut runtime = reopen_after_drop(|| {
+            StorageRuntime::open_with_backend(
+                StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
+                    .with_maintenance_scheduling_policy(
+                        crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                    ),
+                &backend,
+            )
+        })
         .expect("first reopen")
         .into_runtime();
         let own = put_at(&mut runtime, child, b"own", b"kept", 10).commit_version();
@@ -3259,10 +3311,12 @@ fn fork_child_own_timeline_survives_reopen_through_the_checkpoint() {
         own
     };
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -3333,10 +3387,12 @@ fn parentless_recreate_does_not_seed_dead_generation_checkpoint_timeline() {
         (dead_own, new_own)
     };
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -3401,10 +3457,12 @@ fn cow_fork_over_a_volatile_source_keeps_inheritance_across_reopen() {
         let _version_dependent = runtime.branch(&branch_request(mid, BranchAction::Delete));
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(
@@ -3486,10 +3544,12 @@ fn refork_over_a_deleted_name_does_not_adopt_the_dead_generations_manifest() {
             .expect("re-fork victim as gen 2 over a volatile source");
     }
 
-    let runtime = StorageRuntime::open_with_backend(
-        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
-        &backend,
-    )
+    let runtime = reopen_after_drop(|| {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+    })
     .expect("reopen")
     .into_runtime();
     assert_eq!(

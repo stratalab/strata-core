@@ -71,10 +71,11 @@ mod recovery_oracle;
     not(target_arch = "wasm32")
 ))]
 mod recovery_read_faults;
-// Both consumers — the compound-fault and dual-mutation harnesses — are
+// Every consumer — the testkit harnesses and the storage API tests'
+// drop-then-reopen sites (`api::tests::reopen_after_drop`) — is
 // `localfs`-gated.
 #[cfg(all(feature = "localfs", not(target_arch = "wasm32")))]
-mod reopen_retry;
+pub(crate) mod reopen_retry;
 #[cfg(all(
     any(test, feature = "fault-injection"),
     feature = "localfs",
