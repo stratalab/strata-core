@@ -256,7 +256,9 @@ jobs:
 
   loom:
     # TCP4.3: exhaustive schedule exploration of the write-group protocol
-    # (commit_group.rs) under loom. Fully deterministic — every schedule at
+    # (commit_group.rs), the off-lock read protocol (visibility_loom.rs) and
+    # the reader-versus-reclaim liveness protocol (reclaim_loom.rs, #3048)
+    # under loom. Fully deterministic — every schedule at
     # the model bounds is explored, so this can block merges without
     # flapping. The --cfg loom build swaps the storage sync seam
     # (crates/storage/src/sync.rs) to loom primitives; the separate cache
@@ -276,7 +278,7 @@ jobs:
       - name: Schedule-exploration models
         env:
           RUSTFLAGS: --cfg loom
-        run: cargo test --locked -p strata-storage --lib -- commit_group_loom visibility_loom
+        run: cargo test --locked -p strata-storage --lib -- commit_group_loom visibility_loom reclaim_loom
 
   mutation-on-diff:
     # SQLite-style suite-strength gate, bounded to stay affordable: mutate

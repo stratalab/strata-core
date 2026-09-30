@@ -5092,9 +5092,12 @@ fn build_compaction_for_adoption_test(
 /// Drives the interleaving the #3047 investigation suspected: a compaction
 /// installs its output Y and defers on a busy publish slot (so no manifest it
 /// registered lists Y), the flush holding the slot republishes a view that
-/// references Y, and a second compaction consumes Y while a sweep runs. The
+/// references Y, and a second compaction runs while a sweep runs. The
 /// mark now pins every table the current published views reference, so Y
 /// survives regardless of how the manifests and in-memory state line up.
+/// (#3048: level 2 is empty here, so C2 PROMOTES Y rather than rewriting it
+/// and Y stays pinned without the published-view pin too; the consuming
+/// rewrite — the actual #3047 window — is the next test.)
 #[test]
 fn a_table_the_current_published_view_references_is_never_swept() {
     let backend: &'static DurableTestBackend =
@@ -5190,6 +5193,207 @@ fn a_table_the_current_published_view_references_is_never_swept() {
             .contains(&y),
         "the current published view references Y, so the mark pins it"
     );
+
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::quarantine())
+        .expect("enqueue sweep");
+    if let Some(DurableBackgroundMaintenanceStep::SweepStage(inputs)) = runtime
+        .start_next_background_quarantine_sweep()
+        .expect("start sweep")
+    {
+        runtime
+            .finish_quarantine_sweep(inputs.stage())
+            .expect("finish sweep");
+    }
+    assert!(
+        backend.object_metadata(&y).is_ok(),
+        "a table the current view references must survive the sweep: {y}"
+    );
+
+    let (prepared_c2, write_result) = prepared_c2.persist_off_lock();
+    runtime
+        .finish_publish_phase(prepared_c2, write_result)
+        .expect("finish C2 publish");
+}
+
+/// #3048 scaffolding: enqueue a level-1 compaction and drive it through its
+/// off-lock build; the publish phase is the caller's.
+fn build_level_one_compaction(
+    runtime: &mut LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+    branch: BranchId,
+) -> DurableBackgroundMaintenanceBuilt {
+    runtime
+        .enqueue_maintenance(MaintenanceTaskRequest::compaction(branch, 1))
+        .expect("enqueue level-1 compaction");
+    let DurableBackgroundMaintenanceStep::Build(pending) = runtime
+        .start_next_background_table_rewrite_maintenance()
+        .expect("start level-1 compaction")
+        .expect("level-1 compaction step")
+    else {
+        panic!("expected a level-1 compaction build step");
+    };
+    pending.build().expect("build level-1 compaction")
+}
+
+/// #3048 scaffolding: a confirmed table over `race-key` in level 2 (flush,
+/// compact into level 1, promote into level 2 — each confirmed), so a later
+/// level-1 compaction over that key must REWRITE rather than promote.
+fn seed_confirmed_level_two_table(
+    runtime: &mut LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+    branch: BranchId,
+) {
+    let (seed, _) = build_flush_for_frontier_tests(runtime, branch, b"race-key", b"seed");
+    publish_to_confirmation(runtime, seed);
+    let seed_l1 = build_compaction_for_adoption_test(runtime, branch);
+    publish_to_confirmation(runtime, seed_l1);
+    let promotion = build_level_one_compaction(runtime, branch);
+    publish_to_confirmation(runtime, promotion);
+    let levels: Vec<usize> = runtime
+        .branch_catalog()
+        .branch_state(branch)
+        .expect("branch state")
+        .owned_levels()
+        .iter()
+        .map(Vec::len)
+        .collect();
+    assert_eq!(
+        levels.get(2).copied(),
+        Some(1),
+        "the seed table sits in level 2: {levels:?}"
+    );
+}
+
+/// #3048 scaffolding: `object` is named by the current published view and by
+/// nothing else the mark consults — no manifest (confirmed or pending), no
+/// in-flight build, no in-memory branch state.
+fn assert_only_the_current_view_names(
+    runtime: &LifecycleDurableLocalRuntime<'static, CommitManualTimestampSource>,
+    branch: BranchId,
+    object: &ObjectName,
+) {
+    assert!(
+        runtime
+            .published_view_pinned_objects_for_test()
+            .contains(object),
+        "the current published view references the object"
+    );
+    assert!(
+        !runtime
+            .table_catalog()
+            .manifest_frontier_pinned_objects()
+            .contains(object),
+        "no confirmed or pending manifest lists the object"
+    );
+    assert!(
+        !runtime.inflight_table_outputs().snapshot().contains(object),
+        "no in-flight build pins the object"
+    );
+    assert!(
+        runtime
+            .branch_catalog()
+            .branch_state(branch)
+            .expect("branch state")
+            .owned_levels()
+            .iter()
+            .flatten()
+            .all(|table| !object
+                .as_str()
+                .ends_with(table.descriptor().identity().as_str())),
+        "a rewrite consumed the object out of in-memory branch state"
+    );
+}
+
+/// #3048 / #3047: the root-cause interleaving, driven deterministically.
+///
+/// `a_table_the_current_published_view_references_is_never_swept` drives the
+/// deferred-install shape, but its second compaction is a metadata
+/// PROMOTION: Y moves to level 2 unchanged, so the
+/// in-memory pin and C2's pending manifest keep it — it passes with or
+/// without the published-view pin. Here level 2 already holds an overlapping
+/// table, so C2 genuinely REWRITES Y into a new output. In that window Y is
+/// named by no manifest (C1 deferred; the flush's manifest predates C1's
+/// install; C2's pending manifest lists only its own output), by no in-memory
+/// state (C2 consumed it) and by no in-flight build, and the view that
+/// references it is the CURRENT one, not a retired one — so the retired-view
+/// interlock does not defer either. Only the published-view pin (#3639) keeps
+/// Y on disk; without it the sweep deletes an object every reader of the
+/// current view range-reads: the CI failure's `NotFound` on a
+/// `…/l0001/maintenance-compaction-…-level-0-…` object.
+#[test]
+fn a_rewrite_consuming_an_unmanifested_output_never_sweeps_the_current_views_table() {
+    let backend: &'static DurableTestBackend =
+        crate::testkit::leak_static(DurableTestBackend::new());
+    let branch = branch_id(0x7e);
+    let mut runtime = open_runtime(StorageMode::DurableLocalStandard, branch, backend);
+
+    seed_confirmed_level_two_table(&mut runtime, branch);
+
+    // Two confirmed L0 tables over the same key — C1's inputs.
+    for value in [&b"value-1"[..], &b"value-2"[..]] {
+        let (built, _) = build_flush_for_frontier_tests(&mut runtime, branch, b"race-key", value);
+        publish_to_confirmation(&mut runtime, built);
+    }
+
+    // A flush holds the branch's publish slot mid-fsync.
+    let (flush_h, _) =
+        build_flush_for_frontier_tests(&mut runtime, branch, b"race-key", b"value-3");
+    let PreparedPublishStep::OffLock(prepared_h) = runtime
+        .begin_publish_phase(flush_h)
+        .expect("begin flush publish")
+    else {
+        panic!("the flush publishes off-lock");
+    };
+
+    // C1 installs its level-1 output Y, finds the slot busy and defers.
+    let before_c1: std::collections::BTreeSet<ObjectName> = runtime
+        .inflight_table_outputs()
+        .snapshot()
+        .into_iter()
+        .collect();
+    let built_c1 = build_compaction_for_adoption_test(&mut runtime, branch);
+    let outputs_c1: Vec<ObjectName> = runtime
+        .inflight_table_outputs()
+        .snapshot()
+        .into_iter()
+        .filter(|name| !before_c1.contains(name))
+        .collect();
+    assert_eq!(
+        outputs_c1.len(),
+        1,
+        "C1 published one output: {outputs_c1:?}"
+    );
+    let y = outputs_c1[0].clone();
+    match runtime
+        .begin_publish_phase(built_c1)
+        .expect("begin C1 publish")
+    {
+        PreparedPublishStep::Done(result) => assert_eq!(
+            result.expect("C1 resolves").status(),
+            MaintenanceOutcomeStatus::Deferred,
+            "C1 defers on the busy publish slot"
+        ),
+        PreparedPublishStep::OffLock(_) => panic!("the slot is held by the flush"),
+    }
+
+    // The flush finishes: its manifest predates C1's install, the view it
+    // republishes carries Y.
+    let (prepared_h, write_result) = prepared_h.persist_off_lock();
+    runtime
+        .finish_publish_phase(prepared_h, write_result)
+        .expect("finish flush publish");
+
+    // C2 rewrites level 1 into the overlapping level 2 — consuming Y into a
+    // new output — and holds its own publish mid-fsync.
+    let built_c2 = build_level_one_compaction(&mut runtime, branch);
+    let PreparedPublishStep::OffLock(prepared_c2) = runtime
+        .begin_publish_phase(built_c2)
+        .expect("begin C2 publish")
+    else {
+        panic!("C2 publishes off-lock");
+    };
+
+    // The window: Y is referenced by the current published view ONLY.
+    assert_only_the_current_view_names(&runtime, branch, &y);
 
     runtime
         .enqueue_maintenance(MaintenanceTaskRequest::quarantine())

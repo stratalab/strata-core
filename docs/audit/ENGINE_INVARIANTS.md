@@ -271,6 +271,18 @@ is gone; its names are a forbidden-string guard in the retention tests.)
 across every branch including deleted-but-surviving descriptors, and that the only physical
 delete path is the quarantine sweep over proven-unreachable objects.
 
+**Reader leg (#3047, #3048).** Off-lock readers range-read table objects by name through a
+published `BranchReadView`, so the mark also pins every object a CURRENT published view
+references (`published_view_pinned_table_objects` over `current_views`, #3639) and defers the
+whole sweep while any RETIRED view is still held (`retired_views_alive`). Neither leg is
+redundant: a compaction that installs its output while the branch's publish slot is busy
+registers no manifest, so when a later rewrite consumes that output, the current view is the
+ONLY thing naming it (the #3047 `NotFound`). `retired_views_alive` counts in-flight
+`ArcSwap::load_full`s correctly because `swap` pays every outstanding debt on the old value
+before `store` returns. Tests: `a_rewrite_consuming_an_unmanifested_output_never_sweeps_the_current_views_table`
+(`lifecycle/tests/durable.rs`); the loom models in `branch/reclaim_loom.rs` (CI `loom` job),
+each with a sabotage twin per leg.
+
 ### COW-002: Fork capture is atomic against source maintenance
 
 A fork MUST capture the source branch's table set with no window in which concurrent
