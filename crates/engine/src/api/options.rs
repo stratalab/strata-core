@@ -60,6 +60,21 @@ pub enum CachePreheat {
     Disabled,
 }
 
+/// #3500: the codec a durable database writes its storage tables with.
+/// `Zstd` (the default) is the disk-footprint win; `Uncompressed` opts out
+/// (measurement A/B, CPU-constrained edge hosts). The codec is recorded per
+/// block, so a database written under one setting reopens and reads under the
+/// other — the setting only chooses what newly built tables use.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TableCompression {
+    /// Zstd-compress table blocks.
+    #[default]
+    Zstd,
+    /// Write table blocks uncompressed.
+    Uncompressed,
+}
+
 /// Commit durability policy for a durable-local database.
 ///
 /// `Standard` (the default) acknowledges commits from a buffered WAL and
@@ -133,6 +148,7 @@ pub struct DurableLocalOpenOptions {
     cache_preheat: CachePreheat,
     durability: DurabilityMode,
     version_retention: VersionRetention,
+    table_compression: TableCompression,
     #[cfg(any(test, feature = "testkit"))]
     maintenance_scheduling: Option<MaintenanceScheduling>,
     #[cfg(feature = "testkit")]
@@ -151,6 +167,7 @@ impl DurableLocalOpenOptions {
             cache_preheat: CachePreheat::WhenIdle,
             durability: DurabilityMode::Standard,
             version_retention: VersionRetention::KeepAll,
+            table_compression: TableCompression::Zstd,
             #[cfg(any(test, feature = "testkit"))]
             maintenance_scheduling: None,
             #[cfg(feature = "testkit")]
@@ -263,6 +280,18 @@ impl DurableLocalOpenOptions {
     pub(crate) const fn memory_budget_bytes(&self) -> Option<u64> {
         self.memory_budget_bytes
     }
+
+    /// #3500: selects the codec durable tables are written with (`Zstd` by
+    /// default). Per database: two databases in one process may differ.
+    #[must_use]
+    pub const fn with_table_compression(mut self, table_compression: TableCompression) -> Self {
+        self.table_compression = table_compression;
+        self
+    }
+
+    pub(crate) const fn table_compression(&self) -> TableCompression {
+        self.table_compression
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +306,22 @@ mod tests {
         assert_eq!(options.cache_preheat(), CachePreheat::WhenIdle);
         let disabled = options.with_cache_preheat(CachePreheat::Disabled);
         assert_eq!(disabled.cache_preheat(), CachePreheat::Disabled);
+    }
+
+    /// #3500: table compression defaults to `Zstd` and round-trips through the
+    /// builder in both directions.
+    #[test]
+    fn durable_options_table_compression_round_trips() {
+        let options = DurableLocalOpenOptions::new();
+        assert_eq!(options.table_compression(), TableCompression::Zstd);
+        assert_eq!(TableCompression::default(), TableCompression::Zstd);
+        let uncompressed = options.with_table_compression(TableCompression::Uncompressed);
+        assert_eq!(
+            uncompressed.table_compression(),
+            TableCompression::Uncompressed
+        );
+        let zstd = uncompressed.with_table_compression(TableCompression::Zstd);
+        assert_eq!(zstd.table_compression(), TableCompression::Zstd);
     }
 
     /// #3502 Slice D2: retention defaults to `KeepAll` and round-trips through

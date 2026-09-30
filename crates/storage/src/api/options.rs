@@ -126,6 +126,29 @@ pub enum StorageCachePreheatPolicy {
     Disabled,
 }
 
+/// #3500: the codec durable lifecycle-built tables (flush and compaction
+/// output) are written with. The codec is recorded per block, so a database
+/// written under one policy reopens and reads under the other; the policy only
+/// selects what new tables are written with.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StorageTableCompressionPolicy {
+    /// Zstd-compress table blocks (the default, #3499).
+    #[default]
+    Zstd,
+    /// Write table blocks uncompressed.
+    Uncompressed,
+}
+
+impl StorageTableCompressionPolicy {
+    const fn codec(self) -> crate::format::TableCompression {
+        match self {
+            Self::Zstd => crate::format::TableCompression::Zstd,
+            Self::Uncompressed => crate::format::TableCompression::Uncompressed,
+        }
+    }
+}
+
 /// B2: bounds for the configurable data-block byte target.
 const MIN_DATA_BLOCK_BYTES: u32 = 4 * 1024;
 const MAX_DATA_BLOCK_BYTES: u32 = 1024 * 1024;
@@ -451,18 +474,16 @@ impl StorageOpenOptions {
         self.table_compression
     }
 
-    /// #3499: override the durable table compression codec (Zstd by default).
-    /// Test-only: the production opt-out belongs on the engine's
-    /// `DurableLocalOpenOptions` (deferred, tracked separately) — no shipping
-    /// caller overrides the default yet, so gating this to tests keeps the lib
-    /// free of dead code while still letting the storage suite pin both codecs.
-    #[cfg(test)]
+    /// #3500: select the durable table compression codec (Zstd by default).
+    /// Durable modes only; cache mode keeps its in-memory tables uncompressed.
+    /// The engine's `DurableLocalOpenOptions::with_table_compression` is the
+    /// user-facing opt-out.
     #[must_use]
-    pub(crate) const fn with_table_compression_for_test(
+    pub const fn with_table_compression_policy(
         mut self,
-        compression: crate::format::TableCompression,
+        policy: StorageTableCompressionPolicy,
     ) -> Self {
-        self.table_compression = compression;
+        self.table_compression = policy.codec();
         self
     }
 

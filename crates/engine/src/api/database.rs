@@ -28,7 +28,7 @@ use strata_core::Timestamp;
 use super::footprint::{FootprintDetail, StorageFootprint};
 use super::{
     AdminService, BranchName, CacheOpenOptions, CachePreheat, ControlDiagnostics,
-    DurableLocalOpenOptions, SpaceService,
+    DurableLocalOpenOptions, SpaceService, TableCompression,
 };
 
 /// Explicit storage target used to open a database.
@@ -170,6 +170,9 @@ impl Database {
             None,
             None,
             CachePreheat::WhenIdle,
+            // Cache mode keeps its in-memory tables uncompressed; the codec
+            // only reaches durable opens.
+            TableCompression::Zstd,
         )
     }
 
@@ -181,6 +184,7 @@ impl Database {
         let memory_budget_bytes = options.memory_budget_bytes();
         let data_block_bytes = options.data_block_bytes();
         let cache_preheat = options.cache_preheat();
+        let table_compression = options.table_compression();
         // #3502 Slice D2: map the user-facing retention policy to the keep-newer-
         // than window the storage boundary consumes (`None` = KeepAll).
         let version_retention_window = options.version_retention().retained_window();
@@ -193,6 +197,7 @@ impl Database {
             data_block_bytes,
             version_retention_window,
             cache_preheat,
+            table_compression,
         )
     }
 
@@ -670,6 +675,7 @@ impl Database {
         data_block_bytes: Option<u32>,
         version_retention_window: Option<u64>,
         cache_preheat: CachePreheat,
+        table_compression: TableCompression,
     ) -> Result<DatabaseOpenOutcome, EngineError> {
         let vector_artifacts = vector_artifact_store_for_target(&target);
         // Captured before the open consumes the target: the dataset dir gets
@@ -684,6 +690,7 @@ impl Database {
             data_block_bytes,
             version_retention_window,
             cache_preheat,
+            table_compression,
         )?;
         let control = bootstrap_or_load(
             &mut persistence,

@@ -15,8 +15,8 @@ use strata_storage::api::{
     StorageBudgetPolicy, StorageBudgetSource, StorageCachePreheatPolicy, StorageCloseSummary,
     StorageDurabilityPolicy, StorageImmutableSource, StorageKey, StorageMemoryBudget,
     StorageOpenDisposition, StorageOpenOptions, StorageReadRow, StorageRuntime,
-    StorageRuntimeState, StorageSpaceId, StorageValue, TimelineBoundsRequest,
-    WallClockLookupRequest,
+    StorageRuntimeState, StorageSpaceId, StorageTableCompressionPolicy, StorageValue,
+    TimelineBoundsRequest, WallClockLookupRequest,
 };
 use strata_storage::api::{
     DiagnosticsDetail, DiagnosticsOutcome, DiagnosticsRequest, DiagnosticsScope,
@@ -479,7 +479,14 @@ impl StoragePersistence {
     pub(crate) fn open(
         target: PersistenceOpenTarget,
     ) -> Result<(Self, PersistenceOpenSummary), EngineError> {
-        Self::open_with_budget(target, None, None, None, crate::api::CachePreheat::WhenIdle)
+        Self::open_with_budget(
+            target,
+            None,
+            None,
+            None,
+            crate::api::CachePreheat::WhenIdle,
+            crate::api::TableCompression::Zstd,
+        )
     }
 
     pub(crate) fn open_with_budget(
@@ -488,6 +495,7 @@ impl StoragePersistence {
         data_block_bytes: Option<u32>,
         version_retention_window: Option<u64>,
         cache_preheat: crate::api::CachePreheat,
+        table_compression: crate::api::TableCompression,
     ) -> Result<(Self, PersistenceOpenSummary), EngineError> {
         let (runtime, summary, durable) = match target {
             PersistenceOpenTarget::Cache => {
@@ -520,6 +528,14 @@ impl StoragePersistence {
                 options = options.with_cache_preheat_policy(match cache_preheat {
                     crate::api::CachePreheat::WhenIdle => StorageCachePreheatPolicy::WhenIdle,
                     crate::api::CachePreheat::Disabled => StorageCachePreheatPolicy::Disabled,
+                });
+                // #3500: durable-only table codec (Zstd by default; cache mode
+                // keeps its in-memory tables uncompressed).
+                options = options.with_table_compression_policy(match table_compression {
+                    crate::api::TableCompression::Zstd => StorageTableCompressionPolicy::Zstd,
+                    crate::api::TableCompression::Uncompressed => {
+                        StorageTableCompressionPolicy::Uncompressed
+                    }
                 });
                 // Test seam only (space-reclamation contract §3.5): production
                 // passes `None` and keeps storage's background scheduler.

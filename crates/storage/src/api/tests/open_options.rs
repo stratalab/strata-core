@@ -277,13 +277,20 @@ fn open_options_cache_preheat_policy_round_trips() {
 /// silent flip back to Uncompressed would re-inflate on-disk size undetected.
 #[test]
 fn open_options_default_durable_table_compression_is_zstd() {
+    use crate::api::StorageTableCompressionPolicy;
     use crate::format::TableCompression;
 
     let default_options = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard);
     assert_eq!(default_options.table_compression(), TableCompression::Zstd);
 
+    assert_eq!(
+        StorageTableCompressionPolicy::default(),
+        StorageTableCompressionPolicy::Zstd,
+        "the public policy's default must agree with the options default"
+    );
+
     let uncompressed =
-        default_options.with_table_compression_for_test(TableCompression::Uncompressed);
+        default_options.with_table_compression_policy(StorageTableCompressionPolicy::Uncompressed);
     assert_eq!(
         uncompressed.table_compression(),
         TableCompression::Uncompressed
@@ -291,4 +298,9 @@ fn open_options_default_durable_table_compression_is_zstd() {
     uncompressed
         .validate()
         .expect("compression choice needs no validation");
+
+    // #3500: the policy maps onto the codec both ways, so an Uncompressed
+    // database can opt back into Zstd.
+    let zstd = uncompressed.with_table_compression_policy(StorageTableCompressionPolicy::Zstd);
+    assert_eq!(zstd.table_compression(), TableCompression::Zstd);
 }

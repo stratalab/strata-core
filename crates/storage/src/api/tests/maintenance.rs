@@ -1068,12 +1068,15 @@ fn test_explicit_compaction_applies_configured_codec() {
         }
         total
     }
-    fn compacted_table_bytes(name: &str, compression: crate::format::TableCompression) -> u64 {
+    fn compacted_table_bytes(
+        name: &str,
+        compression: crate::api::StorageTableCompressionPolicy,
+    ) -> u64 {
         let root = temp_dir_for_api_test(name);
         let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
         let mut runtime = StorageRuntime::open_with_backend(
             StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
-                .with_table_compression_for_test(compression),
+                .with_table_compression_policy(compression),
             backend,
         )
         .expect("open")
@@ -1102,11 +1105,11 @@ fn test_explicit_compaction_applies_configured_codec() {
 
     let zstd = compacted_table_bytes(
         "explicit-compact-zstd",
-        crate::format::TableCompression::Zstd,
+        crate::api::StorageTableCompressionPolicy::Zstd,
     );
     let uncompressed = compacted_table_bytes(
         "explicit-compact-uncompressed",
-        crate::format::TableCompression::Uncompressed,
+        crate::api::StorageTableCompressionPolicy::Uncompressed,
     );
     assert!(
         zstd.saturating_mul(2) < uncompressed,
@@ -2889,32 +2892,36 @@ fn table_data_object_bytes(root: &std::path::Path) -> u64 {
 fn zstd_flush_shrinks_on_disk_tables_versus_uncompressed() {
     let payload = vec![b'a'; 4096];
 
-    let flush_and_measure = |name: &str, compression: crate::format::TableCompression| -> u64 {
-        let root = temp_dir_for_api_test(name);
-        let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
-        let mut runtime = StorageRuntime::open_with_backend(
-            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
-                .with_table_compression_for_test(compression),
-            backend,
-        )
-        .expect("open durable runtime")
-        .into_runtime();
-        for index in 0..256u32 {
-            let key = format!("z-{index:08}");
+    let flush_and_measure =
+        |name: &str, compression: crate::api::StorageTableCompressionPolicy| -> u64 {
+            let root = temp_dir_for_api_test(name);
+            let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+            let mut runtime = StorageRuntime::open_with_backend(
+                StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+                    .with_table_compression_policy(compression),
+                backend,
+            )
+            .expect("open durable runtime")
+            .into_runtime();
+            for index in 0..256u32 {
+                let key = format!("z-{index:08}");
+                runtime
+                    .commit(&put_batch(key.as_bytes(), &payload))
+                    .expect("commit compressible row");
+            }
             runtime
-                .commit(&put_batch(key.as_bytes(), &payload))
-                .expect("commit compressible row");
-        }
-        runtime
-            .flush_default_branch_for_test()
-            .expect("flush L0 table");
-        table_data_object_bytes(&root)
-    };
+                .flush_default_branch_for_test()
+                .expect("flush L0 table");
+            table_data_object_bytes(&root)
+        };
 
-    let zstd_bytes = flush_and_measure("compress-zstd", crate::format::TableCompression::Zstd);
+    let zstd_bytes = flush_and_measure(
+        "compress-zstd",
+        crate::api::StorageTableCompressionPolicy::Zstd,
+    );
     let plain_bytes = flush_and_measure(
         "compress-plain",
-        crate::format::TableCompression::Uncompressed,
+        crate::api::StorageTableCompressionPolicy::Uncompressed,
     );
 
     assert!(

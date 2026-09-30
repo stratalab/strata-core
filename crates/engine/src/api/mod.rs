@@ -71,7 +71,8 @@ pub use kv::{
 #[cfg(any(test, feature = "testkit"))]
 pub use options::MaintenanceScheduling;
 pub use options::{
-    CacheOpenOptions, CachePreheat, DurabilityMode, DurableLocalOpenOptions, VersionRetention,
+    CacheOpenOptions, CachePreheat, DurabilityMode, DurableLocalOpenOptions, TableCompression,
+    VersionRetention,
 };
 pub use space::{SpaceCreateOutcome, SpaceDeleteOutcome, SpaceService, SpaceUsageSummary};
 pub use vector::{

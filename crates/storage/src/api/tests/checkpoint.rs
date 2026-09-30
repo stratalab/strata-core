@@ -426,7 +426,8 @@ fn uncompressed_tables_read_back_under_compression_and_mix() {
     let (prefix_a, prefix_b) = ("vA-", "vB-");
     let rows = 64usize;
 
-    let open = |root: std::path::PathBuf, compression: crate::format::TableCompression| {
+    let open = |root: std::path::PathBuf,
+                compression: crate::api::StorageTableCompressionPolicy| {
         let backend: &'static StorageBackend =
             crate::testkit::leak_static(StorageBackend::local_fs(root));
         StorageRuntime::open_with_backend(
@@ -434,7 +435,7 @@ fn uncompressed_tables_read_back_under_compression_and_mix() {
                 .with_maintenance_scheduling_policy(
                     StorageMaintenanceSchedulingPolicy::DeterministicInline,
                 )
-                .with_table_compression_for_test(compression),
+                .with_table_compression_policy(compression),
             backend,
         )
         .expect("durable inline open")
@@ -455,7 +456,10 @@ fn uncompressed_tables_read_back_under_compression_and_mix() {
 
     // Era 1 — uncompressed tables.
     {
-        let mut runtime = open(root.clone(), crate::format::TableCompression::Uncompressed);
+        let mut runtime = open(
+            root.clone(),
+            crate::api::StorageTableCompressionPolicy::Uncompressed,
+        );
         runtime
             .commit(&background_put_batch_range(prefix_a, 0, rows, value_a))
             .expect("commit era-1");
@@ -464,7 +468,10 @@ fn uncompressed_tables_read_back_under_compression_and_mix() {
     }
     // Era 2 — reopen with Zstd; read era-1 from uncompressed tables; write + flush era-2 (Zstd).
     {
-        let mut runtime = open(root.clone(), crate::format::TableCompression::Zstd);
+        let mut runtime = open(
+            root.clone(),
+            crate::api::StorageTableCompressionPolicy::Zstd,
+        );
         assert_background_closed_loop_reads(&runtime, prefix_a, rows, value_a);
         runtime
             .commit(&background_put_batch_range(prefix_b, 0, rows, value_b))

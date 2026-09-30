@@ -134,7 +134,7 @@ pub use strata_engine::{
     DatabaseOpenOutcome, DatabaseOpenSummary, DatabaseOpenTarget, DurabilityMode,
     DurableLocalOpenOptions, EngineError, EngineErrorClass, EngineErrorStatus, EngineResult,
     ErrorClass, ErrorCodeRegistryEntry, ErrorDetail, MemoryBudgetSource, ProductSpace, RetryPolicy,
-    VersionRetention,
+    TableCompression, VersionRetention,
 };
 
 /// The types a first program needs, in one import.
