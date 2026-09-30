@@ -2,8 +2,8 @@ use super::{
     require_capability, QuarantineService, QuarantineServiceError, QuarantineServiceResult,
 };
 use crate::backend::{
-    Backend, BackendCapability, BackendErrorKind, DeleteDurability, DeleteOutcome, DeleteStatus,
-    PublishFailureKind,
+    Backend, BackendCapabilities, BackendCapability, BackendErrorKind, DeleteDurability,
+    DeleteOutcome, DeleteStatus, PublishError, PublishFailureKind, PublishOutcome,
 };
 use crate::format::quarantine::{QuarantineEntry, QuarantineInventory};
 use crate::layout::{ObjectFamily, ObjectLayout};
@@ -68,12 +68,11 @@ impl QuarantineService<'_> {
                 reason: "quarantine object is not listed in inventory",
             });
         }
-        let source_bytes = read_object_optional(&self.backend, &request.source_object)?;
         self.handle_new_quarantine_entry(
             request,
             quarantine_object,
             inventory_load.inventory(),
-            source_bytes,
+            quarantine_stage_mode(self.backend.capabilities()),
         )
     }
 
@@ -82,9 +81,39 @@ impl QuarantineService<'_> {
         request: &QuarantineObjectRequest,
         quarantine_object: ObjectName,
         current_inventory: &QuarantineInventory,
-        source_bytes: Option<Vec<u8>>,
-    ) -> QuarantineServiceResult<QuarantineObjectReport> {
-        let Some(source_bytes) = source_bytes else {
+        mode: QuarantineStageMode,
+    ) -> Result<QuarantineObjectReport, QuarantineServiceError> {
+        // #3721: a copy stage reads the source's bytes to re-publish them; a
+        // link stage never reads them — the source's size is all the
+        // inventory entry records, and the link re-uses the bytes in place.
+        let (source_bytes, byte_count) = match mode {
+            QuarantineStageMode::Copy => {
+                let bytes = self.read_verified_source(request)?;
+                let byte_count = bytes.len() as u64;
+                (Some(bytes), byte_count)
+            }
+            QuarantineStageMode::Link => (None, self.source_size(request)?),
+        };
+
+        let updated_inventory =
+            updated_inventory_with_entry(request, current_inventory, byte_count)?;
+
+        self.publish_inventory_then_stage_source(
+            request,
+            quarantine_object,
+            source_bytes.as_deref(),
+            byte_count,
+            &updated_inventory,
+        )
+    }
+
+    /// The source's bytes, cross-checked against its metadata size.
+    fn read_verified_source(
+        &self,
+        request: &QuarantineObjectRequest,
+    ) -> Result<Vec<u8>, QuarantineServiceError> {
+        let Some(source_bytes) = read_object_optional(&self.backend, &request.source_object)?
+        else {
             return Err(QuarantineServiceError::Missing {
                 object: request.source_object.clone(),
             });
@@ -104,27 +133,84 @@ impl QuarantineService<'_> {
                 actual_size: source_metadata.size_bytes(),
             });
         }
-
-        let updated_inventory =
-            updated_inventory_with_entry(request, current_inventory, byte_count)?;
-
-        self.publish_inventory_then_copy_source(
-            request,
-            quarantine_object,
-            &source_bytes,
-            byte_count,
-            &updated_inventory,
-        )
+        Ok(source_bytes)
     }
 
-    fn publish_inventory_then_copy_source(
+    /// #3721: the source's size from its metadata, for a link stage (which
+    /// never reads the bytes); an absent source is `Missing`, as for a copy.
+    fn source_size(
+        &self,
+        request: &QuarantineObjectRequest,
+    ) -> Result<u64, QuarantineServiceError> {
+        match self.backend.object_metadata(&request.source_object) {
+            Ok(metadata) => Ok(metadata.size_bytes()),
+            Err(source) if source.kind() == BackendErrorKind::NotFound => {
+                Err(QuarantineServiceError::Missing {
+                    object: request.source_object.clone(),
+                })
+            }
+            Err(source) => Err(QuarantineServiceError::Metadata {
+                object: request.source_object.clone(),
+                source,
+            }),
+        }
+    }
+
+    /// #3721: make the quarantine object exist — a durable no-clobber link to
+    /// the source where the backend has one, else a durable create-mode copy
+    /// of `source_bytes`. Both leave the source in place (it is deleted only
+    /// after this succeeds) and both are create-mode publishes of the
+    /// quarantine name, so every crash state is one the copy stage already
+    /// produces: quarantine absent, or quarantine present holding exactly the
+    /// source's bytes (for a link, the same file). The outer error is a hard
+    /// service failure; the inner one is a publish failure the caller reports.
+    fn create_quarantine_object(
+        &self,
+        request: &QuarantineObjectRequest,
+        quarantine_object: &ObjectName,
+        source_bytes: Option<&[u8]>,
+        byte_count: u64,
+    ) -> Result<Result<PublishOutcome, PublishError>, QuarantineServiceError> {
+        if let Some(source_bytes) = source_bytes {
+            return Ok(self
+                .publisher
+                .publish_durable_create(quarantine_object, source_bytes));
+        }
+        let failure = match self
+            .backend
+            .link_object(&request.source_object, quarantine_object)
+        {
+            Ok(outcome) => return Ok(Ok(outcome)),
+            Err(failure) => failure,
+        };
+        match link_failure_action(failure.kind(), failure.source_error().kind()) {
+            LinkFailureAction::Report => Ok(Err(failure)),
+            // Nothing became visible, so this is exactly the copy stage's
+            // post-inventory starting state; copy from here.
+            LinkFailureAction::FallBackToCopy => {
+                let source_bytes = self.read_verified_source(request)?;
+                if source_bytes.len() as u64 != byte_count {
+                    return Err(QuarantineServiceError::BackendState {
+                        object: request.source_object.clone(),
+                        expected_size: byte_count,
+                        actual_size: source_bytes.len() as u64,
+                    });
+                }
+                Ok(self
+                    .publisher
+                    .publish_durable_create(quarantine_object, &source_bytes))
+            }
+        }
+    }
+
+    fn publish_inventory_then_stage_source(
         &self,
         request: &QuarantineObjectRequest,
         quarantine_object: ObjectName,
-        source_bytes: &[u8],
+        source_bytes: Option<&[u8]>,
         byte_count: u64,
         updated_inventory: &QuarantineInventory,
-    ) -> QuarantineServiceResult<QuarantineObjectReport> {
+    ) -> Result<QuarantineObjectReport, QuarantineServiceError> {
         // The inventory is published before object movement so reconciliation
         // can classify any later copy failure as an inventory/object mismatch
         // instead of losing track of an in-flight quarantine request.
@@ -150,13 +236,16 @@ impl QuarantineService<'_> {
             Err(source) => return Err(source),
         };
 
-        // Source bytes are deleted only after the quarantine copy has been
-        // durably created. This preserves at least one recoverable copy across
-        // every publish and delete fault window.
-        match self
-            .publisher
-            .publish_durable_create(&quarantine_object, source_bytes)
-        {
+        // Source bytes are deleted only after the quarantine object (a copy,
+        // or a link to the same file) has been durably created. This preserves
+        // at least one recoverable name for the bytes across every publish and
+        // delete fault window.
+        match self.create_quarantine_object(
+            request,
+            &quarantine_object,
+            source_bytes,
+            byte_count,
+        )? {
             Ok(outcome) => {
                 super::validate_publish_outcome(&quarantine_object, byte_count, &outcome).map_err(
                     |mismatch| QuarantineServiceError::InvalidPublishMetadata {
@@ -518,6 +607,56 @@ fn status_after_retry_source_delete(
         QuarantineObjectStatus::SourceAlreadyMissingAfterPublish
     } else {
         QuarantineObjectStatus::QuarantinedSourceDeleteFailed
+    }
+}
+
+/// #3721: how the quarantine object is created.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum QuarantineStageMode {
+    /// A durable hard link to the source: no payload byte is written.
+    Link,
+    /// A durable create-mode copy of the source's bytes.
+    Copy,
+}
+
+/// #3721: link where the backend advertises a durable link, copy elsewhere
+/// (the in-memory and object-store shapes).
+pub(super) const fn quarantine_stage_mode(
+    capabilities: BackendCapabilities,
+) -> QuarantineStageMode {
+    if capabilities.contains(BackendCapability::DurableLink) {
+        QuarantineStageMode::Link
+    } else {
+        QuarantineStageMode::Copy
+    }
+}
+
+/// #3721: what a failed link means for the stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LinkFailureAction {
+    /// This backend cannot link these names; nothing became visible, so copy.
+    FallBackToCopy,
+    /// A real failure: report it exactly as a failed copy publish is reported.
+    Report,
+}
+
+/// #3721: a link that is unsupported here — the trait default (a wrapper that
+/// forwards the capability but not the method), `EXDEV`/`ENOTSUP`
+/// (`UnsupportedOperation`), or `EPERM` on a filesystem without hard links
+/// (`PermissionDenied`) — and failed before anything became visible falls back
+/// to the copy. Every other failure, and every failure at or after visibility,
+/// is reported: falling back after a visible link would publish over it.
+pub(super) const fn link_failure_action(
+    kind: PublishFailureKind,
+    source: BackendErrorKind,
+) -> LinkFailureAction {
+    match (kind, source) {
+        (PublishFailureKind::Unsupported, _)
+        | (
+            PublishFailureKind::FailedBeforeVisibility,
+            BackendErrorKind::UnsupportedOperation | BackendErrorKind::PermissionDenied,
+        ) => LinkFailureAction::FallBackToCopy,
+        _ => LinkFailureAction::Report,
     }
 }
 

@@ -3318,6 +3318,139 @@ fn api_reopen_purges_quarantine_a_prior_session_left_unpurged() {
     runtime.close().expect("close");
 }
 
+/// #3721: `(inode, link count)` of every object file under `family/`, keyed by
+/// path — the quarantine inventory (`manifest`) excluded.
+#[cfg(all(unix, feature = "localfs"))]
+fn object_inodes(
+    root: &std::path::Path,
+    family: &str,
+) -> std::collections::BTreeMap<String, (u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fn walk(dir: &std::path::Path, out: &mut std::collections::BTreeMap<String, (u64, u64)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".object@") && name != "manifest.object@")
+            {
+                let metadata = std::fs::metadata(&path).expect("stat");
+                out.insert(
+                    path.display().to_string(),
+                    (metadata.ino(), metadata.nlink()),
+                );
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(&root.join(family), &mut out);
+    out
+}
+
+/// #3721: on the local filesystem the sweep MOVES each superseded table into
+/// quarantine — the quarantine object is the table's own inode, so the stage
+/// writes no quarantine bytes (a copy is a fresh inode) — and it never moves
+/// the live compaction output. A crash after the sweep then reopens with every
+/// row readable and purges the moved inodes.
+#[cfg(all(unix, feature = "localfs"))]
+#[test]
+fn api_sweep_moves_superseded_tables_into_quarantine_and_never_the_live_output() {
+    let root = temp_dir_for_api_test("maintenance-quarantine-link");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let manual = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue);
+    let mut runtime = StorageRuntime::open_with_backend(manual, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    runtime.commit(&put_batch(b"gc-a", b"one")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush first L0 table");
+    runtime.commit(&put_batch(b"gc-b", b"two")).expect("commit");
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush second L0 table");
+    let inputs = object_inodes(&root, "tables");
+    assert!(inputs.len() >= 2, "two flushes: {inputs:?}");
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Compact,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("compact");
+    let outputs: std::collections::BTreeMap<String, (u64, u64)> = object_inodes(&root, "tables")
+        .into_iter()
+        .filter(|(path, _)| !inputs.contains_key(path))
+        .collect();
+    assert!(!outputs.is_empty(), "the compaction wrote its output");
+    assert!(object_inodes(&root, "quarantine").is_empty());
+
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Reclaim,
+            MaintenanceScope::Branch(branch()),
+        ))
+        .expect("mark");
+    runtime
+        .maintenance(&MaintenanceRequest::new(
+            MaintenanceTask::Quarantine,
+            MaintenanceScope::Global,
+        ))
+        .expect("sweep");
+
+    let staged = object_inodes(&root, "quarantine");
+    let input_inodes: std::collections::BTreeSet<u64> =
+        inputs.values().map(|(inode, _)| *inode).collect();
+    let staged_inodes: std::collections::BTreeSet<u64> =
+        staged.values().map(|(inode, _)| *inode).collect();
+    assert_eq!(
+        staged_inodes, input_inodes,
+        "every superseded table was moved (its own inode), none copied: {staged:?} vs {inputs:?}"
+    );
+    assert!(
+        staged.values().all(|(_, links)| *links == 1),
+        "the table names are gone; quarantine holds the only link: {staged:?}"
+    );
+    assert!(inputs
+        .keys()
+        .all(|path| !std::path::Path::new(path).exists()));
+    // The live output is never staged: still at its path, same inode, one link.
+    assert_eq!(
+        object_inodes(&root, "tables"),
+        outputs,
+        "the live compaction output is untouched"
+    );
+    assert!(outputs
+        .values()
+        .all(|(inode, _)| !staged_inodes.contains(inode)));
+    assert_eq!(read_value(&runtime, b"gc-a").as_deref(), Some(&b"one"[..]));
+    assert_eq!(read_value(&runtime, b"gc-b").as_deref(), Some(&b"two"[..]));
+
+    // Crash before the queued purge runs.
+    drop(runtime);
+    let inline = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = reopen_after_drop(|| StorageRuntime::open_with_backend(inline, backend))
+        .expect("reopen durable runtime")
+        .into_runtime();
+    runtime.wait_background_idle_for_test();
+    assert!(
+        object_inodes(&root, "quarantine").is_empty(),
+        "the reopened session purges the moved tables"
+    );
+    assert_eq!(object_inodes(&root, "tables"), outputs);
+    assert_eq!(read_value(&runtime, b"gc-a").as_deref(), Some(&b"one"[..]));
+    assert_eq!(read_value(&runtime, b"gc-b").as_deref(), Some(&b"two"[..]));
+    runtime.close().expect("close");
+}
+
 /// Direction control for #3626: a reopen with an empty quarantine queues no
 /// purge — the ledger records none.
 #[cfg(feature = "localfs")]

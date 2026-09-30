@@ -13,6 +13,7 @@ use std::sync::Mutex;
 // log. Existing-state and purge cases split into child modules to keep each
 // fault-window group independently reviewable.
 mod existing;
+mod link;
 mod purge;
 mod request;
 
@@ -21,6 +22,8 @@ enum Operation {
     Metadata(ObjectName),
     Publish(ObjectName, PublishMode),
     Delete(ObjectName),
+    /// #3721: `link_object(from, to)`.
+    Link(ObjectName, ObjectName),
 }
 
 #[derive(Debug)]
@@ -34,6 +37,13 @@ struct MutationBackend {
     non_durable_deletes: Mutex<BTreeMap<ObjectName, bool>>,
     metadata_failures: Mutex<BTreeMap<ObjectName, BackendErrorKind>>,
     metadata_override: Mutex<Option<(ObjectName, u64)>>,
+    /// #3721: `to` -> (failure kind, source error kind, whether `to` becomes
+    /// visible anyway).
+    #[allow(
+        clippy::type_complexity,
+        reason = "a test backend's fault table; a named type adds nothing"
+    )]
+    link_failures: Mutex<BTreeMap<ObjectName, (PublishFailureKind, BackendErrorKind, bool)>>,
     operations: Mutex<Vec<Operation>>,
 }
 
@@ -58,8 +68,28 @@ impl MutationBackend {
             non_durable_deletes: Mutex::new(BTreeMap::new()),
             metadata_failures: Mutex::new(BTreeMap::new()),
             metadata_override: Mutex::new(None),
+            link_failures: Mutex::new(BTreeMap::new()),
             operations: Mutex::new(Vec::new()),
         }
+    }
+
+    /// #3721: advertise a durable link, as the local-filesystem backend does.
+    fn with_link(mut self) -> Self {
+        self.capabilities.insert(BackendCapability::DurableLink);
+        self
+    }
+
+    fn fail_link(
+        &self,
+        object: ObjectName,
+        kind: PublishFailureKind,
+        source: BackendErrorKind,
+        visible: bool,
+    ) {
+        self.link_failures
+            .lock()
+            .expect("mutation backend lock")
+            .insert(object, (kind, source, visible));
     }
 
     fn with_object(self, object: ObjectName, bytes: &[u8]) -> Self {
@@ -330,6 +360,56 @@ impl Backend for MutationBackend {
         Ok(PublishOutcome::new(
             name.clone(),
             BackendMetadata::new(bytes.len() as u64, None),
+            PublishDurability::Durable,
+        ))
+    }
+
+    // #3721: models a hard link — `to` gets `from`'s bytes with no read of
+    // them recorded, create-mode no-clobber, and injectable failures.
+    fn link_object(
+        &self,
+        from: &ObjectName,
+        to: &ObjectName,
+    ) -> Result<PublishOutcome, PublishError> {
+        self.operations
+            .lock()
+            .expect("mutation backend lock")
+            .push(Operation::Link(from.clone(), to.clone()));
+        let mut objects = self.objects.lock().expect("mutation backend lock");
+        let Some(bytes) = objects.get(from).cloned() else {
+            return Err(PublishError::new(
+                to.clone(),
+                PublishFailureKind::FailedBeforeVisibility,
+                BackendError::new(BackendErrorKind::NotFound, "link source not found"),
+            ));
+        };
+        if let Some((kind, source, visible)) = self
+            .link_failures
+            .lock()
+            .expect("mutation backend lock")
+            .get(to)
+            .copied()
+        {
+            if visible {
+                objects.insert(to.clone(), bytes);
+            }
+            return Err(PublishError::new(
+                to.clone(),
+                kind,
+                BackendError::new(source, "link failed"),
+            ));
+        }
+        if objects.contains_key(to) {
+            return Err(PublishError::precondition_failed(
+                to,
+                "object already exists",
+            ));
+        }
+        let size = bytes.len() as u64;
+        objects.insert(to.clone(), bytes);
+        Ok(PublishOutcome::new(
+            to.clone(),
+            BackendMetadata::new(size, None),
             PublishDurability::Durable,
         ))
     }

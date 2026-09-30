@@ -880,6 +880,25 @@ reuses `DurableTableObjectSweepRunner`. A swept object also leaves the durable t
 catalogue (`forget_objects`, #3619); only objects the sweep already proved unreachable and
 moved are forgotten.
 
+**Stage mechanics (#3721).** The sweep's stage publishes the quarantine inventory entry,
+then creates the quarantine object, and only then deletes the source. On a backend that
+advertises `DurableLink` (local-fs), the quarantine object is created by a hard link to the
+source: `link(2)` is atomic and no-clobber, and it is durable once the quarantine parent is
+fsynced. No payload byte is copied. Every other backend keeps the durable byte copy, and so
+does a link that fails before becoming visible because this filesystem cannot link these
+paths (`quarantine_stage_mode` / `link_failure_action`, `service/quarantine/mutation.rs`).
+Either way, every crash state is one the copy already produced:
+- the inventory entry with the quarantine object absent (the purge clears it and the source is re-swept);
+- both names present with the same bytes (the retry deletes the source);
+- the quarantine object alone.
+
+The source's removal is the ordinary `delete_object`, including its #3692 directory
+pruning. Pins:
+- `link_failure_action_truth_table`
+- `quarantine_stage_mode_truth_table`
+- the local-fs crash windows in `service/quarantine/tests/local_fs_link.rs`
+- `api_sweep_moves_superseded_tables_into_quarantine_and_never_the_live_output`
+
 ### ARCH-010: The error-code registry is the single authority for an error's row
 
 An error's public class, retry policy, commit outcome and suggested fix are the registry

@@ -464,6 +464,17 @@ impl<B: Backend> Backend for WriteOrderingWatchdog<B> {
         self.record_wal_publish(name, bytes.len() as u64);
         Ok(outcome)
     }
+
+    // #3721: forwarded unwatched. A link re-names a table object's existing
+    // durable bytes into quarantine; it publishes no new content, so it can
+    // neither precede nor follow a WAL sync the watchdog orders.
+    fn link_object(
+        &self,
+        from: &ObjectName,
+        to: &ObjectName,
+    ) -> Result<PublishOutcome, crate::backend::PublishError> {
+        self.inner.link_object(from, to)
+    }
 }
 
 #[cfg(test)]

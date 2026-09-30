@@ -171,7 +171,19 @@ fn read_point_batch(runtime: &StorageRuntime<'_>, branch: BranchId) -> Option<u6
     Some(u64::from_be_bytes(value[0..8].try_into().expect("8 bytes")))
 }
 
+/// Sets `done` when dropped — including when the writer panics. The readers
+/// spin until `done`, so a writer that dies without it would hang the whole
+/// scope (the run then times out instead of failing on the writer's panic).
+struct ReleaseReaders<'a>(&'a AtomicBool);
+
+impl Drop for ReleaseReaders<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 fn writer_loop(runtime: &StorageRuntime<'_>, branch: BranchId, done: &AtomicBool, start: &Barrier) {
+    let _release_readers = ReleaseReaders(done);
     start.wait();
     for batch_no in 1..STRESS_BATCHES {
         runtime
@@ -481,6 +493,7 @@ fn off_lock_fork_and_materialize_under_concurrent_reads() {
         }
         // C4 driver: fork mid-stress, read the child, materialize it while reading.
         scope.spawn(|| {
+            let _release_readers = ReleaseReaders(&done);
             // (v) fork is O(1) / latency-bounded (inherit-by-reference, no table copy).
             let fork_start = Instant::now();
             runtime
