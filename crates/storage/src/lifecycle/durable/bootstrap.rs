@@ -2987,18 +2987,54 @@ fn deleted_branch_allows_recovered_version(
 /// its catalog slot. The seeded branch's manifest was already applied by
 /// the pre-catalog recovery phase; skip it. Deleted descriptors are
 /// resurrection-guarded — the manifest is treated as stale.
-/// #2830: parentless branches own no content at or below their creation
-/// point — `created_at` is visible-at-creation (#2826) and the allocator
-/// stays strictly above it — so restored base-state content at
-/// `version <= created_at` belongs to a DEAD predecessor generation of the
-/// same branch id and must not install. Fork children are exempt: their
-/// inherited rows legitimately sit at or below `created_at`.
-pub(crate) fn parentless_content_predates_generation(
+/// #2830/#2856: how recovery seeds a non-seeded branch's retained timeline
+/// from a checkpoint's (version -> timestamp) group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckpointTimelineGroupSeed {
+    /// The group is this generation's: seed all of it.
+    Whole,
+    /// A parentless branch owns no commit at or below its creation point
+    /// (`created_at` is visible-at-creation, #2826, and the allocator stays
+    /// strictly above it), so entries at `version <= created_at` belong to a
+    /// DEAD predecessor generation of the same branch id: seed only the
+    /// entries above it.
+    AboveCreation(CommitVersion),
+    /// A fork child's group from a checkpoint cut at or below the child's
+    /// creation point predates this generation — it is a dead same-name
+    /// generation's timeline (#2856). It cannot be version-fenced like the
+    /// parentless case (the child's legitimate inherited entries also sit at
+    /// or below `created_at`), so it is not seeded at all: the child then
+    /// recovers exactly like a fork created after the checkpoint, its
+    /// inherited coverage completed from the parent chain after WAL replay
+    /// (`seed_forked_branch_timelines_from_parents`) and its own commits
+    /// (all above `created_at`, so above the watermark) observed by replay.
+    Ignore,
+}
+
+/// #2830/#2856: the pure seeding decision for one checkpoint timeline group.
+/// A checkpoint whose watermark is at or below the branch's `created_at`
+/// was cut before this generation existed — the same generation attribution
+/// `orphaned_non_seeded_branches` applies to the snapshot's durable-base set.
+/// `created_at == None` (a branch created before any commit existed) has no
+/// predecessor to fence.
+pub(crate) fn checkpoint_timeline_group_seed(
     has_parent: bool,
     created_at: Option<CommitVersion>,
-    version: CommitVersion,
-) -> bool {
-    !has_parent && created_at.is_some_and(|created| version <= created)
+    checkpoint_watermark: Option<CommitVersion>,
+) -> CheckpointTimelineGroupSeed {
+    match (has_parent, created_at) {
+        (_, None) => CheckpointTimelineGroupSeed::Whole,
+        (false, Some(created)) => CheckpointTimelineGroupSeed::AboveCreation(created),
+        (true, Some(_)) => {
+            if checkpoint_watermark
+                .is_none_or(|watermark| record_predates_current_generation(watermark, created_at))
+            {
+                CheckpointTimelineGroupSeed::Ignore
+            } else {
+                CheckpointTimelineGroupSeed::Whole
+            }
+        }
+    }
 }
 
 /// The highest commit version any table in the manifest covers (owned
@@ -3257,7 +3293,7 @@ fn install_non_seeded_checkpoint_state(
     checkpoint: &crate::lifecycle::LifecycleRecoveredCheckpoint,
     seeded_branch_id: BranchId,
     orphaned: &[BranchId],
-) -> LifecycleResult<()> {
+) -> Result<(), LifecycleError> {
     // Slice 12: an orphaned branch's snapshot rows are a delta over a lost
     // base — installing them would recover a gap. They are discarded here;
     // the branch starts empty and takes only its WAL-contiguous prefix.
@@ -3278,6 +3314,7 @@ fn install_non_seeded_checkpoint_state(
         branch_catalog,
         checkpoint.timeline_groups(),
         checkpoint.timeline_segment_groups(),
+        checkpoint.trusted_watermark(),
         seeded_branch_id,
     );
     // W3.1c invariant, split by parentage (#2521/#2522): PARENTLESS branches
@@ -3418,10 +3455,12 @@ fn seed_forked_branch_timelines_from_parents(branch_catalog: &LifecycleBranchCat
 /// W3.1b: seed each non-seeded active branch's retained-timeline index from
 /// its decoded checkpoint group. Deleted or unknown branches are skipped —
 /// their indexes stay unseeded and fall back to the timeline-space scan.
+/// Each group is generation-fenced by `checkpoint_timeline_group_seed`.
 fn seed_non_seeded_branch_timelines(
     branch_catalog: &LifecycleBranchCatalog,
     groups: &[crate::format::SnapshotTimelineBranchGroup],
     segment_groups: &[crate::format::SnapshotTimelineSegmentGroup],
+    checkpoint_watermark: Option<CommitVersion>,
     seeded_branch_id: BranchId,
 ) {
     use crate::lifecycle::LifecycleBranchStatus;
@@ -3438,29 +3477,31 @@ fn seed_non_seeded_branch_timelines(
         let Ok(branch) = branch_catalog.branch_state(group.branch_id) else {
             continue;
         };
-        // #2830: drop a dead predecessor generation's timeline entries for a
-        // re-created (parentless) branch — stale coverage claims would let
+        // #2830/#2856: a dead predecessor generation's timeline entries never
+        // seed the current generation — stale coverage claims would let
         // temporal reads resolve versions the generation never had.
         let fenced;
-        let group = if descriptor.parent().is_none() && descriptor.created_at().is_some() {
-            fenced = crate::format::SnapshotTimelineBranchGroup {
-                branch_id: group.branch_id,
-                entries: group
-                    .entries
-                    .iter()
-                    .copied()
-                    .filter(|entry| {
-                        !parentless_content_predates_generation(
-                            false,
-                            descriptor.created_at(),
-                            entry.commit_version,
-                        )
-                    })
-                    .collect(),
-            };
-            &fenced
-        } else {
-            group
+        let group = match checkpoint_timeline_group_seed(
+            descriptor.parent().is_some(),
+            descriptor.created_at(),
+            checkpoint_watermark,
+        ) {
+            CheckpointTimelineGroupSeed::Whole => group,
+            CheckpointTimelineGroupSeed::AboveCreation(created) => {
+                fenced = crate::format::SnapshotTimelineBranchGroup {
+                    branch_id: group.branch_id,
+                    entries: group
+                        .entries
+                        .iter()
+                        .copied()
+                        .filter(|entry| {
+                            !record_predates_current_generation(entry.commit_version, Some(created))
+                        })
+                        .collect(),
+                };
+                &fenced
+            }
+            CheckpointTimelineGroupSeed::Ignore => continue,
         };
         crate::lifecycle::recovery::seed_branch_timeline_from_groups(
             branch,
