@@ -317,6 +317,24 @@ fn temp_dir_for_api_test(name: &str) -> PathBuf {
     path
 }
 
+/// Reopens a path whose previous runtime was DROPPED rather than closed.
+///
+/// A drop bounds background shutdown to a 250 ms quiesce window and detaches
+/// a worker that misses it; the detached worker keeps the writer lock until
+/// its task finishes, which on a loaded runner can be seconds, so an
+/// immediate same-process reopen is refused with `WriterLockHeld` (#2837,
+/// #3546; the product-contract question is #3694). Many tests drop on
+/// purpose to simulate a crash, so the fix belongs here, not in a `close()`:
+/// the reopen retries ONLY the writer-lock refusal, within the testkit's
+/// wall-clock deadline, and returns every other error unchanged at once.
+///
+/// A reopen that follows an explicit `close()` never needs this — close
+/// releases the writer lock before it returns.
+#[cfg(feature = "localfs")]
+fn reopen_after_drop<T>(open: impl FnMut() -> StorageApiResult<T>) -> StorageApiResult<T> {
+    crate::testkit::reopen_retry::open_with_retry_on_unavailable(open)
+}
+
 #[cfg(feature = "localfs")]
 fn wal_segment_file_count(root: &Path) -> usize {
     std::fs::read_dir(root.join("wal")).map_or(0, |entries| {

@@ -116,7 +116,8 @@ fn assert_faulted_checkpoint_recovers(
     }
 
     {
-        let reopened = StorageRuntime::open_local(root).expect("reopen after crash");
+        let reopened = reopen_after_drop(|| StorageRuntime::open_local(root.clone()))
+            .expect("reopen after crash");
         assert_eq!(
             reopened.summary().disposition(),
             StorageOpenDisposition::OpenedExisting
@@ -211,7 +212,8 @@ fn clean_checkpoint_then_crash_recovers_delta_and_wal_tail() {
     }
 
     {
-        let reopened = StorageRuntime::open_local(root).expect("reopen after crash");
+        let reopened = reopen_after_drop(|| StorageRuntime::open_local(root.clone()))
+            .expect("reopen after crash");
         assert_eq!(
             reopened.summary().disposition(),
             StorageOpenDisposition::OpenedExisting
@@ -257,7 +259,8 @@ fn committed_rows_are_durable_via_wal_before_any_checkpoint() {
     }
 
     {
-        let reopened = StorageRuntime::open_local(root).expect("reopen after crash");
+        let reopened = reopen_after_drop(|| StorageRuntime::open_local(root.clone()))
+            .expect("reopen after crash");
         assert_eq!(
             reopened.summary().disposition(),
             StorageOpenDisposition::OpenedExisting
@@ -400,7 +403,8 @@ fn forced_checkpoint_at_scale_load_and_recovery() {
     }
 
     {
-        let reopened = StorageRuntime::open_local(root).expect("reopen the scale database");
+        let reopened = reopen_after_drop(|| StorageRuntime::open_local(root.clone()))
+            .expect("reopen the scale database");
         assert_eq!(
             reopened.summary().disposition(),
             StorageOpenDisposition::OpenedExisting
@@ -429,14 +433,16 @@ fn uncompressed_tables_read_back_under_compression_and_mix() {
     let open = |root: std::path::PathBuf, compression: crate::format::TableCompression| {
         let backend: &'static StorageBackend =
             crate::testkit::leak_static(StorageBackend::local_fs(root));
-        StorageRuntime::open_with_backend(
-            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
-                .with_maintenance_scheduling_policy(
-                    StorageMaintenanceSchedulingPolicy::DeterministicInline,
-                )
-                .with_table_compression_for_test(compression),
-            backend,
-        )
+        reopen_after_drop(|| {
+            StorageRuntime::open_with_backend(
+                StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+                    .with_maintenance_scheduling_policy(
+                        StorageMaintenanceSchedulingPolicy::DeterministicInline,
+                    )
+                    .with_table_compression_for_test(compression),
+                backend,
+            )
+        })
         .expect("durable inline open")
         .into_runtime()
     };
@@ -476,7 +482,8 @@ fn uncompressed_tables_read_back_under_compression_and_mix() {
     // A fresh-created store would answer these reads with zero rows, so the read
     // assertions themselves prove the reopen recovered the prior eras.
     {
-        let outcome = StorageRuntime::open_local(root).expect("reopen");
+        let outcome =
+            reopen_after_drop(|| StorageRuntime::open_local(root.clone())).expect("reopen");
         assert_eq!(
             outcome.summary().disposition(),
             StorageOpenDisposition::OpenedExisting

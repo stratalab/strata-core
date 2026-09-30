@@ -9,50 +9,74 @@
 //! (issue #2727). Under a loaded parallel test run the window is blown far
 //! more often, which made every unprotected `reopen` in the testkit a flake.
 //!
+//! The retry is bounded by a wall-clock deadline, not an attempt count
+//! (#2837 family). The detached worker holds the lock until its *task*
+//! finishes, which on a loaded runner can be seconds past the 250 ms window —
+//! an attempt-count budget sized to the window (the original ~382 ms) still
+//! flaked. The deadline matches the engine-side helper merged in #3693.
+//!
 //! This is deliberately a **test-harness policy, not a product one**: the
 //! product open path must keep failing fast, because writer-lock contention is
-//! also the legitimate "another live opener holds this database" signal.
+//! also the legitimate "another live opener holds this database" signal
+//! (the product-contract question is #3694).
 
 use std::error::Error;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::backend::{BackendError, BackendErrorKind};
 
-/// Retry attempts before the final call. Backoff doubles from 2 ms and caps
-/// at 64 ms; the cumulative sleep (~382 ms) comfortably outlasts the 250 ms
-/// worker-detach window the retry exists to absorb.
-const RETRY_ATTEMPTS: u32 = 10;
+/// Wall-clock budget for absorbing a released-late writer lock. Generous on
+/// purpose: a healthy reopen succeeds on its first attempt and never sleeps,
+/// so the budget is only ever spent by a genuinely stuck lock, where the cost
+/// is a slow failure rather than a flaky one.
+const RETRY_DEADLINE: Duration = Duration::from_secs(30);
+/// Backoff doubles from 2 ms and caps at 64 ms, so a released lock is noticed
+/// within one capped sleep however long the wait ran.
 const INITIAL_BACKOFF: Duration = Duration::from_millis(2);
 const MAX_BACKOFF: Duration = Duration::from_millis(64);
 
 /// Runs `open` until it succeeds, retrying **only** failures whose error
-/// chain bottoms out in a transient `BackendErrorKind::Unavailable`. Every
-/// other error — and exhaustion of the retry budget — returns the original
-/// error unchanged, so real failures stay loud.
-pub(crate) fn open_with_retry_on_unavailable<T, E, F>(mut open: F) -> Result<T, E>
+/// chain carries a transient writer-lock / `Unavailable` signal, for up to
+/// [`RETRY_DEADLINE`] of wall-clock time. Every other error returns
+/// immediately and unchanged — without sleeping — and a transient error that
+/// outlasts the deadline returns unchanged too, so real failures stay loud.
+pub(crate) fn open_with_retry_on_unavailable<T, E, F>(open: F) -> Result<T, E>
 where
     E: Error + 'static,
     F: FnMut() -> Result<T, E>,
 {
+    open_with_retry_within(RETRY_DEADLINE, open)
+}
+
+/// [`open_with_retry_on_unavailable`] with an explicit budget, so the
+/// give-up path is testable without spending the real deadline.
+fn open_with_retry_within<T, E, F>(budget: Duration, mut open: F) -> Result<T, E>
+where
+    E: Error + 'static,
+    F: FnMut() -> Result<T, E>,
+{
+    let deadline = Instant::now() + budget;
     let mut backoff = INITIAL_BACKOFF;
-    for _ in 0..RETRY_ATTEMPTS {
+    loop {
         match open() {
             Ok(value) => return Ok(value),
             Err(err) if is_transient_unavailable(&err) => {
-                thread::sleep(backoff);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(err);
+                }
+                thread::sleep(backoff.min(remaining));
                 backoff = next_backoff(backoff);
             }
             Err(err) => return Err(err),
         }
     }
-    open()
 }
 
 /// The doubling-capped backoff schedule. Pure so its shape is assertable: the
-/// cumulative sleep across `RETRY_ATTEMPTS` must outlast the 250 ms
-/// detach window, which a shrinking or non-growing schedule would silently
-/// break while every retry-count assertion still passed.
+/// cap bounds how late a released lock is noticed, and the doubling keeps a
+/// long wait from spinning.
 fn next_backoff(backoff: Duration) -> Duration {
     (backoff * 2).min(MAX_BACKOFF)
 }
@@ -124,19 +148,26 @@ mod tests {
     }
 
     #[test]
-    fn persistent_unavailable_gives_up_loudly_after_the_budget() {
+    fn persistent_unavailable_gives_up_loudly_at_the_deadline() {
+        let budget = Duration::from_millis(60);
         let calls = Cell::new(0_u32);
-        let result: Result<u32, BackendError> = open_with_retry_on_unavailable(|| {
+        let started = Instant::now();
+        let result: Result<u32, BackendError> = open_with_retry_within(budget, || {
             calls.set(calls.get() + 1);
             Err(unavailable())
         });
-        let err = result.expect_err("budget exhausted");
+        let elapsed = started.elapsed();
+        let err = result.expect_err("deadline exhausted");
         assert_eq!(err.kind(), BackendErrorKind::Unavailable);
-        assert_eq!(calls.get(), RETRY_ATTEMPTS + 1);
+        assert!(calls.get() > 1, "a transient error is retried");
+        assert!(
+            elapsed >= budget,
+            "gave up after {elapsed:?}, before the {budget:?} deadline"
+        );
     }
 
     #[test]
-    fn the_backoff_schedule_doubles_capped_and_outlasts_the_detach_window() {
+    fn the_backoff_schedule_doubles_capped_and_the_deadline_outlasts_a_loaded_detach() {
         // Pin the exact schedule (catches a *->/ or cap regression) ...
         assert_eq!(
             next_backoff(Duration::from_millis(2)),
@@ -150,18 +181,15 @@ mod tests {
             next_backoff(Duration::from_millis(64)),
             Duration::from_millis(64)
         );
-        // ... and the property the schedule exists for: cumulative sleep across
-        // the retry budget outlasts the 250 ms worker-detach window.
-        let mut backoff = INITIAL_BACKOFF;
-        let mut total = Duration::ZERO;
-        for _ in 0..RETRY_ATTEMPTS {
-            total += backoff;
-            backoff = next_backoff(backoff);
-        }
+        // ... and the properties the design exists for: the deadline is
+        // seconds, not the ~382 ms attempt budget that still flaked under a
+        // loaded runner (#2837 family, #3693 uses the same 30 s), and the cap
+        // keeps the release-to-notice latency small against it.
         assert!(
-            total > Duration::from_millis(250),
-            "cumulative backoff {total:?} must outlast the 250ms detach window"
+            RETRY_DEADLINE >= Duration::from_secs(30),
+            "deadline {RETRY_DEADLINE:?} must absorb a seconds-long detached task"
         );
+        assert!(MAX_BACKOFF <= Duration::from_millis(100));
     }
 
     #[test]
@@ -173,6 +201,7 @@ mod tests {
         });
         let err = result.expect_err("fails fast");
         assert_eq!(err.kind(), BackendErrorKind::Corruption);
+        // One call: the only sleep sits between retries, so none happened.
         assert_eq!(calls.get(), 1);
     }
 

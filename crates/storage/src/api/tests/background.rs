@@ -1596,3 +1596,99 @@ fn a_detached_worker_holds_the_writer_lock_past_drop_but_not_past_close() {
     release.wait();
     drop(reopened);
 }
+
+/// `reopen_after_drop` — the harness policy every drop-then-reopen in these
+/// tests routes through (#2837 family) — must wait out a detached worker that
+/// holds the dropped runtime's writer lock for LONGER than the old ~382 ms
+/// attempt budget, and must return a non-lock open error on the first call.
+/// The worker is parked on a barrier and released only after a delay the old
+/// budget could not survive, so both halves are deterministic.
+#[cfg(feature = "localfs")]
+#[test]
+fn reopen_after_drop_waits_out_a_detached_worker_and_fails_fast_on_other_errors() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    fn open(backend: &'static StorageBackend) -> StorageApiResult<StorageRuntime<'static>> {
+        StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard),
+            backend,
+        )
+        .map(StorageOpenOutcome::into_runtime)
+    }
+
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(temp_dir_for_api_test(
+        "reopen-after-drop-retry",
+    )));
+
+    // Drop with a worker parked mid-task: the worker is detached and keeps
+    // the writer lock until released.
+    let release = {
+        let runtime = open(backend).expect("durable open");
+        let ready = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        assert!(
+            runtime.submit_runtime_state_background_probe_for_test(
+                Arc::clone(&ready),
+                Arc::clone(&release),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            "the durable runtime runs a background worker"
+        );
+        ready.wait();
+        release
+    };
+    // Precondition: the lock really is held, so the reopen below must retry.
+    let error = open(backend)
+        .map(drop)
+        .expect_err("a detached worker keeps the dropped runtime's writer lock");
+    assert_eq!(error.code(), "failed_precondition.storage_api.writer_lock");
+
+    let hold = Duration::from_millis(1_500);
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(hold);
+        release.wait();
+    });
+    let attempts = std::cell::Cell::new(0_u32);
+    let started = Instant::now();
+    let reopened = reopen_after_drop(|| {
+        attempts.set(attempts.get() + 1);
+        open(backend)
+    })
+    .expect("the reopen waits out the detached worker's writer lock");
+    let waited = started.elapsed();
+    releaser.join().expect("releaser thread");
+    assert!(
+        attempts.get() > 1,
+        "the lock refusal was retried, not bypassed"
+    );
+    assert!(
+        waited >= hold / 2,
+        "the reopen succeeded after {waited:?}, before the worker could have released"
+    );
+    drop(reopened);
+
+    // A non-lock error is returned on the first call, never retried: a pre-V1
+    // layout marker is a permanent refusal.
+    let dir = temp_dir_for_api_test("reopen-after-drop-non-lock");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    std::fs::write(dir.join("strata.toml"), b"pre-v1").expect("write marker");
+    let attempts = std::cell::Cell::new(0_u32);
+    let started = Instant::now();
+    let error = reopen_after_drop(|| {
+        attempts.set(attempts.get() + 1);
+        StorageRuntime::open_durable_local(&dir, StorageDurabilityPolicy::Standard)
+    })
+    .map(drop)
+    .expect_err("a pre-V1 layout refuses");
+    assert_eq!(
+        error.code(),
+        "failed_precondition.storage_api.incompatible_layout"
+    );
+    assert_eq!(attempts.get(), 1, "a non-lock error is never retried");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a non-lock error must not spend the retry deadline"
+    );
+}
