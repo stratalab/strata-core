@@ -354,6 +354,22 @@ impl LocalFsBackend {
         self.arm_targeted_publish_fault(LocalFsPublishStep::ParentSync, target_object)
     }
 
+    /// #3721: arm a delete fault before the unlink (the object stays visible).
+    #[cfg(all(test, unix))]
+    pub(crate) fn inject_before_removal_delete_fault(&self) -> BackendResult<()> {
+        self.arm_delete_fault(LocalFsDeleteStep::BeforeRemoval)
+    }
+
+    /// #3721: arm a targeted fault at the final install step of `target_object`
+    /// (for a link, the `link(2)` itself — nothing becomes visible).
+    #[cfg(all(test, unix))]
+    pub(crate) fn inject_targeted_final_publish_fault(
+        &self,
+        target_object: String,
+    ) -> BackendResult<()> {
+        self.arm_targeted_publish_fault(LocalFsPublishStep::FinalPublish, target_object)
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn inject_temporary_write_publish_fault(&self) -> BackendResult<()> {
         self.arm_publish_fault(LocalFsPublishStep::TemporaryWrite)
@@ -1116,6 +1132,7 @@ impl Backend for LocalFsBackend {
         if cfg!(unix) {
             capabilities.insert(super::BackendCapability::DurablePublish);
             capabilities.insert(super::BackendCapability::DurableSync);
+            capabilities.insert(super::BackendCapability::DurableLink);
         }
         capabilities
     }
@@ -1425,6 +1442,76 @@ impl Backend for LocalFsBackend {
             PublishDurability::Durable,
         ))
     }
+
+    /// #3721: a hard link — `to` becomes a second directory entry for `from`'s
+    /// inode, so no payload byte is written. It is a create-mode publish in
+    /// every other respect: the target's parents are prepared the same way,
+    /// `link(2)` is atomic and no-clobber (an existing `to` is
+    /// `PreconditionFailed`), a failed link leaves nothing visible, and the
+    /// target's parent fsync is the durability point (a failure there is
+    /// `VisibleDurabilityUnconfirmed`). The creation rides the #3692 parent
+    /// retry, because a concurrent delete that empties `to`'s directory prunes
+    /// it. `from` is untouched; the caller removes it with `delete_object`,
+    /// whose unlink, parent fsync and emptied-directory pruning are unchanged.
+    fn link_object(
+        &self,
+        from: &ObjectName,
+        to: &ObjectName,
+    ) -> Result<PublishOutcome, PublishError> {
+        for name in [from, to] {
+            if let Err(error) = Self::reject_writer_lock_object_mutation(name, "link") {
+                return Err(Self::publish_error(
+                    to,
+                    PublishFailureKind::FailedBeforeVisibility,
+                    error,
+                ));
+            }
+        }
+        if !cfg!(unix) {
+            return Err(PublishError::unsupported(
+                to,
+                BackendError::unsupported(super::BackendCapability::DurableLink),
+            ));
+        }
+
+        let from_path = self.path_for(from);
+        let source = self.metadata_for_object_path(&from_path).map_err(|error| {
+            Self::publish_error(to, PublishFailureKind::FailedBeforeVisibility, error)
+        })?;
+        let final_path = self.prepare_publish_target(to, PublishMode::Create)?;
+        if let Some(error) = self.injected_publish_fault(LocalFsPublishStep::FinalPublish, to) {
+            return Err(Self::publish_error(
+                to,
+                PublishFailureKind::FailedBeforeVisibility,
+                error,
+            ));
+        }
+        let link = || fs::hard_link(&from_path, &final_path).map_err(|err| map_link_error(&err));
+        let linked = match final_path.parent() {
+            Some(parent) => self.create_with_parent_retry(parent, link),
+            None => link(),
+        };
+        if let Err(error) = linked {
+            if error.kind() == BackendErrorKind::AlreadyExists {
+                return Err(PublishError::precondition_failed(
+                    to,
+                    format!("object {to} already exists"),
+                ));
+            }
+            return Err(Self::publish_error(
+                to,
+                PublishFailureKind::FailedBeforeVisibility,
+                error,
+            ));
+        }
+        self.sync_publish_parent(to, &final_path)?;
+
+        Ok(PublishOutcome::new(
+            to.clone(),
+            BackendMetadata::new(source.size_bytes(), None),
+            PublishDurability::Durable,
+        ))
+    }
 }
 
 /// #3692: whether a directory (relative to the backend root) may be removed
@@ -1544,6 +1631,20 @@ impl Drop for LocalFsWriterLock {
         // the lock once no inherited descriptor shares it (the pre-#3609
         // behavior).
         let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+/// #3721: how a failed `link(2)` is reported. A filesystem that cannot
+/// hard-link these two paths — `EXDEV` (the quarantine directory is another
+/// mount) or `ENOTSUP` — lacks the capability rather than failing I/O, so it
+/// surfaces as `UnsupportedOperation` and the quarantine stage falls back to
+/// its byte copy. Every other failure maps like any other I/O error.
+fn map_link_error(error: &std::io::Error) -> BackendError {
+    match error.kind() {
+        std::io::ErrorKind::CrossesDevices | std::io::ErrorKind::Unsupported => {
+            BackendError::new(BackendErrorKind::UnsupportedOperation, error.to_string())
+        }
+        _ => map_io_error(error),
     }
 }
 
@@ -1687,6 +1788,10 @@ mod tests {
             cfg!(unix)
         );
         assert!(capabilities.contains(BackendCapability::SingleWriterLock));
+        assert_eq!(
+            capabilities.contains(BackendCapability::DurableLink),
+            cfg!(unix)
+        );
 
         if cfg!(unix) {
             StorageModeRequest::durable_local(DurabilityPolicy::Standard)
@@ -3367,5 +3472,281 @@ mod tests {
                 .expect("default"),
             0
         );
+    }
+
+    #[cfg(unix)]
+    fn inode(path: &std::path::Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).expect("stat");
+        (metadata.ino(), metadata.nlink())
+    }
+
+    #[test]
+    fn map_link_error_truth_table() {
+        use super::map_link_error;
+        use std::io::{Error, ErrorKind};
+        let cases = [
+            // No hard link between these paths: a missing capability.
+            (
+                ErrorKind::CrossesDevices,
+                BackendErrorKind::UnsupportedOperation,
+            ),
+            (
+                ErrorKind::Unsupported,
+                BackendErrorKind::UnsupportedOperation,
+            ),
+            // Everything else maps like any other I/O error.
+            (ErrorKind::AlreadyExists, BackendErrorKind::AlreadyExists),
+            (ErrorKind::NotFound, BackendErrorKind::NotFound),
+            (
+                ErrorKind::PermissionDenied,
+                BackendErrorKind::PermissionDenied,
+            ),
+            (ErrorKind::StorageFull, BackendErrorKind::NoSpace),
+            (ErrorKind::Interrupted, BackendErrorKind::Interrupted),
+            (ErrorKind::Other, BackendErrorKind::Unknown),
+        ];
+        for (io_kind, expected) in cases {
+            assert_eq!(
+                map_link_error(&Error::from(io_kind)).kind(),
+                expected,
+                "{io_kind:?}"
+            );
+        }
+    }
+
+    /// #3721: a link is a second directory entry for the same inode — no
+    /// payload byte is written — and it leaves the source in place.
+    #[cfg(unix)]
+    #[test]
+    fn link_object_shares_the_source_inode_and_leaves_the_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        let source = ObjectName::new("tables/main/l0000/table0001").expect("name");
+        let target = ObjectName::new("quarantine/branch/table0001").expect("name");
+        backend
+            .publish_object(&source, b"table-bytes", PublishMode::Create)
+            .expect("seed");
+        let (source_inode, _) = inode(&backend.path_for(&source));
+
+        let outcome = backend.link_object(&source, &target).expect("link");
+
+        assert_eq!(outcome.object(), &target);
+        assert_eq!(outcome.metadata().size_bytes(), 11);
+        assert_eq!(outcome.durability(), PublishDurability::Durable);
+        assert_eq!(
+            inode(&backend.path_for(&target)),
+            (source_inode, 2),
+            "the target is the source's inode, now with two names"
+        );
+        assert_eq!(
+            backend.read_object(&source).expect("source"),
+            b"table-bytes"
+        );
+        assert_eq!(
+            backend.read_object(&target).expect("target"),
+            b"table-bytes"
+        );
+        assert_eq!(
+            backend
+                .list_prefix(&ObjectPrefix::new("quarantine/").expect("prefix"))
+                .expect("list"),
+            vec![target.clone()]
+        );
+
+        // Deleting the source leaves the target holding the bytes; its
+        // emptied directory is pruned as by any delete (#3692).
+        backend.delete_object(&source).expect("delete source");
+        assert_eq!(inode(&backend.path_for(&target)), (source_inode, 1));
+        assert_eq!(
+            backend.read_object(&target).expect("target"),
+            b"table-bytes"
+        );
+        assert!(!dir.path().join("tables/main").exists());
+        assert!(dir.path().join("tables").is_dir());
+    }
+
+    /// #3721: create-mode no-clobber — an existing target is refused and kept.
+    #[cfg(unix)]
+    #[test]
+    fn link_object_refuses_an_existing_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        let source = ObjectName::new("tables/main/l0000/table0001").expect("name");
+        let target = ObjectName::new("quarantine/branch/table0001").expect("name");
+        backend.write_object(&source, b"source").expect("seed");
+        backend.write_object(&target, b"other").expect("seed");
+
+        let error = backend
+            .link_object(&source, &target)
+            .expect_err("no clobber");
+
+        assert_eq!(error.kind(), PublishFailureKind::PreconditionFailed);
+        assert_eq!(backend.read_object(&target).expect("kept"), b"other");
+        assert_eq!(backend.read_object(&source).expect("kept"), b"source");
+    }
+
+    /// #3721: a missing source, and a fault at the link itself, fail before
+    /// anything becomes visible.
+    #[cfg(unix)]
+    #[test]
+    fn link_object_failures_before_the_link_leave_nothing_visible() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        let source = ObjectName::new("tables/main/l0000/table0001").expect("name");
+        let target = ObjectName::new("quarantine/branch/table0001").expect("name");
+
+        let missing = backend.link_object(&source, &target).expect_err("missing");
+        assert_eq!(missing.kind(), PublishFailureKind::FailedBeforeVisibility);
+        assert_eq!(missing.source_error().kind(), BackendErrorKind::NotFound);
+        assert!(!backend.path_for(&target).exists());
+
+        backend.write_object(&source, b"source").expect("seed");
+        backend
+            .inject_targeted_final_publish_fault(target.as_str().to_owned())
+            .expect("arm");
+        let faulted = backend.link_object(&source, &target).expect_err("fault");
+        assert_eq!(faulted.kind(), PublishFailureKind::FailedBeforeVisibility);
+        assert_eq!(faulted.source_error().kind(), BackendErrorKind::Interrupted);
+        assert!(!backend.path_for(&target).exists());
+        assert_eq!(inode(&backend.path_for(&source)).1, 1);
+    }
+
+    /// #3721: a parent-sync failure after the link is visible-but-unconfirmed.
+    #[cfg(unix)]
+    #[test]
+    fn link_object_parent_sync_fault_is_visible_unconfirmed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        let source = ObjectName::new("tables/main/l0000/table0001").expect("name");
+        let target = ObjectName::new("quarantine/branch/table0001").expect("name");
+        backend.write_object(&source, b"source").expect("seed");
+        backend
+            .inject_targeted_publish_fault_visible_unconfirmed(target.as_str().to_owned())
+            .expect("arm");
+
+        let error = backend.link_object(&source, &target).expect_err("fault");
+
+        assert_eq!(
+            error.kind(),
+            PublishFailureKind::VisibleDurabilityUnconfirmed
+        );
+        assert_eq!(backend.read_object(&target).expect("visible"), b"source");
+        assert_eq!(backend.read_object(&source).expect("kept"), b"source");
+    }
+
+    /// #3721 x #3692: a concurrent delete that empties the target's directory
+    /// prunes it; the link re-creates the parent and lands.
+    #[cfg(unix)]
+    #[test]
+    fn link_object_survives_its_parent_being_pruned_before_the_link_lands() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        let source = ObjectName::new("tables/main/l0000/table0001").expect("name");
+        let target = ObjectName::new("quarantine/branch/table0001").expect("name");
+        backend.write_object(&source, b"source").expect("seed");
+
+        backend.arm_parent_race(1);
+        backend
+            .link_object(&source, &target)
+            .expect("link rides the race");
+
+        assert_eq!(backend.parent_race_remaining(), 0, "the race fired");
+        assert_eq!(backend.read_object(&target).expect("linked"), b"source");
+    }
+
+    /// #3721: a `link(2)` that fails for any reason other than an existing
+    /// target is a before-visibility failure carrying its own kind — never
+    /// the no-clobber `PreconditionFailed`, which is reserved for
+    /// `AlreadyExists`. Two real failures: the parent pruned on every bounded
+    /// attempt (`NotFound`), and the parent replaced by a file (not a
+    /// directory).
+    #[cfg(unix)]
+    #[test]
+    fn link_object_failures_other_than_an_existing_target_are_not_preconditions() {
+        use super::{LocalFsParentRace, OBJECT_CREATION_ATTEMPTS};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+        let source = ObjectName::new("tables/main/l0000/table0001").expect("name");
+        backend.write_object(&source, b"source").expect("seed");
+
+        let exhausted = ObjectName::new("quarantine/branch-a/table0001").expect("name");
+        backend.arm_parent_race(OBJECT_CREATION_ATTEMPTS);
+        let error = backend
+            .link_object(&source, &exhausted)
+            .expect_err("parent pruned on every attempt");
+        assert_eq!(error.kind(), PublishFailureKind::FailedBeforeVisibility);
+        assert_eq!(error.source_error().kind(), BackendErrorKind::NotFound);
+        assert_eq!(backend.parent_race_remaining(), 0);
+
+        let blocked = ObjectName::new("quarantine/branch-b/table0001").expect("name");
+        backend.arm_parent_race_with(1, LocalFsParentRace::ReplaceWithFile);
+        let error = backend
+            .link_object(&source, &blocked)
+            .expect_err("parent is a file");
+        assert_eq!(error.kind(), PublishFailureKind::FailedBeforeVisibility);
+        assert_ne!(error.source_error().kind(), BackendErrorKind::AlreadyExists);
+        assert_eq!(backend.read_object(&source).expect("kept"), b"source");
+    }
+
+    /// #3721: every production and harness wrapper forwards the link except the
+    /// fault injector, which keeps the trait default so the quarantine stage
+    /// falls back to the byte copy its fault scripts target; a backend without
+    /// hard links refuses before any mutation.
+    #[cfg(unix)]
+    #[test]
+    fn link_object_is_forwarded_by_every_wrapper_but_the_fault_injector() {
+        use crate::backend::memory::MemoryBackend;
+        use crate::backend::BackendHandle;
+        use crate::testkit::{
+            FaultScript, FaultingBackend, ReorderingBackend, WriteOrderingWatchdog,
+        };
+
+        let source = ObjectName::new("tables/main/l0000/table0001").expect("name");
+        let target = ObjectName::new("quarantine/branch/table0001").expect("name");
+        let linked = |backend: &dyn Backend, root: &std::path::Path| {
+            let local = LocalFsBackend::new(root);
+            local.write_object(&source, b"source").expect("seed");
+            backend
+                .link_object(&source, &target)
+                .expect("forwarded link");
+            let shared = inode(&local.path_for(&target));
+            assert_eq!(shared, inode(&local.path_for(&source)));
+            assert_eq!(shared.1, 2);
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local = LocalFsBackend::new(dir.path());
+        linked(&BackendHandle::borrowed(&local), dir.path());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        linked(
+            &WriteOrderingWatchdog::new(LocalFsBackend::new(dir.path())),
+            dir.path(),
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        linked(&ReorderingBackend::local_fs(dir.path()), dir.path());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let faulting = FaultingBackend::new(LocalFsBackend::new(dir.path()), FaultScript::empty());
+        faulting.write_object(&source, b"source").expect("seed");
+        let refused = faulting.link_object(&source, &target).expect_err("default");
+        assert_eq!(refused.kind(), PublishFailureKind::Unsupported);
+        assert!(!LocalFsBackend::new(dir.path()).path_for(&target).exists());
+
+        let memory = MemoryBackend::new();
+        memory.write_object(&source, b"source").expect("seed");
+        assert!(!memory
+            .capabilities()
+            .contains(BackendCapability::DurableLink));
+        assert_eq!(
+            memory
+                .link_object(&source, &target)
+                .expect_err("default")
+                .kind(),
+            PublishFailureKind::Unsupported
+        );
+        assert!(memory.read_object(&target).is_err());
     }
 }

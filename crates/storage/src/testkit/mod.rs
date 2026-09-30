@@ -742,6 +742,12 @@ mod fault {
                 .map_err(|kind| publish_fault(kind, "test quota exhausted"))?;
             self.inner.publish_object(name, bytes, mode)
         }
+
+        // #3721: `link_object` is deliberately NOT forwarded. The default
+        // refuses before any mutation (`Unsupported`), which the quarantine
+        // stage answers with its byte copy — so a script's publish, read and
+        // delete faults keep targeting the same operation stream whatever the
+        // inner backend advertises.
     }
 
     #[cfg(test)]

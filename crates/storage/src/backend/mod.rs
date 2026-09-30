@@ -68,6 +68,9 @@ pub(crate) enum BackendCapability {
     Lease = 13,
     ConsistentList = 14,
     MonotonicMetadata = 15,
+    /// #3721: `link_object` gives an existing object a second, durable,
+    /// no-clobber name without rewriting its bytes (a local-fs hard link).
+    DurableLink = 16,
 }
 
 impl BackendCapability {
@@ -89,6 +92,7 @@ impl BackendCapability {
             Self::Lease => "lease",
             Self::ConsistentList => "consistent_list",
             Self::MonotonicMetadata => "monotonic_metadata",
+            Self::DurableLink => "durable_link",
         }
     }
 
@@ -490,6 +494,24 @@ pub(crate) trait Backend: Send + Sync {
             BackendError::unsupported(BackendCapability::DurablePublish),
         ))
     }
+
+    // #3721: make `to` a second name for `from`'s bytes without rewriting
+    // them, with create-mode publish semantics on `to`: no-clobber (an
+    // existing `to` is `PreconditionFailed`), failure classified by
+    // visibility, and success only once `to`'s entry is durable. `from` is
+    // left in place; removing it is the caller's separate `delete_object`.
+    // Backends advertise it as `DurableLink`; the default refuses before any
+    // mutation (`Unsupported`), so a caller falls back to a byte copy.
+    fn link_object(
+        &self,
+        _from: &ObjectName,
+        to: &ObjectName,
+    ) -> Result<PublishOutcome, PublishError> {
+        Err(PublishError::unsupported(
+            to,
+            BackendError::unsupported(BackendCapability::DurableLink),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -630,6 +652,14 @@ impl Backend for BackendHandle<'_> {
     ) -> PublishResult<PublishOutcome> {
         self.as_backend().publish_object(name, bytes, mode)
     }
+
+    fn link_object(
+        &self,
+        from: &ObjectName,
+        to: &ObjectName,
+    ) -> Result<PublishOutcome, PublishError> {
+        self.as_backend().link_object(from, to)
+    }
 }
 
 #[cfg(test)]
@@ -713,6 +743,7 @@ mod tests {
             (BackendCapability::Lease, "lease"),
             (BackendCapability::ConsistentList, "consistent_list"),
             (BackendCapability::MonotonicMetadata, "monotonic_metadata"),
+            (BackendCapability::DurableLink, "durable_link"),
         ];
 
         for (capability, name) in capabilities {

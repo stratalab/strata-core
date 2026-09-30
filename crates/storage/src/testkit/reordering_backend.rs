@@ -267,6 +267,20 @@ impl Backend for ReorderingBackend {
         self.record_publish(name, as_u64(bytes.len()));
         Ok(outcome)
     }
+
+    // #3721: a completed link is a completed create-mode publish of `to` (its
+    // parent directory is fsynced before success), over bytes the source's
+    // own publish already made durable — so `to` is tracked as fully durable,
+    // exactly like a publish of the same length.
+    fn link_object(
+        &self,
+        from: &ObjectName,
+        to: &ObjectName,
+    ) -> Result<PublishOutcome, crate::backend::PublishError> {
+        let outcome = self.inner.link_object(from, to)?;
+        self.record_publish(to, outcome.metadata().size_bytes());
+        Ok(outcome)
+    }
 }
 
 #[cfg(test)]

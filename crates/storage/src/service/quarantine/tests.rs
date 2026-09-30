@@ -854,6 +854,8 @@ fn inventory_visible_unconfirmed_publish_returns_error_with_new_bytes_visible() 
 }
 
 mod inventory;
+#[cfg(all(unix, feature = "localfs"))]
+mod local_fs_link;
 mod mutation;
 mod reconcile;
 #[cfg(not(target_arch = "wasm32"))]
