@@ -1293,3 +1293,175 @@ fn checkpoint_records_branches_with_durable_base() {
     // Rows, retained timeline, and the durable-base branch set.
     assert_eq!(recovered.checkpoint().section_count(), 3);
 }
+
+/// #2768 (partial) stage: checkpoint + truncation (the normal reclaim path),
+/// then enough writes above the checkpoint to seal several segments, then a
+/// crash (drop, no close). Returns the active segment id at the crash.
+fn stage_sealed_watermark_above_checkpoint(
+    backend: &'static CheckpointTestBackend,
+    branch: BranchId,
+) -> u64 {
+    let mut runtime = open_runtime_with_wal_segment_size(branch, backend, 1024);
+    commit_many_to_rotate(&mut runtime, branch, 24);
+    let outcome = runtime
+        .checkpoint(
+            &LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(31))
+                .expect("request")
+                .with_wal_truncation_after_checkpoint(true),
+        )
+        .expect("checkpoint");
+    assert!(
+        outcome
+            .wal_truncation()
+            .expect("truncation")
+            .deleted_segments()
+            > 0,
+        "the checkpoint's truncation must reclaim covered segments"
+    );
+    let sealed_before = runtime.services().wal().active_segment_id();
+    commit_many_range(&mut runtime, branch, 24, 60, 128);
+    let active = runtime.services().wal().active_segment_id();
+    assert!(
+        active >= sealed_before + 2,
+        "the stage must seal segments above the checkpoint"
+    );
+    drop(runtime);
+    active
+}
+
+/// #2768 (partial): deleting every segment below the active one — the newest
+/// sealed segment among them holds the record the durable commit watermark
+/// attests — leaves a contiguous inventory whose surviving records all sit
+/// ABOVE the watermark, so the #2690 max comparison passes. Strict recovery
+/// must refuse: the attested record is unrecoverable. Before the fix this
+/// recovered Healthy without the deleted commits.
+#[test]
+fn deleting_the_watermark_record_segment_refuses_strict_recovery() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x3f);
+    let active = stage_sealed_watermark_above_checkpoint(backend, branch);
+    for segment_id in 1..active {
+        let object = ObjectLayout::wal_segment(segment_id).expect("segment object");
+        if crate::backend::Backend::object_metadata(backend, &object).is_ok() {
+            let outcome = crate::backend::Backend::delete_object(backend, &object);
+            assert!(outcome.is_ok(), "delete sealed segment {segment_id}");
+        }
+    }
+
+    let mut shell = assemble_shell_with_wal_segment_size(branch, backend, 1024)
+        .expect("the surviving inventory is contiguous");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let error = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect_err("the attested watermark record is gone");
+    assert_eq!(
+        error.code(),
+        "corruption.lifecycle.recovery_corruption",
+        "a missing attested record must refuse: {error:?}"
+    );
+}
+
+/// Direction control for the above: the same stage with nothing deleted
+/// (normal reclaim behind the checkpoint, sealed segments above it) recovers
+/// Healthy with every row.
+#[test]
+fn checkpoint_reclaim_then_sealed_writes_and_crash_recovers_healthy() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x40);
+    stage_sealed_watermark_above_checkpoint(backend, branch);
+
+    let mut shell = assemble_shell_with_wal_segment_size(branch, backend, 1024).expect("shell");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let recovered = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect("strict recovery");
+    assert!(recovered.health().is_healthy(), "{:?}", recovered.health());
+    let reopened = shell.complete_recovery(&recovered).expect("open runtime");
+    for index in 0u8..60 {
+        let key = dynamic_physical_key(branch, format!("rotated-commit-{index}").into_bytes());
+        assert!(
+            reopened
+                .read_view()
+                .expect("read view")
+                .latest(&key)
+                .expect("read latest")
+                .is_some(),
+            "row {index} must survive"
+        );
+    }
+}
+
+/// #2768 (partial) direction control: a BURNED version exactly at the
+/// checkpoint boundary. A clean WAL append failure (no byte lands, the
+/// runtime keeps running) consumes checkpoint+1; the next commit lands at
+/// checkpoint+2; more writes seal segments above it; crash. The durable
+/// watermark names only real sealed records, never the burned version, so
+/// strict recovery is Healthy with every row.
+#[test]
+fn burned_version_at_the_checkpoint_boundary_recovers_healthy() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let branch = branch_id(0x41);
+    let mut runtime = open_runtime_with_wal_segment_size(branch, backend, 1024);
+    commit_many_range(&mut runtime, branch, 0, 8, 128);
+    runtime
+        .checkpoint(
+            &LifecycleCheckpointRequest::new(branch, 1, Timestamp::from_micros(33))
+                .expect("request")
+                .with_wal_truncation_after_checkpoint(true),
+        )
+        .expect("checkpoint");
+    let checkpoint_version = runtime.visible_version();
+
+    backend.fail_next_wal_append();
+    runtime
+        .execute_durable_commit(
+            dynamic_durable_batch(branch, b"burned".to_vec(), vec![0xee; 128]),
+            generation_guard(),
+        )
+        .expect_err("the clean WAL append failure fails the commit");
+    let after_burn = runtime
+        .execute_durable_commit(
+            dynamic_durable_batch(branch, b"rotated-commit-8".to_vec(), vec![8; 128]),
+            generation_guard(),
+        )
+        .expect("the runtime keeps committing after a clean WAL failure");
+    assert_eq!(
+        after_burn.commit_version(),
+        Some(CommitVersion::new(checkpoint_version.as_u64() + 2)),
+        "the failed commit must have burned checkpoint+1"
+    );
+    let active_before = runtime.services().wal().active_segment_id();
+    commit_many_range(&mut runtime, branch, 9, 40, 128);
+    assert!(
+        runtime.services().wal().active_segment_id() >= active_before + 2,
+        "the stage must seal segments above the burned version"
+    );
+    drop(runtime);
+
+    let mut shell = assemble_shell_with_wal_segment_size(branch, backend, 1024).expect("shell");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let recovered = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect("a burned version is not loss");
+    assert!(recovered.health().is_healthy(), "{:?}", recovered.health());
+    let reopened = shell.complete_recovery(&recovered).expect("open runtime");
+    let view = reopened.read_view().expect("read view");
+    for index in 0u8..40 {
+        let key = dynamic_physical_key(branch, format!("rotated-commit-{index}").into_bytes());
+        assert!(
+            view.latest(&key).expect("read latest").is_some(),
+            "row {index} must survive"
+        );
+    }
+    let burned = dynamic_physical_key(branch, b"burned".to_vec());
+    assert!(
+        view.latest(&burned).expect("read latest").is_none(),
+        "the failed commit left no row"
+    );
+}

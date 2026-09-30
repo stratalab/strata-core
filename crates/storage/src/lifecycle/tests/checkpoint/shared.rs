@@ -227,6 +227,11 @@ pub(in crate::lifecycle::tests) struct CheckpointTestBackend {
     /// its checkpoint and retries).
     fail_sync_call: AtomicUsize,
     sync_calls: AtomicUsize,
+    /// #2768: the next append to a WAL segment fails `Unavailable` BEFORE any
+    /// byte lands — a clean WAL write failure (e.g. disk-full). The commit
+    /// has already allocated its version, so the failure burns it while the
+    /// runtime keeps running.
+    fail_next_wal_append: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,6 +286,7 @@ impl CheckpointTestBackend {
             fail_on_read: Mutex::new(None),
             fail_sync_call: AtomicUsize::new(0),
             sync_calls: AtomicUsize::new(0),
+            fail_next_wal_append: AtomicBool::new(false),
         }
     }
 
@@ -405,6 +411,11 @@ impl CheckpointTestBackend {
     ) {
         self.uncertain_table_manifest_replace_call
             .store(call, Ordering::SeqCst);
+    }
+
+    /// Arms a one-shot clean failure of the next WAL segment append.
+    pub(in crate::lifecycle::tests) fn fail_next_wal_append(&self) {
+        self.fail_next_wal_append.store(true, Ordering::SeqCst);
     }
 
     pub(in crate::lifecycle::tests) fn fail_table_object_create_on_call(&self, call: usize) {
@@ -835,6 +846,14 @@ impl Backend for CheckpointTestBackend {
     }
 
     fn append_object(&self, name: &ObjectName, bytes: &[u8]) -> BackendResult<BackendAppend> {
+        if name.as_str().starts_with("wal/")
+            && self.fail_next_wal_append.swap(false, Ordering::SeqCst)
+        {
+            return Err(BackendError::new(
+                BackendErrorKind::Unavailable,
+                "injected clean WAL append failure",
+            ));
+        }
         let mut objects = self.objects.lock().expect("objects");
         let object = objects.entry(name.clone()).or_default();
         let start_offset = object.len() as u64;
