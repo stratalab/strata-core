@@ -2276,33 +2276,35 @@ fn descriptor_version_anchor_truth_table() {
 }
 
 #[test]
-fn base_restore_generation_fence_truth_table() {
-    // #2830: the base-restore fence — parentless only (fork-inherited rows
-    // legitimately sit at or below created_at), `<=` boundary, None fences
-    // nothing.
-    use crate::lifecycle::parentless_content_predates_generation;
+fn checkpoint_timeline_group_seed_truth_table() {
+    // #2830/#2856: the checkpoint timeline-group fence. Parentless: seed only
+    // entries above created_at, whatever the watermark. Fork child: the whole
+    // group when the checkpoint was cut after the child's creation, nothing
+    // when it was cut at or below it (a dead same-name generation's group),
+    // `<=` boundary. created_at None fences nothing.
+    use crate::lifecycle::{checkpoint_timeline_group_seed, CheckpointTimelineGroupSeed as Seed};
     let v = CommitVersion::new;
-    assert!(parentless_content_predates_generation(
-        false,
-        Some(v(10)),
-        v(9)
-    ));
-    assert!(parentless_content_predates_generation(
-        false,
-        Some(v(10)),
-        v(10)
-    ));
-    assert!(!parentless_content_predates_generation(
-        false,
-        Some(v(10)),
-        v(11)
-    ));
-    assert!(!parentless_content_predates_generation(
-        true,
-        Some(v(10)),
-        v(9)
-    ));
-    assert!(!parentless_content_predates_generation(false, None, v(1)));
+    // (has_parent, created_at, checkpoint_watermark) -> decision
+    let table = [
+        (false, Some(v(10)), Some(v(9)), Seed::AboveCreation(v(10))),
+        (false, Some(v(10)), Some(v(10)), Seed::AboveCreation(v(10))),
+        (false, Some(v(10)), Some(v(11)), Seed::AboveCreation(v(10))),
+        (false, Some(v(10)), None, Seed::AboveCreation(v(10))),
+        (false, None, Some(v(9)), Seed::Whole),
+        (true, Some(v(10)), Some(v(9)), Seed::Ignore),
+        (true, Some(v(10)), Some(v(10)), Seed::Ignore),
+        (true, Some(v(10)), Some(v(11)), Seed::Whole),
+        (true, Some(v(10)), None, Seed::Ignore),
+        (true, None, Some(v(9)), Seed::Whole),
+        (true, None, None, Seed::Whole),
+    ];
+    for (has_parent, created_at, watermark, expected) in table {
+        assert_eq!(
+            checkpoint_timeline_group_seed(has_parent, created_at, watermark),
+            expected,
+            "has_parent={has_parent} created_at={created_at:?} watermark={watermark:?}"
+        );
+    }
 }
 
 /// #2847: the non-seeded COMBINE arm's three behaviors on an occupied

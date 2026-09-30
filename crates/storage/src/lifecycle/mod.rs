@@ -149,9 +149,9 @@ pub(crate) use config::{
     reason = "durable lifecycle assembly exports define the local surface for recovery slices"
 )]
 pub(crate) use durable::{
-    classify_wal_segment, close_checkpoint_decision, close_reclaim_should_continue,
-    combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
-    parentless_content_predates_generation, record_predates_current_generation,
+    checkpoint_timeline_group_seed, classify_wal_segment, close_checkpoint_decision,
+    close_reclaim_should_continue, combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
+    record_predates_current_generation, CheckpointTimelineGroupSeed,
     DurableBackgroundMaintenanceBuild, DurableBackgroundMaintenanceBuilt,
     DurableBackgroundMaintenanceStep, DurableGroupApplyDone, DurableGroupApplyWork,
     DurableGroupInFlight, DurableGroupMemberResult, LifecycleCloseReclaimBudget,

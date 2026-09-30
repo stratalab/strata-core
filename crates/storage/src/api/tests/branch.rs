@@ -3070,6 +3070,292 @@ fn fork_child_own_rows_survive_reopen_through_the_checkpoint() {
     );
 }
 
+/// #2856 probe: the version the branch's retained timeline resolves at or
+/// before `timestamp`, or the refusal's error class.
+#[cfg(feature = "localfs")]
+fn timeline_version_at(
+    runtime: &StorageRuntime<'_>,
+    branch_id: BranchId,
+    timestamp: u64,
+) -> Result<CommitVersion, StorageApiErrorClass> {
+    runtime
+        .lookup_version_at_or_before_timestamp(TimestampLookupRequest::new(
+            branch_id,
+            Timestamp::from_micros(timestamp),
+        ))
+        .map(TimestampLookupOutcome::matched_version)
+        .map_err(|error| error.class())
+}
+
+/// #2856 probe: the timestamp the branch's retained timeline records for
+/// `version`, or the refusal's error class.
+#[cfg(feature = "localfs")]
+fn timeline_timestamp_of(
+    runtime: &StorageRuntime<'_>,
+    branch_id: BranchId,
+    version: CommitVersion,
+) -> Result<Timestamp, StorageApiErrorClass> {
+    runtime
+        .lookup_timestamp_for_version(VersionLookupRequest::new(branch_id, version))
+        .map(VersionLookupOutcome::timestamp)
+        .map_err(|error| error.class())
+}
+
+/// #2856: the timeline twin of #2833. A checkpoint captured while gen-1 of
+/// a branch name lived carries that generation's (version -> timestamp)
+/// group; after the name is deleted and re-created BY FORK, that stale
+/// checkpoint is still the latest on disk. Its group must not seed the new
+/// generation's retained timeline: the dead generation's own commit would
+/// resolve under the new generation's id, and a group-seeded (complete)
+/// index would also skip the parent-derived completion, hiding parent
+/// history the re-fork legitimately inherited.
+#[cfg(feature = "localfs")]
+#[test]
+fn refork_of_a_deleted_name_does_not_seed_dead_generation_checkpoint_timeline() {
+    use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
+
+    let root = temp_dir_for_api_test("refork-no-dead-checkpoint-timeline");
+    let backend = StorageBackend::local_fs(root);
+    let victim = branch_with(0x89);
+    let (base_two, dead_own) = {
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+        .expect("durable open")
+        .into_runtime();
+        put_at(&mut runtime, branch(), b"base", b"b", 5);
+        let base_two = put_at(&mut runtime, branch(), b"base-two", b"b2", 10).commit_version();
+        runtime
+            .branch(&branch_request(
+                victim,
+                BranchAction::ForkCurrent { source: branch() },
+            ))
+            .expect("fork gen-1 victim");
+        let dead_own = put_at(&mut runtime, victim, b"dead-own", b"gone", 15).commit_version();
+        // Clean close: the reopen below recovers the victim as plain rows, so
+        // the checkpoint in the next session is not deferred.
+        (base_two, dead_own)
+    };
+    let (parent_after_delete, new_own) = {
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
+                .with_maintenance_scheduling_policy(
+                    crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                ),
+            &backend,
+        )
+        .expect("first reopen")
+        .into_runtime();
+        // The checkpoint records the victim's gen-1 timeline group
+        // (inherited entries plus its own dead-own commit).
+        runtime
+            .enqueue_maintenance(&MaintenanceRequest::new(
+                MaintenanceTask::Checkpoint,
+                MaintenanceScope::Global,
+            ))
+            .expect("enqueue checkpoint");
+        runtime.drain_maintenance().expect("drain checkpoint");
+        runtime
+            .branch(&branch_request(victim, BranchAction::Delete))
+            .expect("delete gen-1 victim");
+        // Parent history gen-1 never saw but gen-2 inherits.
+        let parent_after_delete =
+            put_at(&mut runtime, branch(), b"base-three", b"b3", 17).commit_version();
+        runtime
+            .branch(&BranchRequest::new(
+                victim,
+                BranchAction::ForkCurrent { source: branch() },
+                Some(BranchGeneration::new(2)),
+            ))
+            .expect("re-fork victim as gen 2");
+        let new_own = put_at(&mut runtime, victim, b"new-own", b"alive", 20).commit_version();
+        // Clean close: the live eager fork defers the close checkpoint, so
+        // the stale gen-1 checkpoint stays the latest one on disk.
+        (parent_after_delete, new_own)
+    };
+
+    let runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+        &backend,
+    )
+    .expect("reopen")
+    .into_runtime();
+    assert_eq!(
+        timeline_timestamp_of(&runtime, victim, dead_own),
+        Err(StorageApiErrorClass::HistoryUnavailable),
+        "the dead generation's own commit must not resolve on the re-forked name"
+    );
+    assert_eq!(
+        timeline_version_at(&runtime, victim, 18),
+        Ok(parent_after_delete),
+        "as-of-time on the re-forked name resolves through the parent history it inherited"
+    );
+    // Direction controls: inherited and own history both survive.
+    assert_eq!(
+        timeline_version_at(&runtime, victim, 12),
+        Ok(base_two),
+        "the re-fork keeps the parent's pre-fork history"
+    );
+    assert_eq!(
+        timeline_timestamp_of(&runtime, victim, new_own),
+        Ok(Timestamp::from_micros(20)),
+        "the new generation's own commit resolves"
+    );
+    assert_eq!(
+        timeline_timestamp_of(&runtime, branch(), parent_after_delete),
+        Ok(Timestamp::from_micros(17)),
+        "the parent's timeline is untouched"
+    );
+}
+
+/// #2856 direction control: a live (never deleted) fork child's OWN commit
+/// below the checkpoint watermark has the checkpoint group as its only
+/// timeline carrier — recovery does not replay the WAL below the watermark
+/// for non-seeded branches — so the generation fence must keep a group cut
+/// after the child's creation.
+#[cfg(feature = "localfs")]
+#[test]
+fn fork_child_own_timeline_survives_reopen_through_the_checkpoint() {
+    use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
+
+    let root = temp_dir_for_api_test("fork-child-own-timeline-via-checkpoint");
+    let backend = StorageBackend::local_fs(root);
+    let child = branch_with(0x8a);
+    let base = {
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+            &backend,
+        )
+        .expect("durable open")
+        .into_runtime();
+        let base = put_at(&mut runtime, branch(), b"base", b"b", 5).commit_version();
+        runtime
+            .branch(&branch_request(
+                child,
+                BranchAction::ForkCurrent { source: branch() },
+            ))
+            .expect("fork child");
+        base
+    };
+    let own = {
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
+                .with_maintenance_scheduling_policy(
+                    crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                ),
+            &backend,
+        )
+        .expect("first reopen")
+        .into_runtime();
+        let own = put_at(&mut runtime, child, b"own", b"kept", 10).commit_version();
+        runtime
+            .enqueue_maintenance(&MaintenanceRequest::new(
+                MaintenanceTask::Checkpoint,
+                MaintenanceScope::Global,
+            ))
+            .expect("enqueue checkpoint");
+        runtime.drain_maintenance().expect("drain checkpoint");
+        own
+    };
+
+    let runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+        &backend,
+    )
+    .expect("reopen")
+    .into_runtime();
+    assert_eq!(
+        timeline_timestamp_of(&runtime, child, own),
+        Ok(Timestamp::from_micros(10)),
+        "the child's own below-watermark commit must seed from the checkpoint group"
+    );
+    assert_eq!(
+        timeline_version_at(&runtime, child, 7),
+        Ok(base),
+        "the child's inherited history survives"
+    );
+}
+
+/// #2856 direction control: the PARENTLESS re-creation keeps its #2830
+/// timeline fence — the stale gen-1 group's entries (all at or below the
+/// new generation's creation point) never seed gen 2.
+#[cfg(feature = "localfs")]
+#[test]
+fn parentless_recreate_does_not_seed_dead_generation_checkpoint_timeline() {
+    use crate::api::{MaintenanceRequest, MaintenanceScope, MaintenanceTask};
+
+    let root = temp_dir_for_api_test("parentless-recreate-no-dead-timeline");
+    let backend = StorageBackend::local_fs(root);
+    let victim = branch_with(0x8b);
+    let deferrer = branch_with(0x8c);
+    let (dead_own, new_own) = {
+        let mut runtime = StorageRuntime::open_with_backend(
+            StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always)
+                .with_maintenance_scheduling_policy(
+                    crate::api::StorageMaintenanceSchedulingPolicy::EvaluateAndEnqueue,
+                ),
+            &backend,
+        )
+        .expect("durable open")
+        .into_runtime();
+        put_at(&mut runtime, branch(), b"base", b"b", 5);
+        runtime
+            .branch(&create_request(victim))
+            .expect("create gen-1 victim");
+        let dead_own = put_at(&mut runtime, victim, b"dead-own", b"gone", 15).commit_version();
+        runtime
+            .enqueue_maintenance(&MaintenanceRequest::new(
+                MaintenanceTask::Checkpoint,
+                MaintenanceScope::Global,
+            ))
+            .expect("enqueue checkpoint");
+        runtime.drain_maintenance().expect("drain checkpoint");
+        runtime
+            .branch(&branch_request(victim, BranchAction::Delete))
+            .expect("delete gen-1 victim");
+        runtime
+            .branch(&BranchRequest::new(
+                victim,
+                BranchAction::Create,
+                Some(BranchGeneration::new(2)),
+            ))
+            .expect("re-create victim as gen 2");
+        let new_own = put_at(&mut runtime, victim, b"new-own", b"alive", 20).commit_version();
+        // A live eager fork defers the close checkpoint, keeping the stale
+        // gen-1 checkpoint the latest one on disk.
+        runtime
+            .branch(&branch_request(
+                deferrer,
+                BranchAction::ForkCurrent { source: branch() },
+            ))
+            .expect("eager fork");
+        (dead_own, new_own)
+    };
+
+    let runtime = StorageRuntime::open_with_backend(
+        StorageOpenOptions::durable_local(StorageDurabilityPolicy::Always),
+        &backend,
+    )
+    .expect("reopen")
+    .into_runtime();
+    assert_eq!(
+        timeline_timestamp_of(&runtime, victim, dead_own),
+        Err(StorageApiErrorClass::HistoryUnavailable),
+        "the dead generation's commit must not resolve on the re-created name"
+    );
+    assert_eq!(
+        timeline_version_at(&runtime, victim, 17),
+        Err(StorageApiErrorClass::HistoryUnavailable),
+        "a parentless gen 2 has no history before its own first commit"
+    );
+    assert_eq!(
+        timeline_timestamp_of(&runtime, victim, new_own),
+        Ok(Timestamp::from_micros(20)),
+        "the new generation's own commit resolves"
+    );
+}
+
 /// #2855, the seed-183 Gap shape: a COW fork built over a source whose
 /// in-fork sealed tables are VOLATILE (an eager fork child's materialized
 /// table has no durable catalog entry) yields a child whose fork-time

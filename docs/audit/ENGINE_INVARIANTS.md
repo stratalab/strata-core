@@ -355,9 +355,26 @@ A per-branch table manifest surviving from a DEAD generation of a re-created par
 branch (its max commit version `<= created_at`) MUST be skipped at recovery — restoring it
 would resurrect the deleted generation's base state under the new name.
 
+A checkpoint's retained-timeline GROUP for a re-created name is fenced the same way
+(#2830/#2856), for parentless branches AND fork children: a parentless branch seeds only
+the group's entries above `created_at`; a fork child's group is ignored outright when the
+checkpoint watermark is `<= created_at` (the checkpoint predates this generation, so the
+group is a dead same-name generation's timeline). A fork child cannot be version-fenced
+entry by entry — its legitimate inherited entries also sit `<= created_at` — so an ignored
+child recovers exactly like a fork created after the checkpoint: inherited coverage is
+completed from the parent chain after WAL replay, own commits (all `> created_at`, hence
+above the watermark) are observed by replay. A group from a checkpoint cut after the
+child's creation seeds whole: it is the only carrier of the child's own below-watermark
+commits.
+
 **Audit**: Find the fence inside `recover_per_branch_table_manifests`
-(`lifecycle/durable/bootstrap.rs`). Truth table: `base_restore_generation_fence_truth_table`
-(`lifecycle/tests/recovery.rs`). Origin: #2830/#2834.
+(`lifecycle/durable/bootstrap.rs`); the timeline twin is `checkpoint_timeline_group_seed`
+at its `seed_non_seeded_branch_timelines` call site. Truth table:
+`checkpoint_timeline_group_seed_truth_table` (`lifecycle/tests/recovery.rs`). End to end
+(api/tests/branch.rs): `refork_of_a_deleted_name_does_not_seed_dead_generation_checkpoint_timeline`,
+with direction controls `fork_child_own_timeline_survives_reopen_through_the_checkpoint` and
+`parentless_recreate_does_not_seed_dead_generation_checkpoint_timeline`. Origin:
+#2830/#2834, #2856.
 
 ### COW-009: Fork layer structure and flattening precedence
 

@@ -58,9 +58,9 @@ pub(crate) use bootstrap::reopen_owes_quarantine_purge;
 #[cfg(test)]
 pub(crate) use bootstrap::OrphanReplayFilter;
 pub(crate) use bootstrap::{
-    combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
-    parentless_content_predates_generation, record_predates_current_generation,
-    DurableGroupApplyDone, DurableGroupApplyWork, DurableGroupInFlight, DurableGroupMemberResult,
+    checkpoint_timeline_group_seed, combine_non_seeded_checkpoint_rows, descriptor_version_anchor,
+    record_predates_current_generation, CheckpointTimelineGroupSeed, DurableGroupApplyDone,
+    DurableGroupApplyWork, DurableGroupInFlight, DurableGroupMemberResult,
     LifecycleDurableLocalRuntime, LifecycleRecoveryBootstrapReport,
 };
 pub(crate) use maintenance::{
