@@ -1,8 +1,10 @@
 # Write Amplification And Flash Endurance
 
-Status: derived from the 1.2.x code (#2906). Every number here is **derived**
-from constants unless it is marked **measured**. No harness in the tree measures
-write amplification at a scale where it matters yet (#3709, #3710).
+Status: derived from the 1.2.x code (#2906), then **measured** at the
+maintenance fixed point up to 3.5 GiB (512 MiB budget) and 1.5 GiB (64 MiB
+budget) for #3710; see section 5. Every number is **derived** from constants
+unless it is marked **measured**. The measurement harness is not in the tree;
+no CI lane measures write amplification at scale (#3709).
 
 This document backs catalog entry SCALE-005
 (`docs/audit/ENGINE_INVARIANTS.md`). It explains how many bytes a durable
@@ -22,6 +24,7 @@ A committed row is written to the device by these stages:
 | 4 | L0 → L1 compaction | Each L0 row once more, plus every L1 row its pass overlaps | Yes |
 | 5 | L*n* → L*n*+1 compaction, n = 1..6 | Each row once per level crossing, plus the overlapped rows of the next level | Yes |
 | 6 | Bottommost consolidation (L7) | Runs of at most 4 terminal tables repacked into fewer tables | Yes |
+| 7 | Quarantine stage of reclaim | Each table a compaction retires, moved into `quarantine/` before its source is deleted. On local-fs this is a hard link (no payload bytes, #3721). Backends without a durable link copy the bytes. | As stored |
 
 Manifest, catalog and watermark objects are also written. They are metadata,
 proportional to the number of tables and commits rather than to bytes, and are
@@ -65,7 +68,7 @@ Symbols:
 Physical bytes written per logical byte:
 
 ```text
-WA = W_wal + W_ckpt + c × (1 + W_L0 + Σ W_mid + W_term) [+ W_bottom]
+WA = W_wal + W_ckpt + c × (1 + W_L0 + Σ W_mid + W_term) [+ W_bottom] + W_q
 ```
 
 | Term | Derivation | Bound |
@@ -77,6 +80,7 @@ WA = W_wal + W_ckpt + c × (1 + W_L0 + Σ W_mid + W_term) [+ W_bottom]
 | `W_mid` (n = 1..5) | A one-table pass moves `S ≤ T` bytes and rewrites its overlap in a next level that holds `≤ 3T` at the fixed point. It is `0` when the pass is a metadata-only move. | `0 .. 1 + 3T/S` each, so `≤ 4` each for full tables and `≤ 20` over five crossings |
 | `W_term` (L6 → L7) | See below | `≈ 1 + D / P` |
 | `W_bottom` | Repacks under-filled terminal tables. Only an explicit level-scoped task runs it. | small; not bounded here |
+| `W_q` | The quarantine stage moves every retired compaction input (inputs plus overlapped tables) into `quarantine/`. On local-fs the move is a hard link (`DurableLink`, #3721 / #3723) and writes no payload. Backends without a durable link, and filesystems that refuse the link (EXDEV/ENOTSUP/EPERM), copy the bytes durably. | `0` on local-fs (measured ≤ 0.01, inventory metadata). With a copy it equals compaction input bytes per logical byte, which is `≈ c × (W_L0 + Σ W_mid + W_term)`, and it roughly doubles the compaction share. It was measured at 43–46 % of total WA before #3723. |
 
 ### Why the terminal term is `D / P` and not the classical `≈ 10`
 
@@ -106,8 +110,16 @@ whole terminal level. It grows **linearly** with the dataset. It only dominates
 once `D` exceeds a few times `P`: about 2.5 GiB at the default profile, but only
 about 400 MiB at a 64 MiB edge budget, where `P ≈ 40 MiB`.
 
-This is derived, not measured. #3710 tracks measuring it and deciding the
-count-versus-byte trigger for non-final levels.
+**Measured (section 5):** the shape holds, but the linear magnitude
+overpredicts. At the fixed point, L1-L6 do sit at ≤ 3 tables and nearly all
+data is in L7. But the L7 write term grew at about 2.1 per GiB at 512 MiB, about
+half the predicted `1/P = 4` per GiB. At 64 MiB it **plateaued at about 10**
+from `D ≈ 0.6` GiB to 1.5 GiB, where `1 + D/P` predicts about 15–45. The
+per-pass L6 → L7 overlap was still growing when the term levelled off. The
+likely cause is the grandparent cut and the round-robin compact pointer, but
+that is not proven. Points at 5 and 10 GiB are unmeasured, so whether either
+curve steps up again is open. #3710 stays open for the count-versus-byte policy
+redesign.
 
 **Where the linear term does not apply:**
 
@@ -143,7 +155,8 @@ The same 1 GiB into a 10 GiB database at a **64 MiB edge budget**
 
 The wide middle range is the loose `W_mid` bound. The low end assumes every
 middle crossing is a metadata-only move, and the high end assumes each one
-rewrites three full tables. The measurement in #3709 / #3710 should narrow it.
+rewrites three full tables. Section 5 has the measured values, which replace
+this example for uniform random keys.
 
 Compression scales every table term by `c`. The engine footprint ratchet
 (`crates/engine/tests/storage_footprint_ratchet.rs`) was run for this document
@@ -174,7 +187,92 @@ observation, **not** a bound the theory gives at scale.
 It is also not enforced today. Its only caller is an `#[ignore]`d test, which
 the nightly perf-trace lane runs without `--ignored` (#3709).
 
-## 5. Flash / SD endurance envelope
+## 5. Measured at the maintenance fixed point (#3710)
+
+Every number in this section is **measured**.
+
+**Setup.** The harness was a worktree-only `#[ignore]`d storage test, not in the
+tree, run at `81a9efbe` (before) and `5abae992` (after #3723). It opens a
+durable local-fs `StorageRuntime` on ext4/NVMe with `Standard` durability and the
+product background maintenance. The workload is uniform random 16 B keys with
+**incompressible** random 1 KiB values (`c ≈ 1`, 1,040 logical bytes per row),
+committed in 1,024-row batches. After **every** commit the harness waits for the
+background lane to go idle. At each checkpoint it also waits until no compaction
+completes across a 1.5 s window. The run therefore stays in the trickle regime:
+L1-L6 held ≤ 3 tables at every checkpoint, and L0 held ≤ 3 in all but one.
+
+Physical bytes are counted per object class at the local-fs backend (write,
+append, publish). They agree with `/proc/self/io` `write_bytes` to within 0.3 %,
+and `cancelled_write_bytes` was 0. Runs are deterministic: the same seed gives
+identical table bytes.
+
+**Marginal WA** is the device bytes written over an interval divided by the
+logical bytes added in it. The component columns are per logical byte over the
+same interval. `L7` is bytes written as L7 tables. `q` is the quarantine term,
+before → after #3723. Checkpoint snapshots did not run in any interval
+(`W_ckpt = 0`; the checkpoint-execution counter stayed 0).
+
+### 512 MiB budget (default profile: `R` = 64 MiB, `T` = 32 MiB, `P ≈ 256` MiB)
+
+| D (GiB) | cum WA before → after | **marginal WA before → after** | WAL | flush | L1 | L2–L6 | L7 | `q` before → after | L1–L6 / L7 tables |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--|
+| 0.25 | 3.68 → 2.80 | 3.68 → **2.80** | 1.06 | 0.87 | 0.87 | 0 | 0 | 0.87 → 0 | ≤ 1 / 8 |
+| 0.5 | 3.78 → 2.91 | 3.88 → **3.01** | 1.06 | 1.08 | 0.87 | 0 | 0 | 0.87 → 0 | ≤ 3 / 8 |
+| 1.0 | 6.69 → 4.39 | 9.61 → **5.88** | 1.06 | 1.08 | 1.41 | 0.81 | 1.51 | 3.73 → 0 | ≤ 3 / 22 |
+| 1.5 | 9.00 → 5.54 | 13.62 → **7.83** | 1.06 | 0.97 | 1.35 | 1.02 | 3.42 | 5.79 → 0 | ≤ 3 / 44 |
+| 2.0 | 10.45 → 6.28 | 14.80 → **8.48** | 1.06 | 1.08 | 1.36 | 0.96 | 4.01 | 6.33 → 0 | ≤ 3 / 63 |
+| 2.5 | 11.35 → 6.72 | 14.93 → **8.49** | 1.06 | 0.97 | 1.36 | 1.07 | 4.02 | 6.44 → 0 | ≤ 3 / 79 |
+| 3.5 | 14.29 → 8.19 | 21.64 → **11.88** | 1.06 | 1.03 | 1.58 | 1.31 | 6.88 | 9.77 → 0 | ≤ 3 / 121 |
+
+At 3.5 GiB the device bytes written fell from 53.71 GB to 30.79 GB (−42.7 %).
+The difference is exactly the pre-fix quarantine bytes, 22.92 GB, which equal
+compaction input bytes. Every other column is byte-identical before and after.
+
+### 64 MiB budget (edge: `R` = 8 MiB, `T` = 4 MiB, `P ≈` 32–44 MiB)
+
+| D (GiB) | cum WA before → after | **marginal WA before → after** | WAL | flush | L1 | L2–L6 | L7 | `q` before → after | L1–L6 / L7 tables |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--|
+| 0.25 | 9.83 → 5.98 | 9.83 → **5.98** | 1.06 | 1.03 | 1.27 | 0.70 | 1.88 | 3.85 → 0.00 | ≤ 3 / 63 |
+| 0.5 | 14.02 → 8.09 | 18.21 → **10.20** | 1.06 | 1.03 | 1.35 | 0.85 | 5.80 | 8.01 → 0.01 | ≤ 3 / 139 |
+| 0.75 | 18.41 → 10.31 | 27.20 → **14.74** | 1.06 | 1.03 | 1.35 | 0.80 | 10.32 | 12.47 → 0.01 | ≤ 3 / 216 |
+| 1.0 | 20.34 → 11.28 | 26.11 → **14.20** | 1.06 | 1.03 | 1.06 | 0.62 | 10.23 | 11.92 → 0.01 | ≤ 3 / 274 |
+| 1.5 | 21.77 → *n/m* | 24.62 → *n/m* | 1.06 | 1.03 | 1.22 | 0.28 | 9.58 | 11.09 → *n/m* | ≤ 3 / 446 |
+
+After #3723, the residual `q` of ≤ 0.01 is quarantine-inventory metadata. The
+post-fix run stopped at 1.0 GiB because it hit its time box. At 1.5 GiB only
+the pre-fix row was measured (*n/m* = not measured after the fix). Because every
+non-quarantine column was identical wherever both runs exist, the post-fix
+value is expected to be about 24.6 − 11.1 ≈ 13.5, but that is inferred.
+
+**Where the runs stopped.** Neither budget reached 5 or 10 GiB. The largest
+measured points are 3.5 GiB at 512 MiB and 1.5 GiB (before) / 1.0 GiB (after) at
+64 MiB. Section 3's large-`D` predictions (10 and 100 GiB) remain unmeasured.
+
+### What the measurements say about the derivation
+
+- **Fixed-point shape: confirmed.** L1-L6 sat at ≤ 3 tables at every
+  checkpoint, and nearly all data sat in L7. WAL (1.06), flush (≈ 1) and
+  `W_L0` (0.9-1.6) matched their bounds. `W_mid` was far below its ≤ 20 bound:
+  0.3-1.3 in total, because most middle crossings are metadata-only moves.
+- **The terminal term overpredicts.** At 512 MiB the L7 term grew at about
+  2.1 per GiB, fitted over 1-3.5 GiB. The derivation's `1/P` gives 4 per GiB.
+  The growth came in steps: flat from 1.5 to 2.5 GiB, then a rise. At 64 MiB the
+  L7 term **plateaued at about 10** from about 0.6 to 1.5 GiB, where `1 + D/P`
+  predicts about 15-45. The per-pass overlap was still growing at 0.75 GiB (3 →
+  39 L7 tables per L6 → L7 pass), so the plateau is not yet explained. Larger
+  sizes may step up again.
+- **The quarantine copy was the largest single term (43-46 %) until #3723.**
+  On local-fs it is now 0. Backends without a durable link still pay it.
+- **Byte targets alone are not the fix (control experiment).** Dropping only the
+  count arm (`table_count >= 4`) made marginal WA 1.5-2.2x *worse* at 512 MiB
+  over 1-3.5 GiB, for example 32.5 against 21.6 at 3.5 GiB, both before #3723.
+  The terminal term fell, but the dynamic targets give the levels above the
+  dynamic base level (L1-L3 here) the 256 MiB maximum. L0 always compacts into
+  L1, so data is rewritten through three fat levels. A byte-driven policy also
+  needs L0 to compact directly into the dynamic base level. That is the #3710
+  redesign.
+
+## 6. Flash / SD endurance envelope
 
 ```text
 device bytes/day = logical bytes/day × WA × FTL_WA
@@ -191,21 +289,31 @@ lifetime (days)  = rated TBW / device bytes/day
   endurance" and industrial (pSLC) cards do. Use the vendor datasheet; the
   figures below are an **assumed** rating for illustration only.
 
-*Example, with all inputs assumed except WA, which comes from section 4:*
-- The device logs 1 GiB/day of uniform-key writes, on a card rated 40 TBW, with
-  `FTL_WA = 2`.
-- **Small dataset** (`WA ≈ 6 – 27`): 12 – 54 GiB/day, which is **2 – 9 years**.
-- **10 GiB dataset** (`WA ≈ 44 – 65`): 88 – 130 GiB/day, which is **about
-  0.9 – 1.3 years**.
-- **Same 10 GiB dataset at a 64 MiB budget** (`WA ≈ 270`): about 540 GiB/day,
-  which is **about 2.5 months**.
-- **Append-mostly keys** (`WA ≈ 3.25`): about 6.5 GiB/day, which is **about
-  17 years**.
+*Example.* Every input is assumed except WA, which is the **measured** marginal
+WA from section 5, after #3723, on local-fs:
+- The device logs 1 GiB/day of uniform-key, incompressible writes, on a card
+  rated 40 TB written, with `FTL_WA = 2`.
+
+| Dataset and budget | Measured WA | Device writes/day | Lifetime |
+|---|--:|--:|--:|
+| ≈ 1 GiB, 512 MiB budget | 5.9 | 11.8 GiB | **≈ 8.6 years** |
+| 2-2.5 GiB, 512 MiB budget | 8.5 | 17 GiB | **≈ 6 years** |
+| 3.5 GiB, 512 MiB budget | 11.9 | 23.8 GiB | **≈ 4.3 years** |
+| 0.75-1 GiB, 64 MiB edge budget | 14.2-14.7 | ≈ 29 GiB | **≈ 3.5 years** |
+| same, before #3723 (the quarantine copy) | 26-27 | ≈ 53 GiB | ≈ 1.9 years |
+
+- A backend without a durable link still pays the quarantine copy: use the
+  "before" column of section 5.
+- **10 GiB datasets are unmeasured.** The derived figures (section 4: WA ≈
+  44-65 at 512 MiB, ≈ 260-280 at 64 MiB) overpredicted every size that was
+  measured. Treat them as an upper envelope, not an estimate.
+- **Append-mostly keys** (`WA ≈ 3.25`, derived and unmeasured): about
+  6.5 GiB/day, which is **about 17 years**.
 
 The dataset-proportional terminal term is what decides SD endurance. Key
 locality and memory budget matter far more than any other setting.
 
-## 6. Operator levers
+## 7. Operator levers
 
 What an embedding application can change, from the most effective to the least:
 
@@ -225,7 +333,7 @@ What an embedding application can change, from the most effective to the least:
    (`branch/state/compaction.rs:2096`), so an append-only workload gains nothing
    from it.
 4. **`durability`** (`with_durability`). This does not change bytes; it changes
-   write granularity and therefore `FTL_WA`, as in section 5.
+   write granularity and therefore `FTL_WA`, as in section 6.
 5. **Data compressibility.** This is `c`. Compression is always Zstd on durable
    opens and cannot be switched off from the engine.
 

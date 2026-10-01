@@ -1341,7 +1341,7 @@ The derivation lives in `docs/architecture/storage/write-amplification-and-flash
 (#2906):
 
 ```text
-WA = W_wal + W_ckpt + c × (1 + W_L0 + Σ W_mid + W_term)
+WA = W_wal + W_ckpt + c × (1 + W_L0 + Σ W_mid + W_term) + W_q
 ```
 
 - `W_wal ≈ 1`: the WAL is written once and is not compressed.
@@ -1351,18 +1351,26 @@ WA = W_wal + W_ckpt + c × (1 + W_L0 + Σ W_mid + W_term)
 - Each of the five middle crossings costs 0 (a metadata-only move) to `1 + 3T/S`.
 - `W_term ≈ 1 + D / P`, where `D` is the terminal-level bytes and `P ≈ min(256 MiB, 4R + |L1|)` is
   the L0 pass size.
+- `W_q`: the quarantine stage of reclaim. On local-fs it is a hard link and costs 0 (#3721/#3723).
+  Backends without a durable link copy every retired compaction input, which roughly doubles the
+  compaction share.
 
 The terminal term is **linear** in the dataset rather than the textbook `≈ 10`. At the maintenance
 fixed point, the non-final table-count trigger holds L1-L6 to ≤ 3 tables each, so almost all data
-sits in L7 and each `P`-sized batch rewrites its share of it. This is derived and unmeasured; #3710
-tracks measuring it and deciding the trigger.
+sits in L7 and each `P`-sized batch rewrites its share of it.
 
-Worked at the defaults (512 MiB budget, uniform keys, `c = 1`):
+**Measured (#3710):** fixed point, uniform keys, incompressible 1 KiB values, local-fs, after
+#3723. The shape is confirmed, but the linear term overpredicts:
+- 512 MiB budget, marginal WA: 5.9 at 1 GiB, 8.5 at 2-2.5 GiB, 11.9 at 3.5 GiB. The L7 term grows
+  at ≈ 2.1/GiB against the derived 4/GiB.
+- 64 MiB budget, marginal WA: 14.2-14.7 at 0.75-1 GiB. The L7 term plateaus near 10.
+- Before #3723 the quarantine copy made these 21.6 (3.5 GiB, 512 MiB) and 26-27 (64 MiB).
+- The 5 and 10 GiB points are unmeasured. The derived 10 GiB figures (WA ≈ 44-65 at 512 MiB,
+  ≈ 260-280 at 64 MiB) are an upper envelope.
+- Time-ordered keys: WA ≈ 1.25 + 2c (derived).
 
-- 1 GiB of writes into an empty database: WA ≈ 6-27.
-- The same 1 GiB into a 10 GiB database: WA ≈ 44-65.
-- The 10 GiB case at a 64 MiB edge budget: WA ≈ 260-280.
-- Time-ordered keys: WA ≈ 1.25 + 2c.
+#3710 stays open for the count-versus-byte policy redesign. Byte targets alone measured 1.5-2.2x
+worse.
 
 The operator levers are key locality, `memory_budget` (sets `R`, `T`, `P`) and `version_retention`.
 The doc gives the SD/TBW envelope for each.
@@ -1386,8 +1394,8 @@ If any of these moves, re-derive the doc's table and worked example.
 (~7 MB, where `D / P ≈ 0`), not a bound at scale. KNOWN GAP (#3709): it is also enforced nowhere.
 Its only caller is the `#[ignore]`d cache closed-loop test in `api/tests/background_scale.rs`,
 which the nightly perf-trace lane runs without `--ignored`, and `tests/lifecycle_source_guard.rs`
-only checks that the string exists. No harness measures write amplification at a scale where the
-terminal term matters.
+only checks that the string exists. The #3710 measurements came from a worktree-only harness. No
+harness in the tree measures write amplification at a scale where the terminal term matters.
 
 ### SCALE-006: Maintenance pressure control is deferral + throttle + lanes, not a bandwidth limiter
 
