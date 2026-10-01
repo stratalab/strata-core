@@ -15,11 +15,11 @@
 //! | operation | behavior under a concurrent mutator |
 //! |---|---|
 //! | `read_object` / `read_range` / `object_metadata` | absence-propagating: a racer's delete surfaces as `NotFound`, a replace serves the new bytes; the symlink/dir prechecks are best-effort classifiers, not guards |
-//! | `write_object` | last-writer-wins: a raced delete is recreated; a parent directory an emptied-directory prune removes between parent creation and file creation is re-created and the write retried (bounded, #3692) |
+//! | `write_object` | last-writer-wins: a raced delete is recreated; a parent directory an emptied-directory prune removes between parent creation and file creation is re-created and the write retried (bounded, #3692), and an ancestor pruned mid-walk is re-created by a bounded re-walk (#3730) |
 //! | `delete_object` | idempotent: losing any window (parent walk, stat, or the stat→unlink gap) reports `already_missing`; the winner's parent fsync carries removal durability; the winner then `rmdir`s the directories it emptied below the family root — a non-empty or vanished directory stops or skips the climb, never fails the delete (#3692) |
 //! | `remove_empty_dirs_under` | fuzzy sweep: `rmdir` refuses a directory a racer refilled, a vanished directory is skipped; never removes a family root or the database root (#3692) |
 //! | `list_prefix` / `collect_files` | fuzzy snapshot: concurrently created/deleted entries may or may not appear, a vanished entry or directory is skipped, and the walk itself never fails on absence |
-//! | `publish_object` | atomic install: parent-dir creation tolerates a racer's `EEXIST` with post-verify (#2799), a parent removed before the temp file lands is re-created and the create retried (#3692), temp files retry collisions, create-mode no-clobber maps a raced final link to `PreconditionFailed`, and partial failures classify by visibility |
+//! | `publish_object` | atomic install: parent-dir creation tolerates a racer's `EEXIST` with post-verify (#2799), an ancestor pruned mid-walk is re-created by a bounded re-walk (#3730), a parent removed before the temp file (or `link_object`'s link) lands is re-created and the create retried (#3692), temp files retry collisions, create-mode no-clobber maps a raced final link to `PreconditionFailed`, and partial failures classify by visibility |
 //! | `acquire_writer_lock` | fail-fast BY CONTRACT: contention is the "another live opener" signal and must never be retried here (harness-side retry policy lives in `testkit::reopen_retry`) |
 //! | `append_object` / `open_append_handle` / `sync_object` | single-writer by the lifecycle writer-lock contract; a raced delete of the target fails `NotFound` deliberately (#2766: name-based loss detection) |
 //! | `sync_publish_parent` / `sync_delete_parent` | fail-safe ambiguity: a vanished parent reports durability-unconfirmed — visibility is known, durability of the rename/unlink genuinely is not |
@@ -168,6 +168,12 @@ pub(crate) struct LocalFsBackend {
     /// creation.
     #[cfg(all(test, unix))]
     parent_race: Arc<Mutex<(u32, LocalFsParentRace)>>,
+    /// #3730 race seam: how many upcoming parent-chain walks first have the
+    /// (empty) prunable ancestor they just verified removed before its child
+    /// is created, exactly as a concurrent delete's emptied-directory pruning
+    /// would mid-walk.
+    #[cfg(all(test, unix))]
+    ancestor_race: Arc<Mutex<u32>>,
 }
 
 /// #3692 race seam: what a fired race does to the creation's parent directory.
@@ -194,6 +200,8 @@ impl LocalFsBackend {
             delete_fault: Arc::new(Mutex::new(None)),
             #[cfg(all(test, unix))]
             parent_race: Arc::new(Mutex::new((0, LocalFsParentRace::Prune))),
+            #[cfg(all(test, unix))]
+            ancestor_race: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -514,6 +522,38 @@ impl LocalFsBackend {
         }
     }
 
+    /// #3730: arm the mid-walk race seam for the next `walks` parent-chain
+    /// walks that create missing directories.
+    #[cfg(all(test, unix))]
+    fn arm_ancestor_race(&self, walks: u32) {
+        *self.ancestor_race.lock().expect("ancestor race seam lock") = walks;
+    }
+
+    /// #3730: the armed mid-walk race seam's remaining count.
+    #[cfg(all(test, unix))]
+    fn ancestor_race_remaining(&self) -> u32 {
+        *self.ancestor_race.lock().expect("ancestor race seam lock")
+    }
+
+    /// #3730: fire the mid-walk race seam — remove `dir`, a prunable ancestor
+    /// the walk has just verified and whose child it is about to create, as a
+    /// concurrent delete that empties `dir` and prunes it can. A family root
+    /// or the database root is never pruned, so the seam skips them (without
+    /// spending a count). Written without a comparison on the count, like
+    /// [`Self::injected_parent_race`], so no mutant of it fires unarmed.
+    #[cfg(all(test, unix))]
+    fn injected_ancestor_race(&self, dir: &Path) {
+        if !dir.strip_prefix(&self.root).is_ok_and(dir_is_prunable) {
+            return;
+        }
+        let mut armed = self.ancestor_race.lock().expect("ancestor race seam lock");
+        let Some(remaining) = armed.checked_sub(1) else {
+            return;
+        };
+        *armed = remaining;
+        fs::remove_dir(dir).expect("race seam prunes the empty ancestor");
+    }
+
     /// #3692: one creation attempt — the race seam (tests only), then `create`.
     fn attempt_object_creation<T>(
         &self,
@@ -557,6 +597,30 @@ impl LocalFsBackend {
             outcome = self
                 .ensure_parent_dirs(parent, true)
                 .and_then(|()| self.attempt_object_creation(parent, &mut create));
+        }
+        outcome
+    }
+
+    /// #3730: create `parent` and every missing ancestor for an object
+    /// creation, re-walking when the walk fails `NotFound`, at most
+    /// [`OBJECT_CREATION_ATTEMPTS`] walks in all. This is the #3692 race one
+    /// step earlier: a delete that empties a directory prunes it and then
+    /// every ancestor it leaves empty (`prune_emptied_ancestors`), so the
+    /// directory this walk has just verified can vanish before the walk
+    /// creates its child (`create_dir` then fails `NotFound`), and a directory
+    /// the walk has just created or found can vanish before its re-verify.
+    /// Either way the absence is a lost race, not the owner being gone, and
+    /// the next walk re-creates the chain. Any other failure (a symlink, a
+    /// file where a directory belongs, a permission error) is final. The bound
+    /// is the loop's own range, so no retry decision can make it spin.
+    fn create_parent_dirs(&self, parent: &Path) -> Result<(), BackendError> {
+        let mut outcome = self.ensure_parent_dirs(parent, true);
+        for _ in 1..OBJECT_CREATION_ATTEMPTS {
+            match &outcome {
+                Err(error) if should_retry_object_creation(error.kind()) => {}
+                _ => return outcome,
+            }
+            outcome = self.ensure_parent_dirs(parent, true);
         }
         outcome
     }
@@ -689,7 +753,7 @@ impl LocalFsBackend {
         ))
     }
 
-    fn ensure_parent_dirs(&self, parent: &Path, create_missing: bool) -> BackendResult<()> {
+    fn ensure_parent_dirs(&self, parent: &Path, create_missing: bool) -> Result<(), BackendError> {
         self.ensure_root_dir(create_missing)?;
         let relative = parent.strip_prefix(&self.root).map_err(|_| {
             BackendError::new(
@@ -708,6 +772,12 @@ impl LocalFsBackend {
             };
             current.push(part);
             Self::ensure_dir(&current, create_missing)?;
+            // #3730 race seam: between verifying `current` and creating its
+            // child, a concurrent emptied-directory prune can remove it.
+            #[cfg(all(test, unix))]
+            if create_missing && current != parent {
+                self.injected_ancestor_race(&current);
+            }
         }
 
         Ok(())
@@ -799,10 +869,10 @@ impl LocalFsBackend {
         &self,
         name: &ObjectName,
         mode: PublishMode,
-    ) -> PublishResult<PathBuf> {
+    ) -> Result<PathBuf, PublishError> {
         let final_path = self.path_for(name);
         if let Some(parent) = final_path.parent() {
-            self.ensure_parent_dirs(parent, true).map_err(|error| {
+            self.create_parent_dirs(parent).map_err(|error| {
                 Self::publish_error(name, PublishFailureKind::FailedBeforeVisibility, error)
             })?;
         }
@@ -1163,11 +1233,15 @@ impl Backend for LocalFsBackend {
         Ok(bytes)
     }
 
-    fn write_object(&self, name: &ObjectName, bytes: &[u8]) -> BackendResult<BackendMetadata> {
+    fn write_object(
+        &self,
+        name: &ObjectName,
+        bytes: &[u8],
+    ) -> Result<BackendMetadata, BackendError> {
         Self::reject_writer_lock_object_mutation(name, "write")?;
         let path = self.path_for(name);
         if let Some(parent) = path.parent() {
-            self.ensure_parent_dirs(parent, true)?;
+            self.create_parent_dirs(parent)?;
         }
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -3292,6 +3366,88 @@ mod tests {
         assert_eq!(error.source_error().kind(), BackendErrorKind::NotFound);
         assert_eq!(backend.parent_race_remaining(), 1, "exactly the bound");
         backend.arm_parent_race(0);
+    }
+
+    /// #3730: the race one step earlier — the parent-chain walk itself. A
+    /// table-object sweep's source delete empties `tables/<branch>/l0000/`
+    /// and prunes it and then `tables/<branch>/` (no branch manifest yet), in
+    /// the window after a compaction's walk verified `tables/<branch>/` and
+    /// before it created `l0001/` under it: `create_dir` fails `NotFound`.
+    /// Every create-into-a-directory path re-walks and lands — publish in
+    /// both modes, write, and link — and the seam proves it fired.
+    #[cfg(unix)]
+    #[test]
+    fn creations_survive_an_ancestor_pruned_mid_walk() {
+        use super::OBJECT_CREATION_ATTEMPTS;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+
+        for (branch, mode) in [("b1", PublishMode::Create), ("b2", PublishMode::Replace)] {
+            let name =
+                ObjectName::new(format!("tables/{branch}/l0001/compaction-0")).expect("name");
+            backend.arm_ancestor_race(1);
+            let outcome = backend
+                .publish_object(&name, b"compacted", mode)
+                .expect("publish rides the mid-walk race");
+            assert_eq!(backend.ancestor_race_remaining(), 0, "the race fired");
+            assert_eq!(outcome.durability(), PublishDurability::Durable);
+            assert_eq!(backend.read_object(&name).expect("read"), b"compacted");
+            assert_no_temporary_entries(&backend, &name);
+        }
+
+        // Every walk short of the bound rides the race.
+        let written = ObjectName::new("tables/b3/l0001/table").expect("name");
+        backend.arm_ancestor_race(OBJECT_CREATION_ATTEMPTS - 1);
+        backend
+            .write_object(&written, b"written")
+            .expect("write rides the mid-walk race");
+        assert_eq!(backend.ancestor_race_remaining(), 0, "every race fired");
+        assert_eq!(backend.read_object(&written).expect("read"), b"written");
+
+        let source = ObjectName::new("tables/b4/l0000/table").expect("name");
+        backend.write_object(&source, b"source").expect("seed");
+        let target = ObjectName::new("tables/b5/l0001/table").expect("name");
+        backend.arm_ancestor_race(1);
+        backend
+            .link_object(&source, &target)
+            .expect("link rides the mid-walk race");
+        assert_eq!(backend.ancestor_race_remaining(), 0, "the race fired");
+        assert_eq!(backend.read_object(&target).expect("linked"), b"source");
+
+        // An ancestor pruned on every walk surfaces NotFound, before
+        // visibility, after exactly OBJECT_CREATION_ATTEMPTS walks — one armed
+        // race is left unspent.
+        let exhausted = ObjectName::new("tables/b6/l0001/compaction-0").expect("name");
+        backend.arm_ancestor_race(OBJECT_CREATION_ATTEMPTS + 1);
+        let error = backend
+            .publish_object(&exhausted, b"x", PublishMode::Create)
+            .expect_err("bounded re-walk");
+        assert_eq!(error.kind(), PublishFailureKind::FailedBeforeVisibility);
+        assert_eq!(error.source_error().kind(), BackendErrorKind::NotFound);
+        assert_eq!(backend.ancestor_race_remaining(), 1, "exactly the bound");
+        let exhausted_write = ObjectName::new("tables/b7/l0001/table").expect("name");
+        backend.arm_ancestor_race(OBJECT_CREATION_ATTEMPTS + 1);
+        assert_eq!(
+            backend
+                .write_object(&exhausted_write, b"x")
+                .expect_err("bounded re-walk")
+                .kind(),
+            BackendErrorKind::NotFound
+        );
+        assert_eq!(backend.ancestor_race_remaining(), 1, "exactly the bound");
+        backend.arm_ancestor_race(0);
+
+        // Unarmed, the seam never fires; armed, it never prunes a family root
+        // (`tables/` is the only ancestor the walk verifies before its last
+        // step here, and a non-empty one: removing it would panic).
+        let plain = ObjectName::new("tables/b8/l0001/table").expect("name");
+        backend.write_object(&plain, b"p").expect("plain write");
+        assert_eq!(backend.ancestor_race_remaining(), 0);
+        backend.arm_ancestor_race(1);
+        let shallow = ObjectName::new("tables/b9/table").expect("name");
+        backend.write_object(&shallow, b"s").expect("shallow write");
+        assert_eq!(backend.ancestor_race_remaining(), 1, "no prunable ancestor");
+        backend.arm_ancestor_race(0);
     }
 
     /// (b, backend half) The reconcile sweep removes every empty directory
