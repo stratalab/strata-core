@@ -123,21 +123,26 @@ agent variants shown where they differ.
 
 ### 5.1 cURL (human)
 
+A terminal gets two cards in the site's palette: the download with a live progress bar and the
+checksum, then the next steps (stratadb.org PR #28, live 2026-09-30):
+
 ```
 $ curl -fsSL https://stratadb.org/install.sh | sh
-  ✓ Detected linux x86_64
-  ✓ Downloaded strata v1.0.0 (sha256 verified)
-  ✓ Installed to ~/.strata/bin/strata
-  ✓ Added to PATH in ~/.bashrc
 
-  Strata is ready.  Restart your shell or run:  source ~/.bashrc
+  ╭─ strata ───────────────────────────────────────╮
+  │  v1.2.7 · linux-x86_64                         │
+  │  ██████████████████████  13.2 MB   ✓ sha256    │
+  │  into  ~/.strata/bin/strata                    │
+  │  PATH  added in ~/.bash_profile                │
+  ╰────────────────────────────────────────────────╯
 
-  Try:
-    strata                      Interactive REPL (in-memory, nothing written to disk)
-    strata ./mydb               Open or create a database at ./mydb
-    strata agents guide         Full usage guide (for you or your AI agent)
-
-  Docs: https://stratadb.org/docs
+  ╭─ ready · 1.5s ─────────────────────────────────╮
+  │  strata                 REPL, in memory        │
+  │  strata ./mydb          a database on disk     │
+  │  strata agents guide    for your AI agent      │
+  ╰────────────────────────────────────────────────╯
+  open a new shell, or: source ~/.bash_profile
+  docs  stratadb.org/docs
 ```
 
 ### 5.2 cURL (agent / non-TTY)
