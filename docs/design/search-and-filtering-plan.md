@@ -1,6 +1,6 @@
 # Search and filtering in Strata
 
-**Status:** draft for review (decisions D1–D6 open) · **Drafted:** 2026-09-30 against `main` at `87fa1a9c` (v1.2.7) · **Workstream:** 1.3–1.5
+**Status:** draft for review (decisions D1–D6 open) · **Drafted:** 2026-09-30 against `main` at `87fa1a9c` (v1.2.7) · **Revised:** 2026-10-03, primitives for agent-memory harnesses (section 10) · **Workstream:** 1.3–1.5
 
 An engine-owned index you declare once, kept current in the same commit as your
 data, and queried with small typed JSON filters. No query language.
@@ -21,6 +21,10 @@ data, and queried with small typed JSON filters. No query language.
 - **The order.** Index layer and structured filters first, because two apps and the
   VS Code extension are waiting on them. Then key search, text, production vector
   indexing, auto-embedding and hybrid ranking, then query-time model stages.
+- **Primitives, not a memory module.** Agent-memory harnesses are a lead use case.
+  Strata adds general search primitives they need (weighted fusion, distance
+  cutoffs, missing-field filters, read-your-writes for embeddings) and leaves
+  memory policy to the harness (section 10).
 - **No format change.** Index entries are ordinary versioned rows, the way JSON
   index rows already are. Vector ANN artifacts keep their existing sidecar files.
 
@@ -57,6 +61,11 @@ deletes. The plan builds on it.
   unfilterable non-dict metadata (#2705).
 - **Agents:** the vector `--filter` shape is undiscoverable and its error names a
   serde internal (#3121).
+- **Agent-memory harnesses:** a harness such as a Claude Code mod that keeps an
+  agent's memory in Strata recalls on every prompt. It needs ranked hybrid
+  retrieval that can return nothing, filters on missing fields, read-your-writes
+  for embeddings and low latency on small corpora. Section 10 lists what this adds
+  and where the line sits between the database and the harness.
 
 ## What we borrow
 
@@ -124,6 +133,12 @@ Field types, and the only operations each allows:
 | text | analyzed terms, postings | `prefix` | `match` (BM25) |
 | vector | collection embedding, or auto-embedded | none | `near` (k nearest) |
 
+Every field type also takes `exists` and `missing`, so a filter can ask for
+documents that do or don't have a field, such as "not superseded" as
+`{ "field": "superseded_by", "missing": true }`. A tag field over an array indexes
+every element, so `{ "field": "links", "in": ["note:12"] }` finds every document
+whose `links` array holds `note:12`.
+
 Today's tag index lowercases values and silently rewrites paths. The new tag type
 keeps values exact and rejects paths it cannot index, with a typed error.
 
@@ -172,6 +187,7 @@ search {
   ],
   "match":  { "field": "name", "text": "grand central" },
   "sort":   { "field": "pop", "order": "desc" },
+  "return": ["name", "kind"],
   "limit":  20,
   "cursor": null,
   "as_of":  null
@@ -187,6 +203,10 @@ Response:
   "stats":  { "used_index": true, "rows_examined": 41, "exact": true, "fusion": null }
 }
 ```
+
+`return` names the fields each hit carries, so a caller listing many documents
+(an overview, a table of contents) doesn't pull every body. Without it a hit
+carries the indexed fields.
 
 The clause schema lives in the IDL like every other command, so the CLI, the Python
 SDK and MCP get it from one definition, and an agent sees the valid operations for
@@ -223,13 +243,37 @@ before any code.
   same typed filters. A selective filter pre-filters through the field index; a
   broad one uses HNSW with post-filtering and the existing exact fallback.
   ACORN-style filtered traversal (#1581) is a later optimisation.
+- `near` takes an optional `max_distance`, so a query can return nothing when
+  nothing is close. Fused scores are rank-based and can't be compared across
+  queries, so the cutoff applies to the raw distance, before fusion.
 - A latency perf gate on query time against collection size, which does not exist
-  today.
+  today, and a second gate for small, frequent queries: hybrid search over about
+  1,000 documents, including embedding the query text, measured end to end.
 
 ### 8. Hybrid ranking
 
 When a query has both `match` and `near`, the engine fuses the two ranked lists with
 RRF (k = 60) and reports it in `stats.fusion`. That is deterministic and model-free.
+
+Callers often want relevance blended with a property of the document, such as how
+recent or how important it is. Instead of a scoring language (Elasticsearch's
+`function_score`), a sortable numeric field can join the fusion as one more ranked
+list, and each list takes a weight:
+
+```json
+"fuse": {
+  "lists": [
+    { "from": "match", "weight": 1.0 },
+    { "from": "near",  "weight": 1.0 },
+    { "rank_by": "updated", "order": "desc", "weight": 0.5 }
+  ]
+}
+```
+
+The weighted score is `Σ weight / (60 + rank)`. The caller picks the weights; the
+engine only fuses. Each hit also carries its score breakdown: the BM25 score, the
+vector distance and its rank in every list. A caller can then rerank or explain a
+result itself instead of trusting one fused number.
 
 ### 9. Native inference: embedding, expansion, reranking
 
@@ -244,6 +288,15 @@ service.
   space. Embedding runs in the background, not inside the write, and `index.info`
   reports how far behind it is. Until a document is embedded it is still found by
   filters and `match`, just not by `near`.
+- **Read-your-writes on request.** A query can pass `"wait_for": <version>` (or
+  `"fresh": true` for the latest commit) and waits, up to a timeout, until the
+  embeddings for that version are in, as Elasticsearch's `refresh=wait_for` does.
+  A caller that writes a document and searches for it on the next request gets it
+  back. Without the option, queries never wait.
+- **Embeddings are reused, not recomputed.** Embeddings are cached by model and
+  content hash. Forking a branch or promoting changes back re-embeds only
+  documents whose text changed, so a program that forks a branch per session
+  doesn't pay to re-embed the corpus each time.
 - **Model identity is part of the index.** The index records the embedding model;
   querying with a different one fails with
   `failed_precondition.engine.embedding_model_mismatch` (hard rule 24), and changing
@@ -275,6 +328,56 @@ fuses the lists, and the layer that calls the model decides what to embed and ho
 rerank (hard rules 23 and 25). Every model stage is opt-in per index or per query, so
 a search without them is fully deterministic.
 
+### 10. What agent harnesses build on top
+
+Agent memory is a strong use case for this plan: a harness stores what an agent
+learns and recalls the relevant part on every prompt. Strata's job is to expose
+primitives at the right level so each harness can build its own memory on them.
+Strata does not become a memory module.
+
+**The test for a feature.** It belongs in Strata only if a search app with no
+connection to agents would want it too: news search, docs search, a product
+catalog. Every addition in this revision passes that test:
+
+| Primitive | What a memory harness does with it | Who else wants it | Where |
+|---|---|---|---|
+| Weighted fusion with a numeric field as a ranked list | Blends relevance with recency or importance | News search (recency boost) | §8, S7 |
+| Score breakdown per hit | Reranks or explains recall itself | Anyone debugging relevance | §8, S7 |
+| `max_distance` on `near` | Returns nothing when nothing is relevant; checks for a near-duplicate before writing | Any semantic search with a quality floor | §7, S6 |
+| `exists` / `missing`; tag arrays indexed per element | "Not superseded"; "everything that links to this note" | Standard filter operations (Redis `ismissing`) | §1, S1 |
+| `return` field projection | Lists names and descriptions without pulling bodies | Standard projection | §4, S2 |
+| `wait_for` / `fresh` | A memory written this turn is found next turn | Elasticsearch `refresh=wait_for` | §9, S6 |
+| Embedding reuse by model and content hash | A branch per session doesn't re-embed the corpus | Anyone who forks and promotes | §9, S6 |
+| Small-corpus latency gate | Recall on every prompt stays fast | Autocomplete, interactive search | §7, S6–S7 |
+| Event payload indexes | Searching session history | Audit and log search | D4, 1.4 |
+
+Branches, `as_of` and the event log are already there. A harness can fork a branch
+per session and promote or discard it at the end, ask what the agent believed on a
+past date, and keep an append-only record of what it remembered.
+
+**What stays with the harness.** These are policy, not storage, and Strata does not
+build them:
+
+- the memory schema (types, fields, how one memory links to another);
+- deciding what to remember and when to recall;
+- decay and importance formulas (Strata applies the weights it's given);
+- consolidation and summarisation;
+- whether duplicates are merged or both kept;
+- forgetting and expiry policy;
+- how text is split into chunks;
+- how recalled memories are formatted into a prompt;
+- any `memory.*` command family.
+
+**Related, outside this plan.** Two gaps a harness hits that aren't search: reading
+the changes since a version, so background jobs start when new rows arrive (#3733),
+and a TypeScript client for durable databases, since most harnesses, including
+Claude Code mods, are TypeScript (#3734).
+
+**The reference consumer.** A Strata memory mod for Claude Code, kept in its own
+repository, exercises these primitives on a real, long-running memory store. Its
+real memories and the queries labelled from real sessions become the evaluation set
+for S8.
+
 ## Slices
 
 Each slice is one PR or a short series, with implementation and tests together, under
@@ -289,10 +392,12 @@ goes through the IDL and reaches the CLI, the Python SDK and MCP in the same sli
   Prepares #2703, py#77.
 - **S1. Index layer for tag and numeric fields.** Declarations in the system space,
   same-commit maintenance for JSON prefixes, bounded backfill with `index.info`
-  progress, promotion re-derivation, space-delete sweep. Tests across forks,
-  `as_of`, deletes and promotion. Closes #3728.
+  progress, promotion re-derivation, space-delete sweep, `exists` / `missing` on
+  every field type, tag arrays indexed per element. Tests across forks, `as_of`,
+  deletes and promotion. Closes #3728.
 - **S2. `search` with filters, sort and cursors.** Typed filters, sort on sortable
-  numeric fields, stable cursors, `as_of`, source validation. A work-bound test:
+  numeric fields, stable cursors, `as_of`, `return` projection, source
+  validation. A work-bound test:
   rows examined grow with the page, not the index. Closes #2703, #3482, py#60.
 - **S3. Key matching.** `kv list --match` glob with honest cost stats; a prefix
   autocomplete surface; a trigram key index for substring search. Closes #3017,
@@ -307,16 +412,23 @@ goes through the IDL and reaches the CLI, the Python SDK and MCP in the same sli
 - **S6. Vectors and auto-embedding in `search`.** `near` clauses; metadata fields as
   tag and numeric with selective pre-filtering; auto-embedded vector fields through
   native inference, embedded in the background with freshness in `index.info`;
-  model identity checked per index. Closes #1890, #3121, #2705.
-- **S7. Hybrid ranking with RRF.** Fuse `match` and `near`; explain the fusion in
-  stats.
+  `wait_for` / `fresh` for read-your-writes; embeddings cached by model and
+  content hash so forks and promotion re-embed only changed text; `max_distance`
+  on `near`; model identity checked per index; the small-corpus latency gate.
+  Closes #1890, #3121, #2705.
+- **S7. Hybrid ranking with RRF.** Fuse `match` and `near`; weighted fusion with
+  sortable numeric fields as ranked lists; a score breakdown on each hit; explain
+  the fusion in stats.
+- **S7b. Event payload indexes.** Events as an index source on the same layer, with
+  the event timestamp as a numeric field (D4).
 
 ### 1.5 — query-time model stages
 
 - **S8. Query expansion and reranking.** The `expand` and `rerank` options on
   `search`, running on local models through native inference, with per-stage
   timings in stats. Evaluate with a small labelled query set before turning either
-  on by default anywhere.
+  on by default anywhere. The first set comes from the reference memory consumer
+  (section 10): its real stored memories plus queries labelled from real sessions.
 
 ## Decisions (open)
 
@@ -330,9 +442,10 @@ goes through the IDL and reaches the CLI, the Python SDK and MCP in the same sli
 - **D3. Retire `json.index.*`.** Recommend a clean break to `index.*` in S0. The old
   commands never did anything a user could observe, and they are already marked
   transitional.
-- **D4. What an index can cover.** Recommend JSON prefixes in 1.3, vector
-  collections in 1.4, and key names through the key index. Event payloads and graph
-  properties later, on the same layer.
+- **D4. What an index can cover.** Recommend JSON prefixes in 1.3; vector
+  collections and event payloads in 1.4 (S7b), because searching an append-only
+  history is what agent harnesses and audit tools ask for; key names through the
+  key index. Graph properties later, on the same layer.
 - **D5. Which layer calls the model.** Auto-embedding lands in 1.4, so this is needed
   by S6. Today the executor reaches inference behind a feature flag, and the
   intelligence layer designed for this (roadmap M8) was deferred. Recommend reviving
@@ -346,7 +459,10 @@ goes through the IDL and reaches the CLI, the Python SDK and MCP in the same sli
 
 ## Out of scope
 
-- A query string language of any kind, or scripting.
+- A query string language of any kind, or scripting, including scoring formulas.
+  Weighted fusion is the only way a document property affects rank.
+- Memory semantics: schemas, recall policy, decay, consolidation, forgetting, or a
+  `memory.*` command family. Harnesses build these on the primitives (section 10).
 - Model calls inside the engine, or on any search that does not ask for them.
 - Aggregations and facets beyond what a sort and a filter give (#2296, #2297). Tag
   counts may follow once the index layer exists.
