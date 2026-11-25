@@ -473,7 +473,11 @@ jobs:
   # run's own job list from the API so a lane missing from `needs` below is
   # still reported. `always()` + an explicit failure check, never a plain
   # `if: failure()`: a skipped lane would skip the reporter too, and a
-  # reporter that can be skipped is the original gap again.
+  # reporter that can be skipped is the original gap again. It also runs
+  # when a lane is `cancelled`, because that is how GitHub concludes a lane
+  # that hit its `timeout-minutes` (#3740); the script reads the job's
+  # check-run annotations (hence `checks: read`) to tell a timeout from a
+  # manual cancel.
   nightly-red-reporter:
     needs:
       - memory-safety-miri
@@ -485,12 +489,13 @@ jobs:
       - release-mode-tests
       - differential
       - catalog-reachability
-    if: always() && contains(needs.*.result, 'failure')
+    if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       actions: read
+      checks: read
       issues: write
     steps:
       - uses: actions/checkout@v4

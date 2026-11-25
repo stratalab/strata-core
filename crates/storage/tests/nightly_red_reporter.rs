@@ -9,7 +9,9 @@
 //!   reporter's `needs` list must equal every other job id — a hand-kept lane
 //!   list is exactly the drift #3317 documents), and pin the `always()` shape
 //!   (a plain `if: failure()` is skipped whenever a lane is skipped, and a
-//!   reporter that can be skipped is the original gap again);
+//!   reporter that can be skipped is the original gap again) — including a
+//!   `cancelled` lane, which is how GitHub concludes a lane that hit its
+//!   `timeout-minutes` (#3740: Miri timed out 60 nights, three reported);
 //! - the behavior tests run `scripts/nightly-red-reporter.sh` against a fake
 //!   `gh` on PATH — they judge the decision itself, the same falsifiable-gate
 //!   shape as `mutation_gate_verdict.rs` (#3225).
@@ -87,24 +89,35 @@ fn the_reporter_needs_every_other_lane() {
 }
 
 #[test]
-fn the_reporter_runs_on_failure_even_when_lanes_were_skipped() {
+fn the_reporter_runs_on_failed_or_cancelled_lanes_even_when_others_were_skipped() {
     let block = reporter_block();
     assert!(
-        block.contains("if: always() && contains(needs.*.result, 'failure')"),
-        "the reporter's condition must be `always()` with an explicit failure \
-         check — a plain `if: failure()` is skipped when any lane is skipped"
+        block.contains(
+            "if: always() && (contains(needs.*.result, 'failure') \
+             || contains(needs.*.result, 'cancelled'))"
+        ),
+        "the reporter's condition must be `always()` with explicit failure and \
+         cancelled checks — a plain `if: failure()` is skipped when any lane is \
+         skipped, and a lane that hits its `timeout-minutes` concludes \
+         `cancelled`, so a failure-only check never runs the reporter for it"
     );
 }
 
 #[test]
 fn the_reporter_has_the_permissions_its_calls_need() {
     let block = reporter_block();
-    for permission in ["contents: read", "actions: read", "issues: write"] {
+    for permission in [
+        "contents: read",
+        "actions: read",
+        "checks: read",
+        "issues: write",
+    ] {
         assert!(
             block.contains(permission),
             "the reporter job must declare `{permission}`: job-level \
              permissions replace the defaults wholesale, so omitting one \
-             breaks checkout, the jobs query, or the issue write"
+             breaks checkout, the jobs query, the timeout annotation read, \
+             or the issue write"
         );
     }
 }
@@ -126,7 +139,9 @@ struct FakeGh {
 
 impl FakeGh {
     /// `jobs_json` is the raw jobs-API payload; `issues_json` the raw open
-    /// `nightly-red` issue list. The shim logs every invocation to calls.log.
+    /// `nightly-red` issue list. The shim logs every invocation to calls.log;
+    /// a job's check-run annotations come from [`FakeGh::annotate`], and a
+    /// job without any reads as an empty list.
     fn new(name: &str, jobs_json: &str, issues_json: &str) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "nightly-red-reporter-{name}-{}",
@@ -152,6 +167,23 @@ case "$1 $2" in
       prev="$arg"
     done
     jq -r "$expr" "$here/jobs.json"
+    ;;
+  "api "*"/annotations"*)
+    # repos/<owner>/<repo>/check-runs/<job id>/annotations, filtered by the
+    # caller's --jq like the jobs call above.
+    id="${2#*/check-runs/}"
+    id="${id%%/*}"
+    expr=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--jq" ]; then expr="$arg"; fi
+      prev="$arg"
+    done
+    if [ -f "$here/annotations-$id.json" ]; then
+      jq -r "$expr" "$here/annotations-$id.json"
+    else
+      echo '[]' | jq -r "$expr"
+    fi
     ;;
   "api "*)
     echo "cafe1234"
@@ -179,6 +211,19 @@ esac
         Self { dir }
     }
 
+    /// Gives job `id` check-run annotations with these messages.
+    fn annotate(&self, id: usize, messages: &[&str]) {
+        let entries: Vec<String> = messages
+            .iter()
+            .map(|message| format!(r#"{{"annotation_level":"failure","message":"{message}"}}"#))
+            .collect();
+        std::fs::write(
+            self.dir.join(format!("annotations-{id}.json")),
+            format!("[{}]", entries.join(",")),
+        )
+        .expect("annotations json");
+    }
+
     fn run_reporter(&self) -> std::process::Output {
         let path = format!(
             "{}:{}",
@@ -198,13 +243,24 @@ esac
     }
 }
 
+/// Each job's id is its 1-based position in `entries`.
 fn jobs_json(entries: &[(&str, &str)]) -> String {
     let jobs: Vec<String> = entries
         .iter()
-        .map(|(name, conclusion)| format!(r#"{{"name":"{name}","conclusion":"{conclusion}"}}"#))
+        .enumerate()
+        .map(|(index, (name, conclusion))| {
+            let id = index + 1;
+            format!(r#"{{"id":{id},"name":"{name}","conclusion":"{conclusion}"}}"#)
+        })
         .collect();
     format!(r#"{{"jobs":[{}]}}"#, jobs.join(","))
 }
+
+/// What GitHub annotates on a job that ran into its `timeout-minutes`
+/// (verbatim from the 2026-11-25 Miri lane).
+const TIMEOUT_ANNOTATION: &str = "The job has exceeded the maximum execution time of 2h0m0s";
+/// What a cancelled job is annotated with, timeout or not.
+const CANCEL_ANNOTATION: &str = "The operation was canceled.";
 
 #[test]
 fn a_run_with_no_failures_reports_nothing() {
@@ -241,7 +297,8 @@ fn a_new_red_lane_files_a_labelled_issue_named_after_it() {
     assert!(
         calls.contains("issue create")
             && calls.contains("nightly-red: storage-soak-lanes")
-            && calls.contains("bug,nightly-red"),
+            && calls.contains("bug,nightly-red")
+            && calls.contains("`storage-soak-lanes` failed."),
         "a new red lane files a labelled issue named after it, called: {calls}"
     );
     assert!(
@@ -297,7 +354,7 @@ fn each_red_lane_reports_separately_and_matching_is_exact() {
 }
 
 #[test]
-fn cancelled_and_skipped_lanes_are_not_findings() {
+fn a_manually_cancelled_or_skipped_lane_is_not_a_finding() {
     let fake = FakeGh::new(
         "cancelled",
         &jobs_json(&[
@@ -306,11 +363,59 @@ fn cancelled_and_skipped_lanes_are_not_findings() {
         ]),
         "[]",
     );
+    fake.annotate(1, &[CANCEL_ANNOTATION]);
     let output = fake.run_reporter();
     assert!(output.status.success(), "reporter must exit 0: {output:?}");
     let calls = fake.calls();
     assert!(
+        calls.contains("check-runs/1/annotations"),
+        "a cancelled lane is judged by its annotations, called: {calls}"
+    );
+    assert!(
         !calls.contains("issue "),
-        "cancelled/skipped lanes are not findings, called: {calls}"
+        "a cancel without a timeout, or a skip, is not a finding, called: {calls}"
+    );
+}
+
+#[test]
+fn a_lane_cancelled_by_its_timeout_files_an_issue_saying_so() {
+    let fake = FakeGh::new(
+        "timed-out",
+        &jobs_json(&[
+            ("differential", "success"),
+            ("memory-safety-miri", "cancelled"),
+        ]),
+        "[]",
+    );
+    fake.annotate(2, &[TIMEOUT_ANNOTATION, CANCEL_ANNOTATION]);
+    let output = fake.run_reporter();
+    assert!(output.status.success(), "reporter must exit 0: {output:?}");
+    let calls = fake.calls();
+    assert!(
+        calls.contains("issue create")
+            && calls.contains("nightly-red: memory-safety-miri")
+            && calls.contains("`memory-safety-miri` timed out."),
+        "a lane that hit its timeout-minutes is red and says so, called: {calls}"
+    );
+}
+
+#[test]
+fn a_timed_out_streak_extends_the_open_issue() {
+    let fake = FakeGh::new(
+        "timed-out-streak",
+        &jobs_json(&[("memory-safety-miri", "cancelled")]),
+        r#"[{"number":91,"title":"nightly-red: memory-safety-miri"}]"#,
+    );
+    fake.annotate(1, &[TIMEOUT_ANNOTATION]);
+    let output = fake.run_reporter();
+    assert!(output.status.success(), "reporter must exit 0: {output:?}");
+    let calls = fake.calls();
+    assert!(
+        calls.contains("issue comment 91") && calls.contains("Still red (timed out)"),
+        "a timeout streak comments the open issue, called: {calls}"
+    );
+    assert!(
+        !calls.contains("issue create"),
+        "a timeout streak must not file a second issue, called: {calls}"
     );
 }
