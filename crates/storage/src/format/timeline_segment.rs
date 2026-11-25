@@ -406,7 +406,16 @@ mod tests {
 
     #[test]
     fn segment_round_trips_one_entry_and_a_full_chunk() {
-        for count in [1, 2, TIMELINE_CHUNK_ENTRIES] {
+        // A full chunk is 65,536 entries; interpreting its encode and decode
+        // alone outruns the Miri runner (#3737). Miri checks the small sizes,
+        // which reach every line of both codecs; the native lanes check the
+        // full chunk.
+        let counts: &[usize] = if cfg!(miri) {
+            &[1, 2]
+        } else {
+            &[1, 2, TIMELINE_CHUNK_ENTRIES]
+        };
+        for &count in counts {
             let original = entries(5, count);
             let bytes = encode_timeline_segment(&original).expect("encode");
             assert_eq!(
@@ -578,6 +587,12 @@ mod tests {
     /// The encode-side reference ceiling, on both sides: exactly the ceiling
     /// encodes, one more is refused before any payload is built.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds 2^20 segment refs twice and encodes a 40 MiB payload; safe-Rust \
+                  bounds arithmetic already covered natively, and it outruns the Miri \
+                  runner (#3737)"
+    )]
     fn segments_section_encode_enforces_the_reference_ceiling() {
         let chunk = u64::from(full());
         let valid_refs = |count: usize| -> Vec<TimelineSegmentRef> {

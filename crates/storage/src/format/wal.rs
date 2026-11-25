@@ -1392,6 +1392,11 @@ mod tests {
     /// one byte more is refused by the encoder, and its computed frame is one
     /// over that limit. So the limit admission checks is the encoder's.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds and encodes a 64 MiB commit payload twice; safe-Rust bounds \
+                  arithmetic already covered natively, and it outruns the Miri runner (#3737)"
+    )]
     fn wal_record_frame_limit_matches_the_encoder_at_the_payload_cap() {
         // Four 15 MiB rows, then a last row whose value absorbs the remainder
         // so the payload lands exactly on the cap. Every row stays under the
