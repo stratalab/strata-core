@@ -33,6 +33,14 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - uses: actions/setup-python@v5
+        # `-p strata-gpu-cache --all-features` below turns on its `python`
+        # feature, and PyO3 0.23's build script refuses CPython newer than
+        # 3.13. ubuntu-latest is Ubuntu 26.04 (system Python 3.14) since
+        # 2026-10, which turned this job red on every PR (#3744). Pin the
+        # interpreter PyO3 finds until PyO3 is bumped past 0.23.
+        with:
+          python-version: "3.13"
       - name: Clippy with features enabled
         # The step above lints DEFAULT features only, so everything behind a
         # feature flag went unlinted — `testkit`, `fault-injection`,

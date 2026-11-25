@@ -13,6 +13,8 @@ exclude-dev = true
 [advisories]
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained - compile-time proc-macro via arrow/parquet; drops with the next arrow upgrade" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (no vulnerability) - arrow 54's date/time kernels; revisit with the next arrow upgrade" },
+    { id = "RUSTSEC-2026-0435", reason = "thrift unbounded read_bytes allocation (DoS, not memory unsafety) - parquet 54 decodes footers with its own bounded protocol, but page headers go through thrift's compact protocol, so a hostile parquet file can force a large allocation; accepted for the user-chosen import file until the arrow/parquet upgrade" },
 ]
 
 [licenses]
