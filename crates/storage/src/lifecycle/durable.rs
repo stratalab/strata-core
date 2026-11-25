@@ -45,7 +45,9 @@ pub(crate) use close::{
     close_checkpoint_decision, close_reclaim_should_continue, LifecycleCloseReclaimBudget,
 };
 #[cfg(test)]
-pub(crate) use close::{close_checkpoint_retries_after, close_flushes_branch};
+pub(crate) use close::{
+    close_checkpoint_retries_after, close_flushes_branch, close_publishes_branch_manifest,
+};
 pub(crate) use footprint::{
     classify_wal_segment, LifecycleFootprintAuditFacts, LifecycleFootprintLiveFacts,
     LifecycleFootprintWatermark, WalSegmentClass,

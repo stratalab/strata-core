@@ -329,7 +329,9 @@ fn flush_with_failed_manifest(
 /// durably published is not a durable base. The close checkpoint must carry
 /// its rows in the snapshot rather than skip them as manifest-covered —
 /// otherwise the WAL is truncated behind rows no durable object lists, and
-/// the next open reports `MissingTableManifestBase` and loses them.
+/// the next open reports `MissingTableManifestBase` and loses them. The close
+/// first tries to publish the branch's manifest (#3741); here that publish
+/// fails too, which is the case where carrying the rows is the only cover.
 #[test]
 fn close_checkpoint_carries_a_flushed_table_whose_manifest_never_published() {
     let backend: &'static CheckpointTestBackend =
@@ -348,9 +350,16 @@ fn close_checkpoint_carries_a_flushed_table_whose_manifest_never_published() {
     commit(&mut runtime, extra, b"unpublished-extra-row");
     flush_with_failed_manifest(&mut runtime, backend, extra, "unpublished-extra");
     commit(&mut runtime, initial, b"unpublished-root-b");
+    let close_publish = backend.table_manifest_replace_calls() + 1;
+    backend.fail_table_manifest_replacement_on_call(close_publish);
 
     let close = runtime.close().expect("clean close");
     assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    assert_eq!(
+        backend.table_manifest_replace_calls(),
+        close_publish,
+        "the close tried, and failed, to publish the indebted manifest"
+    );
 
     let (reopened, _) = reopen_counting_replay(initial, backend);
     assert!(
@@ -361,6 +370,118 @@ fn close_checkpoint_carries_a_flushed_table_whose_manifest_never_published() {
     assert!(row_is_present(&reopened, extra, b"unpublished-extra-row"));
     assert!(row_is_present(&reopened, initial, b"unpublished-root-a"));
     assert!(row_is_present(&reopened, initial, b"unpublished-root-b"));
+}
+
+/// #3741: a flushed table whose manifest never landed — in production a
+/// background publish deferred on a busy per-branch slot, whose flush task the
+/// close then canceled — is manifest debt. The close publishes the branch's
+/// table manifest before its checkpoint, so the snapshot records the branch as
+/// a durable base and skips the table's rows instead of copying them (a copy a
+/// small artifact budget refuses, leaving the session's whole WAL behind).
+#[test]
+fn close_publishes_a_table_manifest_that_never_landed_before_its_checkpoint() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xd1);
+    let extra = branch_id(0xd2);
+    let mut runtime = open_runtime(initial, backend);
+    commit(&mut runtime, initial, b"debt-root-a");
+    runtime
+        .create_branch(
+            extra,
+            CommitBranchGeneration::new(1).expect("generation"),
+            None,
+        )
+        .expect("create the root");
+    commit(&mut runtime, extra, b"debt-extra-row");
+    flush_with_failed_manifest(&mut runtime, backend, extra, "debt-extra");
+    commit(&mut runtime, initial, b"debt-root-b");
+    let manifest_calls_before = backend.table_manifest_replace_calls();
+
+    let close = runtime.close().expect("clean close");
+
+    assert_eq!(close.status(), CloseOutcomeStatus::Complete);
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
+    assert_eq!(
+        backend.table_manifest_replace_calls(),
+        manifest_calls_before + 1,
+        "the close published the indebted branch's manifest once"
+    );
+    let mut shell = assemble_shell(initial, backend).expect("shell");
+    let request =
+        LifecycleRecoveryRequest::from_open_plan(shell.open_plan()).expect("recovery request");
+    let outcome = LifecycleRecoveryRuntime::new(&mut shell)
+        .recover(&request)
+        .expect("recovery outcome");
+    assert_eq!(
+        outcome.checkpoint().durable_base_branches(),
+        Some(&[extra][..]),
+        "the table is a durable base, not rows the snapshot copied"
+    );
+    assert_eq!(
+        outcome.wal().record_count(),
+        0,
+        "the next open replays nothing"
+    );
+    let reopened = shell.complete_recovery(&outcome).expect("open runtime");
+    assert!(
+        reopened.current_recovery_health_for_test().is_healthy(),
+        "{:?}",
+        reopened.current_recovery_health_for_test()
+    );
+    assert!(row_is_present(&reopened, extra, b"debt-extra-row"));
+    assert!(row_is_present(&reopened, initial, b"debt-root-a"));
+    assert!(row_is_present(&reopened, initial, b"debt-root-b"));
+}
+
+/// #3741 direction control: with every table already listed by a confirmed
+/// manifest there is no debt, and the close publishes no table manifest.
+#[test]
+fn close_publishes_no_table_manifest_when_every_table_is_confirmed() {
+    let backend: &'static CheckpointTestBackend =
+        crate::testkit::leak_static(CheckpointTestBackend::new());
+    let initial = branch_id(0xd3);
+    let extra = branch_id(0xd4);
+    let mut runtime = open_runtime(initial, backend);
+    runtime
+        .create_branch(
+            extra,
+            CommitBranchGeneration::new(1).expect("generation"),
+            None,
+        )
+        .expect("create the root");
+    commit(&mut runtime, extra, b"settled-extra-row");
+    runtime
+        .rotate_active_for_branch_for_maintenance(extra)
+        .expect("rotate extra");
+    runtime
+        .flush_frozen(
+            &FlushFrozenRequest::new(
+                extra,
+                None,
+                FlushTableIdentitySeed::new("settled-extra-seed").expect("seed"),
+                FlushTableObjectId::new("settled-extra-object").expect("object id"),
+            )
+            .expect("flush request"),
+        )
+        .expect("the flush publishes its manifest");
+    commit(&mut runtime, initial, b"settled-root-row");
+    let manifest_calls_before = backend.table_manifest_replace_calls();
+
+    let close = runtime.close().expect("clean close");
+
+    assert_eq!(
+        close.checkpoint(),
+        CloseCheckpointReport::Attempted(LifecycleCheckpointStatus::Completed)
+    );
+    assert_eq!(
+        backend.table_manifest_replace_calls(),
+        manifest_calls_before,
+        "no manifest debt, so the close publishes no table manifest"
+    );
 }
 
 /// #3665: the catalog's manifest-debt flag is catalog-global, so another
