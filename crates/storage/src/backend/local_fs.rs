@@ -171,9 +171,20 @@ pub(crate) struct LocalFsBackend {
     /// #3730 race seam: how many upcoming parent-chain walks first have the
     /// (empty) prunable ancestor they just verified removed before its child
     /// is created, exactly as a concurrent delete's emptied-directory pruning
-    /// would mid-walk.
+    /// would mid-walk, and what the race then does in its place.
     #[cfg(all(test, unix))]
-    ancestor_race: Arc<Mutex<u32>>,
+    ancestor_race: Arc<Mutex<(u32, LocalFsAncestorRace)>>,
+}
+
+/// #3730 race seam: what a fired mid-walk race does to the ancestor it prunes.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalFsAncestorRace {
+    /// Remove the empty ancestor — a concurrent emptied-directory prune.
+    Prune,
+    /// Prune, then plant a file where the ancestor was, so the walk's next
+    /// step fails for a reason other than absence (not-a-directory).
+    ReplaceWithFile,
 }
 
 /// #3692 race seam: what a fired race does to the creation's parent directory.
@@ -201,7 +212,7 @@ impl LocalFsBackend {
             #[cfg(all(test, unix))]
             parent_race: Arc::new(Mutex::new((0, LocalFsParentRace::Prune))),
             #[cfg(all(test, unix))]
-            ancestor_race: Arc::new(Mutex::new(0)),
+            ancestor_race: Arc::new(Mutex::new((0, LocalFsAncestorRace::Prune))),
         }
     }
 
@@ -526,32 +537,50 @@ impl LocalFsBackend {
     /// walks that create missing directories.
     #[cfg(all(test, unix))]
     fn arm_ancestor_race(&self, walks: u32) {
-        *self.ancestor_race.lock().expect("ancestor race seam lock") = walks;
+        self.arm_ancestor_race_with(walks, LocalFsAncestorRace::Prune);
+    }
+
+    /// #3730: arm the mid-walk race seam with a specific race.
+    #[cfg(all(test, unix))]
+    fn arm_ancestor_race_with(&self, walks: u32, race: LocalFsAncestorRace) {
+        *self.ancestor_race.lock().expect("ancestor race seam lock") = (walks, race);
     }
 
     /// #3730: the armed mid-walk race seam's remaining count.
     #[cfg(all(test, unix))]
     fn ancestor_race_remaining(&self) -> u32 {
-        *self.ancestor_race.lock().expect("ancestor race seam lock")
+        self.ancestor_race
+            .lock()
+            .expect("ancestor race seam lock")
+            .0
     }
 
     /// #3730: fire the mid-walk race seam — remove `dir`, a prunable ancestor
     /// the walk has just verified and whose child it is about to create, as a
-    /// concurrent delete that empties `dir` and prunes it can. A family root
-    /// or the database root is never pruned, so the seam skips them (without
-    /// spending a count). Written without a comparison on the count, like
-    /// [`Self::injected_parent_race`], so no mutant of it fires unarmed.
+    /// concurrent delete that empties `dir` and prunes it can (and, for
+    /// [`LocalFsAncestorRace::ReplaceWithFile`], plant a file in its place).
+    /// A family root or the database root is never pruned, so the seam skips
+    /// them (without spending a count). Written without a comparison on the
+    /// count, like [`Self::injected_parent_race`], so no mutant of it fires
+    /// unarmed.
     #[cfg(all(test, unix))]
     fn injected_ancestor_race(&self, dir: &Path) {
         if !dir.strip_prefix(&self.root).is_ok_and(dir_is_prunable) {
             return;
         }
         let mut armed = self.ancestor_race.lock().expect("ancestor race seam lock");
-        let Some(remaining) = armed.checked_sub(1) else {
+        let (walks, race) = *armed;
+        let Some(remaining) = walks.checked_sub(1) else {
             return;
         };
-        *armed = remaining;
+        armed.0 = remaining;
         fs::remove_dir(dir).expect("race seam prunes the empty ancestor");
+        match race {
+            LocalFsAncestorRace::Prune => {}
+            LocalFsAncestorRace::ReplaceWithFile => {
+                fs::write(dir, b"").expect("race seam plants a file");
+            }
+        }
     }
 
     /// #3692: one creation attempt — the race seam (tests only), then `create`.
@@ -3448,6 +3477,39 @@ mod tests {
         backend.write_object(&shallow, b"s").expect("shallow write");
         assert_eq!(backend.ancestor_race_remaining(), 1, "no prunable ancestor");
         backend.arm_ancestor_race(0);
+    }
+
+    /// #3730: the re-walk answers only `NotFound`. An ancestor replaced by a
+    /// file mid-walk fails the walk not-a-directory (`Unknown`), which is no
+    /// race: it is final and surfaces as itself, on both call sites of the
+    /// re-walk. Re-walking would instead report the file where a directory
+    /// belongs as `Corruption`.
+    #[cfg(unix)]
+    #[test]
+    fn a_mid_walk_failure_other_than_absence_is_final() {
+        use super::LocalFsAncestorRace;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LocalFsBackend::new(dir.path());
+
+        let written = ObjectName::new("tables/b1/l0001/table").expect("name");
+        backend.arm_ancestor_race_with(1, LocalFsAncestorRace::ReplaceWithFile);
+        assert_eq!(
+            backend
+                .write_object(&written, b"x")
+                .expect_err("blocked mid-walk")
+                .kind(),
+            BackendErrorKind::Unknown
+        );
+        assert_eq!(backend.ancestor_race_remaining(), 0, "the race fired");
+
+        let published = ObjectName::new("tables/b2/l0001/compaction-0").expect("name");
+        backend.arm_ancestor_race_with(1, LocalFsAncestorRace::ReplaceWithFile);
+        let error = backend
+            .publish_object(&published, b"x", PublishMode::Create)
+            .expect_err("blocked mid-walk");
+        assert_eq!(error.kind(), PublishFailureKind::FailedBeforeVisibility);
+        assert_eq!(error.source_error().kind(), BackendErrorKind::Unknown);
+        assert_eq!(backend.ancestor_race_remaining(), 0, "the race fired");
     }
 
     /// (b, backend half) The reconcile sweep removes every empty directory
