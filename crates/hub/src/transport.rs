@@ -2,10 +2,13 @@
 //! (slice `HB7b`).
 //!
 //! The client is async; clone orchestration is synchronous. Each call
-//! bridges through a dedicated multi-thread runtime owned by the
-//! transport, and object downloads go through the client's
-//! range-resumable `download_object` (retries + `Range:` resume per
-//! its retry policy — the §3.6 resumability invariant).
+//! bridges through a current-thread runtime owned by the transport: the
+//! calling thread drives I/O and timers, so a transport starts no worker
+//! pool and I/O readiness stays on the calling thread (a cross-thread
+//! handoff is what the thread sanitizer misreports, #3308). Object
+//! downloads go through the client's range-resumable `download_object`
+//! (retries + `Range:` resume per its retry policy — the §3.6
+//! resumability invariant).
 
 use stratahub_client::{
     download_object, Client, ClientConfig, DatasetFilter, ListPageReq, RetryPolicy,
@@ -36,11 +39,10 @@ impl ClientTransport {
     /// [`CloneError::Transport`] when the URL or HTTP stack refuses
     /// configuration.
     pub fn new(base_url: Url) -> Result<Self, CloneError> {
-        let mut config = ClientConfig::default();
-        config.request_timeout = request_timeout_from_env(config.request_timeout);
+        let config = client_config(std::env::var("STRATA_HUB_TIMEOUT_SECONDS").ok().as_deref());
         let client =
             Client::new(base_url.clone(), config).map_err(|error| transport_error(&error))?;
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| CloneError::Transport {
@@ -94,16 +96,25 @@ impl ClientTransport {
     }
 }
 
-/// Test-facing override for the per-request wall-clock timeout
-/// (`STRATA_HUB_TIMEOUT_SECONDS`): sanitizer CI legs run 5-15x slower than
-/// native, so the 30s default expires on legitimate mock-hub round trips
-/// (#2803). Unset or unparsable values keep the default; production callers
-/// never set this.
-fn request_timeout_from_env(default: std::time::Duration) -> std::time::Duration {
-    std::env::var("STRATA_HUB_TIMEOUT_SECONDS")
-        .ok()
+/// The client configuration, with the test-facing timeout override
+/// (`STRATA_HUB_TIMEOUT_SECONDS`) applied to both wall-clock budgets: the
+/// per-request timeout and the TCP connect timeout. Sanitizer CI legs run
+/// 5-15x slower than native (#2803), and the thread sanitizer can stall every
+/// thread for tens of seconds while it symbolizes a (suppressed) report,
+/// which outlasts the 10s connect default on a healthy loopback connect
+/// (#3308).
+/// Unset or unparsable values keep the defaults; production callers never
+/// set this.
+fn client_config(timeout_override: Option<&str>) -> ClientConfig {
+    let mut config = ClientConfig::default();
+    if let Some(timeout) = timeout_override
         .and_then(|value| value.parse::<u64>().ok())
-        .map_or(default, std::time::Duration::from_secs)
+        .map(std::time::Duration::from_secs)
+    {
+        config.request_timeout = timeout;
+        config.connect_timeout = timeout;
+    }
+    config
 }
 
 impl HubTransport for ClientTransport {
@@ -153,22 +164,24 @@ fn transport_error(error: &stratahub_client::ClientError) -> CloneError {
 
 #[cfg(test)]
 mod tests {
-    use super::request_timeout_from_env;
+    use super::client_config;
     use std::time::Duration;
+    use stratahub_client::ClientConfig;
 
-    /// One test for all three cases: the override env var is process-global,
-    /// so sequential assertions avoid a set/remove race between tests.
     #[test]
-    fn request_timeout_env_override_truth_table() {
-        let default = Duration::from_secs(30);
-        std::env::remove_var("STRATA_HUB_TIMEOUT_SECONDS");
-        assert_eq!(request_timeout_from_env(default), default);
+    fn timeout_override_sets_both_request_and_connect_budgets() {
+        let defaults = ClientConfig::default();
+        let budgets = |config: ClientConfig| (config.request_timeout, config.connect_timeout);
+        let default_budgets = (defaults.request_timeout, defaults.connect_timeout);
 
-        std::env::set_var("STRATA_HUB_TIMEOUT_SECONDS", "180");
-        assert_eq!(request_timeout_from_env(default), Duration::from_secs(180));
-
-        std::env::set_var("STRATA_HUB_TIMEOUT_SECONDS", "not-a-number");
-        assert_eq!(request_timeout_from_env(default), default);
-        std::env::remove_var("STRATA_HUB_TIMEOUT_SECONDS");
+        assert_eq!(budgets(client_config(None)), default_budgets);
+        assert_eq!(
+            budgets(client_config(Some("180"))),
+            (Duration::from_secs(180), Duration::from_secs(180))
+        );
+        assert_eq!(
+            budgets(client_config(Some("not-a-number"))),
+            default_budgets
+        );
     }
 }
