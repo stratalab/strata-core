@@ -2144,7 +2144,14 @@ never from `manifest().load_*` directly.
 - **Clean close**: the workers stop, then a bounded reclaim drive runs mark,
   sweep and purge (`ReclaimBudget`, default 500 ms; reclaim-kind tasks are
   drain-before-close via `close_policy_for_kind`). Next, any branch whose
-  unflushed delta reaches 64 KiB is flushed into tables (#3625). Then one
+  unflushed delta reaches 64 KiB is flushed into tables (#3625). Then any
+  branch holding a catalogued table that its confirmed manifest does not list
+  — a background flush whose publish deferred on a busy slot, then was
+  canceled at close — has its table manifest published under the per-branch
+  slot, so the checkpoint skips that table's rows instead of copying them
+  (#3741). A slot still held by a publish the 250 ms worker shutdown detached
+  is skipped; that table's rows are copied as volatile (DUR-010), and a copy
+  the artifact budget refuses leaves the WAL for the next open. Then one
   checkpoint covers every branch, truncates the WAL behind it and prunes the
   snapshot it superseded. A checkpoint that still defers on the delta cap
   (DUR-017) flushes every branch holding a row and retries exactly once with
@@ -2162,7 +2169,7 @@ every reclaim pass reports what it freed (#3622).
 **Audit**: Truth tables — `close_policy_for_kind_truth_table`,
 `close_reclaim_should_continue_truth_table`, `close_checkpoint_decision_truth_table`,
 `close_flushes_branch_truth_table`, `close_checkpoint_retries_after_truth_table`,
-`quiescence_should_arm_truth_table`,
+`close_publishes_branch_manifest_truth_table`, `quiescence_should_arm_truth_table`,
 `should_service_low_tier_truth_table`, `reopen_owes_quarantine_purge_truth_table`,
 `family_frees_disk_truth_table`, `reclaim_waits_on_reader_truth_table`,
 `round_asks_idle_wake_truth_table`, `timeline_segment_is_dead_truth_table`,
@@ -2174,8 +2181,10 @@ every reclaim pass reports what it freed (#3622).
 `api_close_reclaim_truncates_the_wal_behind_the_close_checkpoint`,
 `api_close_flushes_a_large_delta_into_tables_before_its_checkpoint`,
 `api_close_keeps_a_small_delta_in_the_snapshot`,
-`close_checkpoint_over_the_delta_cap_flushes_and_retries_once` and
-`close_checkpoint_over_the_cap_after_the_retry_leaves_the_wal_for_the_next_session`
+`close_checkpoint_over_the_delta_cap_flushes_and_retries_once`,
+`close_checkpoint_over_the_cap_after_the_retry_leaves_the_wal_for_the_next_session`,
+`close_publishes_a_table_manifest_that_never_landed_before_its_checkpoint` and
+`close_publishes_no_table_manifest_when_every_table_is_confirmed`
 (`crates/storage/src/lifecycle/tests/close_checkpoint.rs`), `api_read_only_reopen_reclaims_deterministically`,
 `api_open_reclaims_nothing_inline_without_a_worker`,
 `api_reopen_reconciles_snapshots_to_the_attested_id`,

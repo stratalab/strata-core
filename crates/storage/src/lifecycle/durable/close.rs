@@ -26,6 +26,7 @@ use crate::lifecycle::retention::{
     with_unconfirmed_manifest_error, LifecycleRetentionRequest, LifecycleRetentionScope,
     LifecycleRetentionStatus, LifecycleSnapshotPruningRequest,
 };
+use crate::lifecycle::table_manifest::publish_table_manifest_for_branch_with_budget;
 use crate::lifecycle::{
     purge_proof_from_maintenance_task, purge_quarantine as purge_lifecycle_quarantine,
     repair_branch_from_maintenance_task,
@@ -69,6 +70,20 @@ pub(crate) const CLOSE_FLUSH_MIN_DELTA_BYTES: u64 = 64 * 1024;
 /// `unflushed_bytes` before the close checkpoint.
 pub(crate) const fn close_flushes_branch(unflushed_bytes: u64, threshold: u64) -> bool {
     unflushed_bytes >= threshold
+}
+
+/// #3741: whether a clean close publishes a branch's table manifest before its
+/// checkpoint, given each owned table's `(catalogued, confirmed)` facts. A
+/// table the catalog records that no confirmed manifest of the branch lists —
+/// a flush whose publish was deferred on a busy slot, failed, or was canceled
+/// at close — is debt a publish settles. A table the catalog does not record
+/// (a snapshot-install L0) is not, and on its own publishes nothing.
+pub(crate) fn close_publishes_branch_manifest(
+    tables: impl IntoIterator<Item = (bool, bool)>,
+) -> bool {
+    tables
+        .into_iter()
+        .any(|(catalogued, confirmed)| catalogued && !confirmed)
 }
 
 /// #3614: the unflushed delta at or above which the close's retry after a
@@ -461,6 +476,7 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         // and that retry must not rotate the log again.
         drop(self.guard_set.try_begin_quiesce().map_err(commit_error)?);
         self.flush_deltas_before_close_checkpoint(CLOSE_FLUSH_MIN_DELTA_BYTES);
+        self.publish_manifest_debt_before_close_checkpoint();
         // Reclaim rotation first (#3494): the snapshot below covers every
         // record in the active segment, so sealing it now lets the
         // checkpoint's own truncation pass release it, leaving an empty
@@ -575,6 +591,52 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
                     self.record_recovery_health(Some(&debt));
                 }
             }
+        }
+    }
+
+    /// #3741: publish the table manifest of every branch that holds a table no
+    /// confirmed manifest lists, so the close checkpoint treats it as a durable
+    /// base instead of copying its rows into the snapshot. Under fsync load a
+    /// background flush installs its table, finds the branch's publish slot
+    /// busy and defers the publish; the close cancels that flush task, and the
+    /// table's rows (one memtable) then outgrow a small artifact budget, which
+    /// refuses the checkpoint and leaves the session's whole WAL behind.
+    fn publish_manifest_debt_before_close_checkpoint(&mut self) {
+        for branch_id in self.branch_catalog.registry().active_branch_ids() {
+            let Ok(branch) = self.branch_catalog.branch_state(branch_id) else {
+                continue;
+            };
+            let catalog = &self.table_catalog;
+            let indebted = close_publishes_branch_manifest(
+                branch.owned_levels().iter().flatten().map(|table| {
+                    let identity = table.descriptor().identity();
+                    (
+                        catalog.object_for_identity(identity).is_some(),
+                        catalog.is_durable_base(identity),
+                    )
+                }),
+            );
+            if !indebted {
+                continue;
+            }
+            // A background persist the shutdown did not wait out still holds
+            // the slot; publishing beside it could race its manifest.
+            let Some(_publish_guard) = self.try_acquire_branch_publish_guard(branch_id) else {
+                continue;
+            };
+            let Ok(branch) = self.branch_catalog.branch_state(branch_id) else {
+                continue;
+            };
+            // Best-effort: a refused or failed publish leaves the table
+            // volatile, the checkpoint below copies its rows (#3665), and the
+            // next open reclaims the unlisted object. Nothing is lost, so the
+            // close neither fails nor records a second debt.
+            let _ = publish_table_manifest_for_branch_with_budget(
+                branch,
+                self.services.table_manifest(),
+                &mut self.table_catalog,
+                Some(&self.budget),
+            );
         }
     }
 

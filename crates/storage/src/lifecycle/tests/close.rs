@@ -528,6 +528,32 @@ fn close_flushes_branch_truth_table() {
     assert!(close_flushes_branch(threshold + 1, threshold));
 }
 
+/// #3741: a clean close publishes a branch's table manifest exactly when some
+/// table the catalog records is not listed by a confirmed manifest; a table
+/// the catalog does not record is never debt on its own.
+#[test]
+fn close_publishes_branch_manifest_truth_table() {
+    use crate::lifecycle::durable::close_publishes_branch_manifest;
+    // (catalogued, confirmed) per owned table.
+    let cases: [(&[(bool, bool)], bool); 8] = [
+        (&[], false),
+        (&[(true, true)], false),
+        (&[(true, false)], true),
+        (&[(false, false)], false),
+        (&[(false, true)], false),
+        (&[(true, true), (true, false)], true),
+        (&[(true, false), (true, true)], true),
+        (&[(false, false), (true, true)], false),
+    ];
+    for (tables, expected) in cases {
+        assert_eq!(
+            close_publishes_branch_manifest(tables.iter().copied()),
+            expected,
+            "{tables:?}"
+        );
+    }
+}
+
 /// #3614: only a delta-cap deferral makes the close flush every branch and
 /// retry its checkpoint.
 #[test]
