@@ -277,6 +277,10 @@ impl<'a> JsonService<'a> {
     }
 
     /// Reads multiple latest visible values with metadata.
+    ///
+    /// One snapshot for the whole batch: every entry is read from the same
+    /// version, so a commit that lands while the batch runs is visible to
+    /// every entry or to none.
     pub fn batch_get(
         &mut self,
         entries: &[JsonGetEntry],
@@ -315,22 +319,27 @@ impl<'a> JsonService<'a> {
         self.batch_get_with_selector(entries, ReadSelector::AtTimestamp(timestamp))
     }
 
-    /// The one batch read: one branch record, one selector, one point read
-    /// per entry in request order.
+    /// The one batch read: one branch record, one selector, and one storage
+    /// snapshot for every entry, answered in request order.
     fn batch_get_with_selector(
         &mut self,
         entries: &[JsonGetEntry],
         selector: ReadSelector,
     ) -> Result<Vec<Option<JsonVersionedValue>>, EngineError> {
         let record = self.branch_record()?;
+        let addresses = entries
+            .iter()
+            .map(|entry| self.row_address(&record, entry.id()))
+            .collect();
+        // Each answer is decoded as it is pulled, so the batch holds one raw
+        // row at a time however many entries it names.
+        let rows = self.persistence.read_rows(addresses, selector)?;
         let mut results = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let address = self.row_address(&record, entry.id());
-            let result = match self.persistence.read_row(address, selector)? {
+        for (entry, row) in entries.iter().zip(rows) {
+            results.push(match row? {
                 Some(row) => Self::versioned_value_from_row(entry.id(), entry.path(), &row)?,
                 None => None,
-            };
-            results.push(result);
+            });
         }
         Ok(results)
     }

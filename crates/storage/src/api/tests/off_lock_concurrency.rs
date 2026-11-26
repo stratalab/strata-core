@@ -126,10 +126,45 @@ fn read_checked(runtime: &StorageRuntime<'_>, branch: BranchId, num_keys: usize)
     batch_no
 }
 
+/// Point-batch read of the whole key set through `read_points` (#3582). Every point must come
+/// from one batch, as a scan's rows do; returns that batch number. Callers seed batch 0, so every
+/// key is always present. Panics on a torn batch.
+fn read_points_checked(runtime: &StorageRuntime<'_>, branch: BranchId, num_keys: usize) -> u64 {
+    let requests = (0..num_keys)
+        .map(|i| {
+            PointReadRequest::new(
+                branch,
+                background_space(),
+                key(format!("stress-{i:04}").as_bytes()),
+                ReadBound::Latest,
+            )
+        })
+        .collect::<Vec<_>>();
+    let outcomes = runtime
+        .read_points(requests)
+        .and_then(Iterator::collect::<StorageApiResult<Vec<_>>>)
+        .expect("off-lock latest point batch");
+    assert_eq!(outcomes.len(), num_keys, "one answer per point");
+    let mut batches = outcomes.iter().map(|outcome| {
+        let row = outcome.row().expect("seeded batch 0 covers every key");
+        let value = row.value().expect("stress rows are puts").as_bytes();
+        u64::from_be_bytes(value[0..8].try_into().expect("8 bytes"))
+    });
+    let first = batches.next().expect("a nonempty key set");
+    for observed in batches {
+        assert_eq!(
+            observed, first,
+            "torn point batch: mixed batch numbers in one read_points"
+        );
+    }
+    first
+}
+
 fn reader_loop(runtime: &StorageRuntime<'_>, branch: BranchId, done: &AtomicBool, start: &Barrier) {
     start.wait();
     let mut max_batch = 0u64;
     let mut point_max = 0u64;
+    let mut point_batch_max = 0u64;
     let mut reads = 0u64;
     while !done.load(Ordering::Acquire) {
         if let Some(observed) = read_checked(runtime, branch, STRESS_KEYS) {
@@ -149,6 +184,14 @@ fn reader_loop(runtime: &StorageRuntime<'_>, branch: BranchId, done: &AtomicBool
             );
             point_max = point;
         }
+        // #3582: a point batch reads one version — every key from one commit, and never older
+        // than a batch this reader already saw.
+        let point_batch = read_points_checked(runtime, branch, STRESS_KEYS);
+        assert!(
+            point_batch >= point_batch_max,
+            "visible version regressed for a reader (point batch): {point_batch} < {point_batch_max}"
+        );
+        point_batch_max = point_batch;
         // Cooperate so the (durable) writer and the maintenance workers make progress on a busy box
         // instead of being starved by a hot read loop.
         std::thread::yield_now();

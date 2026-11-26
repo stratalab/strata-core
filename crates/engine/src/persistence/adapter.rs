@@ -556,10 +556,11 @@ impl StoragePersistence {
         ))
     }
 
-    /// Returns an injected fault for `op` as a mapped engine error, if a test
-    /// armed one.
+    /// Runs a test hook armed for `op`, then returns an injected fault for
+    /// `op` as a mapped engine error, if a test armed one.
     #[cfg(any(test, feature = "testkit"))]
     fn guard_fault(&self, op: FaultOp) -> Result<(), EngineError> {
+        self.faults.run_hook(op);
         if let Some(error) = self.faults.take(op) {
             return Err(map_storage_error(error));
         }
@@ -580,6 +581,13 @@ impl StoragePersistence {
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) fn arm_storage_fault(&self, op: FaultOp, kind: StorageFaultKind, skip: usize) {
         self.faults.arm(op, kind, skip);
+    }
+
+    /// Arms a closure that runs at the fault seam of the persistence call that
+    /// follows `skip` matching ones (see `FaultSchedule::arm_hook`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn arm_hook(&self, op: FaultOp, skip: usize, hook: Box<dyn FnOnce() + Send>) {
+        self.faults.arm_hook(op, skip, hook);
     }
 
     /// Arms a content corruption applied to the rows the next matching read
@@ -915,6 +923,41 @@ impl StoragePersistence {
             self.corrupt_rows(FaultOp::Read, std::slice::from_mut(inner));
         }
         Ok(row)
+    }
+
+    /// Reads several rows of one branch from one storage snapshot, so every
+    /// answer comes from one version: a commit that lands while the batch
+    /// runs is visible to every row or to none (#3582). Answers come in the
+    /// order of `addresses` and each is read when it is pulled, so a caller
+    /// that decodes each answer before pulling the next holds one row at a
+    /// time. Each answer then passes the fault seam as one point read.
+    pub(crate) fn read_rows(
+        &self,
+        addresses: Vec<RowAddress>,
+        selector: ReadSelector,
+    ) -> Result<
+        impl Iterator<Item = Result<Option<PersistenceReadRow>, EngineError>> + '_,
+        EngineError,
+    > {
+        let requests = addresses
+            .into_iter()
+            .map(|address| point_read_request(address, selector))
+            .collect::<Result<Vec<_>, _>>()?;
+        let answers = self
+            .runtime
+            .read_points(requests)
+            .map_err(map_storage_error)?;
+        Ok(answers.map(move |answer| {
+            self.guard_fault(FaultOp::Read)?;
+            let mut row = answer
+                .map_err(map_storage_error)?
+                .into_row()
+                .map(PersistenceReadRow::from_storage_owned);
+            if let Some(inner) = row.as_mut() {
+                self.corrupt_rows(FaultOp::Read, std::slice::from_mut(inner));
+            }
+            Ok(row)
+        }))
     }
 
     pub(crate) fn read_history(

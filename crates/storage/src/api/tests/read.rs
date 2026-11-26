@@ -1823,3 +1823,153 @@ fn maintenance_drain_on_a_closed_runtime_rejects() {
         .expect_err("closed runtime rejects run-next maintenance");
     assert_eq!(run.code(), "failed_precondition.storage_api.state");
 }
+
+/// Pulls every answer of a point batch.
+fn read_all_points(
+    runtime: &StorageRuntime<'static>,
+    requests: Vec<PointReadRequest>,
+) -> StorageApiResult<Vec<PointReadOutcome>> {
+    runtime.read_points(requests)?.collect()
+}
+
+#[test]
+fn read_points_answers_each_request_as_read_point_does() {
+    // #3582: the batch is a set of point reads over one loaded view; each
+    // answer must be exactly what a lone `read_point` returns — overwritten,
+    // tombstoned, absent, version-pinned and repeated keys alike.
+    let mut runtime = open_runtime();
+    let first = commit_put(&mut runtime, b"alpha", b"old", 10);
+    commit_put(&mut runtime, b"alpha", b"new", 20);
+    commit_put(&mut runtime, b"beta", b"value", 30);
+    commit_delete(&mut runtime, b"beta", 40);
+    let requests = vec![
+        point_request(b"alpha", ReadBound::Latest),
+        point_request(b"beta", ReadBound::Latest),
+        point_request(b"missing", ReadBound::Latest),
+        point_request(b"alpha", ReadBound::AtVersion(first.commit_version())),
+        point_request(b"alpha", ReadBound::Latest),
+    ];
+
+    let batch = read_all_points(&runtime, requests.clone()).expect("batch read");
+
+    assert_eq!(batch.len(), requests.len(), "one answer per request");
+    for (index, (answer, request)) in batch.iter().zip(&requests).enumerate() {
+        let single = runtime.read_point(request).expect("single read");
+        assert_eq!(answer.row(), single.row(), "request {index}");
+    }
+    // The oracle is not vacuous: the five answers differ as the history says.
+    assert_eq!(read_value(batch[0].row().expect("alpha")), b"new");
+    assert!(batch[1].row().expect("beta tombstone").is_tombstone());
+    assert!(batch[2].row().is_none());
+    assert_eq!(read_value(batch[3].row().expect("pinned alpha")), b"old");
+    assert_eq!(batch[4].row(), batch[0].row(), "a repeated request repeats");
+}
+
+#[test]
+fn read_points_answers_from_the_view_loaded_when_the_batch_began() {
+    // #3582: the mechanism itself. Answers are read as they are pulled, yet
+    // every one comes from the snapshot loaded when the batch began, so a
+    // commit that lands between two answers is visible to neither.
+    let mut runtime = open_runtime();
+    let before = commit_put(&mut runtime, b"alpha", b"old-alpha", 10);
+    commit_put(&mut runtime, b"beta", b"old-beta", 20);
+
+    let mut answers = runtime
+        .read_points(vec![
+            point_request(b"alpha", ReadBound::Latest),
+            point_request(b"beta", ReadBound::Latest),
+        ])
+        .expect("the batch begins");
+    let alpha = answers
+        .next()
+        .expect("an answer for alpha")
+        .expect("alpha reads");
+    // The batch borrows the runtime, so the commit goes through `&self`.
+    runtime
+        .commit(&put_batch(b"beta", b"new-beta"))
+        .expect("commit between two answers");
+    let beta = answers
+        .next()
+        .expect("an answer for beta")
+        .expect("beta reads");
+    assert!(answers.next().is_none(), "one answer per request");
+
+    let alpha = alpha.row().expect("alpha present");
+    assert_eq!(read_value(alpha), b"old-alpha");
+    assert_eq!(alpha.commit_version(), before.commit_version());
+    assert_eq!(
+        read_value(beta.row().expect("beta present")),
+        b"old-beta",
+        "a commit between two answers is not visible to the second"
+    );
+    // Direction control: a read that begins after the commit sees it.
+    let fresh = runtime
+        .read_point(&point_request(b"beta", ReadBound::Latest))
+        .expect("fresh read");
+    assert_eq!(read_value(fresh.row().expect("beta present")), b"new-beta");
+}
+
+#[test]
+fn read_points_on_an_empty_batch_reads_nothing() {
+    let runtime = open_runtime();
+    let answers = read_all_points(&runtime, Vec::new()).expect("an empty batch reads nothing");
+    assert!(answers.is_empty());
+}
+
+#[test]
+fn read_points_on_a_closed_runtime_refuses_even_an_empty_batch() {
+    let mut runtime = open_runtime();
+    commit_put(&mut runtime, b"alpha", b"value", 10);
+    runtime.close().expect("close the runtime");
+    for requests in [vec![], vec![point_request(b"alpha", ReadBound::Latest)]] {
+        let Err(error) = runtime.read_points(requests) else {
+            panic!("a closed runtime refuses a point batch");
+        };
+        assert_eq!(error.code(), "failed_precondition.storage_api.state");
+    }
+}
+
+#[test]
+fn read_points_on_a_missing_branch_fails_as_read_point_does() {
+    let runtime = open_runtime();
+    let request = point_request_for(other_branch(), b"alpha", ReadBound::Latest);
+    let single = runtime
+        .read_point(&request)
+        .expect_err("a missing branch fails a single read");
+    let Err(batch) = runtime.read_points(vec![request]) else {
+        panic!("a missing branch fails the batch before any answer");
+    };
+    assert_eq!(batch.class(), single.class());
+    assert_eq!(batch.code(), single.code());
+}
+
+#[test]
+fn read_points_refuses_a_batch_that_spans_two_branches() {
+    // One batch, one view: a second branch would need a second view, so the
+    // batch is refused rather than silently read from two snapshots — and
+    // refused before any snapshot loads, so the first branch being missing
+    // does not change the answer.
+    let mut runtime = open_runtime();
+    commit_put(&mut runtime, b"alpha", b"value", 10);
+    for (first, second) in [(branch(), other_branch()), (other_branch(), branch())] {
+        let Err(error) = runtime.read_points(vec![
+            point_request_for(first, b"alpha", ReadBound::Latest),
+            point_request_for(second, b"alpha", ReadBound::Latest),
+        ]) else {
+            panic!("a batch reads one branch");
+        };
+        assert_eq!(error.class(), StorageApiErrorClass::InvalidArgument);
+        assert_eq!(error.code(), "invalid_argument.storage_api.argument");
+    }
+
+    // Direction control: the same branch twice is one branch.
+    let answers = read_all_points(
+        &runtime,
+        vec![
+            point_request(b"alpha", ReadBound::Latest),
+            point_request(b"alpha", ReadBound::Latest),
+        ],
+    )
+    .expect("a one-branch batch reads");
+    assert_eq!(answers.len(), 2);
+}
