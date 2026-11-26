@@ -35,9 +35,9 @@ use crate::lifecycle::{
     MaintenanceTaskPriority as LifecycleMaintenanceTaskPriority,
     MaintenanceTaskRequest as LifecycleMaintenanceTaskRequest,
     MaintenanceTaskScope as LifecycleMaintenanceTaskScope, ManualMaintenanceClock,
-    ModeLifecyclePolicy, PreparedPublishStep, RealMaintenanceClock, ReclaimWakeOrigin,
-    RecoveryDegradationClass, RecoveryFaultKind, RecoveryHealth, RecoveryStrictness,
-    StorageBudgetPool, StorageBudgetPressureSeverity, StorageBudgetSnapshot,
+    ModeLifecyclePolicy, PreparedPublishStep, PublishSlotsWait, RealMaintenanceClock,
+    ReclaimWakeOrigin, RecoveryDegradationClass, RecoveryFaultKind, RecoveryHealth,
+    RecoveryStrictness, StorageBudgetPool, StorageBudgetPressureSeverity, StorageBudgetSnapshot,
     StorageMode as LifecycleStorageMode, StorageOpenOutcome as LifecycleStorageOpenOutcome,
     StorageOpenPlan, StorageRuntimeBudget, ThreadedMaintenanceExecutor,
 };
@@ -143,6 +143,21 @@ const DEFAULT_BACKGROUND_BLOCK_WAIT_SLICE: Duration = Duration::from_millis(250)
 const DEFAULT_BACKGROUND_BLOCK_STALL_DEADLINE: Duration = Duration::from_secs(30);
 const DEFAULT_BACKGROUND_BLOCK_NO_RELIEF_ROUNDS: usize = 4;
 pub(super) const DEFAULT_BACKGROUND_CLOSE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+/// #3747: the longest a durable close waits for table-manifest publishes that workers the
+/// background shutdown detached still have in flight. A safety net only: each publish's
+/// release wakes the close.
+const CLOSE_IN_FLIGHT_PUBLISH_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How the in-flight publish of [`StorageRuntime::flush_publish_in_flight_worker_for_test`]
+/// ends (#3747).
+#[cfg(all(test, feature = "localfs"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum InFlightPublishEnd {
+    /// Persist the manifest off-lock and record it under the lock.
+    Persist,
+    /// Panic with the publish still in flight.
+    Panic,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ResolvedReadBound {
@@ -229,6 +244,10 @@ impl StorageCloseOptions {
         }
     }
 
+    /// How long the close waits for background workers before detaching them. A durable
+    /// close then also waits, for at most 30 s, for any table-manifest publish a detached
+    /// worker still has in flight, so the publish records before the close checkpoint
+    /// (normally one fsync; #3747).
     #[must_use]
     pub const fn with_background_shutdown_timeout(
         mut self,
@@ -571,6 +590,67 @@ impl StorageRuntime<'static> {
         }
     }
 
+    /// #3747: a worker that holds a flush of the default branch mid-publish, the state a
+    /// worker detached by the close-time background shutdown is in. Run on another thread, it
+    /// builds the flush and claims the branch's publish slot under the runtime lock, then
+    /// signals `held`. What `proceed` sends decides the rest: persist the table manifest
+    /// with the lock released and record it under the lock, returning whether that record
+    /// succeeded, or panic with the publish still in flight.
+    #[cfg(all(test, feature = "localfs"))]
+    pub(crate) fn flush_publish_in_flight_worker_for_test(
+        &self,
+        held: std::sync::mpsc::Sender<()>,
+        proceed: std::sync::mpsc::Receiver<InFlightPublishEnd>,
+    ) -> Option<Box<dyn FnOnce() -> bool + Send>> {
+        let StorageRuntimeInner::DurableOwned(slot) = &self.inner else {
+            return None;
+        };
+        let runtime = slot.runtime_handle();
+        Some(Box::new(move || {
+            let pending = {
+                let mut runtime = runtime.lock();
+                let branch_id = Self::default_branch_id_for_test();
+                runtime
+                    .rotate_active_for_maintenance()
+                    .expect("rotate the active table");
+                runtime
+                    .enqueue_maintenance(LifecycleMaintenanceTaskRequest::flush(branch_id))
+                    .expect("enqueue the flush");
+                match runtime
+                    .start_next_background_flush_maintenance()
+                    .expect("start the flush")
+                {
+                    Some(crate::lifecycle::DurableBackgroundMaintenanceStep::Build(pending)) => {
+                        pending
+                    }
+                    _ => panic!("the flush must start as a background build"),
+                }
+            };
+            let built = pending.build().expect("build the flush");
+            let step = runtime
+                .lock()
+                .begin_publish_phase(built)
+                .expect("begin the flush publish");
+            let PreparedPublishStep::OffLock(prepared) = step else {
+                panic!("the flush publish must reach the off-lock persist");
+            };
+            held.send(()).expect("signal the publish is in flight");
+            match proceed.recv().expect("wait for the signal to go on") {
+                InFlightPublishEnd::Persist => {}
+                // `resume_unwind` skips the panic hook; the in-flight publish drops while
+                // the thread unwinds, as a panicking persist's would.
+                InFlightPublishEnd::Panic => {
+                    std::panic::resume_unwind(Box::new("in-flight publish panicked"))
+                }
+            }
+            let (prepared, write_result) = prepared.persist_off_lock();
+            runtime
+                .lock()
+                .finish_publish_phase(prepared, write_result)
+                .is_ok()
+        }))
+    }
+
     #[cfg(test)]
     #[cfg_attr(not(feature = "perf-trace"), allow(dead_code))]
     pub(crate) fn submit_stale_background_wake_for_test(&self) {
@@ -900,11 +980,37 @@ impl<'a> StorageRuntime<'a> {
                 Ok(summary)
             }
             StorageRuntimeInner::DurableOwned(runtime) => {
+                // #3747: the publish slots the close waits on below, and a panic mark taken
+                // before the shutdown, so a slot holder that panics from here on fails the close.
+                let publish_slots = runtime.lock().branch_publish_slots();
+                let publish_panics = publish_slots.panic_mark();
                 let background_shutdown = runtime.shutdown_background(background_shutdown_timeout);
                 if let Some(error) = background_shutdown_panic_error(background_shutdown.as_ref()) {
                     return Err(error);
                 }
-                let mut runtime = runtime.lock();
+                // A worker the shutdown detached may still be persisting a table manifest
+                // off-lock, holding its branch's publish slot, or may claim a slot under the
+                // runtime lock once its build is done. Take the lock only at a moment no slot is
+                // held: each publish records first, and none can start while the close holds
+                // the lock. Otherwise the close checkpoint copies that branch's rows as volatile
+                // and may be refused.
+                let (mut runtime, publishes) = publish_slots.lock_once_released(
+                    publish_panics,
+                    CLOSE_IN_FLIGHT_PUBLISH_DEADLINE,
+                    || runtime.lock(),
+                );
+                match publishes {
+                    // A slot holder that panicked fails the close, as a panic the shutdown finds
+                    // does, and leaves the runtime open.
+                    PublishSlotsWait::Panicked => {
+                        return Err(map_lifecycle_error(LifecycleError::MaintenanceTaskFailed {
+                            reason: "table-manifest publish panicked during close",
+                        }));
+                    }
+                    // The deadline is a safety net only (DUR-006). Past it the close goes ahead
+                    // as before #3747, and the WAL stays the durable record.
+                    PublishSlotsWait::Released | PublishSlotsWait::TimedOut => {}
+                }
                 let maintenance_before_close = runtime.maintenance_status().stats();
                 let close = runtime
                     .close_with_reclaim_budget(map_close_reclaim_budget(options.reclaim_budget()))

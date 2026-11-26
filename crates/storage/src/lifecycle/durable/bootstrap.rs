@@ -1,5 +1,6 @@
 //! Commit-runtime bootstrap after durable recovery.
 
+use super::publish_slots::{BranchPublishGuard, BranchPublishSlots};
 use super::{
     branch_error, commit_error, require_admitted, LifecycleDurableLocalServices,
     LifecycleDurableLocalShell,
@@ -43,8 +44,8 @@ use crate::service::SnapshotObject;
 use crate::service::WalGrowthFacts;
 use crate::service::{WalGroupSyncTicket, WalServiceError};
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use strata_core::{BranchId, CommitVersion, Timestamp};
 
@@ -180,11 +181,12 @@ pub(crate) struct LifecycleDurableLocalRuntime<'a, S = CommitManualTimestampSour
     // publication.
     pub(super) pending_releases_sequence: u64,
     // Per-branch publish slots. The off-lock publish phase performs the manifest fsync with the
-    // global runtime lock released; this map serializes same-branch publishes so only one is ever
-    // between sequence-reserve and record (no durable manifest-sequence regression). In-memory
-    // only, populated lazily per branch. Held here rather than in the branch catalog because the
-    // catalog is cloned during recovery/staging and the slots must be unique to the live runtime.
-    pub(super) branch_publish_locks: HashMap<BranchId, Arc<AtomicBool>>,
+    // global runtime lock released; the slots serialize same-branch publishes so only one is ever
+    // between sequence-reserve and record (no durable manifest-sequence regression), and signal
+    // each release to a close waiting outside the lock (#3747). In-memory only. Held here rather
+    // than in the branch catalog because the catalog is cloned during recovery/staging and the
+    // slots must be unique to the live runtime.
+    pub(super) branch_publish_slots: crate::sync::Arc<BranchPublishSlots>,
     #[allow(
         dead_code,
         reason = "runtime hook is consumed by concrete maintenance modules"
@@ -198,20 +200,6 @@ pub(crate) struct LifecycleDurableLocalRuntime<'a, S = CommitManualTimestampSour
     // to reference any concrete close types, preserving the
     // bootstrap-vs-close layering enforced by the lifecycle source guard.
     pub(super) close_retry_state: Option<super::close::DurableCloseRetryState>,
-}
-
-/// RAII guard for a per-branch publish slot (see
-/// [`LifecycleDurableLocalRuntime::try_acquire_branch_publish_guard`]). Held across the off-lock
-/// manifest fsync so at most one publish per branch sits between sequence-reserve and record;
-/// clears the per-branch flag on drop, including on early return or panic.
-pub(super) struct BranchPublishGuard {
-    flag: Arc<AtomicBool>,
-}
-
-impl Drop for BranchPublishGuard {
-    fn drop(&mut self) {
-        self.flag.store(false, Ordering::Release);
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -397,7 +385,7 @@ impl<'a, S> LifecycleDurableLocalShell<'a, S> {
             pending_releases,
             branch_catalog_sequence,
             pending_releases_sequence,
-            branch_publish_locks: HashMap::new(),
+            branch_publish_slots: crate::sync::Arc::new(BranchPublishSlots::new()),
             maintenance: Self::build_maintenance_executor(max_maintenance_queue_depth)?,
             maintenance_coverage_idle_rounds: 0,
             close_retry_state: None,
@@ -756,15 +744,13 @@ impl<S> LifecycleDurableLocalRuntime<'_, S> {
         &mut self,
         branch_id: BranchId,
     ) -> Option<BranchPublishGuard> {
-        let flag = self
-            .branch_publish_locks
-            .entry(branch_id)
-            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-            .clone();
-        match flag.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
-            Ok(_) => Some(BranchPublishGuard { flag }),
-            Err(_) => None,
-        }
+        BranchPublishSlots::try_acquire(&self.branch_publish_slots, branch_id)
+    }
+
+    /// The publish slots, shared so a close can wait for an in-flight publish without holding
+    /// the runtime lock that publish needs to record its manifest (#3747).
+    pub(crate) fn branch_publish_slots(&self) -> crate::sync::Arc<BranchPublishSlots> {
+        crate::sync::Arc::clone(&self.branch_publish_slots)
     }
 
     pub(crate) const fn state(&self) -> LifecycleState {

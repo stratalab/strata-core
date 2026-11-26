@@ -179,8 +179,9 @@ fn assert_durable_background_drain_three_phase_publish(drain_source: &str) {
         !begin_phase.contains("persist_reserved_manifest"),
         "off-lock publish phase one must not fsync the manifest under the lock"
     );
-    // The per-branch publish slot must be a try-lock (CAS), never a blocking acquire, so the
-    // global lock is never blocked on it (the global -> per-branch order cannot deadlock).
+    // The per-branch publish slot must be a try-claim, never a blocking acquire, so the global
+    // lock is never blocked on it (the global -> per-branch order cannot deadlock). Only the
+    // close waits for a slot, and it does so without the global lock (#3747).
     let bootstrap_source = include_str!("../../lifecycle/durable/bootstrap.rs");
     let try_acquire = bootstrap_source
         .split("fn try_acquire_branch_publish_guard")
@@ -190,8 +191,20 @@ fn assert_durable_background_drain_three_phase_publish(drain_source: &str) {
         .next()
         .expect("try_acquire_branch_publish_guard has a body");
     assert!(
-        try_acquire.contains("compare_exchange"),
-        "per-branch publish slot must be claimed with a try-lock (compare_exchange), never a blocking lock"
+        try_acquire.contains("BranchPublishSlots::try_acquire"),
+        "the runtime must claim its per-branch publish slot through BranchPublishSlots::try_acquire"
+    );
+    let slots_source = include_str!("../../lifecycle/durable/publish_slots.rs");
+    let slot_claim = slots_source
+        .split("fn try_acquire(")
+        .nth(1)
+        .expect("BranchPublishSlots::try_acquire is present")
+        .split("fn ")
+        .next()
+        .expect("BranchPublishSlots::try_acquire has a body");
+    assert!(
+        slot_claim.contains(".insert(") && !slot_claim.contains(".wait"),
+        "per-branch publish slot must be claimed with a try-claim (set insert), never a wait"
     );
 }
 

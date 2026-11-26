@@ -158,7 +158,7 @@ pub(crate) use durable::{
     LifecycleDurableAssemblyFacts, LifecycleDurableLocalOpenRequest, LifecycleDurableLocalRuntime,
     LifecycleDurableLocalServices, LifecycleDurableLocalShell, LifecycleFootprintAuditFacts,
     LifecycleFootprintLiveFacts, LifecycleFootprintWatermark, LifecycleRecoveryBootstrapReport,
-    PreparedPublishStep, WalSegmentClass, TABLE_OBJECT_SWEEP_MAX_OBJECTS,
+    PreparedPublishStep, PublishSlotsWait, WalSegmentClass, TABLE_OBJECT_SWEEP_MAX_OBJECTS,
 };
 #[allow(
     unused_imports,

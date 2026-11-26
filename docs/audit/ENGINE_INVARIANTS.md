@@ -2141,7 +2141,22 @@ never from `manifest().load_*` directly.
   re-arms it (`ViewReleaseSignal`, #3645), so a reader released after the quiet
   period's wake still gets its debt reclaimed without another write; the waker
   only schedules the debounced wake, never a drain inline.
-- **Clean close**: the workers stop, then a bounded reclaim drive runs mark,
+- **Clean close**: the workers stop. The 250 ms shutdown can detach a worker
+  still persisting a table manifest (it holds its branch's publish slot), or
+  one still building (it claims a slot under the runtime lock when the build
+  is done). Either needs the runtime lock to record its manifest, so the close
+  takes that lock only at a moment no slot is held (#3747,
+  `BranchPublishSlots::lock_once_released`). It waits for the held slots, checks
+  again under the lock, and waits again if a publish claimed a slot meanwhile.
+  A claim needs the runtime lock, so no publish starts while the close holds
+  it; a build that finishes later waits on the lock and publishes after the
+  close returns (open gap, #3753). Each release wakes the wait, and its 30 s
+  deadline is only a safety net (DUR-006). A slot holder that panics after the
+  close starts (it marks the count before the shutdown) fails the close
+  (`failed_precondition.storage_api.maintenance`), as a worker panic the
+  shutdown finds does, and leaves the runtime open; a second close goes ahead.
+  A detached panic that releases no slot is not reported (#3754).
+  Then a bounded reclaim drive runs mark,
   sweep and purge (`ReclaimBudget`, default 500 ms; reclaim-kind tasks are
   drain-before-close via `close_policy_for_kind`). Next, any branch whose
   unflushed delta reaches 64 KiB is flushed into tables (#3625). Then any
@@ -2149,9 +2164,10 @@ never from `manifest().load_*` directly.
   — a background flush whose publish deferred on a busy slot, then was
   canceled at close — has its table manifest published under the per-branch
   slot, so the checkpoint skips that table's rows instead of copying them
-  (#3741). A slot still held by a publish the 250 ms worker shutdown detached
-  is skipped; that table's rows are copied as volatile (DUR-010), and a copy
-  the artifact budget refuses leaves the WAL for the next open. Then one
+  (#3741). A slot still held here (only a publish that outlasted the safety
+  net) is skipped; that
+  table's rows are copied as volatile (DUR-010), and a copy the artifact
+  budget refuses leaves the WAL for the next open. Then one
   checkpoint covers every branch, truncates the WAL behind it and prunes the
   snapshot it superseded. A checkpoint that still defers on the delta cap
   (DUR-017) flushes every branch holding a row and retries exactly once with
@@ -2185,7 +2201,12 @@ every reclaim pass reports what it freed (#3622).
 `close_checkpoint_over_the_cap_after_the_retry_leaves_the_wal_for_the_next_session`,
 `close_publishes_a_table_manifest_that_never_landed_before_its_checkpoint` and
 `close_publishes_no_table_manifest_when_every_table_is_confirmed`
-(`crates/storage/src/lifecycle/tests/close_checkpoint.rs`), `api_read_only_reopen_reclaims_deterministically`,
+(`crates/storage/src/lifecycle/tests/close_checkpoint.rs`),
+`api_close_waits_for_an_in_flight_manifest_publish_before_its_checkpoint`,
+`api_close_reports_a_panic_in_the_publish_it_waits_for`, with the slot wait's
+own tests (`close_wait_outcome_truth_table` among them) and its loom model
+`publish_slots_loom_close_locks_only_while_no_publish_is_in_flight`
+(`crates/storage/src/lifecycle/durable/publish_slots.rs`), `api_read_only_reopen_reclaims_deterministically`,
 `api_open_reclaims_nothing_inline_without_a_worker`,
 `api_reopen_reconciles_snapshots_to_the_attested_id`,
 `api_reopen_purges_quarantine_a_prior_session_left_unpurged`,
@@ -2207,6 +2228,15 @@ whole-database simulation's footprint audits and their sabotage twins
 the per-PR footprint ratchet (`crates/engine/tests/storage_footprint_ratchet.rs`: per
 primitive, clean at every reopen and under a named total/logical ceiling). A regression
 of any reclaim family must fail the ratchet or the simulation, never only a unit test.
+The close's slot wait (#3747) relies on two rules. Every publish-slot claim happens
+under the runtime lock, which is what lets slots found free under that lock stay free
+for the whole close. And every holder except the off-lock manifest persist releases
+its slot within the same lock hold. Audit every `try_acquire_branch_publish_guard`
+call site (`lifecycle/durable/maintenance.rs`, `lifecycle/durable/close.rs`): it must
+run on the locked runtime, and its guard must drop before the lock is released, save
+the one span from `begin_off_lock_publish` to `finish_publish_phase`. A claim made off
+the lock would let a publish start while the close holds it; a holder that kept a slot
+across any other off-lock step would make every close wait out the 30 s safety net.
 
 ## How to Use This Catalog
 
