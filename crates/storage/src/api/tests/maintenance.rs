@@ -4164,6 +4164,137 @@ fn api_close_flushes_a_large_delta_into_tables_before_its_checkpoint() {
     );
 }
 
+/// #3747: a clean close waits for a table-manifest publish still persisting
+/// off-lock. That is what the 250 ms background shutdown leaves when it
+/// detaches a worker mid-fsync. The publish then records before the close
+/// checkpoint, which carries the flushed table as a durable base instead of
+/// copying its rows. Before the fix the close took the runtime lock at once:
+/// the branch's publish slot was busy, so the checkpoint copied all 256 KiB of
+/// flushed rows into the snapshot (on CI, under a 1 MiB artifact budget, it
+/// was refused and the WAL stayed).
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_waits_for_an_in_flight_manifest_publish_before_its_checkpoint() {
+    let root = temp_dir_for_api_test("maintenance-close-waits-for-in-flight-publish");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root.clone()));
+    let inline = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(inline, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    commit_text_rows(&mut runtime, 256, 1024);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(
+        runtime
+            .flush_publish_in_flight_worker_for_test(held_tx, proceed_rx)
+            .expect("a durable runtime"),
+    );
+    held_rx
+        .recv()
+        .expect("the flush publish is in flight off-lock");
+    // The persist outlasts a close that does not wait for it: that close takes
+    // the runtime lock and checkpoints in the meantime.
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        proceed_tx
+            .send(crate::api::runtime::InFlightPublishEnd::Persist)
+            .expect("the worker waits to persist");
+    });
+
+    let started = std::time::Instant::now();
+    runtime.close().expect("close");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the publish's release wakes the close; it does not sleep out its 30 s safety net"
+    );
+    let snapshot = snapshot_bytes_on_disk(&root);
+    assert!(
+        snapshot < 64 * 1024,
+        "the close checkpoint carries the published table as a durable base, \
+         not its 256 KiB of rows: {snapshot} bytes"
+    );
+    assert!(
+        worker.join().expect("worker thread"),
+        "the in-flight publish records before the close takes the runtime lock"
+    );
+    releaser.join().expect("releaser thread");
+    let reopened = reopen_and_drain(backend);
+    assert_eq!(
+        read_value(&reopened, b"row-000255").map(|value| value.len()),
+        Some(1024),
+        "the flushed rows read back"
+    );
+}
+
+/// #3747: a publish that panics while the close waits for it fails the close,
+/// as a worker panic the background shutdown finds does, and leaves the runtime
+/// open. Without that the close would checkpoint whatever state the panic left
+/// and report success. A second close then completes, and the committed rows
+/// survive.
+#[cfg(feature = "localfs")]
+#[test]
+fn api_close_reports_a_panic_in_the_publish_it_waits_for() {
+    let root = temp_dir_for_api_test("maintenance-close-reports-in-flight-publish-panic");
+    let backend = crate::testkit::leak_static(StorageBackend::local_fs(root));
+    let inline = StorageOpenOptions::durable_local(StorageDurabilityPolicy::Standard)
+        .with_maintenance_scheduling_policy(
+            StorageMaintenanceSchedulingPolicy::DeterministicInline,
+        );
+    let mut runtime = StorageRuntime::open_with_backend(inline, backend)
+        .expect("open durable runtime")
+        .into_runtime();
+    commit_text_rows(&mut runtime, 256, 1024);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(
+        runtime
+            .flush_publish_in_flight_worker_for_test(held_tx, proceed_rx)
+            .expect("a durable runtime"),
+    );
+    held_rx
+        .recv()
+        .expect("the flush publish is in flight off-lock");
+    // The close takes its panic mark before it requests the background
+    // shutdown, so a panic sent once the request is seen lands after the mark.
+    let shutdown_requested = runtime
+        .background_shutdown_requested_flag_for_test()
+        .expect("a durable runtime has a background controller");
+    let releaser = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !shutdown_requested.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "close did not request the background shutdown"
+            );
+            std::thread::yield_now();
+        }
+        proceed_tx
+            .send(crate::api::runtime::InFlightPublishEnd::Panic)
+            .expect("the worker waits to go on");
+    });
+
+    let error = runtime
+        .close()
+        .expect_err("a publish panic during the close's wait fails the close");
+    assert_eq!(error.class(), StorageApiErrorClass::FailedPrecondition);
+    assert_eq!(error.code(), "failed_precondition.storage_api.maintenance");
+    assert!(worker.join().is_err(), "the in-flight publish panicked");
+    releaser.join().expect("releaser thread");
+
+    runtime
+        .close()
+        .expect("the runtime stayed open, and a second close completes");
+    let reopened = reopen_and_drain(backend);
+    assert_eq!(
+        read_value(&reopened, b"row-000255").map(|value| value.len()),
+        Some(1024),
+        "the committed rows survive the panicked publish"
+    );
+}
+
 /// #3625 direction control: a small delta stays in the close snapshot — no
 /// table (and no level-0 churn) for a short session.
 #[cfg(feature = "localfs")]

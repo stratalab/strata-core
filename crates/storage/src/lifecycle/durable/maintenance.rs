@@ -1,6 +1,7 @@
 //! Durable-local maintenance dispatch.
 
-use super::bootstrap::{BranchPublishGuard, LifecycleDurableLocalRuntime};
+use super::bootstrap::LifecycleDurableLocalRuntime;
+use super::publish_slots::BranchPublishGuard;
 use super::{branch_error, commit_error, require_admitted};
 use crate::branch::read::{BranchInheritedLayer, BranchLayout};
 use crate::branch::state::{BranchLocalState, BranchRotationOutcome};

@@ -38,6 +38,7 @@ mod close;
 mod footprint;
 mod inflight;
 mod maintenance;
+mod publish_slots;
 
 #[cfg(test)]
 pub(crate) use close::close_starts_reclaim;
@@ -56,6 +57,7 @@ pub(crate) use inflight::{InFlightOutputsGuard, InFlightTableOutputs};
 #[cfg(test)]
 pub(crate) use maintenance::inventory_listing_seam;
 pub(crate) use maintenance::TABLE_OBJECT_SWEEP_MAX_OBJECTS;
+pub(crate) use publish_slots::PublishSlotsWait;
 
 #[cfg(test)]
 pub(crate) use bootstrap::reopen_owes_quarantine_purge;
