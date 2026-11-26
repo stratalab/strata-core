@@ -1,6 +1,8 @@
 //! JSON document capability.
 
 mod adapter;
+#[cfg(test)]
+mod batch_snapshot_tests;
 mod document;
 mod outcome;
 mod service;

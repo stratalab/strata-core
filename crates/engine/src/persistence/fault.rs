@@ -102,6 +102,16 @@ mod injection {
         skip: usize,
     }
 
+    /// A test closure to run on the calling thread when a matching operation
+    /// reaches the fault seam: before a lone read or commit reaches storage,
+    /// or just after a batch read's answer is read (#3582).
+    struct ScheduledHook {
+        op: FaultOp,
+        hook: Box<dyn FnOnce() + Send>,
+        /// Number of matching operations that pass before this hook runs.
+        skip: usize,
+    }
+
     /// FIFO schedule of pending faults, matched and consumed per operation.
     ///
     /// Interior mutability so arming and consuming take `&self` (#3156). The
@@ -114,6 +124,7 @@ mod injection {
     #[derive(Default)]
     pub(crate) struct FaultSchedule {
         entries: Mutex<Vec<ScheduledFault>>,
+        hooks: Mutex<Vec<ScheduledHook>>,
     }
 
     impl FaultSchedule {
@@ -136,6 +147,33 @@ mod injection {
                 return None;
             }
             Some(entries.remove(position).error)
+        }
+
+        /// Arms a hook that runs when the matching operation that follows
+        /// `skip` passing ones reaches the fault seam, so a test can hold a
+        /// multi-entry read between two of its entries while another thread
+        /// commits (#3582).
+        pub(crate) fn arm_hook(&self, op: FaultOp, skip: usize, hook: Box<dyn FnOnce() + Send>) {
+            entries(&self.hooks).push(ScheduledHook { op, hook, skip });
+        }
+
+        /// Runs the hook for `op` if one is due. The schedule's lock is
+        /// released before the hook runs, so a hook may block while other
+        /// threads' operations (the commit it waits for among them) pass
+        /// through the schedule.
+        pub(crate) fn run_hook(&self, op: FaultOp) {
+            let hook = {
+                let mut hooks = entries(&self.hooks);
+                let Some(position) = hooks.iter().position(|entry| entry.op == op) else {
+                    return;
+                };
+                if hooks[position].skip > 0 {
+                    hooks[position].skip -= 1;
+                    return;
+                }
+                hooks.remove(position).hook
+            };
+            hook();
         }
     }
 

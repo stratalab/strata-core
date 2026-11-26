@@ -98,12 +98,12 @@ use background::{
     BackgroundBlockWaitConfig, BackgroundPressureSnapshot, BackgroundWalGrowthSnapshot, RuntimeSlot,
 };
 
+pub use data::PointBatchRead;
 use data::{
     cap_bound_at_visible, flush_request_for_boundary, map_api_commit_batch, map_commit_summary,
-    map_immutable_sources, map_scan_rows, map_storage_space, physical_key,
-    point_read_row_from_storage_owned, read_row_from_storage, require_version_retained,
-    resolve_read_bound, row_is_expired_at_selected_frontier, timeline_committed_at_for_versions,
-    timeline_resolve_wall_clock, timeline_view_or_index, visible_tombstone_at_bound,
+    map_immutable_sources, map_scan_rows, map_storage_space, physical_key, read_point_in_view,
+    read_row_from_storage, require_version_retained, resolve_read_bound,
+    timeline_committed_at_for_versions, timeline_resolve_wall_clock, timeline_view_or_index,
 };
 use diagnostics::{
     branch_for_diagnostics_scope, branch_generation_or_default, current_visible,
@@ -1487,35 +1487,53 @@ impl<'a> StorageRuntime<'a> {
     fn read_point_inner(&self, request: &PointReadRequest) -> StorageApiResult<PointReadOutcome> {
         let key = physical_key(request.branch_id(), request.storage_space(), request.key())?;
         let (visible, view) = self.load_published_snapshot(request.branch_id())?;
-        if request.bound() == ReadBound::Latest {
-            let row = view
-                .read_point_or_tombstone(
-                    &key,
-                    BranchReadBound::at_version(CommitVersion::new(visible)),
-                )
-                .map_err(branch_error)?;
-            // B4: the branch row is owned — move its key and value into the
-            // public row instead of copying at the boundary.
-            let row = row
-                .map(|row| point_read_row_from_storage_owned(row.into_storage_row()))
-                .transpose()?;
-            return Ok(PointReadOutcome::new(row));
-        }
-        let resolved = resolve_read_bound(&view, request.bound())?;
-        let capped = cap_bound_at_visible(resolved.branch_bound, visible);
-        let row = match view.read_point(&key, capped).map_err(branch_error)? {
-            Some(row) => {
-                // Expiry is decided on the reference (scalar reads), then the
-                // surviving row moves out.
-                if row_is_expired_at_selected_frontier(row.row(), resolved.selected_timestamp) {
-                    None
-                } else {
-                    Some(point_read_row_from_storage_owned(row.into_storage_row())?)
+        read_point_in_view(&view, visible, request.bound(), &key)
+    }
+
+    /// Reads several points of one branch from one published snapshot, so
+    /// the batch reads one consistent version: a commit that lands while it
+    /// runs is visible to every point or to none (#3582). The whole batch is
+    /// validated before any snapshot loads: first that every request names
+    /// the first request's branch (refused with one code whatever the
+    /// order), then each key in request order. Then the frontier and the
+    /// snapshot are loaded once, in the order [`Self::read_point`] loads
+    /// them. Each answer is read as the returned [`PointBatchRead`] is pulled
+    /// and is what [`Self::read_point`] returns at that frontier. An empty
+    /// batch reads nothing, but a closed runtime refuses it as it refuses
+    /// any read.
+    pub fn read_points(
+        &self,
+        requests: Vec<PointReadRequest>,
+    ) -> StorageApiResult<PointBatchRead<'_>> {
+        let Some(branch_id) = requests.first().map(PointReadRequest::branch_id) else {
+            return match self.inner {
+                StorageRuntimeInner::Closed => Err(StorageApiError::InvalidRuntimeState {
+                    reason: "read requires an open runtime",
+                }),
+                StorageRuntimeInner::Cache(_) | StorageRuntimeInner::DurableOwned(_) => {
+                    Ok(PointBatchRead::new(Vec::new(), None))
                 }
-            }
-            None => visible_tombstone_at_bound(&view, &key, capped)?,
+            };
         };
-        Ok(PointReadOutcome::new(row))
+        if requests
+            .iter()
+            .any(|request| request.branch_id() != branch_id)
+        {
+            return Err(StorageApiError::InvalidArgument {
+                field: "branch_id",
+                reason: "a point batch reads one branch",
+            });
+        }
+        let points = requests
+            .into_iter()
+            .map(|request| {
+                let key =
+                    physical_key(request.branch_id(), request.storage_space(), request.key())?;
+                Ok((request.bound(), key))
+            })
+            .collect::<StorageApiResult<Vec<_>>>()?;
+        let view = self.load_published_snapshot(branch_id)?;
+        Ok(PointBatchRead::new(points, Some(view)))
     }
 
     pub fn read_history(

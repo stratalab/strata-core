@@ -594,6 +594,20 @@ impl Database {
         self.persistence.arm_storage_fault(FaultOp::Read, kind, 0);
     }
 
+    /// Runs `hook` on the reading thread at the persistence read that follows
+    /// `skip` further reads (point reads, and history reads too): before a
+    /// lone read reaches storage, or just after a batch read's answer is
+    /// read. A test uses it
+    /// to hold a multi-entry read between two of its entries while another
+    /// thread commits (#3582). `&self`, so a test can arm the next pause
+    /// while a read it paused is still in flight; a hook fires on whichever
+    /// thread reads next, so arm it only while that thread is the reader.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn on_point_read_for_test(&self, skip: usize, hook: impl FnOnce() + Send + 'static) {
+        self.persistence
+            .arm_hook(FaultOp::Read, skip, Box::new(hook));
+    }
+
     /// Arms a storage fault that fires on the next persistence scan.
     #[cfg(any(test, feature = "testkit"))]
     pub fn inject_scan_fault_for_test(&mut self, kind: StorageFaultKind) {

@@ -6,15 +6,18 @@ use super::{
     CommitTimelineLookup, CommitTimelineMiss, CommitTimelineView, CommitVersion,
     FlushFrozenRequest, FlushTableIdentitySeed, FlushTableObjectId, LifecycleStoragePressureReason,
     LifecycleStoragePressureSeverity, LifecycleWriteAdmissionOutcome,
-    LifecycleWriteAdmissionStatus, PhysicalKey, ReadBound, ReadLimit, ResolvedReadBound,
-    RowStorageSpaceId, ScanReadOutcome, StorageApiError, StorageApiLowerLayer, StorageApiResult,
-    StorageKey, StorageReadRow, StorageRow, StorageSpaceId, StorageValue, Timestamp,
-    API_PHYSICAL_SPACE,
+    LifecycleWriteAdmissionStatus, PhysicalKey, PointReadOutcome, ReadBound, ReadLimit,
+    ResolvedReadBound, RowStorageSpaceId, ScanReadOutcome, StorageApiError, StorageApiLowerLayer,
+    StorageApiResult, StorageKey, StorageReadRow, StorageRow, StorageSpaceId, StorageValue,
+    Timestamp, API_PHYSICAL_SPACE,
 };
 use crate::api::read::WallClockLookupOutcome;
 use crate::api::StorageImmutableSource;
 use crate::branch::read::BranchImmutableRowSource;
+use crate::observability::perf_trace;
 use crate::timeline_index::WallClockResolution;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 pub(super) fn map_commit_summary(
     outcome: &crate::commit::CommitOutcome,
@@ -244,6 +247,90 @@ pub(super) fn cap_bound_at_visible(bound: BranchReadBound, visible: u64) -> Bran
         }
         BranchReadBound::Latest => BranchReadBound::at_version(CommitVersion::new(visible)),
         BranchReadBound::AtTimestamp(_) => bound,
+    }
+}
+
+/// Answers one point read of `key` (a request's physical key) at `bound`
+/// from an already loaded published snapshot `view`, whose visible frontier
+/// was `visible` when it was loaded. `read_point` loads one view per read;
+/// `read_points` loads one per batch (#3582).
+#[inline]
+pub(super) fn read_point_in_view(
+    view: &BranchReadView,
+    visible: u64,
+    bound: ReadBound,
+    key: &PhysicalKey,
+) -> StorageApiResult<PointReadOutcome> {
+    if bound == ReadBound::Latest {
+        let row = view
+            .read_point_or_tombstone(
+                key,
+                BranchReadBound::at_version(CommitVersion::new(visible)),
+            )
+            .map_err(branch_error)?;
+        // B4: the branch row is owned — move its key and value into the
+        // public row instead of copying at the boundary.
+        let row = row
+            .map(|row| point_read_row_from_storage_owned(row.into_storage_row()))
+            .transpose()?;
+        return Ok(PointReadOutcome::new(row));
+    }
+    let resolved = resolve_read_bound(view, bound)?;
+    let capped = cap_bound_at_visible(resolved.branch_bound, visible);
+    let row = match view.read_point(key, capped).map_err(branch_error)? {
+        Some(row) => {
+            // Expiry is decided on the reference (scalar reads), then the
+            // surviving row moves out.
+            if row_is_expired_at_selected_frontier(row.row(), resolved.selected_timestamp) {
+                None
+            } else {
+                Some(point_read_row_from_storage_owned(row.into_storage_row())?)
+            }
+        }
+        None => visible_tombstone_at_bound(view, key, capped)?,
+    };
+    Ok(PointReadOutcome::new(row))
+}
+
+/// The answers to a batch of point reads, all from one published snapshot
+/// (#3582); see [`StorageRuntime::read_points`](super::StorageRuntime::read_points).
+/// Each answer is read when it is pulled, in request order, so a caller can
+/// consume one before the next is read: the batch holds one view and its
+/// keys, never every row at once. It borrows the runtime, so the runtime
+/// cannot close while a batch is still answering.
+pub struct PointBatchRead<'r> {
+    points: std::vec::IntoIter<(ReadBound, PhysicalKey)>,
+    view: Option<(u64, Arc<BranchReadView>)>,
+    runtime: PhantomData<&'r ()>,
+}
+
+impl PointBatchRead<'_> {
+    /// `view` is the loaded `(visible frontier, snapshot)` pair, absent only
+    /// for an empty batch.
+    pub(super) fn new(
+        points: Vec<(ReadBound, PhysicalKey)>,
+        view: Option<(u64, Arc<BranchReadView>)>,
+    ) -> Self {
+        Self {
+            points: points.into_iter(),
+            view,
+            runtime: PhantomData,
+        }
+    }
+}
+
+impl Iterator for PointBatchRead<'_> {
+    type Item = StorageApiResult<PointReadOutcome>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (bound, key) = self.points.next()?;
+        let (visible, view) = self.view.as_ref()?;
+        // Timed as the lone `read_point` this answer replaces, less its share
+        // of the batch's key validation and snapshot load.
+        let read_timer = perf_trace::start_timer();
+        let answer = read_point_in_view(view, *visible, bound, &key);
+        perf_trace::record_api_read_point_runtime_elapsed(read_timer);
+        Some(answer)
     }
 }
 

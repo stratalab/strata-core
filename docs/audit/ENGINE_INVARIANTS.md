@@ -724,10 +724,19 @@ The vector index (V1's only secondary index) is updated AFTER storage applicatio
 separate commit off the write path — eventually consistent by design; a query through the
 index may temporarily miss newly-committed entries. KV rows are always authoritative.
 
+The boundary holds across a read verb's entries, not only within one read: a verb that
+answers several entries and promises one snapshot (`json.batch_get`) reads them all from
+one view, so a commit landing mid-batch is visible to every entry or to none (#3582).
+
 **Audit**: Verify all rows in a commit share one stamp (`prepare_commit_rows`,
 `commit/cache.rs`). Verify no reader can observe version V while its apply is in flight
 (the guard + MVCC-004's publish ordering). Verify the vector index update is a separate
-post-apply commit (engine `data/vector/service.rs`).
+post-apply commit (engine `data/vector/service.rs`). Verify every multi-entry point read
+that promises one snapshot goes through `StorageRuntime::read_points` (one
+`load_published_snapshot` per batch, DUR-001's order) via the engine's
+`StoragePersistence::read_rows`, never a `read_row` per entry; pinned by the off-lock stress
+readers' `read_points_checked` (`api/tests/off_lock_concurrency.rs`) and the engine's
+`data/json/batch_snapshot_tests.rs`.
 
 ### ARCH-003: KV rows are the single source of truth
 
