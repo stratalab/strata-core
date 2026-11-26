@@ -267,7 +267,7 @@ jobs:
     # (commit_group.rs), the off-lock read protocol (visibility_loom.rs),
     # the reader-versus-reclaim liveness protocol (reclaim_loom.rs, #3048)
     # and the close's wait for in-flight manifest publishes
-    # (publish_slots.rs, #3747) under loom. Fully deterministic — every schedule at
+    # (publish_slots_loom.rs, #3747) under loom. Fully deterministic — every schedule at
     # the model bounds is explored, so this can block merges without
     # flapping. The --cfg loom build swaps the storage sync seam
     # (crates/storage/src/sync.rs) to loom primitives; the separate cache

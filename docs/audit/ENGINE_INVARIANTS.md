@@ -2204,9 +2204,11 @@ every reclaim pass reports what it freed (#3622).
 (`crates/storage/src/lifecycle/tests/close_checkpoint.rs`),
 `api_close_waits_for_an_in_flight_manifest_publish_before_its_checkpoint`,
 `api_close_reports_a_panic_in_the_publish_it_waits_for`, with the slot wait's
-own tests (`close_wait_outcome_truth_table` among them) and its loom model
+own tests (`close_wait_outcome_truth_table` among them,
+`crates/storage/src/lifecycle/durable/publish_slots.rs`) and its loom model
 `publish_slots_loom_close_locks_only_while_no_publish_is_in_flight`
-(`crates/storage/src/lifecycle/durable/publish_slots.rs`), `api_read_only_reopen_reclaims_deterministically`,
+(`crates/storage/src/lifecycle/durable/publish_slots/publish_slots_loom.rs`),
+`api_read_only_reopen_reclaims_deterministically`,
 `api_open_reclaims_nothing_inline_without_a_worker`,
 `api_reopen_reconciles_snapshots_to_the_attested_id`,
 `api_reopen_purges_quarantine_a_prior_session_left_unpurged`,
