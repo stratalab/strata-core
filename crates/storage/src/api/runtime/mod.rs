@@ -99,7 +99,6 @@ use background::{
     BackgroundBlockWaitConfig, BackgroundPressureSnapshot, BackgroundWalGrowthSnapshot, RuntimeSlot,
 };
 
-pub use data::PointBatchRead;
 use data::{
     before_timeline_error, cap_bound_at_visible, flush_request_for_boundary, map_api_commit_batch,
     map_commit_summary, map_immutable_sources, map_scan_rows, map_storage_space, outside_timeline,
@@ -107,6 +106,7 @@ use data::{
     resolve_read_bound, timeline_committed_at_for_versions, timeline_proves_branch_birth,
     timeline_resolve_wall_clock, timeline_view_or_index,
 };
+pub use data::{BranchScanSnapshot, PointBatchRead};
 use diagnostics::{
     branch_for_diagnostics_scope, branch_generation_or_default, current_visible,
     diagnostics_mode_from_plan, diagnostics_pressure_report, diagnostics_source_layout_report,
@@ -1598,55 +1598,20 @@ impl<'a> StorageRuntime<'a> {
         &self,
         request: &PrefixScanReadRequest,
     ) -> StorageApiResult<ScanReadOutcome> {
-        let prefix = physical_key(
-            request.branch_id(),
-            request.storage_space(),
-            request.prefix(),
-        )?;
-        let (visible, view) = self.load_published_snapshot(request.branch_id())?;
-        let bounds = BranchScanBounds::prefix(&prefix);
-        // The Latest fast path does not apply a version lower bound, so route `after_version`
-        // reads through the resolving view path (which honors the bound at selection).
-        if matches!(request.bound(), ReadBound::Latest) && request.after_version().is_none() {
-            let scan_timer = perf_trace::start_timer();
-            let rows = view
-                .scan_including_tombstones_visible(
-                    &bounds,
-                    BranchReadBound::at_version(CommitVersion::new(visible)),
-                    request.limit().map(ReadLimit::get),
-                )
-                .map_err(branch_error)?;
-            perf_trace::record_api_scan_runtime_elapsed(scan_timer);
-            let map_timer = perf_trace::start_timer();
-            let outcome = map_scan_rows(
-                rows.iter().map(crate::branch::read::BranchHistoryRow::row),
-                request.limit(),
-                None,
-            );
-            perf_trace::record_api_scan_map_elapsed(map_timer);
-            return outcome;
-        }
+        // One path for every prefix scan: a lone scan is a snapshot of one.
+        self.scan_snapshot(request.branch_id())?
+            .scan_prefix(request)
+    }
 
-        let resolved = resolve_read_bound(&view, request.bound())?;
-        let capped = cap_bound_at_visible(resolved.branch_bound, visible);
-        // #3560: thread the limit into the branch scan, as the Latest arm does. The scan resolves
-        // each key at `capped` before counting it and counts against the same TTL frontier
-        // `map_scan_rows` filters with, so the page stops early yet maps to exactly the rows the
-        // unbounded scan would have produced.
-        let rows = view
-            .scan_including_tombstones_limited(
-                &bounds,
-                capped,
-                request.after_version(),
-                request.limit().map(ReadLimit::get),
-                resolved.selected_timestamp,
-            )
-            .map_err(branch_error)?;
-        map_scan_rows(
-            rows.iter().map(crate::branch::read::BranchHistoryRow::row),
-            request.limit(),
-            resolved.selected_timestamp,
-        )
+    /// Loads `branch_id`'s published snapshot once, for a read made of
+    /// several prefix scans that must answer from one frontier (#3758). The
+    /// visible frontier is loaded before the snapshot, as every off-lock
+    /// read loads them (V before S, DUR-001).
+    pub fn scan_snapshot(&self, branch_id: BranchId) -> StorageApiResult<BranchScanSnapshot<'_>> {
+        Ok(BranchScanSnapshot::new(
+            branch_id,
+            self.load_published_snapshot(branch_id)?,
+        ))
     }
 
     pub fn scan_range(&self, request: &ScanReadRequest) -> StorageApiResult<ScanReadOutcome> {

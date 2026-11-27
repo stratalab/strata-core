@@ -608,6 +608,18 @@ impl Database {
             .arm_hook(FaultOp::Read, skip, Box::new(hook));
     }
 
+    /// Runs `hook` on the reading thread at the persistence prefix scan that
+    /// follows `skip` further scans, before that scan reaches storage. A test
+    /// uses it to hold a read made of several scans between two of them
+    /// while another thread commits (#3758). The same rules as
+    /// [`Self::on_point_read_for_test`]: `&self`, and a hook fires on
+    /// whichever thread scans next.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn on_scan_for_test(&self, skip: usize, hook: impl FnOnce() + Send + 'static) {
+        self.persistence
+            .arm_hook(FaultOp::Scan, skip, Box::new(hook));
+    }
+
     /// Arms a storage fault that fires on the next persistence scan.
     #[cfg(any(test, feature = "testkit"))]
     pub fn inject_scan_fault_for_test(&mut self, kind: StorageFaultKind) {

@@ -8,14 +8,15 @@ use strata_core::{CommitVersion, Timestamp};
 use strata_storage::api::{
     BranchAction, BranchCleanupSummary as StorageBranchCleanupSummary,
     BranchGeneration as StorageBranchGeneration, BranchOutcome as StorageBranchOutcome,
-    BranchRequest, BranchStatus as StorageBranchStatus, BranchSummary as StorageBranchSummary,
-    CommitBatch, CommitDurabilitySummary, CommitInstantsRequest, CommitMutation, CommitOptions,
-    CommitTimelineEdge, HistoryReadRequest, ImmutableSourceScanReadRequest, PointReadRequest,
-    PrefixScanReadRequest, ReadBound, ReadLimit, ScanRange, ScanReadRequest, StorageApiError,
-    StorageApiErrorClass, StorageBudgetPolicy, StorageBudgetSource, StorageCachePreheatPolicy,
-    StorageCloseSummary, StorageDurabilityPolicy, StorageImmutableSource, StorageKey,
-    StorageMemoryBudget, StorageOpenDisposition, StorageOpenOptions, StorageReadRow,
-    StorageRuntime, StorageRuntimeState, StorageSpaceId, StorageValue, TimelineBoundsRequest,
+    BranchRequest, BranchScanSnapshot, BranchStatus as StorageBranchStatus,
+    BranchSummary as StorageBranchSummary, CommitBatch, CommitDurabilitySummary,
+    CommitInstantsRequest, CommitMutation, CommitOptions, CommitTimelineEdge, HistoryReadRequest,
+    ImmutableSourceScanReadRequest, PointReadRequest, PrefixScanReadRequest, ReadBound, ReadLimit,
+    ScanRange, ScanReadOutcome, ScanReadRequest, StorageApiError, StorageApiErrorClass,
+    StorageBudgetPolicy, StorageBudgetSource, StorageCachePreheatPolicy, StorageCloseSummary,
+    StorageDurabilityPolicy, StorageImmutableSource, StorageKey, StorageMemoryBudget,
+    StorageOpenDisposition, StorageOpenOptions, StorageReadRow, StorageRuntime,
+    StorageRuntimeState, StorageSpaceId, StorageValue, TimelineBoundsRequest,
     WallClockLookupRequest,
 };
 use strata_storage::api::{
@@ -461,6 +462,35 @@ impl PersistenceImmutableSource {
 
     pub(crate) fn rows(&self) -> &[PersistenceReadRow] {
         &self.rows
+    }
+}
+
+/// One branch's storage snapshot for a read made of several prefix scans:
+/// every scan answers from the frontier loaded when the snapshot was taken,
+/// so a commit that lands between two of them is visible to every scan or to
+/// none (#3758). Each scan answers what [`StoragePersistence::scan_prefix`]
+/// answers at that frontier and passes the fault seam as one scan.
+pub(crate) struct PersistenceScanSnapshot<'a> {
+    persistence: &'a StoragePersistence,
+    branch_id: BranchId,
+    snapshot: BranchScanSnapshot<'a>,
+}
+
+impl PersistenceScanSnapshot<'_> {
+    pub(crate) fn scan_prefix(
+        &self,
+        row_class: RowClass,
+        prefix: Vec<u8>,
+        selector: ReadSelector,
+        limit: Option<usize>,
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
+        self.persistence.scan_prefix_rows(limit, |limit| {
+            let request =
+                prefix_scan_request(self.branch_id, row_class, prefix, selector, limit, None)?;
+            self.snapshot
+                .scan_prefix(&request)
+                .map_err(map_storage_error)
+        })
     }
 }
 
@@ -1044,22 +1074,28 @@ impl StoragePersistence {
         limit: Option<usize>,
         after_version: Option<CommitVersion>,
     ) -> Result<Vec<PersistenceReadRow>, EngineError> {
+        self.scan_prefix_rows(limit, |limit| {
+            let request =
+                prefix_scan_request(branch_id, row_class, prefix, selector, limit, after_version)?;
+            self.runtime
+                .scan_prefix(&request)
+                .map_err(map_storage_error)
+        })
+    }
+
+    /// What every prefix scan shares around the storage call `scan`: the
+    /// fault seam, the zero-limit answer, the row mapping and the scanned-row
+    /// count.
+    fn scan_prefix_rows(
+        &self,
+        limit: Option<usize>,
+        scan: impl FnOnce(Option<ReadLimit>) -> Result<ScanReadOutcome, EngineError>,
+    ) -> Result<Vec<PersistenceReadRow>, EngineError> {
         self.guard_fault(FaultOp::Scan)?;
         if limit == Some(0) {
             return Ok(Vec::new());
         }
-        let limit = read_limit(limit)?;
-        let outcome = self
-            .runtime
-            .scan_prefix(&prefix_scan_request(
-                branch_id,
-                row_class,
-                prefix,
-                selector,
-                limit,
-                after_version,
-            )?)
-            .map_err(map_storage_error)?;
+        let outcome = scan(read_limit(limit)?)?;
         let mut rows: Vec<PersistenceReadRow> = outcome
             .rows()
             .iter()
@@ -1068,6 +1104,23 @@ impl StoragePersistence {
         self.corrupt_rows(FaultOp::Scan, &mut rows);
         self.record_scanned_rows(rows.len());
         Ok(rows)
+    }
+
+    /// Loads one storage snapshot of `branch_id` for a read made of several
+    /// prefix scans, so they all answer from one frontier (#3758).
+    pub(crate) fn scan_snapshot(
+        &self,
+        branch_id: BranchId,
+    ) -> Result<PersistenceScanSnapshot<'_>, EngineError> {
+        let snapshot = self
+            .runtime
+            .scan_snapshot(branch_id)
+            .map_err(map_storage_error)?;
+        Ok(PersistenceScanSnapshot {
+            persistence: self,
+            branch_id,
+            snapshot,
+        })
     }
 
     pub(crate) fn scan_range(

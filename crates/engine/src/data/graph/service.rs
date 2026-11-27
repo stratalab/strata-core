@@ -2493,8 +2493,17 @@ impl<'a> GraphService<'a> {
     ) -> Result<GraphAdjacencyIndex, EngineError> {
         let record = self.branch_record()?;
         self.require_graph_with_selector(&record, graph, selector)?;
+        // #3758: the nodes and the edges come from one snapshot, so a commit
+        // that lands between the two scans is visible to both or to neither —
+        // never an edge whose endpoint the node scan did not see.
+        let snapshot = self.persistence.scan_snapshot(record.storage_branch_id())?;
         let mut builder = GraphAdjacencyIndexBuilder::new(graph.clone(), *budget);
-        for row in self.node_rows(&record, graph, selector)? {
+        for row in snapshot.scan_prefix(
+            RowClass::GraphNode,
+            encode_graph_node_prefix(&self.space, graph),
+            selector,
+            None,
+        )? {
             if row.is_tombstone() {
                 continue;
             }
@@ -2502,7 +2511,16 @@ impl<'a> GraphService<'a> {
             builder.add_node(node_id)?;
         }
         builder.finish_nodes();
-        for row in self.edge_rows(&record, graph, selector)? {
+        let edge_rows = snapshot.scan_prefix(
+            RowClass::GraphEdge,
+            encode_graph_edge_prefix(&self.space, graph),
+            selector,
+            None,
+        )?;
+        // Both scans are read: release the view before decoding the edges, so
+        // the build pins old tables no longer than its reads need them.
+        drop(snapshot);
+        for row in edge_rows {
             if row.is_tombstone() {
                 continue;
             }
