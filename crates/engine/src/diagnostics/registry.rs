@@ -1307,6 +1307,17 @@ mod tests {
             4,
             "each history row has its own remedy"
         );
+        // Each remedy is an explicit row of the history table, not a fallback
+        // that happens to differ: a code missing from the table would inherit
+        // the class remedy and still look distinct above.
+        for entry in rows.iter().map(|(entry, _)| entry).chain([&retained]) {
+            assert_eq!(
+                Some(entry.suggested_fix),
+                history_suggested_fix(entry.code),
+                "{}",
+                entry.code
+            );
+        }
     }
 
     /// `already_exists.engine.persistence` is an `already_exists` row under

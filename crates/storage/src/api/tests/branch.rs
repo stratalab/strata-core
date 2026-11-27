@@ -387,6 +387,7 @@ fn branch_fork_at_a_timestamp_outside_the_timeline_names_the_edge() {
     assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
 }
 
+#[cfg(feature = "localfs")]
 fn read_timed_at(
     runtime: &StorageRuntime<'_>,
     branch_id: BranchId,
