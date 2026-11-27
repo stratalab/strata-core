@@ -258,13 +258,16 @@ pub enum Command {
         /// Source version.
         version: u64,
     },
-    /// Forks a branch from a retained source timestamp.
+    /// Forks a branch from a retained source commit timestamp.
     BranchForkAtTimestamp {
         /// Source branch name.
         source: String,
         /// Destination branch name.
         branch: String,
-        /// Source timestamp in microseconds.
+        /// Source position on the logical commit timeline: the `timestamp`
+        /// from a write receipt or `history` output, not the `version` and
+        /// not the wall-clock `committed_at`. A per-commit counter, never a
+        /// calendar date.
         timestamp: u64,
     },
     /// Deletes an active branch.

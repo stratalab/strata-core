@@ -648,7 +648,10 @@ pub(crate) enum BranchCommand {
         /// Fork from a retained source version.
         #[arg(long, conflicts_with = "timestamp")]
         version: Option<u64>,
-        /// Fork from a retained source timestamp.
+        /// Fork from a position on the source's logical commit timeline: the
+        /// `timestamp` from a write receipt or `history` output, not the
+        /// `version` and not `committed_at`. This is a per-commit counter,
+        /// never a calendar date.
         #[arg(long, conflicts_with = "version")]
         timestamp: Option<u64>,
     },
@@ -2473,6 +2476,58 @@ pub(crate) mod tests {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// Every flag that takes a position on the logical commit timeline says
+    /// so, and none calls it microseconds. Beside `--as-of-time`, a bare
+    /// "timestamp" reads as a wall-clock instant, and the old help said
+    /// microseconds for both `--as-of` and `branch fork --timestamp`.
+    #[test]
+    fn commit_clock_flags_name_the_commit_timeline() {
+        fn walk(command: &clap::Command, path: &str, out: &mut Vec<(String, String)>) {
+            for arg in command.get_arguments() {
+                let id = arg.get_id().as_str();
+                if id == "as_of" || (path == "branch fork" && id == "timestamp") {
+                    let help = arg
+                        .get_long_help()
+                        .or_else(|| arg.get_help())
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    out.push((format!("{path} --{}", id.replace('_', "-")), help));
+                }
+            }
+            for sub in command.get_subcommands() {
+                let sub_path = if path.is_empty() {
+                    sub.get_name().to_owned()
+                } else {
+                    format!("{path} {}", sub.get_name())
+                };
+                walk(sub, &sub_path, out);
+            }
+        }
+        let mut flags = Vec::new();
+        walk(&super::Cli::command(), "", &mut flags);
+        assert!(
+            flags
+                .iter()
+                .any(|(flag, _)| flag == "branch fork --timestamp"),
+            "expected `branch fork --timestamp` among {flags:?}",
+        );
+        assert!(
+            flags
+                .iter()
+                .filter(|(flag, _)| flag.ends_with("--as-of"))
+                .count()
+                > 1,
+            "expected the `--as-of` flags among {flags:?}",
+        );
+        for (flag, help) in &flags {
+            let help = help.to_lowercase();
+            assert!(
+                help.contains("logical commit timeline") && !help.contains("microsecond"),
+                "`{flag}` takes a logical commit-timeline position; its help must say so: {help:?}",
+            );
+        }
     }
 
     /// Every leaf verb the `strata` clap tree exposes. This is the mechanical,

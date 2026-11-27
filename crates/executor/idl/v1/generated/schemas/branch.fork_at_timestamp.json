@@ -161,7 +161,7 @@
   "command": "branch.fork_at_timestamp",
   "request": {
     "additionalProperties": false,
-    "description": "Forks a branch from a retained source timestamp.",
+    "description": "Forks a branch from a retained source commit timestamp.",
     "properties": {
       "branch": {
         "description": "Destination branch name.",
@@ -172,7 +172,7 @@
         "type": "string"
       },
       "timestamp": {
-        "description": "Source timestamp in microseconds.",
+        "description": "Source position on the logical commit timeline: the `timestamp`\nfrom a write receipt or `history` output, not the `version` and\nnot the wall-clock `committed_at`. A per-commit counter, never a\ncalendar date.",
         "format": "uint64",
         "minimum": 0,
         "type": "integer"
