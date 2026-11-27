@@ -155,6 +155,9 @@ commands:
             - requests/v1/json/set_rename.json
           request: requests/v1/json/batch_get_as_of.json
           response: responses/v1/json/batch_get_ok.json
+      error_cases:
+        - request: requests/v1/json/batch_get_after_latest_commit.json
+          expected_error: responses/v1/errors/json/batch_get_after_latest_commit.json
   - id: json.batch_delete
     kind: batch.itemwise_mutation
     title: Batch delete JSON values

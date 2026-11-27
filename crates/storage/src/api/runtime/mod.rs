@@ -1514,7 +1514,9 @@ impl<'a> StorageRuntime<'a> {
     /// them. Each answer is read as the returned [`PointBatchRead`] is pulled
     /// and is what [`Self::read_point`] returns at that frontier. An empty
     /// batch reads nothing, but a closed runtime refuses it as it refuses
-    /// any read.
+    /// any read. An empty batch names no branch or bound, so it checks
+    /// neither: a caller whose batch is pinned to one position calls
+    /// [`Self::validate_read_bound`] when it has no point to read (#3763).
     pub fn read_points(
         &self,
         requests: Vec<PointReadRequest>,
@@ -1548,6 +1550,22 @@ impl<'a> StorageRuntime<'a> {
             .collect::<StorageApiResult<Vec<_>>>()?;
         let view = self.load_published_snapshot(branch_id)?;
         Ok(PointBatchRead::new(points, Some(view)))
+    }
+
+    /// Refuses `bound` on `branch_id` exactly as a point read at it would,
+    /// without reading a row (#3763). A pinned batch that reads no point
+    /// still answers for its position, so a position outside the branch's
+    /// history fails an empty batch as it fails a full one. A
+    /// [`ReadBound::Latest`] bound needs only an open runtime and a
+    /// published branch.
+    pub fn validate_read_bound(
+        &self,
+        branch_id: BranchId,
+        bound: ReadBound,
+    ) -> StorageApiResult<()> {
+        let (_, view) = self.load_published_snapshot(branch_id)?;
+        resolve_read_bound(&view, bound)?;
+        Ok(())
     }
 
     pub fn read_history(

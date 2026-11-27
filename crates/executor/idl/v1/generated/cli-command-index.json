@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "90295d551b81c78fc477d39e1b80a4e308f0f9e35b4e851679c73f8bc5a1c853",
+    "checksum_sha256": "ab61869e57d4a993858af5f9b4185f18184e97802a947cbe9969291ef5dee558",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -6787,7 +6787,7 @@
       "kind": "batch.itemwise_read",
       "title": "Batch get JSON values",
       "summary": "Read multiple JSON values by document and path.",
-      "description": "Reads several document/path entries and returns positional item results. Each item records whether the value was found and includes version metadata when present.\n\nWith `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every entry is read as of that one position, so a batch can hydrate the documents a version-pinned read named — a graph query at a version, say — without mixing in later state. Entries keep their order, a repeated entry is answered again, and a document absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch rather than answering from the latest state: `history_unavailable.engine.before_first_commit` or `history_unavailable.engine.after_latest_commit` names the end it missed, `history_unavailable.engine.undated_history` refuses an `as_of_time` over commits that record no wall-clock time, and `history_unavailable.engine.persistence_history` refuses history a retention policy pruned; setting both clocks at once is refused.\n\nItemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.",
+      "description": "Reads several document/path entries and returns positional item results. Each item records whether the value was found and includes version metadata when present.\n\nWith `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every entry is read as of that one position, so a batch can hydrate the documents a version-pinned read named — a graph query at a version, say — without mixing in later state. Entries keep their order, a repeated entry is answered again, and a document absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch rather than answering from the latest state, even a batch that names no entry or one whose every entry is refused: `history_unavailable.engine.before_first_commit` or `history_unavailable.engine.after_latest_commit` names the end it missed, `history_unavailable.engine.undated_history` refuses an `as_of_time` over commits that record no wall-clock time, and `history_unavailable.engine.persistence_history` refuses history a retention policy pruned; setting both clocks at once is refused.\n\nItemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.",
       "docs": "/docs/json/batch_get",
       "feature": "core",
       "access": "read",
@@ -6856,6 +6856,12 @@
             ],
             "request": "requests/v1/json/batch_get_as_of.json",
             "response": "responses/v1/json/batch_get_ok.json"
+          }
+        ],
+        "error_cases": [
+          {
+            "request": "requests/v1/json/batch_get_after_latest_commit.json",
+            "expected_error": "responses/v1/errors/json/batch_get_after_latest_commit.json"
           }
         ]
       },
@@ -7981,7 +7987,7 @@
       "kind": "batch.itemwise_read",
       "title": "Batch get KV values",
       "summary": "Read multiple KV values by key.",
-      "description": "Reads several KV keys and returns positional item results. Each item records whether the corresponding key was found and includes value metadata when present.\n\nEvery key is read from one snapshot, so a commit that lands while the batch runs is visible to every key or to none. With `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every key is read as of that one position, so a batch can hydrate the entries a version-pinned read named — a graph query at a version, say — without mixing in later state. Keys keep their order, a repeated key is answered again, and a key absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch rather than answering from the latest state: `history_unavailable.engine.before_first_commit` or `history_unavailable.engine.after_latest_commit` names the end it missed, `history_unavailable.engine.undated_history` refuses an `as_of_time` over commits that record no wall-clock time, and `history_unavailable.engine.persistence_history` refuses history a retention policy pruned; setting both clocks at once is refused.\n\nItemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.",
+      "description": "Reads several KV keys and returns positional item results. Each item records whether the corresponding key was found and includes value metadata when present.\n\nEvery key is read from one snapshot, so a commit that lands while the batch runs is visible to every key or to none. With `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every key is read as of that one position, so a batch can hydrate the entries a version-pinned read named — a graph query at a version, say — without mixing in later state. Keys keep their order, a repeated key is answered again, and a key absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch rather than answering from the latest state, even a batch that names no key or one whose every key is refused: `history_unavailable.engine.before_first_commit` or `history_unavailable.engine.after_latest_commit` names the end it missed, `history_unavailable.engine.undated_history` refuses an `as_of_time` over commits that record no wall-clock time, and `history_unavailable.engine.persistence_history` refuses history a retention policy pruned; setting both clocks at once is refused.\n\nItemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.",
       "docs": "/docs/kv/batch_get",
       "feature": "core",
       "access": "read",

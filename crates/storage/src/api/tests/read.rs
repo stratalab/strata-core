@@ -2181,3 +2181,55 @@ fn read_points_refuses_a_batch_that_spans_two_branches() {
     .expect("a one-branch batch reads");
     assert_eq!(answers.len(), 2);
 }
+
+#[test]
+fn validate_read_bound_answers_each_position_as_read_point_does() {
+    // #3763: the check a pinned batch runs when it reads no point. At every
+    // position it answers as a point read there does: the same refusal
+    // outside the branch's history, success inside it. So an empty batch
+    // hears what a full one hears.
+    let mut runtime = open_runtime();
+    let first = commit_put(&mut runtime, b"alpha", b"one", 10);
+    commit_put(&mut runtime, b"alpha", b"two", 20);
+    for (bound, readable) in [
+        (ReadBound::Latest, true),
+        (ReadBound::AtVersion(first.commit_version()), true),
+        (ReadBound::AtTimestamp(first.commit_timestamp()), true),
+        (ReadBound::AtVersion(CommitVersion::MAX), false),
+        (ReadBound::AtTimestamp(Timestamp::EPOCH), false),
+        (ReadBound::AtTimestamp(Timestamp::MAX), false),
+    ] {
+        let single = runtime.read_point(&point_request(b"alpha", bound));
+        let checked = runtime.validate_read_bound(branch(), bound);
+        assert_eq!(single.is_ok(), readable, "{bound:?}");
+        assert_eq!(checked.is_ok(), readable, "{bound:?}");
+        if let (Err(checked), Err(single)) = (checked, single) {
+            assert_eq!(checked.class(), single.class(), "{bound:?}");
+            assert_eq!(checked.code(), single.code(), "{bound:?}");
+        }
+    }
+}
+
+#[test]
+fn validate_read_bound_on_a_missing_branch_or_closed_runtime_fails_as_read_point_does() {
+    let mut runtime = open_runtime();
+    commit_put(&mut runtime, b"alpha", b"value", 10);
+    let single = runtime
+        .read_point(&point_request_for(
+            other_branch(),
+            b"alpha",
+            ReadBound::Latest,
+        ))
+        .expect_err("a missing branch fails a single read");
+    let checked = runtime
+        .validate_read_bound(other_branch(), ReadBound::Latest)
+        .expect_err("a missing branch fails the check");
+    assert_eq!(checked.class(), single.class());
+    assert_eq!(checked.code(), single.code());
+
+    runtime.close().expect("close the runtime");
+    let closed = runtime
+        .validate_read_bound(branch(), ReadBound::Latest)
+        .expect_err("a closed runtime refuses the check");
+    assert_eq!(closed.code(), "failed_precondition.storage_api.state");
+}
