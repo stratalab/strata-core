@@ -1,15 +1,15 @@
 use super::error::{branch_error, commit_error, map_lifecycle_error};
 use super::{
-    BranchHistoryOptions, BranchId, BranchReadBound, BranchReadView, CommitAdmissionPressureReason,
-    CommitAdmissionPressureSeverity, CommitAdmissionSummary, CommitBatch, CommitDurabilityClass,
-    CommitDurabilitySummary, CommitExpectedVersion, CommitSummary, CommitTimelineEntry,
-    CommitTimelineLookup, CommitTimelineMiss, CommitTimelineView, CommitVersion,
-    FlushFrozenRequest, FlushTableIdentitySeed, FlushTableObjectId, LifecycleStoragePressureReason,
-    LifecycleStoragePressureSeverity, LifecycleWriteAdmissionOutcome,
-    LifecycleWriteAdmissionStatus, PhysicalKey, PointReadOutcome, ReadBound, ReadLimit,
-    ResolvedReadBound, RowStorageSpaceId, ScanReadOutcome, StorageApiError, StorageApiLowerLayer,
-    StorageApiResult, StorageKey, StorageReadRow, StorageRow, StorageSpaceId, StorageValue,
-    Timestamp, API_PHYSICAL_SPACE,
+    BranchHistoryOptions, BranchId, BranchReadBound, BranchReadView, BranchScanBounds,
+    CommitAdmissionPressureReason, CommitAdmissionPressureSeverity, CommitAdmissionSummary,
+    CommitBatch, CommitDurabilityClass, CommitDurabilitySummary, CommitExpectedVersion,
+    CommitSummary, CommitTimelineEntry, CommitTimelineLookup, CommitTimelineMiss,
+    CommitTimelineView, CommitVersion, FlushFrozenRequest, FlushTableIdentitySeed,
+    FlushTableObjectId, LifecycleStoragePressureReason, LifecycleStoragePressureSeverity,
+    LifecycleWriteAdmissionOutcome, LifecycleWriteAdmissionStatus, PhysicalKey, PointReadOutcome,
+    PrefixScanReadRequest, ReadBound, ReadLimit, ResolvedReadBound, RowStorageSpaceId,
+    ScanReadOutcome, StorageApiError, StorageApiLowerLayer, StorageApiResult, StorageKey,
+    StorageReadRow, StorageRow, StorageSpaceId, StorageValue, Timestamp, API_PHYSICAL_SPACE,
 };
 use crate::api::read::WallClockLookupOutcome;
 use crate::api::{CommitTimelineEdge, StorageImmutableSource};
@@ -331,6 +331,109 @@ impl Iterator for PointBatchRead<'_> {
         let answer = read_point_in_view(view, *visible, bound, &key);
         perf_trace::record_api_read_point_runtime_elapsed(read_timer);
         Some(answer)
+    }
+}
+
+/// Answers one prefix scan of `prefix` (the request's physical prefix) from
+/// an already loaded published snapshot `view`, whose visible frontier was
+/// `visible` when it was loaded. Every prefix scan reaches it through a
+/// [`BranchScanSnapshot`], whether the snapshot serves one scan or several
+/// (#3758).
+#[inline]
+fn scan_prefix_in_view(
+    view: &BranchReadView,
+    visible: u64,
+    request: &PrefixScanReadRequest,
+    prefix: &PhysicalKey,
+) -> StorageApiResult<ScanReadOutcome> {
+    let bounds = BranchScanBounds::prefix(prefix);
+    // The Latest fast path does not apply a version lower bound, so route `after_version`
+    // reads through the resolving view path (which honors the bound at selection).
+    if matches!(request.bound(), ReadBound::Latest) && request.after_version().is_none() {
+        let scan_timer = perf_trace::start_timer();
+        let rows = view
+            .scan_including_tombstones_visible(
+                &bounds,
+                BranchReadBound::at_version(CommitVersion::new(visible)),
+                request.limit().map(ReadLimit::get),
+            )
+            .map_err(branch_error)?;
+        perf_trace::record_api_scan_runtime_elapsed(scan_timer);
+        let map_timer = perf_trace::start_timer();
+        let outcome = map_scan_rows(
+            rows.iter().map(crate::branch::read::BranchHistoryRow::row),
+            request.limit(),
+            None,
+        );
+        perf_trace::record_api_scan_map_elapsed(map_timer);
+        return outcome;
+    }
+
+    let resolved = resolve_read_bound(view, request.bound())?;
+    let capped = cap_bound_at_visible(resolved.branch_bound, visible);
+    // #3560: thread the limit into the branch scan, as the Latest arm does. The scan resolves
+    // each key at `capped` before counting it and counts against the same TTL frontier
+    // `map_scan_rows` filters with, so the page stops early yet maps to exactly the rows the
+    // unbounded scan would have produced.
+    let rows = view
+        .scan_including_tombstones_limited(
+            &bounds,
+            capped,
+            request.after_version(),
+            request.limit().map(ReadLimit::get),
+            resolved.selected_timestamp,
+        )
+        .map_err(branch_error)?;
+    map_scan_rows(
+        rows.iter().map(crate::branch::read::BranchHistoryRow::row),
+        request.limit(),
+        resolved.selected_timestamp,
+    )
+}
+
+/// One branch's published snapshot, loaded once, for a read made of several
+/// prefix scans: every scan answers from the frontier loaded when the
+/// snapshot was taken, so a commit that lands between two of them is visible
+/// to every scan or to none (#3758). Each scan answers exactly what
+/// [`StorageRuntime::scan_prefix`](super::StorageRuntime::scan_prefix)
+/// answers at that frontier. It borrows the runtime, so the runtime cannot
+/// close while it is held.
+pub struct BranchScanSnapshot<'r> {
+    branch_id: BranchId,
+    visible: u64,
+    view: Arc<BranchReadView>,
+    runtime: PhantomData<&'r ()>,
+}
+
+impl BranchScanSnapshot<'_> {
+    /// `visible` and `view` are the frontier and snapshot loaded together.
+    pub(super) fn new(branch_id: BranchId, (visible, view): (u64, Arc<BranchReadView>)) -> Self {
+        Self {
+            branch_id,
+            visible,
+            view,
+            runtime: PhantomData,
+        }
+    }
+
+    /// Scans one prefix at this snapshot's frontier. A request on another
+    /// branch is refused, since the snapshot holds one branch's view.
+    pub fn scan_prefix(
+        &self,
+        request: &PrefixScanReadRequest,
+    ) -> StorageApiResult<ScanReadOutcome> {
+        if request.branch_id() != self.branch_id {
+            return Err(StorageApiError::InvalidArgument {
+                field: "branch_id",
+                reason: "a scan snapshot reads one branch",
+            });
+        }
+        let prefix = physical_key(
+            request.branch_id(),
+            request.storage_space(),
+            request.prefix(),
+        )?;
+        scan_prefix_in_view(&self.view, self.visible, request, &prefix)
     }
 }
 

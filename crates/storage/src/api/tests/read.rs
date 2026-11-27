@@ -2233,3 +2233,144 @@ fn validate_read_bound_on_a_missing_branch_or_closed_runtime_fails_as_read_point
         .expect_err("a closed runtime refuses the check");
     assert_eq!(closed.code(), "failed_precondition.storage_api.state");
 }
+
+fn prefix_request(prefix: &[u8], bound: ReadBound) -> PrefixScanReadRequest {
+    PrefixScanReadRequest::new(branch(), engine_space(), api_key(prefix), bound, None)
+}
+
+#[test]
+fn scan_snapshot_answers_each_scan_as_scan_prefix_does() {
+    // #3758: a snapshot is a set of prefix scans over one loaded view; each
+    // answer must be exactly what a lone `scan_prefix` returns: latest,
+    // version-pinned, timestamp-pinned, limited and after-version scans
+    // alike. A lone scan is itself a snapshot of one, so the values below,
+    // read against the history, are the oracle that is not circular.
+    let mut runtime = open_runtime();
+    let first = commit_put(&mut runtime, b"node:a", b"one", 10);
+    commit_put(&mut runtime, b"node:b", b"bee", 20);
+    commit_put(&mut runtime, b"edge:ab", b"uses", 30);
+    commit_put(&mut runtime, b"node:a", b"two", 40);
+    commit_delete(&mut runtime, b"node:b", 50);
+    let requests = [
+        prefix_request(b"node:", ReadBound::Latest),
+        prefix_request(b"edge:", ReadBound::Latest),
+        prefix_request(b"node:", ReadBound::AtVersion(first.commit_version())),
+        prefix_request(b"node:", ReadBound::AtTimestamp(first.commit_timestamp())),
+        PrefixScanReadRequest::new(
+            branch(),
+            engine_space(),
+            api_key(b"node:"),
+            ReadBound::Latest,
+            Some(ReadLimit::new(1).expect("valid limit")),
+        ),
+        prefix_request(b"node:", ReadBound::Latest).with_after_version(first.commit_version()),
+        prefix_request(b"missing:", ReadBound::Latest),
+    ];
+
+    let snapshot = runtime.scan_snapshot(branch()).expect("the snapshot loads");
+    for (index, request) in requests.iter().enumerate() {
+        let from_snapshot = snapshot.scan_prefix(request).expect("snapshot scan");
+        let single = runtime.scan_prefix(request).expect("single scan");
+        assert_eq!(from_snapshot, single, "request {index}");
+    }
+    // The oracle is not vacuous: the scans differ as the history says.
+    let latest_nodes = snapshot.scan_prefix(&requests[0]).expect("latest nodes");
+    assert_eq!(read_value(&latest_nodes.rows()[0]), b"two");
+    let pinned_nodes = snapshot.scan_prefix(&requests[2]).expect("pinned nodes");
+    assert_eq!(read_value(&pinned_nodes.rows()[0]), b"one");
+    let by_timestamp = snapshot.scan_prefix(&requests[3]).expect("timestamp nodes");
+    assert_eq!(read_value(&by_timestamp.rows()[0]), b"one");
+    assert_eq!(
+        snapshot
+            .scan_prefix(&requests[4])
+            .expect("limited")
+            .rows()
+            .len(),
+        1
+    );
+    assert!(snapshot
+        .scan_prefix(&requests[6])
+        .expect("missing")
+        .rows()
+        .is_empty());
+}
+
+#[test]
+fn scan_snapshot_answers_from_the_view_loaded_when_it_was_taken() {
+    // #3758: the mechanism itself. Every scan comes from the snapshot loaded
+    // when it was taken, so a commit that lands between two scans is visible
+    // to neither.
+    let mut runtime = open_runtime();
+    commit_put(&mut runtime, b"node:a", b"a", 10);
+
+    let snapshot = runtime.scan_snapshot(branch()).expect("the snapshot loads");
+    let nodes = snapshot
+        .scan_prefix(&prefix_request(b"node:", ReadBound::Latest))
+        .expect("node scan");
+    // The snapshot borrows the runtime, so the commit goes through `&self`.
+    runtime
+        .commit(&put_batch(b"node:b", b"b"))
+        .expect("commit between two scans");
+    runtime
+        .commit(&put_batch(b"edge:ab", b"uses"))
+        .expect("a second commit between two scans");
+    let edges = snapshot
+        .scan_prefix(&prefix_request(b"edge:", ReadBound::Latest))
+        .expect("edge scan");
+    let nodes_again = snapshot
+        .scan_prefix(&prefix_request(b"node:", ReadBound::Latest))
+        .expect("node scan again");
+
+    assert_eq!(nodes.rows().len(), 1);
+    assert!(
+        edges.rows().is_empty(),
+        "a commit between two scans is not visible to the second"
+    );
+    assert_eq!(nodes_again, nodes, "the snapshot answers one frontier");
+    // Direction control: a scan that begins after the commits sees them.
+    let fresh = runtime
+        .scan_prefix(&prefix_request(b"edge:", ReadBound::Latest))
+        .expect("fresh scan");
+    assert_eq!(fresh.rows().len(), 1);
+}
+
+#[test]
+fn scan_snapshot_refuses_another_branch_a_missing_branch_and_a_closed_runtime() {
+    let mut runtime = open_runtime();
+    commit_put(&mut runtime, b"node:a", b"a", 10);
+    {
+        let snapshot = runtime.scan_snapshot(branch()).expect("the snapshot loads");
+        let error = snapshot
+            .scan_prefix(&PrefixScanReadRequest::new(
+                other_branch(),
+                engine_space(),
+                api_key(b"node:"),
+                ReadBound::Latest,
+                None,
+            ))
+            .expect_err("a snapshot reads one branch");
+        assert_eq!(error.class(), StorageApiErrorClass::InvalidArgument);
+        assert_eq!(error.code(), "invalid_argument.storage_api.argument");
+    }
+
+    let single = runtime
+        .scan_prefix(&PrefixScanReadRequest::new(
+            other_branch(),
+            engine_space(),
+            api_key(b"node:"),
+            ReadBound::Latest,
+            None,
+        ))
+        .expect_err("a missing branch fails a single scan");
+    let Err(missing) = runtime.scan_snapshot(other_branch()) else {
+        panic!("a missing branch has no snapshot");
+    };
+    assert_eq!(missing.class(), single.class());
+    assert_eq!(missing.code(), single.code());
+
+    runtime.close().expect("close the runtime");
+    let Err(closed) = runtime.scan_snapshot(branch()) else {
+        panic!("a closed runtime has no snapshot");
+    };
+    assert_eq!(closed.code(), "failed_precondition.storage_api.state");
+}

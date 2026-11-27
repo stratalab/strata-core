@@ -2,6 +2,8 @@
 
 mod adapter;
 mod adjacency;
+#[cfg(test)]
+mod adjacency_snapshot_tests;
 mod analytics;
 mod iterative;
 mod ontology;

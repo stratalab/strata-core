@@ -1053,6 +1053,16 @@ branch (`data/graph/analytics.rs::sssp_with`). Tests:
 `subgraph_keeps_self_loops_and_is_deterministic` (`traversal.rs`), and the `historical ==
 latest` comparisons in `tests/engine_graph_analytics.rs`.
 
+The snapshot is ONE storage read: `adjacency_index_with_selector` takes its node scan and its
+edge scan from one `StoragePersistence::scan_snapshot` (`persistence/adapter.rs`), so both
+answer from the frontier loaded with it and a commit between them is visible to both or to
+neither (#3758). Two independently loaded `Latest` scans let an edge reach the builder
+without its endpoint, failing a healthy database with `data_loss.engine.graph_index`; a
+build that scans through `self.persistence` directly instead of the snapshot is the
+regression. Tests: `test_graph_adjacency_reads_one_version_across_concurrent_commits_*`
+(`data/graph/adjacency_snapshot_tests.rs`) and
+`scan_snapshot_answers_from_the_view_loaded_when_it_was_taken` (storage `api/tests/read.rs`).
+
 ### ARCH-014: A graph's metadata row is rewritten by every commit that changes its nodes or edges
 
 A graph's metadata row (`data/graph/record.rs::GraphMetadataRecord`) carries the graph's
