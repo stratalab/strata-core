@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "f352efc6404cf552947af7d7e39378b2298e839a60700abfb6e0a2c913ffca8c",
+    "checksum_sha256": "90295d551b81c78fc477d39e1b80a4e308f0f9e35b4e851679c73f8bc5a1c853",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -1990,7 +1990,7 @@
       "kind": "read.page",
       "title": "Read event sequence range",
       "summary": "Read a range of events by sequence number.",
-      "description": "Reads events from the selected branch and space by sequence range. The start sequence is inclusive and the optional end sequence is exclusive; reverse direction returns the same `[start_seq, end_seq)` window in descending order (newest first). An optional event type narrows the results.\n\nPaginated responses use opaque cursors. Clients should pass the returned cursor back to the same command shape and must not parse cursor contents.",
+      "description": "Reads events from the selected branch and space by sequence range. The start sequence is inclusive and the optional end sequence is exclusive; reverse direction returns the same `[start_seq, end_seq)` window in descending order (newest first). An optional event type narrows the results.\n\nThis command reads the latest log and takes no `as_of`. To read the log as of an earlier commit, page through `event.list` with `as_of` (or `as_of_time`) and its `after_sequence` cursor; it reads oldest first, and there is no newest-first read as of a commit. Do not bound this command's `end_seq` by an as-of `event.count`: force-deleting a space restarts its sequence numbers, so after that the same numbers name events of the new log.\n\nPaginated responses use opaque cursors. Clients should pass the returned cursor back to the same command shape and must not parse cursor contents.",
       "docs": "/docs/event/range",
       "feature": "core",
       "access": "read",

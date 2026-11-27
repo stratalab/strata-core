@@ -34,11 +34,11 @@
     batch is accepted); the caps #2701 documents are SDK-side only
   issue: 2701
 - axis: as_of_coverage
-  surfaces: [kv_get/event_list (have as_of), kv_exists/event_range/event_verify_chain (lack it)]
+  surfaces: [kv_get/event_list (have as_of), kv_exists/event_verify_chain (lack it)]
   behavior: >-
     as_of is accepted by most reads but rejected as an unknown field by
-    kv_exists, event_range, and event_verify_chain; event_range's omission is
-    a recorded deliberate skip pending a contract decision
+    kv_exists and event_verify_chain (event_range and event_range_by_time are
+    latest-only by contract, #3145, and are not a divergence)
   issue: 2702
 - axis: json_scan_addressing
   surfaces: [json_scan, json_count/json_list prefix]
