@@ -293,12 +293,16 @@ impl<'a> EventService<'a> {
     /// at the log start returns the tail (the newest events) and the `limit`
     /// takes from the newest end.
     ///
-    /// This read is latest-only by design: it has no `as_of` (commit-timeline)
-    /// twin. Event's temporal reads are served by `as_of` on [`get`](Self::get)
-    /// / [`len`](Self::len) / [`list`](Self::list) plus the deliberately
-    /// separate event-domain [`range_by_time`](Self::range_by_time) axis, so a
-    /// commit-timeline `range_at` would be redundant. This is the one
-    /// intentional skip in the executor-audit `as_of` parity work (#40).
+    /// This read is latest-only: it has no `as_of` (commit-timeline) twin, and
+    /// neither does [`range_by_time`](Self::range_by_time). To read the log as
+    /// of an earlier commit, page through [`list_page`](Self::list_page) with
+    /// `as_of` and its sequence cursor; [`get_at`](Self::get_at) and
+    /// [`len_at`](Self::len_at) read single events and counts. There is no
+    /// newest-first read of the log as of a commit.
+    ///
+    /// Do not bound a latest `range` by [`len_at`](Self::len_at): a forced
+    /// space delete restarts the sequence counter, so after one the same
+    /// sequence numbers name events of the new log.
     pub fn range(
         &mut self,
         start_seq: EventSequence,

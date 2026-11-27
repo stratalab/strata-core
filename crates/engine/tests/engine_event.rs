@@ -44,6 +44,74 @@ fn event_reads_return_none_for_tombstoned_rows_after_forced_space_delete() {
     });
 }
 
+/// `range` has no `as_of`; the log as of a commit is read with `list_page` and
+/// its sequence cursor. A sequence number is not a stable index into history:
+/// a forced space delete restarts the counter, so a latest `range` bounded by
+/// an as-of count reads the new log under the old numbers.
+#[test]
+fn the_log_as_of_a_commit_survives_a_forced_space_delete_that_restarts_sequences() {
+    run_database_modes(|database| {
+        let then = {
+            let mut events = event_service(database, "default", "tenant_a");
+            events
+                .append(event_type("old"), payload(json!({"id": "old-0"})))
+                .expect("first append succeeds");
+            events
+                .append(event_type("old"), payload(json!({"id": "old-1"})))
+                .expect("second append succeeds")
+                .commit()
+                .timestamp()
+        };
+        database
+            .spaces(branch("default"))
+            .expect("space service opens")
+            .delete(&space("tenant_a"), true)
+            .expect("forced space delete succeeds");
+        let mut events = event_service(database, "default", "tenant_a");
+        let restarted = events
+            .append(event_type("new"), payload(json!({"id": "new-0"})))
+            .expect("append after the delete succeeds");
+        assert_eq!(restarted.sequence(), EventSequence::new(0));
+
+        let ids = |page: &EventRangePage| {
+            page.events()
+                .iter()
+                .map(|event| event.payload().as_inner()["id"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            events.len_at(then).expect("count as of then").count(),
+            2,
+            "the log as of the commit held two events",
+        );
+        let latest = events
+            .range(
+                EventSequence::new(0),
+                Some(EventSequence::new(2)),
+                None,
+                EventRangeDirection::Forward,
+                None,
+            )
+            .expect("latest range succeeds");
+        assert_eq!(
+            ids(&latest),
+            [json!("new-0")],
+            "a latest range reads the new log"
+        );
+
+        let first = events
+            .list_page(None, None, Some(1), Some(then))
+            .expect("first as-of page succeeds");
+        assert_eq!(ids(&first), [json!("old-0")]);
+        assert!(first.has_more());
+        let second = events
+            .list_page(None, first.cursor(), Some(1), Some(then))
+            .expect("second as-of page succeeds");
+        assert_eq!(ids(&second), [json!("old-1")]);
+        assert!(!second.has_more());
+    });
+}
+
 #[test]
 fn empty_event_log_contract_runs_in_cache_and_durable_modes() {
     run_database_modes(|database| {
