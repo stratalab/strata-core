@@ -207,7 +207,7 @@
         "in": "strata kv put greeting original",
         "out": "created greeting",
         "reproducible": true,
-        "note": "The receipt carries this commit's timestamp (microseconds)."
+        "note": "The receipt's commit timestamp is this commit's position on the logical commit timeline."
       },
       {
         "in": "strata kv put greeting updated",
@@ -218,7 +218,7 @@
         "in": "strata command run --command-json '{\"branch\":\"snapshot\",\"source\":\"default\",\"timestamp\":3,\"type\":\"branch_fork_at_timestamp\"}'",
         "out": "forked snapshot from default at timestamp 3",
         "reproducible": true,
-        "note": "snapshot forks default's history as of that instant."
+        "note": "snapshot forks default's history as of that commit."
       },
       {
         "in": "strata command run --command-json '{\"branch\":\"snapshot\",\"key\":\"Z3JlZXRpbmc=\",\"type\":\"kv_get\"}'",

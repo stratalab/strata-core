@@ -2664,6 +2664,36 @@ mod tests {
     }
 
     #[test]
+    fn fork_at_timestamp_documents_the_commit_timeline_clock() {
+        // `branch.fork_at_timestamp` resolves `timestamp` on the same logical
+        // commit timeline as `as_of`, never against a wall-clock instant. Its
+        // request field and its generated reference page must say so, and
+        // neither may call it microseconds.
+        let idl = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("idl/v1/generated");
+        let schema: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(idl.join("schemas/branch.fork_at_timestamp.json"))
+                .expect("read schema"),
+        )
+        .expect("parse schema");
+        let description = schema
+            .pointer("/request/properties/timestamp/description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(
+            description.contains("logical commit timeline") && !description.contains("microsecond"),
+            "`branch.fork_at_timestamp.timestamp` must document the commit-timeline clock: {description:?}",
+        );
+        let page = std::fs::read_to_string(idl.join("docs/branch/fork_at_timestamp.md"))
+            .expect("read reference page")
+            .to_lowercase();
+        assert!(
+            !page.contains("microsecond"),
+            "the `branch.fork_at_timestamp` reference page must not call the commit clock microseconds",
+        );
+    }
+
+    #[test]
     fn commit_clock_timestamp_outputs_are_not_labeled_wall_clock() {
         // #3112: the `timestamp` on write acks (`CommitReceipt`) and read
         // envelopes (`VersionedValue`, `ScanItem`, `JsonVersionedValue`,

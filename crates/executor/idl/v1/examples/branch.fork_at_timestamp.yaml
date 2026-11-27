@@ -3,12 +3,12 @@ steps:
   - call: kv.put
     args: { key: greeting, value: original }
     bind: base
-    note: The receipt carries this commit's timestamp (microseconds).
+    note: The receipt's commit timestamp is this commit's position on the logical commit timeline.
   - call: kv.put
     args: { key: greeting, value: updated }
   - call: branch.fork_at_timestamp
     args: { source: default, branch: snapshot, timestamp: "{base.commit.timestamp}" }
-    note: snapshot forks default's history as of that instant.
+    note: snapshot forks default's history as of that commit.
   - call: kv.get
     args: { key: greeting, branch: snapshot }
     returns: original

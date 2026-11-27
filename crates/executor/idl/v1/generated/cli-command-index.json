@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.3",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "cadb4843978fa5fe5b64090a97dfdffd0c5d4e51d38fd4e7f4a8790b85d2df80",
+    "checksum_sha256": "f352efc6404cf552947af7d7e39378b2298e839a60700abfb6e0a2c913ffca8c",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -839,8 +839,8 @@
       "op": "fork_at_timestamp",
       "kind": "mutation.create",
       "title": "Fork branch at timestamp",
-      "summary": "Fork a new branch from a retained source timestamp.",
-      "description": "Forks a new branch anchored at a retained source timestamp (microseconds, on Strata's logical commit clock). The engine resolves the timestamp to the covering retained commit; the returned parent lineage records both the fork timestamp and the resolved fork version. A timestamp before the source's first commit fails with `history_unavailable.engine.before_first_commit`, and one after its latest commit with `history_unavailable.engine.after_latest_commit` rather than forking the current state; `history_unavailable.engine.persistence_history` is reserved for history a retention policy pruned.\n\nThis command has no dedicated CLI verb: the CLI expresses it as `strata branch fork <SOURCE> <BRANCH> --timestamp <TIMESTAMP>` (one shared `branch fork` verb routes to all three fork commands, so only `branch.fork` owns the CLI path). It remains fully reachable through the generic wire surface — `strata command run`, MCP, and SDKs.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
+      "summary": "Fork a new branch from a retained source commit timestamp.",
+      "description": "Forks a new branch anchored at a retained position on the source's logical commit timeline: the `timestamp` from a write receipt or `history` output. It is a per-commit counter, not the `version`, not the wall-clock `committed_at` beside it, and never a calendar date. The engine resolves the timestamp to the covering retained commit; the returned parent lineage records both the fork timestamp and the resolved fork version. A timestamp before the source's first commit fails with `history_unavailable.engine.before_first_commit`, and one after its latest commit with `history_unavailable.engine.after_latest_commit` rather than forking the current state; `history_unavailable.engine.persistence_history` is reserved for history a retention policy pruned.\n\nThis command has no dedicated CLI verb: the CLI expresses it as `strata branch fork <SOURCE> <BRANCH> --timestamp <TIMESTAMP>` (one shared `branch fork` verb routes to all three fork commands, so only `branch.fork` owns the CLI path). It remains fully reachable through the generic wire surface — `strata command run`, MCP, and SDKs.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
       "docs": "/docs/branch/fork_at_timestamp",
       "feature": "core",
       "access": "write",
