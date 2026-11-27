@@ -165,7 +165,15 @@ impl Executor {
                 branch,
                 space,
                 keys,
-            } => self.execute_kv_batch_get(branch.as_deref(), space.as_deref(), keys),
+                as_of,
+                as_of_time,
+            } => self.execute_kv_batch_get(
+                branch.as_deref(),
+                space.as_deref(),
+                keys,
+                as_of,
+                as_of_time,
+            ),
             Command::KvBatchDelete {
                 branch,
                 space,

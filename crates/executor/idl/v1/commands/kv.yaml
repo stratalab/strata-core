@@ -113,6 +113,7 @@ commands:
     prose: commands/kv.batch_get.md
     errors+:
       - invalid_argument.engine.kv_batch
+      - history_unavailable.engine.persistence_history
     display:
       columns:
         - field: /data/items/*/result/key
@@ -125,6 +126,19 @@ commands:
         - requests/v1/kv/put.json
       request: requests/v1/kv/batch_get.json
       response: responses/v1/kv/batch_get_ok.json
+      cases:
+        # #3581: pinned to the first put's commit while a later rewrite
+        # exists, so the ok response (the first value) only replays if
+        # `as_of` is honored — a batch that ignored it would answer the
+        # rewrite.
+        - setup:
+            - requests/v1/kv/put.json
+            - requests/v1/setup/kv_put_a_two.json
+          request: requests/v1/kv/batch_get_as_of.json
+          response: responses/v1/kv/batch_get_ok.json
+      error_cases:
+        - request: requests/v1/kv/batch_get_unretained_version.json
+          expected_error: responses/v1/errors/kv/batch_get_unretained_version.json
   - id: kv.batch_delete
     kind: batch.itemwise_mutation
     title: Batch delete KV values

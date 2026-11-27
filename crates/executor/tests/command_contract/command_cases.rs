@@ -42,6 +42,7 @@ pub(super) fn all_commands() -> Vec<Command> {
 pub(super) fn command_round_trip_cases() -> Vec<Command> {
     let mut commands = all_commands();
     commands.extend(admin_space_round_trip_edge_commands());
+    commands.extend(kv_round_trip_edge_commands());
     commands.extend(json_round_trip_edge_commands());
     commands.extend(vector_round_trip_edge_commands());
     commands.extend(event_round_trip_edge_commands());

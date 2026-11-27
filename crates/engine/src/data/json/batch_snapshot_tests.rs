@@ -155,9 +155,18 @@ fn test_json_batch_decodes_each_answer_before_reading_the_next() {
 
     assert_eq!(error.code(), CORRUPT_DOCUMENT_CODE);
     assert!(
-        second_read_rx.try_recv().is_err(),
-        "the second entry was never read"
+        matches!(second_read_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "the second entry was never read, and its hook is still armed"
     );
+}
+
+/// Sets the flag when dropped, including while a panic unwinds.
+struct ReleaseOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ReleaseOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 /// Pairs the stress writer commits; enough that a batch read split across
@@ -175,6 +184,10 @@ fn test_unpinned_json_batch_never_straddles_a_racing_writer() {
     write_pair(&database, 0);
     let reader_started = AtomicBool::new(false);
     std::thread::scope(|scope| {
+        // Released on drop as well, so a reader that panics before its first
+        // `store` still lets the writer finish and the scope join: the test
+        // fails instead of hanging.
+        let _release_writer = ReleaseOnDrop(&reader_started);
         let writer = scope.spawn(|| {
             while !reader_started.load(Ordering::Acquire) {
                 std::thread::yield_now();

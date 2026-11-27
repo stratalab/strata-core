@@ -470,6 +470,13 @@ pub enum Command {
     ///   result `i` always belongs to request `i`.
     /// - **Repeats are allowed**, unlike the write batches — a read batch is a
     ///   list of lookups, not a set of mutations.
+    /// - **One snapshot.** Every key is read from the same consistent
+    ///   version, so a batch cannot straddle a concurrent write.
+    /// - **One pinned version.** With `as_of` or `as_of_time`, every key is
+    ///   read as of that one position, so a batch can hydrate the entries a
+    ///   version-pinned read named without mixing in later state. An instant
+    ///   outside the branch's history fails the whole batch rather than
+    ///   answering from the latest state.
     KvBatchGet {
         /// Target branch. Defaults to the executor handle branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -479,6 +486,20 @@ pub enum Command {
         space: Option<String>,
         /// Keys to read.
         keys: Vec<Bytes>,
+        /// Read every key as of a position on the logical commit timeline —
+        /// the `timestamp` from `history` output, not the `version`, and
+        /// never a calendar date. To read as of a real time, use
+        /// `as_of_time` instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
+        /// Read every key as of a real time: a wall-clock instant in
+        /// microseconds since the Unix epoch (UTC), as reported by
+        /// `committed_at` on a write ack or on any `history` row. Resolves to
+        /// the commit at or before that instant, and fails rather than
+        /// guessing if the instant falls outside the branch's recorded
+        /// history. Mutually exclusive with `as_of`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of_time: Option<u64>,
     },
     /// Deletes multiple KV entries in one engine commit.
     ///
@@ -508,7 +529,7 @@ pub enum Command {
     /// # Guaranteed semantics
     ///
     /// - **Positional**, one answer per requested key in the order asked, with
-    ///   repeats allowed — the same contract as `batch_get`.
+    ///   repeats allowed — the same positional contract as `batch_get`.
     /// - **A deleted key does not exist**, even though its history remains
     ///   readable through `history` and through any read at an earlier point.
     KvBatchExists {

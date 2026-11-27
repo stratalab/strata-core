@@ -183,19 +183,68 @@ impl<'a> KvService<'a> {
     }
 
     /// Reads multiple latest visible KV values with commit metadata.
+    ///
+    /// One snapshot for the whole batch: every key is read from the same
+    /// version, so a commit that lands while the batch runs is visible to
+    /// every key or to none.
     pub fn batch_get(
         &mut self,
         keys: &[KvKey],
     ) -> Result<Vec<Option<KvVersionedValue>>, EngineError> {
+        self.batch_get_with_selector(keys, ReadSelector::Latest)
+    }
+
+    /// Reads multiple KV values with commit metadata as they were at a commit
+    /// version (#3581).
+    ///
+    /// One pinned version for the whole batch: every key is answered from the
+    /// state at `version`, so entries hydrated for a version-pinned graph
+    /// result come from that version and never a mix of it and the latest
+    /// state. Answers keep request order, a repeated key is answered again,
+    /// and an absent key is `None`. Each answer's metadata is its row's own
+    /// commit, as [`Self::get_versioned_at`] reports it.
+    pub fn batch_get_at_version(
+        &mut self,
+        keys: &[KvKey],
+        version: CommitVersion,
+    ) -> Result<Vec<Option<KvVersionedValue>>, EngineError> {
+        self.batch_get_with_selector(keys, ReadSelector::AtVersion(version))
+    }
+
+    /// Reads multiple KV values with commit metadata as they were at a
+    /// timestamp (#3581) — [`Self::batch_get_at_version`] by timestamp. An
+    /// instant outside the branch's retained history fails the whole batch
+    /// with the same diagnostic a single read raises, never falling back to
+    /// the latest state.
+    pub fn batch_get_at(
+        &mut self,
+        keys: &[KvKey],
+        timestamp: Timestamp,
+    ) -> Result<Vec<Option<KvVersionedValue>>, EngineError> {
+        self.batch_get_with_selector(keys, ReadSelector::AtTimestamp(timestamp))
+    }
+
+    /// The one batch read: one branch record, one selector, and one storage
+    /// snapshot for every key, answered in request order.
+    fn batch_get_with_selector(
+        &mut self,
+        keys: &[KvKey],
+        selector: ReadSelector,
+    ) -> Result<Vec<Option<KvVersionedValue>>, EngineError> {
         let record = self.branch_record()?;
+        let addresses = keys
+            .iter()
+            .map(|key| self.row_address(&record, key))
+            .collect();
+        // Each answer is decoded as it is pulled, so the batch holds one raw
+        // row at a time however many keys it names.
+        let rows = self.persistence.read_rows(addresses, selector)?;
         let mut results = Vec::with_capacity(keys.len());
-        for key in keys {
-            let address = self.row_address(&record, key);
-            let result = match self.persistence.read_row(address, ReadSelector::Latest)? {
+        for row in rows {
+            results.push(match row? {
                 Some(row) => versioned_value_from_row(&row)?,
                 None => None,
-            };
-            results.push(result);
+            });
         }
         Ok(results)
     }

@@ -1,6 +1,8 @@
 //! Byte-oriented KV capability.
 
 mod adapter;
+#[cfg(test)]
+mod batch_snapshot_tests;
 mod outcome;
 mod service;
 mod types;

@@ -191,7 +191,12 @@ impl Executor {
         branch: Option<&str>,
         space: Option<&str>,
         keys: Vec<Bytes>,
+        as_of: Option<u64>,
+        as_of_time: Option<u64>,
     ) -> Result<Output, ExecutorError> {
+        // #3581: one pinned position for the whole batch, resolved before the
+        // service borrow so both clocks run the identical as-of path (#3112).
+        let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
         let mut service = self.kv_service(branch, space)?;
         if keys.is_empty() {
             return Ok(Output::BatchGetResults(kv_batch_get_result(Vec::new())));
@@ -214,7 +219,10 @@ impl Executor {
             .iter()
             .map(|(_, _, key)| key.clone())
             .collect::<Vec<_>>();
-        let values = service.batch_get(&keys)?;
+        let values = match as_of {
+            Some(as_of) => service.batch_get_at(&keys, as_of)?,
+            None => service.batch_get(&keys)?,
+        };
         for ((index, output_key, _), value) in valid_keys.into_iter().zip(values) {
             results[index] = Some(batch_get_result(usize_to_u64(index), output_key, value));
         }

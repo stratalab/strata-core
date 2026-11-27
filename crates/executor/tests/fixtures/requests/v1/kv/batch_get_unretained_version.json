@@ -1,0 +1,8 @@
+{
+  "type": "kv_batch_get",
+  "keys": [
+    "YQ==",
+    "bWlzc2luZw=="
+  ],
+  "as_of": 999
+}

@@ -550,14 +550,14 @@ version straight through (#3509). A version exactly AT F is retained and allowed
 arms (`api/runtime/mod.rs::branch`) — a fork arm that validates only
 `require_retained_version_watermark` / the timeline is the regression. The engine's
 capability services (KV, JSON, event, vector, graph — single and batch `_at_version` /
-`_at` reads alike, #3485) enforce the floor one layer down, through that same storage
+`_at` reads alike, #3485, #3581) enforce the floor one layer down, through that same storage
 `read_point` / scan check, surfaced by `map_storage_error` in `persistence/adapter.rs` as
 `history_unavailable.engine.persistence_history`; an engine read that resolves a version or
 timestamp itself instead of passing the `ReadSelector` through is the regression there. Tests:
 `read_at_version_below_retained_history_floor_is_rejected` (`api/tests/read.rs`),
 `api_fork_below_retained_history_floor_is_rejected` (`api/tests/maintenance.rs`),
 `batch_get_at_outside_the_retained_window_is_a_diagnostic_not_the_latest_state`
-(`tests/engine_json_batch_as_of.rs`).
+(`tests/engine_json_batch_as_of.rs`, `tests/engine_kv_batch_as_of.rs`).
 
 ### MVCC-010: Paginated reads seek from version-independent key positions and re-seek past tombstones
 
@@ -725,8 +725,9 @@ separate commit off the write path — eventually consistent by design; a query 
 index may temporarily miss newly-committed entries. KV rows are always authoritative.
 
 The boundary holds across a read verb's entries, not only within one read: a verb that
-answers several entries and promises one snapshot (`json.batch_get`) reads them all from
-one view, so a commit landing mid-batch is visible to every entry or to none (#3582).
+answers several entries and promises one snapshot (`json.batch_get`, `kv.batch_get`) reads
+them all from one view, so a commit landing mid-batch is visible to every entry or to none
+(#3582, #3581).
 
 **Audit**: Verify all rows in a commit share one stamp (`prepare_commit_rows`,
 `commit/cache.rs`). Verify no reader can observe version V while its apply is in flight
@@ -736,7 +737,7 @@ that promises one snapshot goes through `StorageRuntime::read_points` (one
 `load_published_snapshot` per batch, DUR-001's order) via the engine's
 `StoragePersistence::read_rows`, never a `read_row` per entry; pinned by the off-lock stress
 readers' `read_points_checked` (`api/tests/off_lock_concurrency.rs`) and the engine's
-`data/json/batch_snapshot_tests.rs`.
+`data/json/batch_snapshot_tests.rs` and `data/kv/batch_snapshot_tests.rs`.
 
 ### ARCH-003: KV rows are the single source of truth
 

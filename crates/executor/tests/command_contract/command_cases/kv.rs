@@ -44,6 +44,8 @@ pub(super) fn kv_commands() -> Vec<Command> {
             branch: None,
             space: None,
             keys: vec![bytes("a"), bytes("missing")],
+            as_of: None,
+            as_of_time: None,
         },
         Command::KvBatchDelete {
             branch: None,
@@ -77,6 +79,28 @@ pub(super) fn kv_commands() -> Vec<Command> {
             space: None,
             prefix: Some(bytes("a")),
             count: Some(4),
+        },
+    ]
+}
+
+pub(super) fn kv_round_trip_edge_commands() -> Vec<Command> {
+    vec![
+        // #3581: the two as-of clocks must round-trip on the wire the same way
+        // `KvGet`'s do — a populated `as_of` and a populated `as_of_time`,
+        // each mutually exclusive with the other.
+        Command::KvBatchGet {
+            branch: Some("feature".to_owned()),
+            space: Some("space-a".to_owned()),
+            keys: vec![bytes("a")],
+            as_of: Some(42),
+            as_of_time: None,
+        },
+        Command::KvBatchGet {
+            branch: None,
+            space: None,
+            keys: vec![bytes("a")],
+            as_of: None,
+            as_of_time: Some(1_700_000_000_000_000),
         },
     ]
 }
