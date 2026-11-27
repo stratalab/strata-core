@@ -1623,6 +1623,46 @@ fn kv_batch_get_as_of_refusals_match_the_single_read() {
     );
 }
 
+/// The `Executor::kv_batch_get` facade is the unpinned command on the default
+/// branch and space: it answers the latest value of every key, in order, and
+/// says the same thing the `KvBatchGet` command says.
+#[test]
+fn kv_batch_get_facade_reads_the_latest_state_of_the_default_branch() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let (v_a1, t_a1) = put_receipt(&mut executor, "a", "one");
+    put_receipt(&mut executor, "a", "two");
+    let (v_b, t_b) = put_receipt(&mut executor, "b", "bee");
+    let keys = ["a", "missing", "b"];
+
+    let output = executor
+        .kv_batch_get(keys.iter().copied().map(bytes).collect())
+        .expect("facade batch get succeeds");
+    let Output::BatchGetResults(results) = output else {
+        panic!("unexpected batch get output: {output:?}");
+    };
+    let answers: KvBatchAnswers = results
+        .into_iter()
+        .map(|item| {
+            let result = item.result().expect("every read item carries a result");
+            (
+                result.found(),
+                result.value().cloned(),
+                result.version(),
+                result.timestamp(),
+            )
+        })
+        .collect();
+    assert!(v_a1 < v_b && t_a1 < t_b, "the commits are ordered");
+    assert_eq!(answers[0].1, Some(bytes("two")), "the latest value of A");
+    assert_eq!(answers[1], (false, None, None, None), "an absent key");
+    assert_eq!(answers[2], (true, Some(bytes("bee")), Some(v_b), Some(t_b)));
+    assert_eq!(
+        answers,
+        kv_batch_get_at(&mut executor, &keys, None, None).expect("command batch get"),
+        "the facade answers what the command answers"
+    );
+}
+
 /// Pins the `KvPut` contract: each put is one atomic commit with a strictly
 /// increasing version, and an acknowledged write is immediately visible to
 /// subsequent reads from the same database — never transiently invisible.
