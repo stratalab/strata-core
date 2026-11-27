@@ -1136,13 +1136,19 @@ space as it was (MVCC-001); a fork mid-sweep inherits the marked row and each br
 resumes independently (COW-003). `space usage` reports a marked space as zeros and
 `branch compare` treats every row of a marked space as absent on that branch, both at the
 version they read (`control::space::pending_deletion_at`, #3575), so a space mid-sweep
-counts and diffs exactly as a deleted one. One window is documented rather than closed:
-capability reads have no registration choke point the way graph reads have
-`graph_metadata_row`, so a data read of a mid-sweep space can still return a row the sweep
-has not yet reached, until the chunk that removes it (#3585). The regression is a new
-surface that counts or compares a space's rows by physical presence without consulting
-`pending_deletion_at`, a registering path that skips
-`finish_pending_deletion`, a sweep that tombstones the catalog row before the last chunk,
+counts and diffs exactly as a deleted one. Compare also enumerates each branch's spaces at
+the version it reads (`control::space::registered_spaces_at`, #3589): the index as it was
+then, each listed catalog row validated at that same version. So a space deleted or
+unregistered since, on every branch compared, still diffs at an instant it existed, and
+corruption at that version is refused as it is at the latest state. One window is
+documented rather than closed: capability reads have no registration choke point the way
+graph reads have `graph_metadata_row`, so a data read of a mid-sweep space can still
+return a row the sweep has not yet reached, until the chunk that removes it (#3585). The
+regression is a new surface that counts or compares a space's rows by physical presence
+without consulting `pending_deletion_at`, an as-of surface that lists spaces from the live
+index (`registered_spaces`) while it reads rows at a past selector, a registering path
+that skips `finish_pending_deletion`, a sweep that tombstones the catalog row before the
+last chunk,
 or a catalog row listed in the index while marked (`validate_space_catalog_row` treats that
 as corruption).
 
@@ -1155,15 +1161,24 @@ commits the catalog tombstone only after the last chunk; `validate_space_catalog
 that the index lists. In `api/space.rs`, `delete` takes the single-commit path only below
 `DELETE_CHUNK_ROWS`, otherwise commits `unregister_mutations(.., marked = true)` before
 `sweep_space_rows`, and resumes a marked unregistered name through
-`finish_pending_deletion`. Tests: `tests/engine_space_delete.rs` (the issue's shape in
+`finish_pending_deletion`. In `branch/compare.rs`, `compare_records` enumerates each
+branch's spaces with `registered_spaces_at` at the compared selector, never the live index
+for a past instant; `registered_spaces` is `registered_spaces_at` at the latest state.
+Tests: `tests/engine_space_delete.rs` (the issue's shape in
 both modes; the exact one-commit / three-commit boundary; a read pinned before the mark),
 `tests/engine_event_space_refusals.rs::deleting_an_oversized_space_succeeds_in_chunks`
 (the former refusal), in-crate
 `api::space::tests::a_marked_space_is_unregistered_and_its_deletion_resumes` (resume by
 delete, by create, by a registering write, after a durable reopen, and independently on
 each side of a fork; a promotion sweeps only when it commits — a refused one and a preview
-leave the sweep owed), and
-`records::tests::space_record_deleting_mark_round_trips_and_is_omitted_when_clear`.
+leave the sweep owed),
+`records::tests::space_record_deleting_mark_round_trips_and_is_omitted_when_clear`, the
+as-of compare in `tests/branch_compare.rs`
+(`test_compare_at_a_timestamp_reads_a_space_deleted_since_on_every_branch`, its
+after-reopen and mid-sweep twins), and in-crate
+`control::space::tests::registered_spaces_at_*` (a space deleted since is listed; a catalog
+row corrupt at that version, a version with no index, or a missing storage branch is
+refused as corruption; an instant outside history raises `history_unavailable`).
 
 ### ARCH-016: A multi-commit bulk import leaves a durable watermark until its last commit
 

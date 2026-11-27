@@ -5,7 +5,7 @@ use strata_core::BranchId;
 use crate::branch::catalog::BranchCatalogRecord;
 use crate::commit::CommitOutcome;
 use crate::data::kv::ProductSpace;
-use crate::diagnostics::{EngineError, EngineErrorClass};
+use crate::diagnostics::{EngineError, ErrorClass};
 use crate::persistence::{
     decode_vector_index_manifest_key, encode_event_meta_space_prefix, encode_event_space_prefix,
     encode_event_type_index_space_prefix, encode_graph_binding_space_prefix,
@@ -141,9 +141,24 @@ pub(crate) fn registered_spaces(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
 ) -> Result<Vec<ProductSpace>, EngineError> {
-    let spaces = read_required_space_index(persistence, record)?;
+    registered_spaces_at(persistence, record, ReadSelector::Latest)
+}
+
+/// The spaces `record` had registered at `selector`, checked as
+/// [`registered_spaces`] checks the latest ones but at that same selector.
+/// The index row must exist, and each listed space's catalog row must exist,
+/// name that space, and carry no deleting mark. A historical reader, such as
+/// an as-of branch compare (#3589), asks at its own selector, so a space
+/// deleted since is still listed, and corruption at that version is refused
+/// with the same code as today's.
+pub(crate) fn registered_spaces_at(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    selector: ReadSelector,
+) -> Result<Vec<ProductSpace>, EngineError> {
+    let spaces = read_required_space_index_at(persistence, record, selector)?;
     for space in &spaces {
-        validate_space_catalog_row(persistence, record, space)?;
+        validate_space_catalog_row_at(persistence, record, space, selector)?;
     }
     Ok(spaces)
 }
@@ -153,6 +168,9 @@ pub(crate) fn registered_spaces(
 /// exists at that version (a branch point predating any space carries none), so a
 /// spaceless base is simply "nothing to reconcile"; a genuinely missing base
 /// branch (never expected — the base is always an ancestor) surfaces as an error.
+/// That leniency is the promotion base's alone: a reader for which a missing
+/// index or catalog row is corruption, such as an as-of branch compare, uses
+/// [`registered_spaces_at`] (#3589).
 pub(crate) fn read_space_index_at(
     persistence: &mut StoragePersistence,
     storage_branch: BranchId,
@@ -485,7 +503,19 @@ fn read_required_space_index(
     persistence: &StoragePersistence,
     record: &BranchCatalogRecord,
 ) -> Result<Vec<ProductSpace>, EngineError> {
-    let bytes = read_required(persistence, &space_address(record, space_index_key()))?;
+    read_required_space_index_at(persistence, record, ReadSelector::Latest)
+}
+
+fn read_required_space_index_at(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    selector: ReadSelector,
+) -> Result<Vec<ProductSpace>, EngineError> {
+    let bytes = read_required_at(
+        persistence,
+        &space_address(record, space_index_key()),
+        selector,
+    )?;
     decode_space_index(&bytes)
 }
 
@@ -494,9 +524,19 @@ fn validate_space_catalog_row(
     record: &BranchCatalogRecord,
     space: &ProductSpace,
 ) -> Result<(), EngineError> {
-    let bytes = read_required(
+    validate_space_catalog_row_at(persistence, record, space, ReadSelector::Latest)
+}
+
+fn validate_space_catalog_row_at(
+    persistence: &StoragePersistence,
+    record: &BranchCatalogRecord,
+    space: &ProductSpace,
+    selector: ReadSelector,
+) -> Result<(), EngineError> {
+    let bytes = read_required_at(
         persistence,
         &space_address(record, space_catalog_key(space.as_str())),
+        selector,
     )?;
     let decoded = decode_space_catalog_record(&bytes)?;
     if decoded.space() != space {
@@ -518,13 +558,24 @@ fn read_required(
     persistence: &StoragePersistence,
     address: &RowAddress,
 ) -> Result<Vec<u8>, EngineError> {
-    match persistence.read(address.clone(), ReadSelector::Latest) {
+    read_required_at(persistence, address, ReadSelector::Latest)
+}
+
+fn read_required_at(
+    persistence: &StoragePersistence,
+    address: &RowAddress,
+    selector: ReadSelector,
+) -> Result<Vec<u8>, EngineError> {
+    match persistence.read(address.clone(), selector) {
         Ok(Some(value)) => Ok(value),
         Ok(None) => Err(EngineError::corruption(
             "data_loss.engine.space_catalog",
             "required branch-local space control row is missing",
         )),
-        Err(error) if error.class() == EngineErrorClass::NotFound => Err(EngineError::corruption(
+        // The public class, not the legacy one: the legacy class folds
+        // `history_unavailable` into not-found (#3139), and at a past selector
+        // an out-of-window read must surface as itself, not as corruption.
+        Err(error) if error.public_class() == ErrorClass::NotFound => Err(EngineError::corruption(
             "data_loss.engine.space_catalog",
             "branch-local space control storage branch is missing",
         )),
@@ -543,9 +594,9 @@ fn space_address(record: &BranchCatalogRecord, key: Vec<u8>) -> RowAddress {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_space_index_at, registered_spaces, registration_and_deletion_mutations,
-        registration_mutations, seed_required_space_rows, validate_required_space_rows,
-        DEFAULT_SPACE, SYSTEM_SPACE,
+        index_without, read_space_index_at, registered_spaces, registered_spaces_at,
+        registration_and_deletion_mutations, registration_mutations, seed_required_space_rows,
+        unregister_mutations, validate_required_space_rows, DEFAULT_SPACE, SYSTEM_SPACE,
     };
     use crate::branch::catalog::BranchCatalogRecord;
     use crate::branch::BranchName;
@@ -558,6 +609,7 @@ mod tests {
         reserved_space_key, space_catalog_key, space_index_key, CommitPlan, PersistenceOpenTarget,
         ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
     };
+    use strata_core::{CommitVersion, Timestamp};
 
     #[test]
     fn required_space_rows_seed_and_validate() {
@@ -887,5 +939,167 @@ mod tests {
             .create_branch(record.storage_branch_id(), record.generation())
             .expect("storage branch created");
         record
+    }
+
+    /// Commits `mutations` on `record`'s branch and returns the version.
+    fn commit_on(
+        persistence: &StoragePersistence,
+        record: &BranchCatalogRecord,
+        mutations: Vec<RowMutation>,
+    ) -> CommitVersion {
+        persistence
+            .commit(&CommitPlan::new(
+                record.storage_branch_id(),
+                mutations,
+                Some(record.generation()),
+            ))
+            .expect("commit succeeds")
+            .version()
+    }
+
+    fn catalog_row(record: &BranchCatalogRecord, space: &ProductSpace) -> RowAddress {
+        RowAddress::new(
+            record.storage_branch_id(),
+            RowClass::SpaceControl,
+            space_catalog_key(space.as_str()),
+        )
+    }
+
+    /// #3589: a past selector lists the spaces registered then, so a space
+    /// deleted since is still listed at a version it existed.
+    #[test]
+    fn registered_spaces_at_lists_a_space_deleted_since() {
+        let (mut persistence, _) =
+            StoragePersistence::open(PersistenceOpenTarget::Cache).expect("cache opens");
+        let record = create_branch(&mut persistence, "space-test");
+        seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
+        let tenant = ProductSpace::new("tenant").expect("valid space");
+        let mutations =
+            registration_mutations(&persistence, &record, &tenant).expect("registration");
+        let registered = commit_on(&persistence, &record, mutations);
+        let remaining = index_without(&persistence, &record, &tenant)
+            .expect("index reads")
+            .expect("tenant is registered");
+        let mutations =
+            unregister_mutations(&record, &tenant, &remaining, false).expect("unregistration");
+        commit_on(&persistence, &record, mutations);
+
+        let then = registered_spaces_at(&persistence, &record, ReadSelector::AtVersion(registered))
+            .expect("the index at the registration validates");
+        assert!(then.contains(&tenant), "listed at the version it existed");
+        let now = registered_spaces(&mut persistence, &record).expect("the latest index");
+        assert!(!now.contains(&tenant), "gone today");
+    }
+
+    /// #3589: a past selector validates each catalog row at that version, so
+    /// a row that was corrupt then is refused even though it is sound now.
+    #[test]
+    fn registered_spaces_at_refuses_a_catalog_row_corrupt_at_that_version() {
+        let (mut persistence, _) =
+            StoragePersistence::open(PersistenceOpenTarget::Cache).expect("cache opens");
+        let record = create_branch(&mut persistence, "space-test");
+        seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
+        let tenant = ProductSpace::new("tenant").expect("valid space");
+        let other = ProductSpace::new("other").expect("valid space");
+        let mutations =
+            registration_mutations(&persistence, &record, &tenant).expect("registration");
+        commit_on(&persistence, &record, mutations);
+        let corrupt = commit_on(
+            &persistence,
+            &record,
+            vec![RowMutation::put(
+                catalog_row(&record, &tenant),
+                encode_space_record(&other),
+            )],
+        );
+        commit_on(
+            &persistence,
+            &record,
+            vec![RowMutation::put(
+                catalog_row(&record, &tenant),
+                encode_space_record(&tenant),
+            )],
+        );
+
+        let error = registered_spaces_at(&persistence, &record, ReadSelector::AtVersion(corrupt))
+            .expect_err("the catalog row was corrupt at that version");
+        assert_eq!(error.class(), EngineErrorClass::Corruption);
+        assert_eq!(error.code(), "data_loss.engine.space_catalog");
+        // Direction control: the repaired latest state validates.
+        registered_spaces_at(&persistence, &record, ReadSelector::Latest)
+            .expect("the repaired catalog validates");
+    }
+
+    /// #3589: a past selector with no space index is corruption, not an empty
+    /// set of spaces, as it is at the latest state.
+    #[test]
+    fn registered_spaces_at_refuses_a_version_with_no_space_index() {
+        let (mut persistence, _) =
+            StoragePersistence::open(PersistenceOpenTarget::Cache).expect("cache opens");
+        let record = create_branch(&mut persistence, "space-test");
+        let tenant = ProductSpace::new("tenant").expect("valid space");
+        let unindexed = commit_on(
+            &persistence,
+            &record,
+            vec![RowMutation::put(
+                catalog_row(&record, &tenant),
+                encode_space_record(&tenant),
+            )],
+        );
+        seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
+
+        let error = registered_spaces_at(&persistence, &record, ReadSelector::AtVersion(unindexed))
+            .expect_err("no space index at that version");
+        assert_eq!(error.class(), EngineErrorClass::Corruption);
+        assert_eq!(error.code(), "data_loss.engine.space_catalog");
+        // Direction control: the seeded latest state validates.
+        registered_spaces_at(&persistence, &record, ReadSelector::Latest)
+            .expect("the seeded index validates");
+    }
+
+    /// #3589: space-control rows on a storage branch that does not exist are
+    /// catalog corruption at any selector, as they are at the latest state.
+    #[test]
+    fn registered_spaces_at_reports_a_missing_storage_branch_as_corruption() {
+        let (persistence, _) =
+            StoragePersistence::open(PersistenceOpenTarget::Cache).expect("cache opens");
+        let record =
+            BranchCatalogRecord::root(BranchName::new("never-created").expect("valid branch"), 1);
+
+        for selector in [
+            ReadSelector::Latest,
+            ReadSelector::AtVersion(CommitVersion::new(1)),
+        ] {
+            let error = registered_spaces_at(&persistence, &record, selector)
+                .expect_err("no storage branch backs the record");
+            assert_eq!(error.class(), EngineErrorClass::Corruption, "{selector:?}");
+            assert_eq!(
+                error.code(),
+                "data_loss.engine.space_catalog",
+                "{selector:?}"
+            );
+        }
+    }
+
+    /// #3589: an instant outside the branch's history surfaces as
+    /// `history_unavailable`, never as catalog corruption, though the legacy
+    /// error class folds it into not-found (#3139).
+    #[test]
+    fn registered_spaces_at_reports_an_instant_outside_history_as_itself() {
+        let (mut persistence, _) =
+            StoragePersistence::open(PersistenceOpenTarget::Cache).expect("cache opens");
+        let record = create_branch(&mut persistence, "space-test");
+        seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
+
+        let error = registered_spaces_at(
+            &persistence,
+            &record,
+            ReadSelector::AtTimestamp(Timestamp::from_micros(u64::MAX)),
+        )
+        .expect_err("an instant after the latest commit raises");
+        assert_eq!(
+            error.code(),
+            "history_unavailable.engine.persistence_history"
+        );
     }
 }

@@ -13,7 +13,7 @@ use crate::api::{BranchComparison, BranchStateSelector, ComparedEntity, SpaceCom
 use crate::branch::adapter::{CapabilityBranchAdapter, ComparableEntity, DerivedDisposition};
 use crate::branch::catalog::BranchCatalogRecord;
 use crate::branch::preview::capability_adapters;
-use crate::control::space::{pending_deletion_at, registered_spaces};
+use crate::control::space::{pending_deletion_at, registered_spaces_at};
 use crate::data::graph::{marked_graphs, GraphName};
 use crate::data::kv::ProductSpace;
 use crate::diagnostics::EngineError;
@@ -27,8 +27,6 @@ const fn read_selector(selector: BranchStateSelector) -> ReadSelector {
     }
 }
 
-/// The present (non-tombstone) entities of one capability in one space at the
-/// selected branch state, keyed by identity for set difference.
 /// What a deletion under way hides from one branch's view of one space at
 /// the compared version (#3575): the whole space, when its catalog row is
 /// marked (#3574), or the graphs whose metadata row is marked (#3477). Rows
@@ -76,6 +74,8 @@ impl HiddenByDeletion {
     }
 }
 
+/// The present (non-tombstone) entities of one capability in one space at the
+/// selected branch state, keyed by identity for set difference.
 fn present_entities(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
@@ -115,8 +115,11 @@ pub(crate) fn compare_records(
     selector: BranchStateSelector,
 ) -> Result<BranchComparison, EngineError> {
     let read = read_selector(selector);
-    let mut spaces = registered_spaces(persistence, record_a)?;
-    for space in registered_spaces(persistence, record_b)? {
+    // Each branch's spaces at the compared state, not today's (#3589): a
+    // space deleted since, on every branch compared, still diffs at an
+    // instant it existed.
+    let mut spaces = registered_spaces_at(persistence, record_a, read)?;
+    for space in registered_spaces_at(persistence, record_b, read)? {
         if !spaces.contains(&space) {
             spaces.push(space);
         }
