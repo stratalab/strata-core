@@ -198,7 +198,7 @@ commands:
     prose: commands/branch.fork_at_timestamp.md
     errors+:
       - already_exists.engine.branch
-      - history_unavailable.engine.persistence_history
+      - set:temporal.timestamp_history
     display:
       receipt: "forked {/data/name} from {/data/parent/name} at timestamp {/data/parent/fork_timestamp}"
       identity:

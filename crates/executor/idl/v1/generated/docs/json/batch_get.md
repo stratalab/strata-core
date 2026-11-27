@@ -7,7 +7,7 @@ section: json
 
 Reads several document/path entries and returns positional item results. Each item records whether the value was found and includes version metadata when present.
 
-With `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every entry is read as of that one position, so a batch can hydrate the documents a version-pinned read named — a graph query at a version, say — without mixing in later state. Entries keep their order, a repeated entry is answered again, and a document absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch with `history_unavailable.engine.persistence_history` rather than answering from the latest state; setting both clocks at once is refused.
+With `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every entry is read as of that one position, so a batch can hydrate the documents a version-pinned read named — a graph query at a version, say — without mixing in later state. Entries keep their order, a repeated entry is answered again, and a document absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch rather than answering from the latest state: `history_unavailable.engine.before_first_commit` or `history_unavailable.engine.after_latest_commit` names the end it missed, `history_unavailable.engine.undated_history` refuses an `as_of_time` over commits that record no wall-clock time, and `history_unavailable.engine.persistence_history` refuses history a retention policy pruned; setting both clocks at once is refused.
 
 Itemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.
 
@@ -59,6 +59,10 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.json_document_id`](https://stratadb.org/e/invalid_argument.engine.json_document_id)
 - [`invalid_argument.engine.json_path`](https://stratadb.org/e/invalid_argument.engine.json_path)
 - [`invalid_argument.engine.json_path_too_long`](https://stratadb.org/e/invalid_argument.engine.json_path_too_long)
+- [`history_unavailable.engine.persistence_history`](https://stratadb.org/e/history_unavailable.engine.persistence_history)
+- [`history_unavailable.engine.before_first_commit`](https://stratadb.org/e/history_unavailable.engine.before_first_commit)
+- [`history_unavailable.engine.after_latest_commit`](https://stratadb.org/e/history_unavailable.engine.after_latest_commit)
+- [`history_unavailable.engine.undated_history`](https://stratadb.org/e/history_unavailable.engine.undated_history)
 
 ## Invocation
 

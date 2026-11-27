@@ -1138,7 +1138,7 @@
       "kind": "mutation.create",
       "title": "Fork branch at timestamp",
       "summary": "Fork a new branch from a retained source timestamp.",
-      "description": "Forks a new branch anchored at a retained source timestamp (microseconds, on Strata's logical commit clock). The engine resolves the timestamp to the covering retained commit; the returned parent lineage records both the fork timestamp and the resolved fork version. A timestamp outside retained history fails with `history_unavailable.engine.persistence_history`.\n\nThis command has no dedicated CLI verb: the CLI expresses it as `strata branch fork <SOURCE> <BRANCH> --timestamp <TIMESTAMP>` (one shared `branch fork` verb routes to all three fork commands, so only `branch.fork` owns the CLI path). It remains fully reachable through the generic wire surface — `strata command run`, MCP, and SDKs.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
+      "description": "Forks a new branch anchored at a retained source timestamp (microseconds, on Strata's logical commit clock). The engine resolves the timestamp to the covering retained commit; the returned parent lineage records both the fork timestamp and the resolved fork version. A timestamp before the source's first commit fails with `history_unavailable.engine.before_first_commit`, and one after its latest commit with `history_unavailable.engine.after_latest_commit` rather than forking the current state; `history_unavailable.engine.persistence_history` is reserved for history a retention policy pruned.\n\nThis command has no dedicated CLI verb: the CLI expresses it as `strata branch fork <SOURCE> <BRANCH> --timestamp <TIMESTAMP>` (one shared `branch fork` verb routes to all three fork commands, so only `branch.fork` owns the CLI path). It remains fully reachable through the generic wire surface — `strata command run`, MCP, and SDKs.\n\nSuccessful mutations return an acknowledgement of the outcome: for a state-changing write, the affected target with the mutation effect and commit facts; for mutations that produce a domain result (such as a branch or a promotion outcome), that result object.",
       "docs": "/docs/branch/fork_at_timestamp",
       "cli": {
         "surface": "wire"
@@ -1184,6 +1184,14 @@
         {
           "code": "history_unavailable.engine.persistence_history",
           "docs": "https://stratadb.org/e/history_unavailable.engine.persistence_history"
+        },
+        {
+          "code": "history_unavailable.engine.before_first_commit",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.before_first_commit"
+        },
+        {
+          "code": "history_unavailable.engine.after_latest_commit",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.after_latest_commit"
         }
       ],
       "fixtures": {
@@ -6180,7 +6188,7 @@
       "kind": "batch.itemwise_read",
       "title": "Batch get JSON values",
       "summary": "Read multiple JSON values by document and path.",
-      "description": "Reads several document/path entries and returns positional item results. Each item records whether the value was found and includes version metadata when present.\n\nWith `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every entry is read as of that one position, so a batch can hydrate the documents a version-pinned read named — a graph query at a version, say — without mixing in later state. Entries keep their order, a repeated entry is answered again, and a document absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch with `history_unavailable.engine.persistence_history` rather than answering from the latest state; setting both clocks at once is refused.\n\nItemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.",
+      "description": "Reads several document/path entries and returns positional item results. Each item records whether the value was found and includes version metadata when present.\n\nWith `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every entry is read as of that one position, so a batch can hydrate the documents a version-pinned read named — a graph query at a version, say — without mixing in later state. Entries keep their order, a repeated entry is answered again, and a document absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch rather than answering from the latest state: `history_unavailable.engine.before_first_commit` or `history_unavailable.engine.after_latest_commit` names the end it missed, `history_unavailable.engine.undated_history` refuses an `as_of_time` over commits that record no wall-clock time, and `history_unavailable.engine.persistence_history` refuses history a retention policy pruned; setting both clocks at once is refused.\n\nItemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.",
       "docs": "/docs/json/batch_get",
       "cli": {
         "surface": "wire"
@@ -6226,6 +6234,22 @@
         {
           "code": "invalid_argument.engine.json_path_too_long",
           "docs": "https://stratadb.org/e/invalid_argument.engine.json_path_too_long"
+        },
+        {
+          "code": "history_unavailable.engine.persistence_history",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.persistence_history"
+        },
+        {
+          "code": "history_unavailable.engine.before_first_commit",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.before_first_commit"
+        },
+        {
+          "code": "history_unavailable.engine.after_latest_commit",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.after_latest_commit"
+        },
+        {
+          "code": "history_unavailable.engine.undated_history",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.undated_history"
         }
       ],
       "fixtures": {
@@ -7317,7 +7341,7 @@
       "kind": "batch.itemwise_read",
       "title": "Batch get KV values",
       "summary": "Read multiple KV values by key.",
-      "description": "Reads several KV keys and returns positional item results. Each item records whether the corresponding key was found and includes value metadata when present.\n\nEvery key is read from one snapshot, so a commit that lands while the batch runs is visible to every key or to none. With `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every key is read as of that one position, so a batch can hydrate the entries a version-pinned read named — a graph query at a version, say — without mixing in later state. Keys keep their order, a repeated key is answered again, and a key absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch with `history_unavailable.engine.persistence_history` rather than answering from the latest state; setting both clocks at once is refused.\n\nItemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.",
+      "description": "Reads several KV keys and returns positional item results. Each item records whether the corresponding key was found and includes value metadata when present.\n\nEvery key is read from one snapshot, so a commit that lands while the batch runs is visible to every key or to none. With `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every key is read as of that one position, so a batch can hydrate the entries a version-pinned read named — a graph query at a version, say — without mixing in later state. Keys keep their order, a repeated key is answered again, and a key absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch rather than answering from the latest state: `history_unavailable.engine.before_first_commit` or `history_unavailable.engine.after_latest_commit` names the end it missed, `history_unavailable.engine.undated_history` refuses an `as_of_time` over commits that record no wall-clock time, and `history_unavailable.engine.persistence_history` refuses history a retention policy pruned; setting both clocks at once is refused.\n\nItemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.",
       "docs": "/docs/kv/batch_get",
       "cli": {
         "surface": "wire"
@@ -7363,6 +7387,18 @@
         {
           "code": "history_unavailable.engine.persistence_history",
           "docs": "https://stratadb.org/e/history_unavailable.engine.persistence_history"
+        },
+        {
+          "code": "history_unavailable.engine.before_first_commit",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.before_first_commit"
+        },
+        {
+          "code": "history_unavailable.engine.after_latest_commit",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.after_latest_commit"
+        },
+        {
+          "code": "history_unavailable.engine.undated_history",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.undated_history"
         }
       ],
       "fixtures": {
@@ -7383,8 +7419,8 @@
         ],
         "error_cases": [
           {
-            "request": "requests/v1/kv/batch_get_unretained_version.json",
-            "expected_error": "responses/v1/errors/kv/batch_get_unretained_version.json"
+            "request": "requests/v1/kv/batch_get_after_latest_commit.json",
+            "expected_error": "responses/v1/errors/kv/batch_get_after_latest_commit.json"
           }
         ]
       },
@@ -7706,6 +7742,18 @@
         {
           "code": "history_unavailable.engine.persistence_history",
           "docs": "https://stratadb.org/e/history_unavailable.engine.persistence_history"
+        },
+        {
+          "code": "history_unavailable.engine.before_first_commit",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.before_first_commit"
+        },
+        {
+          "code": "history_unavailable.engine.after_latest_commit",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.after_latest_commit"
+        },
+        {
+          "code": "history_unavailable.engine.undated_history",
+          "docs": "https://stratadb.org/e/history_unavailable.engine.undated_history"
         }
       ],
       "fixtures": {
@@ -7717,8 +7765,12 @@
         ],
         "error_cases": [
           {
-            "request": "requests/v1/kv/get_unretained_version.json",
-            "expected_error": "responses/v1/errors/kv/get_unretained_version.json"
+            "request": "requests/v1/kv/get_after_latest_commit.json",
+            "expected_error": "responses/v1/errors/kv/get_after_latest_commit.json"
+          },
+          {
+            "request": "requests/v1/kv/get_before_first_commit.json",
+            "expected_error": "responses/v1/errors/kv/get_before_first_commit.json"
           }
         ]
       },

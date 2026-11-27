@@ -52,10 +52,10 @@
 0	ok	a	3	base64:/w==
 1	miss	missing		
 ∎
-### kv.batch_get · responses/v1/errors/kv/batch_get_unretained_version.json · human
-history_unavailable.engine.persistence_history: command failed∎
-### kv.batch_get · responses/v1/errors/kv/batch_get_unretained_version.json · raw
-history_unavailable.engine.persistence_history: command failed∎
+### kv.batch_get · responses/v1/errors/kv/batch_get_after_latest_commit.json · human
+history_unavailable.engine.after_latest_commit: command failed∎
+### kv.batch_get · responses/v1/errors/kv/batch_get_after_latest_commit.json · raw
+history_unavailable.engine.after_latest_commit: command failed∎
 ### kv.batch_get · responses/v1/kv/batch_get_ok.json · human
 #  STATUS  KEY      VERSION  VALUE
 0  ok      a              3  one
@@ -123,10 +123,14 @@ base64:/w==
 ∎
 ### kv.get · edge:value=non-utf8 · raw
 <bytes:ff>∎
-### kv.get · responses/v1/errors/kv/get_unretained_version.json · human
-history_unavailable.engine.persistence_history: command failed∎
-### kv.get · responses/v1/errors/kv/get_unretained_version.json · raw
-history_unavailable.engine.persistence_history: command failed∎
+### kv.get · responses/v1/errors/kv/get_after_latest_commit.json · human
+history_unavailable.engine.after_latest_commit: command failed∎
+### kv.get · responses/v1/errors/kv/get_after_latest_commit.json · raw
+history_unavailable.engine.after_latest_commit: command failed∎
+### kv.get · responses/v1/errors/kv/get_before_first_commit.json · human
+history_unavailable.engine.before_first_commit: command failed∎
+### kv.get · responses/v1/errors/kv/get_before_first_commit.json · raw
+history_unavailable.engine.before_first_commit: command failed∎
 ### kv.get · responses/v1/kv/get_found.json · human
 one
 ∎

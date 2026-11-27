@@ -19,10 +19,22 @@
 mod common;
 
 use common::{branch, key, space, value};
-use strata_core::CommitVersion;
+use strata_core::{CommitVersion, Timestamp};
 use strata_engine::{Database, DatabaseOpenOutcome, DurableLocalOpenOptions, VersionRetention};
 
 const HISTORY_CODE: &str = "history_unavailable.engine.persistence_history";
+const BEFORE_FIRST_CODE: &str = "history_unavailable.engine.before_first_commit";
+
+/// The code an `as_of` timestamp before every commit raises on the default
+/// branch.
+fn epoch_read_code(db: &mut Database) -> String {
+    db.kv(branch("default"), space("default"))
+        .expect("default KV opens")
+        .get_at(&key(b"k"), Timestamp::EPOCH)
+        .expect_err("a timestamp before every commit raises")
+        .code()
+        .to_owned()
+}
 
 fn open(path: &std::path::Path, retention: VersionRetention) -> Database {
     Database::open_local(
@@ -81,6 +93,12 @@ fn opt_in_retention_prunes_old_versions_end_to_end() {
         .expect_err("oldest version was pruned");
     assert_eq!(error.code(), HISTORY_CODE);
 
+    // #3588: once a floor is published, pruning may have taken the earliest
+    // commits' stamps with it, so the timeline cannot prove where the branch
+    // began. A timestamp before it keeps the retained-history code rather than
+    // claiming it is before the first commit.
+    assert_eq!(epoch_read_code(&mut db), HISTORY_CODE);
+
     let latest = db
         .kv(branch("default"), space("default"))
         .expect("default KV opens")
@@ -118,6 +136,10 @@ fn default_keep_all_retention_keeps_old_versions_end_to_end() {
         .expect("oldest version retained under KeepAll")
         .expect("oldest value exists");
     assert_eq!(oldest.as_bytes(), &[b'v', 0]);
+
+    // #3588 direction control: with nothing pruned, the same timestamp is
+    // before the branch's first commit, and says so.
+    assert_eq!(epoch_read_code(&mut db), BEFORE_FIRST_CODE);
 }
 
 /// #3502 Slice E3 — default-posture proof. A database opened with the PLAIN

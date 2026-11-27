@@ -9,8 +9,9 @@
 //! event's own occurrence time): `len_at(ts)` is the number of events committed
 //! by `ts`, and `get_at(sequence, ts)` yields the event iff its append
 //! committed by `ts`. `len_at` is lenient before the first commit (returns 0);
-//! `get_at` out-of-range (before the retained floor / after the latest commit)
-//! is a `history_unavailable` diagnostic, matching the KV boundary contract.
+//! `get_at` out-of-range (before the first commit / after the latest commit)
+//! is a `history_unavailable` diagnostic naming that end, matching the KV
+//! boundary contract.
 
 #![allow(clippy::result_large_err)]
 
@@ -22,7 +23,8 @@ use serde_json::json;
 use strata_core::{CommitVersion, Timestamp};
 use strata_engine::{Database, EventPayload, EventSequence, EventType};
 
-const HISTORY_CODE: &str = "history_unavailable.engine.persistence_history";
+const BEFORE_FIRST_CODE: &str = "history_unavailable.engine.before_first_commit";
+const AFTER_LATEST_CODE: &str = "history_unavailable.engine.after_latest_commit";
 
 fn event_type() -> EventType {
     EventType::new("conformance.event").expect("valid event type")
@@ -94,11 +96,11 @@ proptest! {
         let before = events
             .get_at(EventSequence::new(0), Timestamp::EPOCH)
             .expect_err("before-history read is a diagnostic");
-        prop_assert_eq!(before.code(), HISTORY_CODE);
+        prop_assert_eq!(before.code(), BEFORE_FIRST_CODE);
         let after = events
             .get_at(EventSequence::new(0), Timestamp::MAX)
             .expect_err("after-latest read is a diagnostic");
-        prop_assert_eq!(after.code(), HISTORY_CODE);
+        prop_assert_eq!(after.code(), AFTER_LATEST_CODE);
     }
 
     #[test]

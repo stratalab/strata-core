@@ -10,12 +10,12 @@ use strata_storage::api::{
     BranchGeneration as StorageBranchGeneration, BranchOutcome as StorageBranchOutcome,
     BranchRequest, BranchStatus as StorageBranchStatus, BranchSummary as StorageBranchSummary,
     CommitBatch, CommitDurabilitySummary, CommitInstantsRequest, CommitMutation, CommitOptions,
-    HistoryReadRequest, ImmutableSourceScanReadRequest, PointReadRequest, PrefixScanReadRequest,
-    ReadBound, ReadLimit, ScanRange, ScanReadRequest, StorageApiError, StorageApiErrorClass,
-    StorageBudgetPolicy, StorageBudgetSource, StorageCachePreheatPolicy, StorageCloseSummary,
-    StorageDurabilityPolicy, StorageImmutableSource, StorageKey, StorageMemoryBudget,
-    StorageOpenDisposition, StorageOpenOptions, StorageReadRow, StorageRuntime,
-    StorageRuntimeState, StorageSpaceId, StorageValue, TimelineBoundsRequest,
+    CommitTimelineEdge, HistoryReadRequest, ImmutableSourceScanReadRequest, PointReadRequest,
+    PrefixScanReadRequest, ReadBound, ReadLimit, ScanRange, ScanReadRequest, StorageApiError,
+    StorageApiErrorClass, StorageBudgetPolicy, StorageBudgetSource, StorageCachePreheatPolicy,
+    StorageCloseSummary, StorageDurabilityPolicy, StorageImmutableSource, StorageKey,
+    StorageMemoryBudget, StorageOpenDisposition, StorageOpenOptions, StorageReadRow,
+    StorageRuntime, StorageRuntimeState, StorageSpaceId, StorageValue, TimelineBoundsRequest,
     WallClockLookupRequest,
 };
 use strata_storage::api::{
@@ -1479,6 +1479,29 @@ const fn persistence_code(error: &StorageApiError) -> (&'static str, &'static st
             "unavailable.engine.persistence",
             "persistence lower layer is unavailable",
         ),
+        // #3588: a point outside the commit timeline names the end it missed.
+        // Nothing was pruned, so the retained-window code — kept for history
+        // that was — would send the caller after history that never existed.
+        StorageApiError::OutsideCommitTimeline { edge, .. } => match edge {
+            CommitTimelineEdge::BeforeFirstCommit => (
+                "history_unavailable.engine.before_first_commit",
+                "the requested time is before the branch's first commit",
+            ),
+            CommitTimelineEdge::AfterLatestCommit => (
+                "history_unavailable.engine.after_latest_commit",
+                "the requested time is after the branch's latest commit",
+            ),
+            CommitTimelineEdge::UndatedHistory => (
+                "history_unavailable.engine.undated_history",
+                "the branch's commits record no wall-clock time to compare the requested time against",
+            ),
+            // `CommitTimelineEdge` is `#[non_exhaustive]`; every edge it has
+            // today is matched above.
+            _ => (
+                "history_unavailable.engine.persistence_history",
+                "requested persistence history is unavailable",
+            ),
+        },
         _ => match error.class() {
             StorageApiErrorClass::InvalidArgument => (
                 "invalid_argument.engine.persistence",
@@ -1609,6 +1632,7 @@ fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
         StorageApiError::InvalidRuntimeState { reason }
         | StorageApiError::RetainedHistoryUnavailable { reason, .. }
         | StorageApiError::TimestampHistoryUnavailable { reason, .. }
+        | StorageApiError::OutsideCommitTimeline { reason, .. }
         | StorageApiError::DurableUncertain { reason, .. }
         | StorageApiError::RecoveryDegraded { reason }
         | StorageApiError::MaintenanceRejected { reason } => {
@@ -1700,8 +1724,8 @@ pub(crate) fn close_summary_is_durable(summary: StorageCloseSummary) -> bool {
 mod tests {
     use strata_core::BranchId;
     use strata_storage::api::{
-        CommitAdmissionPressureReason, CommitAdmissionPressureSeverity, StorageApiError,
-        StorageApiLowerLayer,
+        CommitAdmissionPressureReason, CommitAdmissionPressureSeverity, CommitTimelineEdge,
+        StorageApiError, StorageApiLowerLayer,
     };
 
     use super::map_storage_error;
@@ -1855,6 +1879,21 @@ mod tests {
                     reason: "test timestamp history",
                 },
                 "history_unavailable.engine.persistence_history",
+                &[],
+            ),
+            (
+                outside_timeline(CommitTimelineEdge::BeforeFirstCommit),
+                "history_unavailable.engine.before_first_commit",
+                &[],
+            ),
+            (
+                outside_timeline(CommitTimelineEdge::AfterLatestCommit),
+                "history_unavailable.engine.after_latest_commit",
+                &[],
+            ),
+            (
+                outside_timeline(CommitTimelineEdge::UndatedHistory),
+                "history_unavailable.engine.undated_history",
                 &[],
             ),
             (
@@ -2299,6 +2338,54 @@ mod tests {
             RetryPolicy::AfterStateChange,
             CommitOutcomeStatus::NotApplicable,
         );
+    }
+
+    fn outside_timeline(edge: CommitTimelineEdge) -> StorageApiError {
+        StorageApiError::OutsideCommitTimeline {
+            branch_id: branch(),
+            edge,
+            reason: "test timeline edge",
+        }
+    }
+
+    /// #3588: each edge of the commit timeline maps to its own code in the
+    /// history class. Only a time past the latest commit can become readable —
+    /// a later commit covers it — so only that one is retryable.
+    #[test]
+    fn storage_timeline_edges_map_to_distinct_history_codes() {
+        for (edge, code, retry_policy) in [
+            (
+                CommitTimelineEdge::BeforeFirstCommit,
+                "history_unavailable.engine.before_first_commit",
+                RetryPolicy::Never,
+            ),
+            (
+                CommitTimelineEdge::AfterLatestCommit,
+                "history_unavailable.engine.after_latest_commit",
+                RetryPolicy::AfterStateChange,
+            ),
+            (
+                CommitTimelineEdge::UndatedHistory,
+                "history_unavailable.engine.undated_history",
+                RetryPolicy::Never,
+            ),
+        ] {
+            let error = map_storage_error(outside_timeline(edge));
+            assert_eq!(error.code(), code, "{edge:?}");
+            assert_eq!(error.class(), EngineErrorClass::NotFound, "{edge:?}");
+            assert_eq!(
+                error.retryable(),
+                retry_policy == RetryPolicy::AfterStateChange,
+                "{edge:?}"
+            );
+            assert_v1_status(
+                &error,
+                ErrorClass::HistoryUnavailable,
+                retry_policy,
+                CommitOutcomeStatus::NotApplicable,
+            );
+            assert!(error.source_arc().is_some(), "{edge:?}");
+        }
     }
 
     #[test]

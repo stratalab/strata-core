@@ -66,7 +66,7 @@ fn empty_event_log_contract_runs_in_cache_and_durable_modes() {
                 .list_types_at(Timestamp::from_micros(u64::MAX))
                 .expect_err("after-latest read is a diagnostic")
                 .code(),
-            "history_unavailable.engine.persistence_history"
+            "history_unavailable.engine.after_latest_commit"
         );
         assert!(events
             .range(
@@ -1024,21 +1024,21 @@ fn assert_event_timestamp_boundaries(database: &mut Database) -> EventHistoryFac
             .get_at(EventSequence::new(0), Timestamp::EPOCH)
             .expect_err("before-history read is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.before_first_commit"
     );
     assert_eq!(
         events
             .get_at(EventSequence::new(0), Timestamp::MAX)
             .expect_err("after-latest read is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.after_latest_commit"
     );
     assert_eq!(
         events
             .len_at(Timestamp::MAX)
             .expect_err("after-latest len is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.after_latest_commit"
     );
     EventHistoryFacts {
         first: first_commit_ts,

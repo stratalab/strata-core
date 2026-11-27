@@ -134,6 +134,7 @@ commands:
     errors+:
       - invalid_argument.engine.json_path
       - invalid_argument.engine.json_path_too_long
+      - set:temporal.wall_clock_history
     display:
       columns:
         - field: /data/items/*/result/document_version

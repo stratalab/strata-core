@@ -32,6 +32,8 @@ use strata_engine::{
 
 const N_KEYS: usize = 3;
 const HISTORY_CODE: &str = "history_unavailable.engine.persistence_history";
+const BEFORE_FIRST_CODE: &str = "history_unavailable.engine.before_first_commit";
+const AFTER_LATEST_CODE: &str = "history_unavailable.engine.after_latest_commit";
 
 #[derive(Clone, Copy, Debug)]
 enum Op {
@@ -456,17 +458,30 @@ fn temporal_reads_match_oracle<F: TemporalFixture>(ops: Vec<Op>) -> Result<(), T
 
         // Out-of-range reads are diagnostics, never clamp-to-latest or ordinary
         // absence: before the retained floor (version 0 / EPOCH) and after the
-        // latest retained commit (version MAX / Timestamp::MAX).
+        // latest retained commit (version MAX / Timestamp::MAX). A timestamp
+        // names the end it missed; a version keeps the retained-history code.
         if max_version >= 1 {
             let boundaries = [
-                F::get_at_version(&mut db, "default", index, CommitVersion::new(0)),
-                F::get_at_version(&mut db, "default", index, CommitVersion::MAX),
-                F::get_at(&mut db, "default", index, Timestamp::EPOCH),
-                F::get_at(&mut db, "default", index, Timestamp::MAX),
+                (
+                    F::get_at_version(&mut db, "default", index, CommitVersion::new(0)),
+                    HISTORY_CODE,
+                ),
+                (
+                    F::get_at_version(&mut db, "default", index, CommitVersion::MAX),
+                    HISTORY_CODE,
+                ),
+                (
+                    F::get_at(&mut db, "default", index, Timestamp::EPOCH),
+                    BEFORE_FIRST_CODE,
+                ),
+                (
+                    F::get_at(&mut db, "default", index, Timestamp::MAX),
+                    AFTER_LATEST_CODE,
+                ),
             ];
-            for boundary in boundaries {
+            for (boundary, code) in boundaries {
                 let error = boundary.expect_err("out-of-range read is a diagnostic");
-                prop_assert_eq!(error.code(), HISTORY_CODE, "{}", F::label());
+                prop_assert_eq!(error.code(), code, "{}", F::label());
             }
         }
     }

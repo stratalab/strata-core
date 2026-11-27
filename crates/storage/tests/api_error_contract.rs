@@ -20,8 +20,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use strata_storage::api::{
-    BranchId, CommitAdmissionPressureReason, CommitAdmissionPressureSeverity, StorageApiError,
-    StorageApiErrorClass, StorageApiLowerLayer,
+    BranchId, CommitAdmissionPressureReason, CommitAdmissionPressureSeverity, CommitTimelineEdge,
+    StorageApiError, StorageApiErrorClass, StorageApiLowerLayer,
 };
 
 /// The source file that defines `StorageApiError`. The fixture's coverage is
@@ -197,6 +197,16 @@ fn sample_errors() -> Vec<(&'static str, StorageApiError, StorageApiErrorClass, 
             StorageApiError::TimestampHistoryUnavailable {
                 branch_id: branch(),
                 reason: "timestamp predates covered history",
+            },
+            StorageApiErrorClass::HistoryUnavailable,
+            false,
+        ),
+        (
+            "OutsideCommitTimeline",
+            StorageApiError::OutsideCommitTimeline {
+                branch_id: branch(),
+                edge: CommitTimelineEdge::AfterLatestCommit,
+                reason: "timestamp is after the latest commit",
             },
             StorageApiErrorClass::HistoryUnavailable,
             false,
@@ -627,6 +637,12 @@ fn every_storage_api_code_is_pinned_as_a_literal() {
             reason: "r",
         }
         .code(),
+        StorageApiError::OutsideCommitTimeline {
+            branch_id: branch(),
+            edge: CommitTimelineEdge::BeforeFirstCommit,
+            reason: "r",
+        }
+        .code(),
         StorageApiError::durable_uncertain("r").code(),
         StorageApiError::RecoveryDegraded { reason: "r" }.code(),
         StorageApiError::MaintenanceRejected { reason: "r" }.code(),
@@ -662,6 +678,7 @@ fn every_storage_api_code_is_pinned_as_a_literal() {
         "conflict.storage_api.conflict",
         "history_unavailable.storage_api.retained",
         "history_unavailable.storage_api.timestamp",
+        "history_unavailable.storage_api.outside_timeline",
         "ambiguous_commit.storage_api.durable_uncertain",
         "failed_precondition.storage_api.recovery_degraded",
         "failed_precondition.storage_api.maintenance",

@@ -112,3 +112,17 @@ sets:
       - invalid_argument.executor.arrow_graph
       - unavailable.executor.arrow_io
       - internal.executor.arrow
+  # What a read or fork at a timestamp raises for a time outside the branch's
+  # history: before its first commit, after its latest, or (once a retention
+  # policy has published a floor) in history it pruned (#3588).
+  - id: temporal.timestamp_history
+    errors:
+      - history_unavailable.engine.persistence_history
+      - history_unavailable.engine.before_first_commit
+      - history_unavailable.engine.after_latest_commit
+  # The same for a read that also takes `as_of_time`, plus an instant over
+  # commits that record no wall-clock time (#3588).
+  - id: temporal.wall_clock_history
+    errors:
+      - set:temporal.timestamp_history
+      - history_unavailable.engine.undated_history

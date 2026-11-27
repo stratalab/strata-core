@@ -373,6 +373,87 @@ fn read_at_timestamp_resolving_below_retained_history_floor_is_rejected() {
     assert_eq!(read_value(at.row().expect("row present")), b"v2");
 }
 
+/// #3588: the refusal names the edge of the timeline a point fell off, as a
+/// typed edge rather than a reason string (Hard Rule 29).
+fn assert_timeline_edge(error: &StorageApiError, expected: CommitTimelineEdge, what: u64) {
+    let StorageApiError::OutsideCommitTimeline { edge, .. } = error else {
+        panic!("{what}: expected OutsideCommitTimeline, got {error:?}");
+    };
+    assert_eq!(*edge, expected, "{what}");
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+}
+
+fn read_at_micros(
+    runtime: &StorageRuntime<'static>,
+    micros: u64,
+) -> StorageApiResult<PointReadOutcome> {
+    runtime.read_point(&point_request(
+        b"alpha",
+        ReadBound::AtTimestamp(Timestamp::from_micros(micros)),
+    ))
+}
+
+/// #3588: with nothing pruned, a timestamp outside the branch's commit
+/// timeline names the edge it fell off. One tick on either side of the
+/// history is already outside it, and both ends of the history still read.
+#[test]
+fn read_at_timestamp_outside_the_timeline_names_the_edge() {
+    let mut runtime = open_runtime();
+    commit_put(&mut runtime, b"alpha", b"v1", 10);
+    commit_put(&mut runtime, b"alpha", b"v2", 30);
+
+    for (micros, expected) in [
+        (0, CommitTimelineEdge::BeforeFirstCommit),
+        (9, CommitTimelineEdge::BeforeFirstCommit),
+        (31, CommitTimelineEdge::AfterLatestCommit),
+        (u64::MAX, CommitTimelineEdge::AfterLatestCommit),
+    ] {
+        let error = read_at_micros(&runtime, micros).expect_err("outside the timeline");
+        assert_timeline_edge(&error, expected, micros);
+    }
+    for (micros, expected) in [(10, b"v1"), (30, b"v2")] {
+        let read = read_at_micros(&runtime, micros).expect("an end of the history reads");
+        assert_eq!(read_value(read.row().expect("row present")), expected);
+    }
+}
+
+/// #3588: a branch with no commits is not "before its first commit" for a
+/// future timestamp, which a later commit makes after-latest or readable, so
+/// it keeps the retryable retention refusal until it has its own (#3765).
+#[test]
+fn read_at_timestamp_on_a_branch_with_no_commits_keeps_the_retryable_refusal() {
+    let runtime = open_runtime();
+    for micros in [10, u64::MAX] {
+        let error = read_at_micros(&runtime, micros).expect_err("no history to read");
+        assert!(
+            matches!(error, StorageApiError::TimestampHistoryUnavailable { .. }),
+            "{micros}: {error:?}"
+        );
+    }
+}
+
+/// #3588 direction control: under a retained-history floor, earlier commits
+/// may have been pruned along with their stamps, so a timestamp before the
+/// timeline keeps the retention refusal. The after-latest edge does not depend
+/// on pruning and still names itself.
+#[test]
+fn read_at_timestamp_before_the_timeline_under_a_floor_keeps_the_retention_refusal() {
+    let mut runtime = open_runtime();
+    let first = commit_put(&mut runtime, b"alpha", b"v1", 10);
+    commit_put(&mut runtime, b"alpha", b"v2", 30);
+    runtime
+        .set_retained_history_floor_for_test(branch(), first.commit_version())
+        .expect("set retained history floor");
+
+    let before = read_at_micros(&runtime, 9).expect_err("before the timeline");
+    assert!(
+        matches!(before, StorageApiError::TimestampHistoryUnavailable { .. }),
+        "a floor keeps the retention refusal: {before:?}"
+    );
+    let after = read_at_micros(&runtime, 31).expect_err("after the timeline");
+    assert_timeline_edge(&after, CommitTimelineEdge::AfterLatestCommit, 31);
+}
+
 #[test]
 fn read_at_timestamp_resolves_to_commit_version() {
     let mut runtime = open_runtime();
@@ -936,18 +1017,28 @@ fn timestamp_lookup_equal_timestamps_uses_greatest_version() {
     assert_eq!(lookup.matched_version(), second.commit_version());
 }
 
+/// #3588: the lookup API refuses a timestamp before the first commit the way a
+/// timestamp read does, and a branch with no commits keeps the retryable
+/// retention refusal (#3765).
 #[test]
-fn timestamp_lookup_before_retained_range_rejects() {
+fn timestamp_lookup_before_the_first_commit_names_the_edge() {
     let mut runtime = open_runtime();
-    commit_put(&mut runtime, b"a", b"a", 50);
-
-    let error = runtime
-        .lookup_version_at_or_before_timestamp(TimestampLookupRequest::new(
+    let lookup_at = |runtime: &StorageRuntime<'static>, micros| {
+        runtime.lookup_version_at_or_before_timestamp(TimestampLookupRequest::new(
             branch(),
-            Timestamp::from_micros(10),
+            Timestamp::from_micros(micros),
         ))
-        .expect_err("timestamp before retained timeline");
-    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+    };
+
+    let empty = lookup_at(&runtime, 10).expect_err("a branch with no commits");
+    assert!(
+        matches!(empty, StorageApiError::TimestampHistoryUnavailable { .. }),
+        "an empty timeline keeps the retention refusal: {empty:?}"
+    );
+
+    commit_put(&mut runtime, b"a", b"a", 50);
+    let error = lookup_at(&runtime, 10).expect_err("timestamp before the first commit");
+    assert_timeline_edge(&error, CommitTimelineEdge::BeforeFirstCommit, 10);
 }
 
 #[test]
@@ -1334,12 +1425,12 @@ fn wall_clock_resolution_rides_over_an_undated_prefix() {
             Timestamp::from_micros(dated_instant.as_micros() - 1),
         ))
         .expect_err("a target before the dated range must refuse");
-    let StorageApiError::TimestampHistoryUnavailable { reason, .. } = error else {
-        panic!("unexpected error: {error:?}");
-    };
-    assert!(
-        reason.contains("undated"),
-        "the refusal must name the undated prefix, not claim history is missing: {reason}"
+    // The refusal names the undated prefix rather than claiming history is
+    // missing (#3588: a typed edge, not reason text).
+    assert_timeline_edge(
+        &error,
+        CommitTimelineEdge::UndatedHistory,
+        dated_instant.as_micros() - 1,
     );
 
     // The undated commits are still perfectly readable by logical as_of — the
@@ -1352,6 +1443,119 @@ fn wall_clock_resolution_rides_over_an_undated_prefix() {
         .expect("undated history is still readable")
         .row()
         .is_some());
+}
+
+/// Proves the retained-timeline index complete with a timeline lookup, so a
+/// wall-clock refusal after it is about the history rather than about coverage.
+/// The lookup's own answer is ignored: on a branch with no commits it refuses,
+/// and the seed it performs on the way is the point.
+#[cfg(feature = "localfs")]
+fn prove_timeline_coverage(runtime: &StorageRuntime<'static>) {
+    let _ = runtime.read_point(&point_request(
+        b"k",
+        ReadBound::AtTimestamp(Timestamp::from_micros(10)),
+    ));
+    assert!(runtime
+        .retained_timeline_complete_for_test(branch())
+        .expect("index is complete"));
+}
+
+#[cfg(feature = "localfs")]
+fn wall_clock_at(
+    runtime: &StorageRuntime<'static>,
+    micros: u64,
+) -> StorageApiResult<WallClockLookupOutcome> {
+    runtime.resolve_wall_clock(WallClockLookupRequest::new(
+        branch(),
+        Timestamp::from_micros(micros),
+    ))
+}
+
+/// #3588: with nothing pruned, a wall-clock instant outside a dated history
+/// names the edge it fell off, one microsecond either side of it; both commit
+/// instants still resolve. Under a retained-history floor the before edge
+/// keeps the retention refusal, because pruned commits take their instants
+/// with them.
+#[cfg(feature = "localfs")]
+#[test]
+fn wall_clock_outside_the_dated_history_names_the_edge() {
+    let root = temp_dir_for_api_test("read-wall-clock-edges");
+    let mut runtime = open_durable_runtime(root);
+    let first_instant = 1_788_000_000_000_000;
+    let latest_instant = 1_788_000_000_000_500;
+    let first = commit_put_with_committed_at(
+        &mut runtime,
+        b"k",
+        b"v1",
+        10,
+        Timestamp::from_micros(first_instant),
+    );
+    commit_put_with_committed_at(
+        &mut runtime,
+        b"k",
+        b"v2",
+        20,
+        Timestamp::from_micros(latest_instant),
+    );
+    prove_timeline_coverage(&runtime);
+
+    for (micros, expected) in [
+        (first_instant - 1, CommitTimelineEdge::BeforeFirstCommit),
+        (latest_instant + 1, CommitTimelineEdge::AfterLatestCommit),
+    ] {
+        let error = wall_clock_at(&runtime, micros).expect_err("outside the dated history");
+        assert_timeline_edge(&error, expected, micros);
+    }
+    for micros in [first_instant, latest_instant] {
+        assert_eq!(
+            wall_clock_at(&runtime, micros)
+                .expect("a commit instant resolves")
+                .committed_at(),
+            Timestamp::from_micros(micros)
+        );
+    }
+
+    runtime
+        .set_retained_history_floor_for_test(branch(), first.commit_version())
+        .expect("set retained history floor");
+    let before = wall_clock_at(&runtime, first_instant - 1).expect_err("before the history");
+    assert!(
+        matches!(before, StorageApiError::TimestampHistoryUnavailable { .. }),
+        "a floor keeps the retention refusal: {before:?}"
+    );
+    let after = wall_clock_at(&runtime, latest_instant + 1).expect_err("after the history");
+    assert_timeline_edge(
+        &after,
+        CommitTimelineEdge::AfterLatestCommit,
+        latest_instant + 1,
+    );
+}
+
+/// #3588: commits that carry no instant are history whose wall-clock position
+/// is unknown, not missing history. A branch with no commits at all has nothing
+/// undated, and keeps the retryable retention refusal until it has its own
+/// (#3765).
+#[cfg(feature = "localfs")]
+#[test]
+fn wall_clock_over_undated_or_absent_history_names_which() {
+    let instant = 1_788_000_000_000_000;
+
+    let root = temp_dir_for_api_test("read-wall-clock-empty");
+    let runtime = open_durable_runtime(root);
+    prove_timeline_coverage(&runtime);
+    let error = wall_clock_at(&runtime, instant).expect_err("a branch with no commits");
+    assert!(
+        matches!(error, StorageApiError::TimestampHistoryUnavailable { .. }),
+        "an empty branch keeps the retention refusal: {error:?}"
+    );
+
+    let root = temp_dir_for_api_test("read-wall-clock-all-undated");
+    let mut runtime = open_durable_runtime(root);
+    commit_put(&mut runtime, b"k", b"v1", 10);
+    commit_put(&mut runtime, b"k", b"v2", 20);
+    prove_timeline_coverage(&runtime);
+    let error = wall_clock_at(&runtime, instant).expect_err("no commit carries an instant");
+    assert_timeline_edge(&error, CommitTimelineEdge::UndatedHistory, instant);
 }
 
 /// #3112 S3a / F1: wall-clock history has NO scan fallback, because
@@ -1804,7 +2008,11 @@ fn timestamp_lookup_before_retained_history_reports_history_unavailable() {
             Timestamp::from_micros(1),
         ))
         .expect_err("timestamp before retained history must reject");
-    assert_eq!(error.code(), "history_unavailable.storage_api.timestamp");
+    // #3588: nothing was pruned, so it is before the first commit.
+    assert_eq!(
+        error.code(),
+        "history_unavailable.storage_api.outside_timeline"
+    );
 }
 
 #[test]

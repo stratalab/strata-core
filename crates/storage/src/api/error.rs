@@ -55,6 +55,20 @@ impl StorageApiLowerLayer {
     }
 }
 
+/// Which side of a branch's commit timeline a refused point fell on, when no
+/// history was pruned to put it there (#3588).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitTimelineEdge {
+    /// Earlier than the branch's first commit.
+    BeforeFirstCommit,
+    /// Later than the branch's latest commit. Reads never clamp to it.
+    AfterLatestCommit,
+    /// A wall-clock instant over commits that record none: the history is
+    /// retained and readable, only its wall-clock position is unknown.
+    UndatedHistory,
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum StorageApiError {
@@ -130,6 +144,16 @@ pub enum StorageApiError {
         branch_id: BranchId,
         reason: &'static str,
     },
+    /// The requested point lies outside the branch's commit timeline and no
+    /// history was pruned to put it there. Distinct from the two retention
+    /// variants, whose remedy is to ask for retained history: nothing is
+    /// missing here, so that remedy sends the caller after history that never
+    /// existed (#3588).
+    OutsideCommitTimeline {
+        branch_id: BranchId,
+        edge: CommitTimelineEdge,
+        reason: &'static str,
+    },
     DurableUncertain {
         reason: &'static str,
         source: Option<Arc<dyn Error + Send + Sync + 'static>>,
@@ -203,6 +227,9 @@ impl StorageApiError {
             Self::Conflict { .. } => "conflict.storage_api.conflict",
             Self::RetainedHistoryUnavailable { .. } => "history_unavailable.storage_api.retained",
             Self::TimestampHistoryUnavailable { .. } => "history_unavailable.storage_api.timestamp",
+            Self::OutsideCommitTimeline { .. } => {
+                "history_unavailable.storage_api.outside_timeline"
+            }
             Self::DurableUncertain { .. } => "ambiguous_commit.storage_api.durable_uncertain",
             Self::RecoveryDegraded { .. } => "failed_precondition.storage_api.recovery_degraded",
             Self::MaintenanceRejected { .. } => "failed_precondition.storage_api.maintenance",
@@ -264,6 +291,9 @@ impl StorageApiError {
             Self::TimestampHistoryUnavailable { .. } => {
                 "Request a timestamp within the covered timestamp-history window."
             }
+            Self::OutsideCommitTimeline { .. } => {
+                "Request a point between the branch's first and latest commits, or read latest without a bound."
+            }
             Self::DurableUncertain { .. } => {
                 "Re-open the database to recover durable state before assuming the commit outcome."
             }
@@ -309,9 +339,9 @@ impl StorageApiError {
             Self::BranchNotFound { .. } => StorageApiErrorClass::NotFound,
             Self::BranchAlreadyExists { .. } => StorageApiErrorClass::AlreadyExists,
             Self::Conflict { .. } => StorageApiErrorClass::Conflict,
-            Self::RetainedHistoryUnavailable { .. } | Self::TimestampHistoryUnavailable { .. } => {
-                StorageApiErrorClass::HistoryUnavailable
-            }
+            Self::RetainedHistoryUnavailable { .. }
+            | Self::TimestampHistoryUnavailable { .. }
+            | Self::OutsideCommitTimeline { .. } => StorageApiErrorClass::HistoryUnavailable,
             Self::DurableUncertain { .. } => StorageApiErrorClass::AmbiguousCommit,
             Self::ResourceExhausted { .. } => StorageApiErrorClass::ResourceExhausted,
             Self::LowerLayer { .. } => StorageApiErrorClass::Internal,
@@ -457,6 +487,12 @@ impl fmt::Display for StorageApiError {
                     "branch {branch_id} timestamp history unavailable: {reason}"
                 )
             }
+            Self::OutsideCommitTimeline {
+                branch_id, reason, ..
+            } => write!(
+                formatter,
+                "branch {branch_id} commit timeline does not reach the requested point: {reason}"
+            ),
             Self::DurableUncertain { reason, .. } => {
                 write!(formatter, "storage durability is uncertain: {reason}")
             }

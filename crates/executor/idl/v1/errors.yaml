@@ -55,6 +55,9 @@ errors:
   - invalid_argument.engine.branch_delete
   - already_exists.engine.branch
   - history_unavailable.engine.persistence_history
+  - history_unavailable.engine.before_first_commit
+  - history_unavailable.engine.after_latest_commit
+  - history_unavailable.engine.undated_history
   - invalid_argument.engine.product_space_reserved
   - invalid_argument.engine.space_delete_default
   - failed_precondition.engine.format_version

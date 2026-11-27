@@ -68,7 +68,19 @@
 # in this lane can pin the envelope. The envelope is pinned by
 # `crates/executor/tests/admin_storage_behavior.rs` (cache refusal by code)
 # and drains when the replay lane gains a durable scratch executor.
-budget: 109
+# 109 -> 111 (#3588): history_unavailable.engine.persistence_history and
+# history_unavailable.engine.undated_history join. The retained-history code now
+# means history was pruned, or that a published retention floor makes "nothing
+# was pruned" unprovable; pruning is opt-in and durable-only, so the scratch
+# cache executor cannot raise it. `as_of: 999`, the fixture that used to, is
+# past the latest commit and now replays after_latest_commit instead. Undated
+# history exists only in databases written before commits recorded a wall-clock
+# time (#3112), which no fixture can create. Both envelopes are pinned by engine
+# tests (`version_retention.rs` through a real pruning compaction, and the
+# adapter's `storage_timeline_edges_map_to_distinct_history_codes`); they drain
+# when the replay lane gains a durable executor with a retention policy and an
+# undated-history seed.
+budget: 111
 unreplayed:
   - already_exists.engine.json_index
   - failed_precondition.engine.graph_ontology_edge_type
@@ -80,6 +92,8 @@ unreplayed:
   - failed_precondition.engine.runtime_closed
   - failed_precondition.engine.space_not_empty
   - failed_precondition.executor.hub_clone
+  - history_unavailable.engine.persistence_history
+  - history_unavailable.engine.undated_history
   - inference.download_disabled
   - inference.download_failed
   - inference.download_verification_failed

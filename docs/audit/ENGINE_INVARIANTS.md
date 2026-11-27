@@ -543,8 +543,19 @@ would see keys rewritten between the fork point and F as absent. The floor is th
 `retained_history_floor`, DISTINCT from and NOT substitutable by the never-pruned TIMELINE
 minimum — validating only the timeline bounds (as the fork path once did) passes a below-F
 version straight through (#3509). A version exactly AT F is retained and allowed.
+A timestamp or wall-clock instant before everything the branch's timeline holds is refused
+as before-the-first-commit (`OutsideCommitTimeline`) ONLY when that timeline proves where the
+branch began: no floor is published, and the timeline is either a proven index (a fork
+child's is seeded with its parent's pre-fork entries) or the own-row rebuild of a branch with
+no inherited layers. Otherwise the refusal MUST stay the retention variant: pruning can shed
+the earliest commits' stamps, and a fork child's own-row rebuild leaves its inherited history
+out, so "nothing earlier exists" is unprovable (#3588). An instant after the latest commit
+names that edge regardless.
 
-**Audit**: Verify the read path consults `version_below_retained_floor`
+**Audit**: Verify every caller of `before_timeline_error` (`api/runtime/data.rs`: the
+at-timestamp read, wall-clock resolution, and the `ForkAtTimestamp` arm in
+`api/runtime/mod.rs`) passes `timeline_proves_branch_birth`, evaluated BEFORE the timeline
+lookup, since the scan fallback seeds the index on its way through. Verify the read path consults `version_below_retained_floor`
 (`api/runtime/data.rs`) and the fork path consults
 `require_fork_version_within_retained_floor` in BOTH the `ForkAtVersion` and `ForkAtTimestamp`
 arms (`api/runtime/mod.rs::branch`) — a fork arm that validates only
@@ -557,7 +568,12 @@ timestamp itself instead of passing the `ReadSelector` through is the regression
 `read_at_version_below_retained_history_floor_is_rejected` (`api/tests/read.rs`),
 `api_fork_below_retained_history_floor_is_rejected` (`api/tests/maintenance.rs`),
 `batch_get_at_outside_the_retained_window_is_a_diagnostic_not_the_latest_state`
-(`tests/engine_json_batch_as_of.rs`, `tests/engine_kv_batch_as_of.rs`).
+(`tests/engine_json_batch_as_of.rs`, `tests/engine_kv_batch_as_of.rs`),
+`read_at_timestamp_before_the_timeline_under_a_floor_keeps_the_retention_refusal`
+(`api/tests/read.rs`),
+`a_fork_child_names_its_first_commit_only_from_a_timeline_that_covers_its_birth`
+(`api/tests/branch.rs`), and `opt_in_retention_prunes_old_versions_end_to_end`
+(`tests/version_retention.rs`, through a real pruning compaction).
 
 ### MVCC-010: Paginated reads seek from version-independent key positions and re-seek past tombstones
 

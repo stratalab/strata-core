@@ -103,6 +103,9 @@ pub(crate) enum WallClockResolution {
     /// No commit on the branch carries an instant. Every wall-clock question is
     /// unanswerable here.
     NoDatedHistory,
+    /// The branch has no commits at all: nothing is undated, and an instant is
+    /// neither before nor after a history that does not exist yet (#3588).
+    NoCommits,
     /// A dated commit is followed by an undated one. Instants only ever arrive
     /// as a suffix (`observe_committed_at` never downgrades, `seed_from_scan`
     /// preserves, and every commit since S2a carries one), so this shape means
@@ -686,6 +689,10 @@ impl RetainedCommitTimeline {
 /// instants are unknown, so they cannot be compared to a target — which is also
 /// why a target landing before the dated range refuses instead of guessing.
 fn resolve_wall_clock(entries: &[RetainedTimelineEntry], target: Timestamp) -> WallClockResolution {
+    // No commits means no history to be undated (#3588).
+    if entries.is_empty() {
+        return WallClockResolution::NoCommits;
+    }
     let Some(dated_start) = entries
         .iter()
         .position(|entry| entry.committed_at().is_some())
@@ -1419,8 +1426,8 @@ mod tests {
     }
 
     #[test]
-    fn wall_clock_resolution_on_an_empty_branch_reports_no_dated_history() {
-        assert_eq!(resolve(&[], 100), WallClockResolution::NoDatedHistory);
+    fn wall_clock_resolution_on_an_empty_branch_reports_no_commits() {
+        assert_eq!(resolve(&[], 100), WallClockResolution::NoCommits);
     }
 
     /// F1: an unproven index has NO fallback for wall-clock, because a scan

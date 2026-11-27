@@ -142,7 +142,12 @@ const CONFLICT_CODES: &[&str] = &[
     "failed_precondition.engine.graph_not_empty",
 ];
 
-const HISTORY_UNAVAILABLE_CODES: &[&str] = &["history_unavailable.engine.persistence_history"];
+const HISTORY_UNAVAILABLE_CODES: &[&str] = &[
+    "history_unavailable.engine.after_latest_commit",
+    "history_unavailable.engine.before_first_commit",
+    "history_unavailable.engine.persistence_history",
+    "history_unavailable.engine.undated_history",
+];
 
 const UNSUPPORTED_CODES: &[&str] = &[
     "unsupported.engine.persistence_capability",
@@ -394,6 +399,10 @@ fn retry_policy_for_code(code: &str, class: EngineErrorClass) -> RetryPolicy {
         | "conflict.engine.promotion"
         | "failed_precondition.engine.persistence"
         | "failed_precondition.engine.writer_lock"
+        // A later commit can cover a time past the newest one; nothing makes a
+        // time before the first commit, or an undated commit's time, readable,
+        // so those two keep the class default of `Never` (#3588).
+        | "history_unavailable.engine.after_latest_commit"
         | "history_unavailable.engine.persistence_history"
         | "resource_exhausted.engine.persistence_budget"
         | "unsupported.engine.persistence_capability" => return RetryPolicy::AfterStateChange,
@@ -445,6 +454,9 @@ fn commit_outcome_for_code(code: &str, class: EngineErrorClass) -> CommitOutcome
 /// class-generic sentence, and a caller reading only `message_template` /
 /// `suggested_fix` — the docs page, the MCP tool description — was told to
 /// "reload current state and retry", which is not a thing that fixes it.
+///
+/// The out-of-timeline history codes are here so each names the end of
+/// history it missed rather than the `NotFound` sentence (#3588).
 fn class_prefixed_message(code: &str) -> Option<&'static str> {
     Some(match code {
         "failed_precondition.engine.embedding_model_mismatch" => {
@@ -468,6 +480,41 @@ fn class_prefixed_message(code: &str) -> Option<&'static str> {
             "A vector collection with this name already exists."
         }
         "already_exists.engine.persistence" => "The resource already exists.",
+        "history_unavailable.engine.before_first_commit" => {
+            "The requested time is before the branch's first commit."
+        }
+        "history_unavailable.engine.after_latest_commit" => {
+            "The requested time is after the branch's latest commit."
+        }
+        "history_unavailable.engine.undated_history" => {
+            "The requested wall-clock time falls among commits that record no wall-clock time."
+        }
+        _ => return None,
+    })
+}
+
+/// Suggested-fix text for the `history_unavailable.*` codes. Each names the
+/// edge of history a request fell off, because the remedy differs: only the
+/// retained-window row is about pruning, and the other three must not send a
+/// caller after history that never existed (#3588).
+fn history_suggested_fix(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "history_unavailable.engine.persistence_history" => {
+            "Request history inside the retained window."
+        }
+        "history_unavailable.engine.before_first_commit" => {
+            "Request a time at or after the branch's first commit. `as_of_time` is the wall-clock \
+             time a commit was made, not a time inside your data; to replay history, pass `as_of` \
+             set to a commit's `timestamp`."
+        }
+        "history_unavailable.engine.after_latest_commit" => {
+            "Request a time at or before the branch's latest commit, or omit `as_of` and \
+             `as_of_time` to read the latest state; a later time does not clamp to it."
+        }
+        "history_unavailable.engine.undated_history" => {
+            "Pass `as_of` set to a commit's `timestamp` instead; these commits predate wall-clock \
+             recording, so `as_of_time` cannot place them."
+        }
         _ => return None,
     })
 }
@@ -475,6 +522,9 @@ fn class_prefixed_message(code: &str) -> Option<&'static str> {
 /// Suggested-fix text for `not_found.*` / `already_exists.*` codes (see U19),
 /// and for the embedding-model codes, whose fix is a specific command.
 fn class_prefixed_suggested_fix(code: &str) -> Option<&'static str> {
+    if let Some(fix) = history_suggested_fix(code) {
+        return Some(fix);
+    }
     Some(match code {
         "failed_precondition.engine.embedding_model_mismatch" => {
             "Embed with the model the collection records (see `vector collection stats`), or \
@@ -557,9 +607,6 @@ fn class_prefixed_suggested_fix(code: &str) -> Option<&'static str> {
         "failed_precondition.engine.format_version" => {
             "Open the database with the Strata version that wrote it or a newer one; \
              downgrades are not supported."
-        }
-        "history_unavailable.engine.persistence_history" => {
-            "Request history inside the retained window."
         }
         "already_exists.engine.branch" => {
             "Choose a different branch name or delete the existing branch first."
@@ -1211,6 +1258,66 @@ mod tests {
             history,
             suggested_fix_for_code("not_found.engine.persistence", EngineErrorClass::NotFound)
         );
+    }
+
+    /// #3588: nothing was pruned when a time falls before the first commit,
+    /// after the latest, or among undated commits, so each of those rows has a
+    /// remedy and message of its own rather than the retained-window row's.
+    /// Only a time past the latest commit can become readable, so only it is
+    /// retryable.
+    #[test]
+    fn out_of_timeline_history_rows_carry_their_own_remedy() {
+        let row = |code| error_code_registry_entry(code).expect("registered");
+        let retained = row("history_unavailable.engine.persistence_history");
+        let rows = [
+            (
+                row("history_unavailable.engine.before_first_commit"),
+                RetryPolicy::Never,
+            ),
+            (
+                row("history_unavailable.engine.after_latest_commit"),
+                RetryPolicy::AfterStateChange,
+            ),
+            (
+                row("history_unavailable.engine.undated_history"),
+                RetryPolicy::Never,
+            ),
+        ];
+        for (entry, retry_policy) in &rows {
+            assert_eq!(
+                entry.class,
+                ErrorClass::HistoryUnavailable,
+                "{}",
+                entry.code
+            );
+            assert_eq!(entry.retry_policy, *retry_policy, "{}", entry.code);
+            assert_ne!(
+                entry.message_template, retained.message_template,
+                "{}",
+                entry.code
+            );
+        }
+        let distinct_fixes: BTreeSet<_> = rows
+            .iter()
+            .map(|(entry, _)| entry.suggested_fix)
+            .chain([retained.suggested_fix])
+            .collect();
+        assert_eq!(
+            distinct_fixes.len(),
+            4,
+            "each history row has its own remedy"
+        );
+        // Each remedy is an explicit row of the history table, not a fallback
+        // that happens to differ: a code missing from the table would inherit
+        // the class remedy and still look distinct above.
+        for entry in rows.iter().map(|(entry, _)| entry).chain([&retained]) {
+            assert_eq!(
+                Some(entry.suggested_fix),
+                history_suggested_fix(entry.code),
+                "{}",
+                entry.code
+            );
+        }
     }
 
     /// `already_exists.engine.persistence` is an `already_exists` row under

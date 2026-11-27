@@ -296,7 +296,7 @@ fn compare_at_a_timestamp_after_a_branch_latest_is_history_unavailable() {
         .expect_err("a timestamp after a branch's latest is rejected");
     assert_eq!(
         error.code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.after_latest_commit"
     );
 }
 
