@@ -534,7 +534,7 @@ fn kv_versioned_and_point_in_time_reads_preserve_commit_metadata() {
         kv.get_at(&sequence.alpha, Timestamp::EPOCH)
             .expect_err("before-history read is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.before_first_commit"
     );
     assert_eq!(
         kv.get_at(&sequence.alpha, sequence.third.timestamp())
@@ -558,7 +558,7 @@ fn kv_versioned_and_point_in_time_reads_preserve_commit_metadata() {
         kv.get_at(&sequence.alpha, Timestamp::MAX)
             .expect_err("after-latest read is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.after_latest_commit"
     );
 }
 
@@ -688,7 +688,7 @@ fn kv_list_page_and_timestamp_list_suppress_tombstones() {
         kv.list_at(Some(&app_prefix), Timestamp::EPOCH)
             .expect_err("before-history list is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.before_first_commit"
     );
     assert_key_bytes(
         &kv.list_at(Some(&app_prefix), visible_timestamp)
@@ -701,7 +701,7 @@ fn kv_list_page_and_timestamp_list_suppress_tombstones() {
         kv.list_at(Some(&app_prefix), Timestamp::MAX)
             .expect_err("after-latest list is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.after_latest_commit"
     );
 
     let first_page = kv

@@ -47,14 +47,15 @@ $ strata ./shop kv get price
 200
 ```
 
-## A version that never existed is refused
+## A moment past the newest commit is refused
 
-Asking for a moment outside the retained window is an error rather than a
-nearest-match guess, so a caller never mistakes a clamp for an answer:
+Asking for a moment after the newest commit is an error rather than a
+nearest-match guess, so a caller never mistakes a clamp for an answer. The
+error names the end of the history the request missed:
 
 ```console
 $ strata ./shop kv get price --as-of 99
-history_unavailable.engine.persistence_history: requested persistence history is unavailable (…)
-  hint: Request history inside the retained window.
-  ref: https://stratadb.org/e/history_unavailable.engine.persistence_history
+history_unavailable.engine.after_latest_commit: the requested time is after the branch's latest commit (…)
+  hint: Request a time at or before the branch's latest commit, or omit `as_of` and `as_of_time` to read the latest state; a later time does not clamp to it.
+  ref: https://stratadb.org/e/history_unavailable.engine.after_latest_commit
 ```

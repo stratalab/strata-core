@@ -23,7 +23,7 @@ commands:
     output: Output::KvVersionedValue
     prose: commands/kv.get.md
     errors+:
-      - history_unavailable.engine.persistence_history
+      - set:temporal.wall_clock_history
     display:
       value: /data/value/value
       as: bytes
@@ -31,8 +31,10 @@ commands:
       request: requests/v1/kv/get.json
       response: responses/v1/kv/get_found.json
       error_cases:
-        - request: requests/v1/kv/get_unretained_version.json
-          expected_error: responses/v1/errors/kv/get_unretained_version.json
+        - request: requests/v1/kv/get_after_latest_commit.json
+          expected_error: responses/v1/errors/kv/get_after_latest_commit.json
+        - request: requests/v1/kv/get_before_first_commit.json
+          expected_error: responses/v1/errors/kv/get_before_first_commit.json
       setup:
         - requests/v1/kv/put.json
         - requests/v1/setup/kv_put_a_two.json
@@ -113,7 +115,7 @@ commands:
     prose: commands/kv.batch_get.md
     errors+:
       - invalid_argument.engine.kv_batch
-      - history_unavailable.engine.persistence_history
+      - set:temporal.wall_clock_history
     display:
       columns:
         - field: /data/items/*/result/key
@@ -137,8 +139,8 @@ commands:
           request: requests/v1/kv/batch_get_as_of.json
           response: responses/v1/kv/batch_get_ok.json
       error_cases:
-        - request: requests/v1/kv/batch_get_unretained_version.json
-          expected_error: responses/v1/errors/kv/batch_get_unretained_version.json
+        - request: requests/v1/kv/batch_get_after_latest_commit.json
+          expected_error: responses/v1/errors/kv/batch_get_after_latest_commit.json
   - id: kv.batch_delete
     kind: batch.itemwise_mutation
     title: Batch delete KV values

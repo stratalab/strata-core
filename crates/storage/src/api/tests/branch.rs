@@ -343,22 +343,126 @@ fn branch_fork_at_timestamp_resolves_timeline() {
     assert_eq!(read_value(&runtime, child, b"timed"), Some(b"one".to_vec()));
 }
 
+fn fork_at_micros(
+    runtime: &mut StorageRuntime<'_>,
+    micros: u64,
+) -> StorageApiResult<BranchOutcome> {
+    runtime.branch(&branch_request(
+        branch_with(0x47),
+        BranchAction::ForkAtTimestamp {
+            source: branch(),
+            timestamp: Timestamp::from_micros(micros),
+        },
+    ))
+}
+
+/// #3588: with nothing pruned, a fork timestamp outside the source's commit
+/// timeline names the edge it fell off; under a retained-history floor the
+/// before edge keeps the retention refusal, because pruned commits take their
+/// stamps with them.
 #[test]
-fn branch_fork_at_unretained_timestamp_rejects() {
+fn branch_fork_at_a_timestamp_outside_the_timeline_names_the_edge() {
+    let mut runtime = open_runtime();
+    let first = put_at(&mut runtime, branch(), b"timed", b"one", 10);
+
+    for (micros, expected) in [
+        (5, CommitTimelineEdge::BeforeFirstCommit),
+        (11, CommitTimelineEdge::AfterLatestCommit),
+    ] {
+        let error = fork_at_micros(&mut runtime, micros).expect_err("outside the timeline");
+        let StorageApiError::OutsideCommitTimeline { edge, .. } = error else {
+            panic!("{micros}: expected OutsideCommitTimeline, got {error:?}");
+        };
+        assert_eq!(edge, expected, "{micros}");
+    }
+
+    runtime
+        .set_retained_history_floor_for_test(branch(), first.commit_version())
+        .expect("set retained history floor");
+    let error = fork_at_micros(&mut runtime, 5).expect_err("before the timeline");
+    assert!(
+        matches!(error, StorageApiError::TimestampHistoryUnavailable { .. }),
+        "a floor keeps the retention refusal: {error:?}"
+    );
+    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+}
+
+fn read_timed_at(
+    runtime: &StorageRuntime<'_>,
+    branch_id: BranchId,
+    micros: u64,
+) -> StorageApiResult<Option<Vec<u8>>> {
+    runtime
+        .read_point(&PointReadRequest::new(
+            branch_id,
+            engine_space(),
+            api_key(b"timed"),
+            ReadBound::AtTimestamp(Timestamp::from_micros(micros)),
+        ))
+        .map(|outcome| {
+            outcome
+                .row()
+                .and_then(|row| row.value().map(|value| value.as_bytes().to_vec()))
+        })
+}
+
+/// #3588: a fork child's proven timeline carries the history it inherited, so
+/// a timestamp before the parent's first commit is before the child's too,
+/// and a pre-fork timestamp reads the parent's value. With the child's index
+/// unproven, a timestamp lookup answers from the child's own rows, which leave
+/// that history out: a miss there proves nothing about where the branch began,
+/// so it keeps the retryable retention refusal, and the retry does answer once
+/// the lookup has seeded the index. A branch with no inherited layers is its
+/// own whole history, so its own rows still prove where it began.
+#[cfg(feature = "localfs")]
+#[test]
+fn a_fork_child_names_its_first_commit_only_from_a_timeline_that_covers_its_birth() {
     let mut runtime = open_runtime();
     put_at(&mut runtime, branch(), b"timed", b"one", 10);
-
-    let error = runtime
+    put_at(&mut runtime, branch(), b"timed", b"two", 20);
+    runtime
+        .flush_default_branch_for_test()
+        .expect("flush so the child inherits a table");
+    let child = branch_with(0x49);
+    runtime
         .branch(&branch_request(
-            branch_with(0x47),
-            BranchAction::ForkAtTimestamp {
-                source: branch(),
-                timestamp: Timestamp::from_micros(5),
-            },
+            child,
+            BranchAction::ForkCurrent { source: branch() },
         ))
-        .expect_err("unretained timestamp rejected");
+        .expect("fork");
 
-    assert_eq!(error.class(), StorageApiErrorClass::HistoryUnavailable);
+    let error = read_timed_at(&runtime, child, 5).expect_err("before the parent's history");
+    let StorageApiError::OutsideCommitTimeline { edge, .. } = error else {
+        panic!("expected OutsideCommitTimeline, got {error:?}");
+    };
+    assert_eq!(edge, CommitTimelineEdge::BeforeFirstCommit);
+    assert_eq!(
+        read_timed_at(&runtime, child, 15).expect("pre-fork history reads"),
+        Some(b"one".to_vec())
+    );
+
+    runtime
+        .mark_retained_timeline_incomplete_for_test(child)
+        .expect("mark the child's index unproven");
+    let error = read_timed_at(&runtime, child, 15)
+        .expect_err("the child's own rows leave its inherited history out");
+    assert!(
+        matches!(error, StorageApiError::TimestampHistoryUnavailable { .. }),
+        "an own-rows miss on a fork child keeps the retention refusal: {error:?}"
+    );
+    assert_eq!(
+        read_timed_at(&runtime, child, 15).expect("the retry answers from the seeded index"),
+        Some(b"one".to_vec())
+    );
+
+    runtime
+        .mark_retained_timeline_incomplete_for_test(branch())
+        .expect("mark the source's index unproven");
+    let error = read_timed_at(&runtime, branch(), 5).expect_err("before the source's history");
+    let StorageApiError::OutsideCommitTimeline { edge, .. } = error else {
+        panic!("expected OutsideCommitTimeline, got {error:?}");
+    };
+    assert_eq!(edge, CommitTimelineEdge::BeforeFirstCommit);
 }
 
 #[test]

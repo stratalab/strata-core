@@ -1099,7 +1099,7 @@ mod tests {
         .expect_err("an instant after the latest commit raises");
         assert_eq!(
             error.code(),
-            "history_unavailable.engine.persistence_history"
+            "history_unavailable.engine.after_latest_commit"
         );
     }
 }

@@ -811,7 +811,7 @@ fn exercise_vector_timestamp_reads(database: &mut Database) {
             )
             .expect_err("pre-history query is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.before_first_commit"
     );
     vectors
         .create_collection(collection.clone(), config(2, VectorDistanceMetric::Cosine))

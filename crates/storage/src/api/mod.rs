@@ -67,7 +67,7 @@ pub use diagnostics::{
     DiagnosticsStoragePressureSeverity, DiagnosticsTableReachabilityReport,
     DiagnosticsTimelineReport, DiagnosticsWalGrowthReport,
 };
-pub use error::{StorageApiError, StorageApiErrorClass, StorageApiLowerLayer};
+pub use error::{CommitTimelineEdge, StorageApiError, StorageApiErrorClass, StorageApiLowerLayer};
 pub use maintenance::{
     MaintenanceDrainSummary, MaintenanceFailureSummary, MaintenanceQueueSummary,
     MaintenanceReasonClass, MaintenanceRequest, MaintenanceScope, MaintenanceSummary,

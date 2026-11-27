@@ -263,8 +263,17 @@ the public registry when adding, renaming, or removing a public error code.
 <a id="failed_precondition.engine.vector_index_manifest"></a>
 - `failed_precondition.engine.vector_index_manifest`
 
+<a id="history_unavailable.engine.after_latest_commit"></a>
+- `history_unavailable.engine.after_latest_commit`
+
+<a id="history_unavailable.engine.before_first_commit"></a>
+- `history_unavailable.engine.before_first_commit`
+
 <a id="history_unavailable.engine.persistence_history"></a>
 - `history_unavailable.engine.persistence_history`
+
+<a id="history_unavailable.engine.undated_history"></a>
+- `history_unavailable.engine.undated_history`
 
 <a id="internal.engine.persistence"></a>
 - `internal.engine.persistence`

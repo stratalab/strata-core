@@ -51,13 +51,14 @@ use super::{
     BranchParentSummary, BranchRequest, BranchStatus, BranchSummary, CommitAdmissionPressureReason,
     CommitAdmissionPressureSeverity, CommitAdmissionSummary, CommitBatch, CommitDurability,
     CommitDurabilitySummary, CommitExpectedVersion, CommitInstantsRequest, CommitSummary,
-    DiagnosticsBranchCatalogReport, DiagnosticsBudgetAccuracy, DiagnosticsBudgetPool,
-    DiagnosticsBudgetPressure, DiagnosticsBudgetReport, DiagnosticsBudgetUsage,
-    DiagnosticsCheckpointReport, DiagnosticsDetail, DiagnosticsFootprintReport, DiagnosticsOutcome,
-    DiagnosticsQuarantineReport, DiagnosticsReadActivityReport, DiagnosticsReclaimDeferral,
-    DiagnosticsReclaimOutcome, DiagnosticsReclaimPass, DiagnosticsReclaimReport,
-    DiagnosticsRecoveryClass, DiagnosticsRecoveryFault, DiagnosticsRecoveryFaultKind,
-    DiagnosticsRecoveryReport, DiagnosticsRequest, DiagnosticsRetentionReport, DiagnosticsScope,
+    CommitTimelineEdge, DiagnosticsBranchCatalogReport, DiagnosticsBudgetAccuracy,
+    DiagnosticsBudgetPool, DiagnosticsBudgetPressure, DiagnosticsBudgetReport,
+    DiagnosticsBudgetUsage, DiagnosticsCheckpointReport, DiagnosticsDetail,
+    DiagnosticsFootprintReport, DiagnosticsOutcome, DiagnosticsQuarantineReport,
+    DiagnosticsReadActivityReport, DiagnosticsReclaimDeferral, DiagnosticsReclaimOutcome,
+    DiagnosticsReclaimPass, DiagnosticsReclaimReport, DiagnosticsRecoveryClass,
+    DiagnosticsRecoveryFault, DiagnosticsRecoveryFaultKind, DiagnosticsRecoveryReport,
+    DiagnosticsRequest, DiagnosticsRetentionReport, DiagnosticsScope,
     DiagnosticsSourceLayoutReport, DiagnosticsSourceLevelTableCount,
     DiagnosticsStoragePressureReason, DiagnosticsStoragePressureReport,
     DiagnosticsStoragePressureSeverity, DiagnosticsTableReachabilityReport,
@@ -100,10 +101,11 @@ use background::{
 
 pub use data::PointBatchRead;
 use data::{
-    cap_bound_at_visible, flush_request_for_boundary, map_api_commit_batch, map_commit_summary,
-    map_immutable_sources, map_scan_rows, map_storage_space, physical_key, read_point_in_view,
-    read_row_from_storage, require_version_retained, resolve_read_bound,
-    timeline_committed_at_for_versions, timeline_resolve_wall_clock, timeline_view_or_index,
+    before_timeline_error, cap_bound_at_visible, flush_request_for_boundary, map_api_commit_batch,
+    map_commit_summary, map_immutable_sources, map_scan_rows, map_storage_space, outside_timeline,
+    physical_key, read_point_in_view, read_row_from_storage, require_version_retained,
+    resolve_read_bound, timeline_committed_at_for_versions, timeline_proves_branch_birth,
+    timeline_resolve_wall_clock, timeline_view_or_index,
 };
 use diagnostics::{
     branch_for_diagnostics_scope, branch_generation_or_default, current_visible,
@@ -1113,7 +1115,10 @@ impl<'a> StorageRuntime<'a> {
             BranchAction::ForkAtTimestamp { source, timestamp } => {
                 require_valid_branch_identifier(request.branch_id(), "branch_id")?;
                 require_valid_branch_identifier(source, "source_branch_id")?;
-                let timeline = self.timeline_view(source)?;
+                let source_view = self.read_view_for_branch(source)?;
+                // Before the lookup: its scan fallback seeds the index.
+                let proves_birth = timeline_proves_branch_birth(&source_view);
+                let timeline = timeline_view_or_index(&source_view)?;
                 let lookup = timeline.version_at_or_before(timestamp);
                 let version = match lookup.miss() {
                     CommitTimelineMiss::Matched => lookup.matched_version().ok_or(
@@ -1122,17 +1127,26 @@ impl<'a> StorageRuntime<'a> {
                             reason: "timestamp lookup did not return a retained version",
                         },
                     )?,
-                    CommitTimelineMiss::BeforeRetainedHistory | CommitTimelineMiss::Empty => {
+                    CommitTimelineMiss::BeforeRetainedHistory => {
+                        return Err(before_timeline_error(
+                            source,
+                            proves_birth,
+                            "timestamp is before the earliest commit on the source timeline",
+                        ));
+                    }
+                    // An empty source keeps the retryable refusal (#3765).
+                    CommitTimelineMiss::Empty => {
                         return Err(StorageApiError::TimestampHistoryUnavailable {
                             branch_id: source,
-                            reason: "timestamp is outside retained timeline history",
+                            reason: "source timeline has no commits",
                         });
                     }
                     CommitTimelineMiss::AfterLatestRetained => {
-                        return Err(StorageApiError::TimestampHistoryUnavailable {
-                            branch_id: source,
-                            reason: "timestamp is newer than retained timeline history",
-                        });
+                        return Err(outside_timeline(
+                            source,
+                            CommitTimelineEdge::AfterLatestCommit,
+                            "timestamp is after the latest commit on the source timeline",
+                        ));
                     }
                 };
                 self.require_fork_version_within_retained_floor(source, version)?;
@@ -1717,7 +1731,10 @@ impl<'a> StorageRuntime<'a> {
         &self,
         request: TimestampLookupRequest,
     ) -> StorageApiResult<TimestampLookupOutcome> {
-        let timeline = self.timeline_view(request.branch_id())?;
+        let view = self.read_view_for_branch(request.branch_id())?;
+        // Before the lookup: its scan fallback seeds the index.
+        let proves_birth = timeline_proves_branch_birth(&view);
+        let timeline = timeline_view_or_index(&view)?;
         let lookup = timeline.version_at_or_before(request.timestamp());
         match lookup.miss() {
             CommitTimelineMiss::Matched | CommitTimelineMiss::AfterLatestRetained => {
@@ -1741,12 +1758,16 @@ impl<'a> StorageRuntime<'a> {
                         .then_some(TimestampLookupMiss::AfterLatestRetained),
                 ))
             }
-            CommitTimelineMiss::BeforeRetainedHistory | CommitTimelineMiss::Empty => {
-                Err(StorageApiError::TimestampHistoryUnavailable {
-                    branch_id: request.branch_id(),
-                    reason: "timestamp is outside retained timeline history",
-                })
-            }
+            // #3588: the same refusal a timestamp read raises for this miss.
+            CommitTimelineMiss::BeforeRetainedHistory => Err(before_timeline_error(
+                request.branch_id(),
+                proves_birth,
+                "timestamp is before the earliest commit on the branch timeline",
+            )),
+            CommitTimelineMiss::Empty => Err(StorageApiError::TimestampHistoryUnavailable {
+                branch_id: request.branch_id(),
+                reason: "branch timeline has no commits",
+            }),
         }
     }
 

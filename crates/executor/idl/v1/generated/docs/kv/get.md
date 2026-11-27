@@ -53,6 +53,9 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.product_space`](https://stratadb.org/e/invalid_argument.engine.product_space)
 - [`invalid_argument.engine.kv_key`](https://stratadb.org/e/invalid_argument.engine.kv_key)
 - [`history_unavailable.engine.persistence_history`](https://stratadb.org/e/history_unavailable.engine.persistence_history)
+- [`history_unavailable.engine.before_first_commit`](https://stratadb.org/e/history_unavailable.engine.before_first_commit)
+- [`history_unavailable.engine.after_latest_commit`](https://stratadb.org/e/history_unavailable.engine.after_latest_commit)
+- [`history_unavailable.engine.undated_history`](https://stratadb.org/e/history_unavailable.engine.undated_history)
 
 ## Invocation
 

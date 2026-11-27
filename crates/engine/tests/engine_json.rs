@@ -618,7 +618,7 @@ fn json_history_version_timestamp_and_list_at_are_stable() {
         json.get_at(&doc, &root(), Timestamp::EPOCH)
             .expect_err("pre-history timestamp read is a diagnostic")
             .code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.before_first_commit"
     );
 
     let created = json

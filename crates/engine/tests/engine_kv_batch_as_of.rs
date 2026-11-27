@@ -242,27 +242,32 @@ fn batch_get_at_outside_the_retained_window_is_a_diagnostic_not_the_latest_state
     run_database_modes(exercise_window_diagnostics);
 }
 
-/// A timestamp before the retained history or after the latest commit, and
-/// a version after the latest commit, fail the whole batch with the
-/// temporal-window diagnostic. A batch that fell back to the latest state
+/// A timestamp before the first commit or after the latest one fails the
+/// whole batch with the diagnostic naming that end, and a version after the
+/// latest commit fails it the way the single read does. A batch that fell
+/// back to the latest state
 /// would answer instead — the exact mix of versions the pinned read exists
 /// to rule out.
 fn exercise_window_diagnostics(database: &mut Database) {
     let mut kv = kv_service(database, "default");
     seed(&mut kv);
 
-    for (instant, what) in [
-        (Timestamp::EPOCH, "before the retained history"),
-        (Timestamp::MAX, "after the latest commit"),
+    for (instant, code, what) in [
+        (
+            Timestamp::EPOCH,
+            "history_unavailable.engine.before_first_commit",
+            "before the first commit",
+        ),
+        (
+            Timestamp::MAX,
+            "history_unavailable.engine.after_latest_commit",
+            "after the latest commit",
+        ),
     ] {
         let error = kv
             .batch_get_at(&keys(), instant)
             .expect_err("an out-of-window batch is refused");
-        assert_eq!(
-            error.code(),
-            "history_unavailable.engine.persistence_history",
-            "{what}"
-        );
+        assert_eq!(error.code(), code, "{what}");
         // The same class and code the single read raises for the instant:
         // the code is what tells a trimmed or future instant from a key
         // that simply is not there.

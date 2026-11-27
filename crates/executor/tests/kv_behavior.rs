@@ -206,12 +206,13 @@ fn as_of_time_past_the_latest_commit_raises_instead_of_clamping() {
     assert_eq!(error.class(), ExecutorErrorClass::NotFound);
     assert_eq!(
         error.code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.after_latest_commit"
     );
 }
 
 /// F3: "before the database existed" is a real answer, and distinct from a
-/// successful read of empty history.
+/// successful read of empty history. Nothing was pruned, so it names the first
+/// commit rather than a retention window.
 #[test]
 fn as_of_time_before_the_first_commit_raises() {
     let mut executor = Executor::open_cache().expect("cache executor opens");
@@ -222,30 +223,43 @@ fn as_of_time_before_the_first_commit_raises() {
     assert_eq!(error.class(), ExecutorErrorClass::NotFound);
     assert_eq!(
         error.code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.before_first_commit"
     );
 }
 
 /// A designed safety property: instants are epoch MICROS, and every other
 /// plausible unit for the same moment lands outside the dated range in one
-/// direction or the other. No unit confusion can quietly resolve to a wrong
-/// commit — a class of bug that would otherwise be invisible.
+/// direction or the other — and the refusal names which. No unit confusion can
+/// quietly resolve to a wrong commit — a class of bug that would otherwise be
+/// invisible.
 #[test]
 fn as_of_time_in_the_wrong_time_unit_always_raises() {
     let mut executor = Executor::open_cache().expect("cache executor opens");
     let (_, micros) = put_stamp(&mut executor, "unit-key", "one");
 
-    for (unit, instant) in [
-        ("seconds", micros / 1_000_000),
-        ("millis", micros / 1_000),
-        ("nanos", micros.saturating_mul(1_000)),
+    for (unit, instant, code) in [
+        (
+            "seconds",
+            micros / 1_000_000,
+            "history_unavailable.engine.before_first_commit",
+        ),
+        (
+            "millis",
+            micros / 1_000,
+            "history_unavailable.engine.before_first_commit",
+        ),
+        (
+            "nanos",
+            micros.saturating_mul(1_000),
+            "history_unavailable.engine.after_latest_commit",
+        ),
     ] {
         let Err(error) = kv_get_at(&mut executor, "unit-key", None, Some(instant)) else {
             panic!("{unit} must not silently resolve to a commit");
         };
         assert_eq!(
             error.code(),
-            "history_unavailable.engine.persistence_history",
+            code,
             "{unit} landed outside the dated range, as intended"
         );
     }
@@ -1619,7 +1633,7 @@ fn kv_batch_get_as_of_refusals_match_the_single_read() {
         .expect_err("a timeline position after the latest commit is a diagnostic");
     assert_eq!(
         after_latest.code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.after_latest_commit"
     );
 }
 

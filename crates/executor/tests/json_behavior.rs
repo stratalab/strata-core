@@ -2529,7 +2529,7 @@ fn json_batch_get_as_of_refusals_match_the_single_read() {
         .expect_err("a timeline position after the latest commit is a diagnostic");
     assert_eq!(
         after_latest.code(),
-        "history_unavailable.engine.persistence_history"
+        "history_unavailable.engine.after_latest_commit"
     );
 }
 

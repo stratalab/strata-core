@@ -12,7 +12,7 @@ use super::{
     Timestamp, API_PHYSICAL_SPACE,
 };
 use crate::api::read::WallClockLookupOutcome;
-use crate::api::StorageImmutableSource;
+use crate::api::{CommitTimelineEdge, StorageImmutableSource};
 use crate::branch::read::BranchImmutableRowSource;
 use crate::observability::perf_trace;
 use crate::timeline_index::WallClockResolution;
@@ -420,6 +420,57 @@ fn version_below_retained_floor(view: &BranchReadView, version: CommitVersion) -
         .is_some_and(|floor| version < floor)
 }
 
+/// #3588: whether a miss before everything the branch's timeline holds proves
+/// the point is before the branch's first commit. Two things stop it: a
+/// published retained-history floor, because pruning can shed the earliest
+/// commits' stamps; and, on a fork child, a timeline rebuilt from the child's
+/// own rows, which leaves out the history it inherited. A proven index carries
+/// that history (it is seeded from the parent at fork), and a branch with no
+/// inherited layers has no other history to leave out.
+///
+/// Evaluate it BEFORE the lookup: the scan fallback seeds the index on its way
+/// through, so an index proven afterwards says nothing about the scan that
+/// answered. A fork child whose index recovery completed from its own rows
+/// (the corruption-guard fallback) passes this check without the inherited
+/// history; #3766 tracks that degraded state.
+pub(super) fn timeline_proves_branch_birth(view: &BranchReadView) -> bool {
+    view.retained_history_floor().is_none()
+        && (view.inherited_layer_count() == 0
+            || view
+                .retained_timeline()
+                .is_some_and(|(index, _)| index.is_complete()))
+}
+
+/// #3588: the refusal for a point earlier than anything the branch's timeline
+/// holds. When the timeline proves where the branch began, the point is before
+/// its first commit, and the retention refusal
+/// would send the caller after history that never existed. When it cannot,
+/// earlier history may exist that this timeline does not show, and the
+/// retention refusal is the honest answer.
+pub(super) fn before_timeline_error(
+    branch_id: BranchId,
+    timeline_proves_birth: bool,
+    reason: &'static str,
+) -> StorageApiError {
+    if timeline_proves_birth {
+        outside_timeline(branch_id, CommitTimelineEdge::BeforeFirstCommit, reason)
+    } else {
+        StorageApiError::TimestampHistoryUnavailable { branch_id, reason }
+    }
+}
+
+pub(super) const fn outside_timeline(
+    branch_id: BranchId,
+    edge: CommitTimelineEdge,
+    reason: &'static str,
+) -> StorageApiError {
+    StorageApiError::OutsideCommitTimeline {
+        branch_id,
+        edge,
+        reason,
+    }
+}
+
 pub(super) fn require_version_retained(
     view: &BranchReadView,
     version: CommitVersion,
@@ -466,6 +517,7 @@ pub(super) fn resolve_read_bound(
             })
         }
         ReadBound::AtTimestamp(timestamp) => {
+            let proves_birth = timeline_proves_branch_birth(view);
             let lookup = timeline_version_at_or_before(view, timestamp)?;
             match lookup.miss() {
                 CommitTimelineMiss::Matched => {
@@ -494,18 +546,23 @@ pub(super) fn resolve_read_bound(
                         )?),
                     })
                 }
-                CommitTimelineMiss::BeforeRetainedHistory | CommitTimelineMiss::Empty => {
-                    Err(StorageApiError::TimestampHistoryUnavailable {
-                        branch_id: view.branch_id(),
-                        reason: "timestamp is before retained timeline history",
-                    })
-                }
-                CommitTimelineMiss::AfterLatestRetained => {
-                    Err(StorageApiError::TimestampHistoryUnavailable {
-                        branch_id: view.branch_id(),
-                        reason: "timestamp is after latest retained timeline history",
-                    })
-                }
+                CommitTimelineMiss::BeforeRetainedHistory => Err(before_timeline_error(
+                    view.branch_id(),
+                    proves_birth,
+                    "timestamp is before the earliest commit on the branch timeline",
+                )),
+                // A branch with no commits is not "before its first commit"
+                // for a future time, which a later commit makes after-latest
+                // or readable, so it keeps the retryable refusal (#3765).
+                CommitTimelineMiss::Empty => Err(StorageApiError::TimestampHistoryUnavailable {
+                    branch_id: view.branch_id(),
+                    reason: "branch timeline has no commits",
+                }),
+                CommitTimelineMiss::AfterLatestRetained => Err(outside_timeline(
+                    view.branch_id(),
+                    CommitTimelineEdge::AfterLatestCommit,
+                    "timestamp is after the latest commit on the branch timeline",
+                )),
             }
         }
     }
@@ -568,18 +625,30 @@ pub(super) fn timeline_resolve_wall_clock(
                 .committed_at()
                 .ok_or_else(|| unavailable("resolved commit carries no wall-clock instant"))?,
         )),
-        WallClockResolution::AfterLatestDated => Err(unavailable(
+        WallClockResolution::AfterLatestDated => Err(outside_timeline(
+            view.branch_id(),
+            CommitTimelineEdge::AfterLatestCommit,
             "wall-clock instant is after the latest dated commit",
         )),
-        WallClockResolution::BeforeDatedWithUndatedPrefix => Err(unavailable(
+        WallClockResolution::BeforeDatedWithUndatedPrefix => Err(outside_timeline(
+            view.branch_id(),
+            CommitTimelineEdge::UndatedHistory,
             "wall-clock instant is before the first dated commit; earlier history is undated",
         )),
-        WallClockResolution::BeforeDatedHistory => Err(unavailable(
+        // Resolution answers only from a proven index, never a scan, so the
+        // order of this check against the lookup does not matter here.
+        WallClockResolution::BeforeDatedHistory => Err(before_timeline_error(
+            view.branch_id(),
+            timeline_proves_branch_birth(view),
             "wall-clock instant is before the first dated commit",
         )),
-        WallClockResolution::NoDatedHistory => Err(unavailable(
+        WallClockResolution::NoDatedHistory => Err(outside_timeline(
+            view.branch_id(),
+            CommitTimelineEdge::UndatedHistory,
             "branch has no commits carrying a wall-clock instant",
         )),
+        // As for a logical time on an empty branch (#3765).
+        WallClockResolution::NoCommits => Err(unavailable("branch has no commits")),
         WallClockResolution::InconsistentDating => Err(unavailable(
             "branch timeline mixes dated and undated commits inconsistently",
         )),
