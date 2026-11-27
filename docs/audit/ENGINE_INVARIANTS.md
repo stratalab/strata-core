@@ -564,8 +564,13 @@ capability services (KV, JSON, event, vector, graph — single and batch `_at_ve
 `_at` reads alike, #3485, #3581) enforce the floor one layer down, through that same storage
 `read_point` / scan check, surfaced by `map_storage_error` in `persistence/adapter.rs` as
 `history_unavailable.engine.persistence_history`; an engine read that resolves a version or
-timestamp itself instead of passing the `ReadSelector` through is the regression there. Tests:
+timestamp itself instead of passing the `ReadSelector` through is the regression there. A
+batch that reads no row (one naming no key, or one whose every key the executor refused)
+checks its position through `StorageRuntime::validate_read_bound` (`api/runtime/mod.rs`),
+which runs that same `resolve_read_bound`, called from `read_rows` in
+`persistence/adapter.rs` (#3763). Tests:
 `read_at_version_below_retained_history_floor_is_rejected` (`api/tests/read.rs`),
+`validate_read_bound_answers_each_position_as_read_point_does` (`api/tests/read.rs`),
 `api_fork_below_retained_history_floor_is_rejected` (`api/tests/maintenance.rs`),
 `batch_get_at_outside_the_retained_window_is_a_diagnostic_not_the_latest_state`
 (`tests/engine_json_batch_as_of.rs`, `tests/engine_kv_batch_as_of.rs`),

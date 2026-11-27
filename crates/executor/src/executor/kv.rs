@@ -3,10 +3,9 @@ use super::{
     batch_item_result, bytes_from_key, delete_effect, delete_output, empty_batch_exists_results,
     empty_batch_get_results, empty_batch_results, finish_batch_exists_results,
     finish_batch_get_results, finish_batch_results, history_result, kv_batch_exists_result,
-    kv_batch_get_result, kv_batch_result, kv_key, kv_value, optional_key, optional_limit,
-    reject_duplicate_valid_keys, sample_output, scan_item, upsert_effect, usize_to_u64,
-    versioned_value, write_output, BatchKvEntry, Bytes, Executor, ExecutorError, Maybe, Output,
-    PageInfo,
+    kv_batch_result, kv_key, kv_value, optional_key, optional_limit, reject_duplicate_valid_keys,
+    sample_output, scan_item, upsert_effect, usize_to_u64, versioned_value, write_output,
+    BatchKvEntry, Bytes, Executor, ExecutorError, Maybe, Output, PageInfo,
 };
 
 impl Executor {
@@ -198,9 +197,6 @@ impl Executor {
         // service borrow so both clocks run the identical as-of path (#3112).
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
         let mut service = self.kv_service(branch, space)?;
-        if keys.is_empty() {
-            return Ok(Output::BatchGetResults(kv_batch_get_result(Vec::new())));
-        }
         let mut results = empty_batch_get_results(keys.len());
         let mut valid_keys = Vec::with_capacity(keys.len());
         for (index, key) in keys.into_iter().enumerate() {
@@ -212,13 +208,13 @@ impl Executor {
                 }
             }
         }
-        if valid_keys.is_empty() {
-            return Ok(Output::BatchGetResults(finish_batch_get_results(results)));
-        }
         let keys = valid_keys
             .iter()
             .map(|(_, _, key)| key.clone())
             .collect::<Vec<_>>();
+        // #3763: read even when no key survived, so the engine still checks a
+        // pinned position: an out-of-history `as_of` fails a batch that reads
+        // nothing exactly as it fails a full one.
         let values = match as_of {
             Some(as_of) => service.batch_get_at(&keys, as_of)?,
             None => service.batch_get(&keys)?,

@@ -312,56 +312,107 @@ fn batch_get_at_outside_the_retained_window_is_a_diagnostic_not_the_latest_state
 }
 
 /// A timestamp before the first commit or after the latest one fails the
-/// whole batch with the diagnostic naming that end. A batch that fell back to
-/// the latest state would answer instead — the exact mix of versions
-/// the pinned read exists to rule out.
+/// whole batch with the diagnostic naming that end, and a version after the
+/// latest commit fails it the way the single read does. A batch that fell
+/// back to the latest state would answer instead — the exact mix of versions
+/// the pinned read exists to rule out. The position is checked even when the
+/// batch names no entry (#3763): an empty batch is refused exactly as a full
+/// one.
 fn exercise_window_diagnostics(database: &mut Database) {
     let mut json = json_service(database, "default");
     seed(&mut json);
 
-    for (instant, code, what) in [
-        (
-            Timestamp::EPOCH,
-            "history_unavailable.engine.before_first_commit",
-            "before the first commit",
-        ),
-        (
-            Timestamp::MAX,
-            "history_unavailable.engine.after_latest_commit",
-            "after the latest commit",
-        ),
-    ] {
+    for (batch, size) in [(entries(), "full batch"), (Vec::new(), "empty batch")] {
+        for (instant, code, what) in [
+            (
+                Timestamp::EPOCH,
+                "history_unavailable.engine.before_first_commit",
+                "before the first commit",
+            ),
+            (
+                Timestamp::MAX,
+                "history_unavailable.engine.after_latest_commit",
+                "after the latest commit",
+            ),
+        ] {
+            let error = json
+                .batch_get_at(&batch, instant)
+                .expect_err("an out-of-window batch is refused");
+            assert_eq!(error.code(), code, "{size}, {what}");
+            // The same class and code the single read raises for the
+            // instant: the code is what tells a trimmed or future instant
+            // from a document that simply is not there.
+            let single = json
+                .get_versioned_at(&doc("addr:a"), &root(), instant)
+                .expect_err("the single read is refused the same way");
+            assert_eq!(error.class(), single.class(), "{size}, {what}");
+            assert_eq!(error.code(), single.code(), "{size}, {what}");
+        }
+
         let error = json
-            .batch_get_at(&entries(), instant)
-            .expect_err("an out-of-window batch is refused");
-        assert_eq!(error.code(), code, "{what}");
-        // The same class and code the single read raises for the instant:
-        // the code is what tells a trimmed or future instant from a document
-        // that simply is not there.
+            .batch_get_at_version(&batch, CommitVersion::MAX)
+            .expect_err("a version after the latest commit is refused");
         let single = json
-            .get_versioned_at(&doc("addr:a"), &root(), instant)
+            .get_at_version(&doc("addr:a"), &root(), CommitVersion::MAX)
             .expect_err("the single read is refused the same way");
-        assert_eq!(error.class(), single.class(), "{what}");
-        assert_eq!(error.code(), single.code(), "{what}");
+        assert_eq!(error.class(), single.class(), "{size}");
+        assert_eq!(error.code(), single.code(), "{size}");
     }
 }
 
 #[test]
-fn batch_get_at_version_on_an_empty_batch_reads_nothing() {
+fn an_empty_batch_reads_nothing_unless_its_position_is_outside_history() {
     run_database_modes(exercise_empty_batch);
 }
 
+/// An empty batch at a position inside history answers nothing, and so does
+/// an unpinned empty batch, even on a branch never written. A pinned empty
+/// batch is refused only where the single read at its position is: outside
+/// the branch's history, which on a branch with no commits is everywhere
+/// (#3763).
 fn exercise_empty_batch(database: &mut Database) {
-    let mut json = json_service(database, "default");
-    let history = seed(&mut json);
-    assert!(json
-        .batch_get_at_version(&[], history.v1)
-        .expect("empty batch succeeds")
+    let history = {
+        let mut json = json_service(database, "default");
+        let history = seed(&mut json);
+        assert!(json
+            .batch_get_at_version(&[], history.v1)
+            .expect("empty batch succeeds")
+            .is_empty());
+        assert!(json
+            .batch_get_at(&[], history.t1)
+            .expect("empty batch succeeds")
+            .is_empty());
+        assert!(json
+            .batch_get(&[])
+            .expect("unpinned empty batch succeeds")
+            .is_empty());
+        history
+    };
+    database
+        .branches()
+        .expect("branch service opens")
+        .create(branch("fresh"))
+        .expect("an empty branch is created");
+    let mut fresh = json_service(database, "fresh");
+    assert!(fresh
+        .batch_get(&[])
+        .expect("an unpinned empty batch on a never-written branch succeeds")
         .is_empty());
-    assert!(json
+    assert!(fresh
+        .batch_get(&entries())
+        .expect("an unpinned batch on a never-written branch succeeds")
+        .iter()
+        .all(Option::is_none));
+    // The branch has no commits, so a pinned empty batch is refused as the
+    // single read at that position is.
+    let error = fresh
         .batch_get_at(&[], history.t1)
-        .expect("empty batch succeeds")
-        .is_empty());
+        .expect_err("a branch with no commits has no history to pin");
+    let single = fresh
+        .get_versioned_at(&doc("addr:a"), &root(), history.t1)
+        .expect_err("the single read is refused the same way");
+    assert_eq!(error.class(), single.class());
+    assert_eq!(error.code(), single.code());
 }
 
 #[test]

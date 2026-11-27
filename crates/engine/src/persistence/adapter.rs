@@ -931,14 +931,33 @@ impl StoragePersistence {
     /// order of `addresses` and each is read when it is pulled, so a caller
     /// that decodes each answer before pulling the next holds one row at a
     /// time. Each answer then passes the fault seam as one point read.
+    ///
+    /// Every address is on `branch_id`. A batch with no address still checks
+    /// `selector` on that branch, as one point read through the fault seam,
+    /// so a position outside the branch's history fails an empty batch as it
+    /// fails a full one (#3763). An unpinned empty batch needs only the
+    /// branch's published snapshot, which every catalog branch has.
     pub(crate) fn read_rows(
         &self,
+        branch_id: BranchId,
         addresses: Vec<RowAddress>,
         selector: ReadSelector,
     ) -> Result<
         impl Iterator<Item = Result<Option<PersistenceReadRow>, EngineError>> + '_,
         EngineError,
     > {
+        debug_assert!(
+            addresses
+                .iter()
+                .all(|address| address.branch_id() == branch_id),
+            "every address of a row batch is on its branch"
+        );
+        if addresses.is_empty() {
+            self.guard_fault(FaultOp::Read)?;
+            self.runtime
+                .validate_read_bound(branch_id, storage_read_bound(selector))
+                .map_err(map_storage_error)?;
+        }
         let requests = addresses
             .into_iter()
             .map(|address| point_read_request(address, selector))

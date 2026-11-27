@@ -1927,6 +1927,11 @@ fn json_batch_get_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn json_batch_get_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/json/batch_get_after_latest_commit.json", "responses/v1/errors/json/batch_get_after_latest_commit.json");
+}
+
+#[test]
 fn json_batch_get_replay_observes_a_declared_output() {
     support::replay_observes_declared(&["requests/v1/json/set.json"], "requests/v1/json/batch_get.json", &["json_batch_get_results"]);
 }

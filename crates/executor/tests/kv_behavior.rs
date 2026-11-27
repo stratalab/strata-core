@@ -1637,6 +1637,70 @@ fn kv_batch_get_as_of_refusals_match_the_single_read() {
     );
 }
 
+/// The number of items a KV batch read answers, whatever each item says.
+fn kv_batch_get_items(
+    executor: &mut Executor,
+    keys: &[&str],
+    as_of: Option<u64>,
+    as_of_time: Option<u64>,
+) -> Result<usize, Box<strata_executor::ExecutorError>> {
+    let output = executor.execute(Command::KvBatchGet {
+        branch: None,
+        space: None,
+        keys: keys.iter().copied().map(bytes).collect(),
+        as_of,
+        as_of_time,
+    })?;
+    let Output::BatchGetResults(results) = output else {
+        panic!("unexpected batch get output: {output:?}");
+    };
+    Ok(results.into_iter().count())
+}
+
+/// #3763: a pinned batch checks its position even when it reads no key —
+/// one that names none, and one whose every key is refused item by item.
+/// Each clock refuses an out-of-history position exactly as the single read
+/// does, so the two clocks agree at each end of history whatever the batch
+/// holds. An empty key is the refused key.
+#[test]
+fn kv_batch_get_checks_its_position_even_when_it_reads_no_key() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let (timestamp, committed_at) = put_stamp(&mut executor, "a", "one");
+
+    for (keys, shape) in [
+        (&[][..], "a batch naming no key"),
+        (&[""][..], "a batch whose every key is refused"),
+    ] {
+        for (code, logical, wall_clock) in [
+            ("history_unavailable.engine.before_first_commit", 0, 0),
+            (
+                "history_unavailable.engine.after_latest_commit",
+                u64::MAX,
+                u64::MAX,
+            ),
+        ] {
+            for (as_of, as_of_time) in [(Some(logical), None), (None, Some(wall_clock))] {
+                let what = format!("{shape}, as_of {as_of:?}, as_of_time {as_of_time:?}");
+                let batch = kv_batch_get_items(&mut executor, keys, as_of, as_of_time)
+                    .expect_err("an out-of-history position fails the whole batch");
+                let single = kv_get_at(&mut executor, "a", as_of, as_of_time)
+                    .expect_err("the single read is refused too");
+                assert_eq!(batch.class(), single.class(), "{what}");
+                assert_eq!(batch.code(), single.code(), "{what}");
+                assert_eq!(batch.code(), code, "{what}");
+            }
+        }
+
+        // Direction control: inside history the same batch answers, one item
+        // per key, on either clock.
+        for (as_of, as_of_time) in [(Some(timestamp), None), (None, Some(committed_at))] {
+            let items = kv_batch_get_items(&mut executor, keys, as_of, as_of_time)
+                .expect("an in-history batch answers");
+            assert_eq!(items, keys.len(), "{shape}");
+        }
+    }
+}
+
 /// The `Executor::kv_batch_get` facade is the unpinned command on the default
 /// branch and space: it answers the latest value of every key, in order, and
 /// says the same thing the `KvBatchGet` command says.

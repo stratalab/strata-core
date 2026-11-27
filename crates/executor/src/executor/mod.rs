@@ -169,9 +169,9 @@ use batch::{
     finish_batch_exists_results, finish_batch_get_results, finish_batch_results,
     finish_json_batch_get_results, finish_json_batch_results, finish_presence_exists_results,
     finish_vector_batch_get_results, finish_vector_batch_results, graph_batch_result,
-    json_batch_get_batch_result, json_batch_result, kv_batch_exists_result, kv_batch_get_result,
-    kv_batch_result, presence_exists_failed, presence_exists_item, presence_exists_result,
-    reject_duplicate_json_targets, reject_duplicate_valid_keys, reject_duplicate_vector_keys,
+    json_batch_result, kv_batch_exists_result, kv_batch_result, presence_exists_failed,
+    presence_exists_item, presence_exists_result, reject_duplicate_json_targets,
+    reject_duplicate_valid_keys, reject_duplicate_vector_keys,
 };
 use event_convert::{
     engine_event_direction, engine_event_type, event_append_output, event_batch_append_item_result,

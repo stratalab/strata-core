@@ -2533,6 +2533,91 @@ fn json_batch_get_as_of_refusals_match_the_single_read() {
     );
 }
 
+/// The number of items a JSON batch read answers, whatever each item says.
+fn json_batch_get_items(
+    executor: &mut Executor,
+    entries: Vec<BatchJsonGetEntry>,
+    as_of: Option<u64>,
+    as_of_time: Option<u64>,
+) -> Result<usize, Box<strata_executor::ExecutorError>> {
+    let output = executor.execute(Command::JsonBatchGet {
+        branch: None,
+        space: None,
+        entries,
+        as_of,
+        as_of_time,
+    })?;
+    let Output::JsonBatchGetResults(results) = output else {
+        panic!("unexpected batch get output: {output:?}");
+    };
+    Ok(results.into_iter().count())
+}
+
+fn json_get_at(
+    executor: &mut Executor,
+    key: &str,
+    as_of: Option<u64>,
+    as_of_time: Option<u64>,
+) -> Result<Output, Box<strata_executor::ExecutorError>> {
+    executor
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: key.to_owned(),
+            path: "$".to_owned(),
+            as_of,
+            as_of_time,
+        })
+        .map_err(Box::new)
+}
+
+/// #3763: a pinned batch checks its position even when it reads no entry —
+/// one that names none, and one whose every entry is refused item by item.
+/// Each clock refuses an out-of-history position exactly as the single read
+/// does, so the two clocks agree at each end of history whatever the batch
+/// holds. An unparseable path is the refused entry.
+#[test]
+fn json_batch_get_checks_its_position_even_when_it_reads_no_entry() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let (timestamp, committed_at) = json_set_stamp(&mut executor, "addr:a", json!({"n": 1}));
+
+    for (entries, shape) in [
+        (Vec::new(), "a batch naming no entry"),
+        (
+            vec![BatchJsonGetEntry::new("addr:a", "$[")],
+            "a batch whose every entry is refused",
+        ),
+    ] {
+        for (code, logical, wall_clock) in [
+            ("history_unavailable.engine.before_first_commit", 0, 0),
+            (
+                "history_unavailable.engine.after_latest_commit",
+                u64::MAX,
+                u64::MAX,
+            ),
+        ] {
+            for (as_of, as_of_time) in [(Some(logical), None), (None, Some(wall_clock))] {
+                let what = format!("{shape}, as_of {as_of:?}, as_of_time {as_of_time:?}");
+                let batch = json_batch_get_items(&mut executor, entries.clone(), as_of, as_of_time)
+                    .expect_err("an out-of-history position fails the whole batch");
+                let single = json_get_at(&mut executor, "addr:a", as_of, as_of_time)
+                    .expect_err("the single read is refused too");
+                assert_eq!(batch.class(), single.class(), "{what}");
+                assert_eq!(batch.code(), single.code(), "{what}");
+                assert_eq!(batch.code(), code, "{what}");
+            }
+        }
+
+        // Direction control: inside history the same batch answers, one item
+        // per entry, on either clock.
+        for (as_of, as_of_time) in [(Some(timestamp), None), (None, Some(committed_at))] {
+            let items = json_batch_get_items(&mut executor, entries.clone(), as_of, as_of_time)
+                .expect("an in-history batch answers");
+            assert_eq!(items, entries.len(), "{shape}");
+        }
+    }
+}
+
 fn spaced_json<T>(commit: impl FnOnce(&mut Executor) -> T, executor: &mut Executor) -> T {
     std::thread::sleep(std::time::Duration::from_millis(2));
     commit(executor)

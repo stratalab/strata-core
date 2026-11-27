@@ -40,6 +40,10 @@
 ∎
 ### json.batch_get · edge:items=[] · raw
 ∎
+### json.batch_get · responses/v1/errors/json/batch_get_after_latest_commit.json · human
+history_unavailable.engine.after_latest_commit: command failed∎
+### json.batch_get · responses/v1/errors/json/batch_get_after_latest_commit.json · raw
+history_unavailable.engine.after_latest_commit: command failed∎
 ### json.batch_get · responses/v1/json/batch_get_ok.json · human
 #  STATUS  DOCUMENT_VERSION  VERSION  VALUE
 0  ok                     1        3  "Ada"

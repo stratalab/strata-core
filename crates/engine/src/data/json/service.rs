@@ -333,7 +333,9 @@ impl<'a> JsonService<'a> {
             .collect();
         // Each answer is decoded as it is pulled, so the batch holds one raw
         // row at a time however many entries it names.
-        let rows = self.persistence.read_rows(addresses, selector)?;
+        let rows = self
+            .persistence
+            .read_rows(record.storage_branch_id(), addresses, selector)?;
         let mut results = Vec::with_capacity(entries.len());
         for (entry, row) in entries.iter().zip(rows) {
             results.push(match row? {

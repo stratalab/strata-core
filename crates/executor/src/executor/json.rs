@@ -1,9 +1,9 @@
 use super::{
     delete_effect, empty_json_batch_get_results, empty_json_batch_results,
     empty_presence_exists_results, engine_json_index_type, finish_json_batch_get_results,
-    finish_json_batch_results, finish_presence_exists_results, json_batch_get_batch_result,
-    json_batch_get_failed, json_batch_get_result, json_batch_item_failed, json_batch_item_result,
-    json_batch_result, json_delete_output, json_document_id, json_get_entry, json_history_items,
+    finish_json_batch_results, finish_presence_exists_results, json_batch_get_failed,
+    json_batch_get_result, json_batch_item_failed, json_batch_item_result, json_batch_result,
+    json_delete_output, json_document_id, json_get_entry, json_history_items,
     json_index_definition, json_index_name, json_list_output, json_path, json_sample_item,
     json_sample_output, json_value, json_versioned_value, json_write_output,
     optional_json_document_id, optional_json_prefix, optional_limit, presence_exists_failed,
@@ -206,11 +206,6 @@ impl Executor {
         // service borrow so both clocks run the identical as-of path (#3112).
         let as_of = self.resolve_as_of(branch, as_of, as_of_time)?;
         let mut service = self.json_service(branch, space)?;
-        if entries.is_empty() {
-            return Ok(Output::JsonBatchGetResults(json_batch_get_batch_result(
-                Vec::new(),
-            )));
-        }
         let mut results = empty_json_batch_get_results(entries.len());
         let mut valid_entries = Vec::with_capacity(entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
@@ -222,15 +217,13 @@ impl Executor {
                 }
             }
         }
-        if valid_entries.is_empty() {
-            return Ok(Output::JsonBatchGetResults(finish_json_batch_get_results(
-                results,
-            )));
-        }
         let engine_entries = valid_entries
             .iter()
             .map(|(_, entry)| entry.clone())
             .collect::<Vec<_>>();
+        // #3763: read even when no entry survived, so the engine still checks
+        // a pinned position: an out-of-history `as_of` fails a batch that
+        // reads nothing exactly as it fails a full one.
         let values = match as_of {
             Some(as_of) => service.batch_get_at(&engine_entries, as_of)?,
             None => service.batch_get(&engine_entries)?,
