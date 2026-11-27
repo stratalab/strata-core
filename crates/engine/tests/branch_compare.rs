@@ -8,7 +8,10 @@ use strata_engine::{
     JsonDocumentId, JsonPath, JsonValue, SpaceComparison,
 };
 
-use common::{branch, key, open_cache_database, space, value};
+use common::{
+    branch, key, open_cache_database, open_durable_database, reopen_durable_database_after_drop,
+    space, value,
+};
 
 fn doc_id(value: &str) -> JsonDocumentId {
     JsonDocumentId::new(value).expect("valid document id")
@@ -295,4 +298,156 @@ fn compare_at_a_timestamp_after_a_branch_latest_is_history_unavailable() {
         error.code(),
         "history_unavailable.engine.persistence_history"
     );
+}
+
+/// Creates `tenant` on default with `k = v1`, then forks `feature` from it.
+fn seed_tenant_space_and_fork(database: &mut strata_engine::Database) {
+    database
+        .spaces(branch("default"))
+        .expect("space service opens")
+        .create(space("tenant"))
+        .expect("space create succeeds");
+    database
+        .kv(branch("default"), space("tenant"))
+        .expect("tenant KV opens")
+        .put(key(b"k"), value(b"v1"))
+        .expect("put k");
+    database
+        .branches()
+        .expect("branch service opens")
+        .fork_current(&branch("default"), branch("feature"))
+        .expect("fork succeeds");
+}
+
+fn delete_tenant(database: &mut strata_engine::Database, on: &str) {
+    database
+        .spaces(branch(on))
+        .expect("space service opens")
+        .delete(&space("tenant"), true)
+        .expect("space delete succeeds");
+}
+
+fn compare_default_and_feature(
+    database: &mut strata_engine::Database,
+    selector: BranchStateSelector,
+) -> BranchComparison {
+    database
+        .branches()
+        .expect("branch service opens")
+        .compare(&branch("default"), &branch("feature"), selector)
+        .expect("compare succeeds")
+}
+
+/// A space that every compared branch has unregistered since the instant
+/// still compares at that instant: its spaces come from each branch's space
+/// index as it was then, not from today's. `unregister` either deletes the
+/// space outright or leaves it mid-sweep (marked, rows still stored).
+fn space_unregistered_since_on_every_branch_compares_then(
+    database: &mut strata_engine::Database,
+    unregister: fn(&mut strata_engine::Database, &str),
+) {
+    seed_tenant_space_and_fork(database);
+    let then = database
+        .kv(branch("feature"), space("tenant"))
+        .expect("feature tenant KV opens")
+        .put(key(b"k"), value(b"v2"))
+        .expect("feature put")
+        .commit()
+        .timestamp();
+    // Both branches unregister the space after `then`, so neither lists it
+    // now, and both branches' latest commits come after `then`.
+    unregister(database, "default");
+    unregister(database, "feature");
+
+    let past = compare_default_and_feature(database, BranchStateSelector::AtTimestamp(then));
+    let tenant = find(&past, ComparedCapability::Kv, "tenant")
+        .expect("the unregistered space compares at the instant it existed");
+    assert_eq!(identities(tenant.modified()), vec![b"k".to_vec()]);
+    assert!(tenant.added().is_empty());
+    assert!(tenant.removed().is_empty());
+
+    // Direction control: today the space is gone on both branches.
+    let current = compare_default_and_feature(database, BranchStateSelector::Current);
+    assert!(find(&current, ComparedCapability::Kv, "tenant").is_none());
+}
+
+#[test]
+fn test_compare_at_a_timestamp_reads_a_space_deleted_since_on_every_branch() {
+    let mut database = open_cache_database().expect("cache open succeeds");
+    space_unregistered_since_on_every_branch_compares_then(&mut database, delete_tenant);
+}
+
+/// Durable, and compared after a reopen: recovery rebuilds the timeline the
+/// past instant resolves through, and the historical index must survive it.
+#[test]
+fn test_compare_at_a_timestamp_reads_a_space_deleted_since_on_every_branch_after_a_reopen() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut database = open_durable_database(tempdir.path()).expect("durable open succeeds");
+    seed_tenant_space_and_fork(&mut database);
+    let then = database
+        .kv(branch("feature"), space("tenant"))
+        .expect("feature tenant KV opens")
+        .put(key(b"k"), value(b"v2"))
+        .expect("feature put")
+        .commit()
+        .timestamp();
+    delete_tenant(&mut database, "default");
+    delete_tenant(&mut database, "feature");
+    database.close().expect("close succeeds");
+    drop(database);
+    let mut database =
+        reopen_durable_database_after_drop(tempdir.path()).expect("durable reopen succeeds");
+
+    let past = compare_default_and_feature(&mut database, BranchStateSelector::AtTimestamp(then));
+    let tenant = find(&past, ComparedCapability::Kv, "tenant")
+        .expect("the deleted space compares at the instant it existed");
+    assert_eq!(identities(tenant.modified()), vec![b"k".to_vec()]);
+    let current = compare_default_and_feature(&mut database, BranchStateSelector::Current);
+    assert!(find(&current, ComparedCapability::Kv, "tenant").is_none());
+}
+
+/// The same with the space left mid-sweep on both branches: marked and
+/// unregistered, its rows still stored (#3574).
+#[cfg(feature = "testkit")]
+#[test]
+fn test_compare_at_a_timestamp_reads_a_space_mid_sweep_on_every_branch() {
+    fn mark_tenant(database: &mut strata_engine::Database, on: &str) {
+        database
+            .spaces(branch(on))
+            .expect("space service opens")
+            .begin_space_delete_for_test(&space("tenant"))
+            .expect("the deletion begins");
+    }
+    let mut database = open_cache_database().expect("cache open succeeds");
+    space_unregistered_since_on_every_branch_compares_then(&mut database, mark_tenant);
+}
+
+/// Control: a space deleted since the instant on only one branch compares at
+/// that instant as it was on both (equal here), and today as absent on the
+/// deleted side. This held before #3589 too, because the other branch still
+/// lists the space today; it guards that the per-instant enumeration keeps it.
+#[test]
+fn test_compare_at_a_timestamp_reads_a_space_deleted_since_on_one_branch() {
+    let mut database = open_cache_database().expect("cache open succeeds");
+    seed_tenant_space_and_fork(&mut database);
+    let then = database
+        .kv(branch("feature"), space("default"))
+        .expect("feature KV opens")
+        .put(key(b"elsewhere"), value(b"x"))
+        .expect("feature put")
+        .commit()
+        .timestamp();
+    delete_tenant(&mut database, "default");
+
+    let past = compare_default_and_feature(&mut database, BranchStateSelector::AtTimestamp(then));
+    assert!(
+        find(&past, ComparedCapability::Kv, "tenant").is_none(),
+        "at the instant both branches hold k = v1 in tenant"
+    );
+
+    let current = compare_default_and_feature(&mut database, BranchStateSelector::Current);
+    let tenant = find(&current, ComparedCapability::Kv, "tenant").expect("the space differs today");
+    assert_eq!(identities(tenant.added()), vec![b"k".to_vec()]);
+    assert!(tenant.removed().is_empty());
+    assert!(tenant.modified().is_empty());
 }
