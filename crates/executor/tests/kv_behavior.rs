@@ -576,6 +576,8 @@ fn command_to_output_mapping_is_explicit_for_every_variant() {
             branch: None,
             space: None,
             keys: vec![bytes("map-a"), bytes("missing")],
+            as_of: None,
+            as_of_time: None,
         },
         Command::KvBatchDelete {
             branch: None,
@@ -680,6 +682,8 @@ fn empty_batches_return_empty_outputs() {
                 branch: None,
                 space: None,
                 keys: Vec::new(),
+                as_of: None,
+                as_of_time: None,
             })
             .expect("empty batch get succeeds"),
         Output::BatchGetResults(results) if results.is_empty() && !results.applied()
@@ -718,6 +722,8 @@ fn invalid_batch_items_are_positional_errors() {
             branch: None,
             space: None,
             keys: vec![Bytes::new(Vec::new()), bytes("valid")],
+            as_of: None,
+            as_of_time: None,
         })
         .expect("batch get returns positional errors");
     let Output::BatchGetResults(results) = output else {
@@ -770,6 +776,8 @@ fn batch_commands_validate_branch_before_returning_item_results() {
             branch: Some("missing".to_owned()),
             space: None,
             keys: Vec::new(),
+            as_of: None,
+            as_of_time: None,
         },
         Command::KvBatchDelete {
             branch: Some("missing".to_owned()),
@@ -1216,6 +1224,8 @@ fn execute_batch_get(executor: &mut Executor, keys: Vec<&str>) -> Vec<Option<Byt
             branch: None,
             space: None,
             keys: keys.into_iter().map(bytes).collect(),
+            as_of: None,
+            as_of_time: None,
         })
         .expect("batch get succeeds")
     {
@@ -1449,6 +1459,168 @@ fn kv_get_at(
         as_of,
         as_of_time,
     })
+}
+
+/// A put's commit as `(version, logical timestamp)`, each read from its own
+/// receipt field, so a test can tell the two apart.
+fn put_receipt(executor: &mut Executor, key: &str, value: &str) -> (u64, u64) {
+    let output = executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: bytes(key),
+            value: bytes(value),
+        })
+        .expect("put succeeds");
+    let Output::WriteResult { commit, .. } = output else {
+        panic!("unexpected put output: {output:?}");
+    };
+    (commit.version(), commit.timestamp())
+}
+
+/// Each item of a KV batch read as `(found, value, version, timestamp)`.
+type KvBatchAnswers = Vec<(bool, Option<Bytes>, Option<u64>, Option<u64>)>;
+
+fn kv_batch_get_at(
+    executor: &mut Executor,
+    keys: &[&str],
+    as_of: Option<u64>,
+    as_of_time: Option<u64>,
+) -> Result<KvBatchAnswers, Box<strata_executor::ExecutorError>> {
+    let output = executor.execute(Command::KvBatchGet {
+        branch: None,
+        space: None,
+        keys: keys.iter().copied().map(bytes).collect(),
+        as_of,
+        as_of_time,
+    })?;
+    let Output::BatchGetResults(results) = output else {
+        panic!("unexpected batch get output: {output:?}");
+    };
+    Ok(results
+        .into_iter()
+        .map(|item| {
+            let result = item.result().expect("every read item carries a result");
+            (
+                result.found(),
+                result.value().cloned(),
+                result.version(),
+                result.timestamp(),
+            )
+        })
+        .collect())
+}
+
+/// #3581: `as_of` pins every key of a batch to one commit — the batch at a
+/// position says what that position said, in request order, with a key
+/// deleted later still present and a key written later still absent, while
+/// the unpinned batch says the latest.
+#[test]
+fn kv_batch_get_as_of_pins_every_key_to_one_commit() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let (v_a1, t_a1) = put_receipt(&mut executor, "a", "one");
+    let (v_b, t_b) = put_receipt(&mut executor, "b", "bee");
+    let (v_a2, t_a2) = put_receipt(&mut executor, "a", "two");
+    delete_stamp(&mut executor, "b");
+    put_receipt(&mut executor, "c", "sea");
+    let keys = ["a", "b", "c", "a"];
+
+    // `as_of` addresses the logical timeline, so the read takes B's
+    // timestamp; each answer carries its row's own version and timestamp.
+    let at_b = kv_batch_get_at(&mut executor, &keys, Some(t_b), None).expect("as_of read");
+    assert_eq!(
+        at_b,
+        vec![
+            (true, Some(bytes("one")), Some(v_a1), Some(t_a1)),
+            (true, Some(bytes("bee")), Some(v_b), Some(t_b)),
+            (false, None, None, None),
+            (true, Some(bytes("one")), Some(v_a1), Some(t_a1)),
+        ],
+        "at B's commit: A's first value, B present, C not yet written"
+    );
+
+    let latest = kv_batch_get_at(&mut executor, &keys, None, None).expect("latest read");
+    assert_eq!(
+        latest[0],
+        (true, Some(bytes("two")), Some(v_a2), Some(t_a2))
+    );
+    assert_eq!(
+        latest[1],
+        (false, None, None, None),
+        "B is gone at the latest"
+    );
+    assert!(latest[2].0, "C exists at the latest");
+    assert_eq!(latest[3], latest[0], "a duplicate key is answered again");
+}
+
+/// #3581: `as_of_time` on a batch is exactly `as_of` at the instant's commit,
+/// for every commit — the same contract the single read keeps (#3112).
+#[test]
+fn kv_batch_get_as_of_time_matches_as_of_at_each_commit() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let stamps = vec![
+        spaced(|e| put_stamp(e, "drift", "one"), &mut executor),
+        spaced(|e| put_stamp(e, "drift", "two"), &mut executor),
+        spaced(|e| put_stamp(e, "other", "elsewhere"), &mut executor),
+        spaced(|e| delete_stamp(e, "drift"), &mut executor),
+    ];
+    assert_distinct_instants(&stamps);
+    let keys = ["drift", "other"];
+    for (index, (timestamp, committed_at)) in stamps.iter().copied().enumerate() {
+        let by_logical = kv_batch_get_at(&mut executor, &keys, Some(timestamp), None)
+            .expect("logical as_of batch");
+        let by_wall_clock = kv_batch_get_at(&mut executor, &keys, None, Some(committed_at))
+            .expect("wall-clock as_of batch");
+        assert_eq!(by_logical, by_wall_clock, "commit {index}");
+    }
+    let first =
+        kv_batch_get_at(&mut executor, &keys, None, Some(stamps[0].1)).expect("first commit");
+    let last = kv_batch_get_at(&mut executor, &keys, None, Some(stamps[3].1)).expect("last commit");
+    assert_ne!(
+        first, last,
+        "the history is observably different across commits"
+    );
+}
+
+/// #3581: the batch keeps the single read's refusals — both clocks at once
+/// is a conflict, and a position outside the branch's history is a
+/// diagnostic for the whole batch, never a fallback to the latest state.
+#[test]
+fn kv_batch_get_as_of_refusals_match_the_single_read() {
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let (timestamp, committed_at) = put_stamp(&mut executor, "a", "one");
+    let keys = ["a", "missing"];
+
+    let conflict = kv_batch_get_at(&mut executor, &keys, Some(timestamp), Some(committed_at))
+        .expect_err("both clocks at once is refused");
+    let single_conflict = kv_get_at(&mut executor, "a", Some(timestamp), Some(committed_at))
+        .expect_err("the single read refuses both clocks too");
+    assert_eq!(conflict.class(), ExecutorErrorClass::InvalidInput);
+    assert_eq!(conflict.code(), "invalid_argument.executor.as_of_conflict");
+    assert_eq!(conflict.code(), single_conflict.code());
+
+    for (as_of, as_of_time, what) in [
+        (
+            Some(u64::MAX),
+            None,
+            "a timeline position after the latest commit",
+        ),
+        (None, Some(u64::MAX), "an instant after the latest commit"),
+        (None, Some(0), "an instant before the first commit"),
+    ] {
+        let batch = kv_batch_get_at(&mut executor, &keys, as_of, as_of_time)
+            .expect_err("an out-of-history batch is refused");
+        let single =
+            kv_get_at(&mut executor, "a", as_of, as_of_time).expect_err("the single read too");
+        assert_eq!(batch.class(), single.class(), "{what}");
+        assert_eq!(batch.code(), single.code(), "{what}");
+    }
+    let after_latest = kv_batch_get_at(&mut executor, &keys, Some(u64::MAX), None)
+        .expect_err("a timeline position after the latest commit is a diagnostic");
+    assert_eq!(
+        after_latest.code(),
+        "history_unavailable.engine.persistence_history"
+    );
 }
 
 /// Pins the `KvPut` contract: each put is one atomic commit with a strictly

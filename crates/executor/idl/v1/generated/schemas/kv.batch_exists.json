@@ -532,7 +532,7 @@
   "command": "kv.batch_exists",
   "request": {
     "additionalProperties": false,
-    "description": "Checks multiple keys for existence.\n\n# Guaranteed semantics\n\n- **Positional**, one answer per requested key in the order asked, with\n  repeats allowed — the same contract as `batch_get`.\n- **A deleted key does not exist**, even though its history remains\n  readable through `history` and through any read at an earlier point.",
+    "description": "Checks multiple keys for existence.\n\n# Guaranteed semantics\n\n- **Positional**, one answer per requested key in the order asked, with\n  repeats allowed — the same positional contract as `batch_get`.\n- **A deleted key does not exist**, even though its history remains\n  readable through `history` and through any read at an earlier point.",
     "properties": {
       "branch": {
         "description": "Target branch. Defaults to the executor handle branch.",

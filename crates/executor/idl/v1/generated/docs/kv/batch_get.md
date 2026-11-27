@@ -7,6 +7,8 @@ section: kv
 
 Reads several KV keys and returns positional item results. Each item records whether the corresponding key was found and includes value metadata when present.
 
+Every key is read from one snapshot, so a commit that lands while the batch runs is visible to every key or to none. With `as_of` (a position on the logical commit timeline) or `as_of_time` (a wall-clock instant), every key is read as of that one position, so a batch can hydrate the entries a version-pinned read named — a graph query at a version, say — without mixing in later state. Keys keep their order, a repeated key is answered again, and a key absent at that position is a miss. An instant outside the branch's recorded history fails the whole batch with `history_unavailable.engine.persistence_history` rather than answering from the latest state; setting both clocks at once is refused.
+
 Itemwise batches return one positional item result per input item. The outer batch status summarizes whether all, some, or none of the items succeeded.
 
 ## Examples
@@ -41,6 +43,8 @@ $ strata command run --command-json '{"keys":["YQ==","Yg==","bWlzc2luZw=="],"typ
 
 | Name | Type | Required | Description |
 |---|---|---|---|
+| `as_of` | `integer` | no | Read every key as of a position on the logical commit timeline — the `timestamp` from `history` output, not the `version`, and never a calendar date. To read as of a real time, use `as_of_time` instead. |
+| `as_of_time` | `integer` | no | Read every key as of a real time: a wall-clock instant in microseconds since the Unix epoch (UTC), as reported by `committed_at` on a write ack or on any `history` row. Resolves to the commit at or before that instant, and fails rather than guessing if the instant falls outside the branch's recorded history. Mutually exclusive with `as_of`. |
 | `keys` | `Bytes[]` | yes | Keys to read. |
 
 Plus the optional scope: `branch` and `space` (default to the session branch and the `"default"` space).
@@ -56,6 +60,7 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.engine.product_space`](https://stratadb.org/e/invalid_argument.engine.product_space)
 - [`invalid_argument.engine.kv_key`](https://stratadb.org/e/invalid_argument.engine.kv_key)
 - [`invalid_argument.engine.kv_batch`](https://stratadb.org/e/invalid_argument.engine.kv_batch)
+- [`history_unavailable.engine.persistence_history`](https://stratadb.org/e/history_unavailable.engine.persistence_history)
 
 ## Invocation
 

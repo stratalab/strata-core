@@ -603,10 +603,30 @@ fn kv_read_shapes_do_not_devolve_to_point_or_write_loops() {
         .join("service.rs");
     let text = fs::read_to_string(path).expect("read KV service source");
 
-    let batch_get = function_body(&text, "pub fn batch_get");
+    // `batch_get` / `batch_get_at_version` / `batch_get_at` delegate to
+    // `batch_get_with_selector`, which reads every key through one batched
+    // storage read: one snapshot per batch, never a point read per key
+    // (#3757, #3581).
+    let batch_get = function_body(&text, "fn batch_get_with_selector");
     assert!(batch_get.contains("let record = self.branch_record()?;"));
-    assert!(batch_get.contains(".read_row("));
+    assert!(batch_get.contains(".read_rows("));
+    assert!(!batch_get.contains(".read_row("));
     assert!(!batch_get.contains("commit_batch"));
+    for public in [
+        "pub fn batch_get(",
+        "pub fn batch_get_at_version(",
+        "pub fn batch_get_at(",
+    ] {
+        let body = function_body(&text, public);
+        assert!(
+            body.contains("self.batch_get_with_selector("),
+            "`{public}` delegates to the one batch read"
+        );
+        assert!(
+            !body.contains(".read_row"),
+            "`{public}` reads nothing itself"
+        );
+    }
 
     // `count` / `count_at` delegate to `count_with_selector`, which owns the scan.
     let count = function_body(&text, "fn count_with_selector");

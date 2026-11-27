@@ -2284,6 +2284,11 @@ fn kv_batch_get_request_rejects_unknown_keys_at_closed_objects() {
 }
 
 #[test]
+fn kv_batch_get_error_case_0_envelope_matches() {
+    support::error_case_envelope_matches(&[], "requests/v1/kv/batch_get_unretained_version.json", "responses/v1/errors/kv/batch_get_unretained_version.json");
+}
+
+#[test]
 fn kv_batch_get_replay_observes_a_declared_output() {
     support::replay_observes_declared(&["requests/v1/kv/put.json"], "requests/v1/kv/batch_get.json", &["batch_get_results"]);
 }

@@ -176,6 +176,8 @@ fn export_kv(
             branch: branch.map(str::to_owned),
             space: space.map(str::to_owned),
             keys,
+            as_of: None,
+            as_of_time: None,
         })?;
         let Output::BatchGetResults(results) = output else {
             return Err(unexpected_output("kv_batch_get"));

@@ -1,0 +1,7 @@
+{
+  "class": "history_unavailable",
+  "code": "history_unavailable.engine.persistence_history",
+  "commit_outcome": "not_applicable",
+  "retry_policy": "after_state_change",
+  "retryable": true
+}
