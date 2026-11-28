@@ -802,4 +802,19 @@ impl Database {
     pub(crate) fn write_turn_is_held_for_test(&self, row: &crate::persistence::RowAddress) -> bool {
         self.persistence.write_turn_is_held_for_test(row)
     }
+
+    /// Writes that have waited for a held turn so far.
+    pub(crate) fn turn_waits_for_test(&self) -> u64 {
+        self.persistence.turn_waits_for_test()
+    }
+
+    /// Persistence calls that have reached the fault seam so far, as
+    /// `(point reads, scans, commits)`.
+    pub(crate) fn persistence_calls_for_test(&self) -> (u64, u64, u64) {
+        (
+            self.persistence.persistence_calls_for_test(FaultOp::Read),
+            self.persistence.persistence_calls_for_test(FaultOp::Scan),
+            self.persistence.persistence_calls_for_test(FaultOp::Commit),
+        )
+    }
 }

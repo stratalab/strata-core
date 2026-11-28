@@ -247,6 +247,11 @@ pub(crate) struct StoragePersistence {
     /// #3473, #3489).
     #[cfg(any(test, feature = "testkit"))]
     scanned_rows: std::sync::atomic::AtomicU64,
+    /// Writes that found their turn's stripe held and had to wait for it, so
+    /// the concurrency conformance harness can tell a write queued behind a
+    /// paused one from a write still running.
+    #[cfg(any(test, feature = "testkit"))]
+    turn_waits: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -537,10 +542,34 @@ impl StoragePersistence {
     /// writer that panicked while holding the stripe leaves nothing for the
     /// next one to distrust, since the stripe guards no data.
     pub(crate) fn serialize_writes_to<T>(&self, row: &RowAddress, write: impl FnOnce() -> T) -> T {
-        let _turn = self.write_stripes[write_stripe(row)]
+        let stripe = &self.write_stripes[write_stripe(row)];
+        #[cfg(any(test, feature = "testkit"))]
+        self.note_turn_wait(stripe);
+        let _turn = stripe
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         write()
+    }
+
+    /// Counts a write that is about to wait for a held stripe.
+    #[cfg(any(test, feature = "testkit"))]
+    fn note_turn_wait(&self, stripe: &Mutex<()>) {
+        if matches!(stripe.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+            self.turn_waits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Writes that have waited for a held turn so far.
+    #[cfg(test)]
+    pub(crate) fn turn_waits_for_test(&self) -> u64 {
+        self.turn_waits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many `op` persistence calls have reached the fault seam so far.
+    #[cfg(test)]
+    pub(crate) fn persistence_calls_for_test(&self, op: FaultOp) -> u64 {
+        self.faults.calls(op)
     }
 
     /// Whether the stripe `row` serializes on is held right now (#3776): by
@@ -627,6 +656,8 @@ impl StoragePersistence {
                 corruption: CorruptionSchedule::default(),
                 #[cfg(any(test, feature = "testkit"))]
                 scanned_rows: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(any(test, feature = "testkit"))]
+                turn_waits: std::sync::atomic::AtomicU64::new(0),
             },
             PersistenceOpenSummary {
                 created,

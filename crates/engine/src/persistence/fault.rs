@@ -16,6 +16,19 @@ pub(crate) enum FaultOp {
     Branch,
 }
 
+impl FaultOp {
+    /// A dense index for per-kind tallies.
+    #[cfg(any(test, feature = "testkit"))]
+    const fn index(self) -> usize {
+        match self {
+            Self::Commit => 0,
+            Self::Read => 1,
+            Self::Scan => 2,
+            Self::Branch => 3,
+        }
+    }
+}
+
 #[cfg(any(test, feature = "testkit"))]
 pub(crate) use injection::{CorruptionSchedule, FaultSchedule};
 #[cfg(any(test, feature = "testkit"))]
@@ -33,6 +46,11 @@ mod injection {
     /// A test that panics mid-operation must not make the schedule
     /// permanently unusable for the rest of the run — the schedule holds no
     /// invariant a panic could break, only a pending-work list.
+    fn entries_array(lock: &Mutex<[u64; 4]>) -> MutexGuard<'_, [u64; 4]> {
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn entries<T>(lock: &Mutex<Vec<T>>) -> MutexGuard<'_, Vec<T>> {
         lock.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -125,6 +143,10 @@ mod injection {
     pub(crate) struct FaultSchedule {
         entries: Mutex<Vec<ScheduledFault>>,
         hooks: Mutex<Vec<ScheduledHook>>,
+        /// How many operations of each kind reached the seam, so a test can
+        /// count an operation's persistence calls and pause at each one in
+        /// turn (the concurrency conformance harness).
+        calls: Mutex<[u64; 4]>,
     }
 
     impl FaultSchedule {
@@ -149,6 +171,12 @@ mod injection {
             Some(entries.remove(position).error)
         }
 
+        /// How many `op` operations have reached the seam so far.
+        #[cfg(test)]
+        pub(crate) fn calls(&self, op: FaultOp) -> u64 {
+            entries_array(&self.calls)[op.index()]
+        }
+
         /// Arms a hook that runs when the matching operation that follows
         /// `skip` passing ones reaches the fault seam, so a test can hold a
         /// multi-entry read between two of its entries while another thread
@@ -162,6 +190,7 @@ mod injection {
         /// threads' operations (the commit it waits for among them) pass
         /// through the schedule.
         pub(crate) fn run_hook(&self, op: FaultOp) {
+            entries_array(&self.calls)[op.index()] += 1;
             let hook = {
                 let mut hooks = entries(&self.hooks);
                 let Some(position) = hooks.iter().position(|entry| entry.op == op) else {
