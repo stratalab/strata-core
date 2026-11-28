@@ -46,7 +46,9 @@ pub(crate) use key::{
     remote_origin_key, reserved_space_key, space_catalog_key, space_index_key,
     storage_registry_key, vector_index_manifest_key, vector_index_manifest_prefix,
 };
-pub(crate) use plan::CommitPlan;
+pub(crate) use plan::{
+    retry_lost_commit_race, CommitCondition, CommitPlan, COMMIT_CONFLICT_ATTEMPTS,
+};
 pub(crate) use row::{ReadSelector, RowAddress, RowMutation};
 pub(crate) use scan_ordered::OrderedTextScan;
 pub(crate) use space::RowClass;

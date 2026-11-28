@@ -68,6 +68,36 @@ impl EventRecordEnvelope {
         }
     }
 
+    /// An event not yet placed in its log: [`Self::place`] sets its
+    /// sequence, timestamp and hashes before it is encoded. An append places
+    /// it again on every attempt, since each attempt reads the log afresh
+    /// (#3776).
+    pub(crate) const fn unplaced(event_type: EventType, payload: EventPayload) -> Self {
+        Self::new(
+            EventSequence::new(0),
+            event_type,
+            payload,
+            Timestamp::from_micros(0),
+            [0; 32],
+            [0; 32],
+        )
+    }
+
+    /// Places the event at `sequence` and `timestamp`, linked to
+    /// `previous_hash` and sealed with `hash`.
+    pub(crate) const fn place(
+        &mut self,
+        sequence: EventSequence,
+        timestamp: Timestamp,
+        previous_hash: EventHash,
+        hash: EventHash,
+    ) {
+        self.sequence = sequence;
+        self.timestamp = timestamp;
+        self.previous_hash = previous_hash;
+        self.hash = hash;
+    }
+
     pub(crate) const fn sequence(&self) -> EventSequence {
         self.sequence
     }

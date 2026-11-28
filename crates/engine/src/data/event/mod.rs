@@ -1,6 +1,8 @@
 //! Event log primitive.
 
 mod adapter;
+#[cfg(test)]
+mod concurrent_append_tests;
 mod hash;
 mod outcome;
 mod record;

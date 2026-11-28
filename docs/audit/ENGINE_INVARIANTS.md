@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (7), ARCH (18, one retired), SCALE (13), DUR (19) = 92 entries, 91 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (10), ACID (8), ARCH (18, one retired), SCALE (13), DUR (19) = 93 entries, 92 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -714,6 +714,60 @@ covering fsync (`lifecycle/durable/bootstrap.rs`); verify durability events at r
 checkpoint, and close (`service/wal.rs`); verify no time-based fsync mechanism exists. The
 shed-prefix direction is pinned by the process-crash testkit
 (`sigkilled_child_recovers_a_prefix_of_acknowledged_history`).
+
+### ACID-008: A read-modify-write commit carries the row it read, and takes that row's turn
+
+The engine's capability services borrow `&self`, so threads sharing one `Database` write at
+once. A write that derives its commit from a row it read MUST NOT overwrite a commit that
+landed after that read. The case that matters most is an event append, which places its
+events from the log's metadata row: next sequence, head hash. Two guards hold this, and
+neither replaces the other:
+
+- **Correctness: the commit condition.** The commit carries the row as a
+  `CommitCondition` (`persistence/plan.rs`): present at the version read, or absent. Storage
+  validates it under the per-branch commit guard (ACID-003) and refuses a moved row with
+  `conflict.engine.persistence`, applying nothing. `retry_lost_commit_race` re-runs the
+  whole write, reads included, up to `COMMIT_CONFLICT_ATTEMPTS` times.
+- **Liveness: the turn.** The write holds the stripe its row hashes to
+  (`StoragePersistence::serialize_writes_to`, a fixed array of per-database mutexes) from
+  its read through its commit. In-process writers of one row then queue instead of racing.
+  Under saturation, retrying alone lets one writer lose hundreds of races in a row. A write
+  holds one stripe at a time, so stripes cannot deadlock.
+
+The costs, accepted for correctness:
+- **The turn spans the commit.** In `Always` mode that includes the covering fsync, so two
+  logs that share one of the 256 stripes append one after the other. One log's appends are
+  serial regardless, since each places its events from the last one's metadata.
+- **A conditioned commit builds a conflict source.** That is one point read of the
+  conditioned row under the branch's commit guard (ACID-004), where a blind write skips
+  it.
+
+A write path that skips the condition can silently lose an acknowledged write (#3776: 400
+acknowledged appends, 200 stored). One that skips the turn makes a saturated log fail
+appends with retryable conflicts. Either is the regression.
+
+**Audit**: For every engine write that reads a row and commits a value derived from it,
+verify that:
+- the commit carries that row as a condition;
+- the write runs inside `serialize_writes_to` on that row, wrapping `retry_lost_commit_race`.
+
+Today that is `EventService::batch_append` (`data/event/service.rs`). Three sites the #3776
+audit found are not converted yet, and each is a known regression:
+- JSON path writes, which rewrite the whole document (#3777);
+- the space index rewritten by a first write to a new space (#3778);
+- the graph metadata counts (#3474, tracked in #3779).
+
+`replay_append` (artifact import) owns its log alone. It carries the condition but takes no
+turn and does not retry, so a race it never expects fails the import instead of overwriting.
+
+Tests:
+- `a_conditioned_commit_lands_only_while_the_row_is_as_it_was_read` and
+  `retry_lost_commit_race_retries_only_a_lost_race_and_only_up_to_its_bound`
+  (`persistence/plan.rs`);
+- the `concurrent_append_tests` module (`data/event/`), whose replay race shows a real
+  conflict, and `test_an_append_holds_its_logs_turn_from_its_read_through_its_commit`;
+- `concurrent_appenders_through_one_handle_keep_every_acknowledged_event`
+  (`tests/engine_event.rs`).
 
 ---
 
