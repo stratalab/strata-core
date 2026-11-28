@@ -10,6 +10,8 @@ pub mod artifact;
 
 mod branch;
 mod commit;
+#[cfg(test)]
+mod concurrency_conformance;
 mod config;
 mod control;
 mod data;
