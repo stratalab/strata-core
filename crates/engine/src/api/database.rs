@@ -620,6 +620,19 @@ impl Database {
             .arm_hook(FaultOp::Scan, skip, Box::new(hook));
     }
 
+    /// Runs `hook` on the committing thread at the persistence commit that
+    /// follows `skip` further commits, after every read the write made and
+    /// before its commit reaches storage. A test uses it to hold a
+    /// read-modify-write write between its reads and its commit while
+    /// another thread commits (#3776). The same rules as
+    /// [`Self::on_point_read_for_test`]: `&self`, and a hook fires on
+    /// whichever thread commits next.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn on_commit_for_test(&self, skip: usize, hook: impl FnOnce() + Send + 'static) {
+        self.persistence
+            .arm_hook(FaultOp::Commit, skip, Box::new(hook));
+    }
+
     /// Arms a storage fault that fires on the next persistence scan.
     #[cfg(any(test, feature = "testkit"))]
     pub fn inject_scan_fault_for_test(&mut self, kind: StorageFaultKind) {
@@ -776,5 +789,17 @@ fn vector_artifact_store_for_target(target: &PersistenceOpenTarget) -> VectorArt
         PersistenceOpenTarget::DurableLocal(path, _, _) => {
             VectorArtifactStore::durable_local(path.join("engine-artifacts").join("vector"))
         }
+    }
+}
+
+// Test-only accessors live at the end of the file: the error-code ratchet
+// (`error_code_assertion_guard.rs`) reads everything after a file's first
+// `#[cfg(test)]` as test content.
+#[cfg(test)]
+impl Database {
+    /// Whether the turn `row` serializes on is held right now (#3776): by a
+    /// write of `row`, or of another row that shares its stripe.
+    pub(crate) fn write_turn_is_held_for_test(&self, row: &crate::persistence::RowAddress) -> bool {
+        self.persistence.write_turn_is_held_for_test(row)
     }
 }

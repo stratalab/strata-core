@@ -17,6 +17,78 @@ fn event_contract_runs_in_cache_and_durable_modes() {
 }
 
 #[test]
+fn concurrent_appenders_through_one_handle_keep_every_acknowledged_event() {
+    run_database_modes(exercise_concurrent_appenders);
+}
+
+/// #3776: services are `&self`, so threads sharing one handle append to one
+/// log at once. Every acknowledged append keeps its own sequence and its own
+/// payload, the log's length counts them all, and the chain verifies. Before
+/// the fix, half of 400 acknowledged appends were overwritten.
+fn exercise_concurrent_appenders(database: &mut Database) {
+    const WRITERS: u64 = 4;
+    const APPENDS: u64 = 100;
+    let database = &*database;
+    let acknowledged = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for writer in 0..WRITERS {
+            let acknowledged = &acknowledged;
+            scope.spawn(move || {
+                for index in 0..APPENDS {
+                    let sequence = database
+                        .event(branch("default"), space("default"))
+                        .expect("event service opens")
+                        .append(
+                            event_type("race"),
+                            payload(json!({"writer": writer, "index": index})),
+                        )
+                        .expect("the append is acknowledged")
+                        .sequence();
+                    acknowledged
+                        .lock()
+                        .expect("no writer panicked")
+                        .push((sequence, writer, index));
+                }
+            });
+        }
+    });
+
+    let acknowledged = acknowledged.into_inner().expect("no writer panicked");
+    let total = WRITERS * APPENDS;
+    let mut sequences = acknowledged
+        .iter()
+        .map(|(sequence, _, _)| sequence.as_u64())
+        .collect::<Vec<_>>();
+    sequences.sort_unstable();
+    sequences.dedup();
+    assert_eq!(
+        u64::try_from(sequences.len()).expect("fits"),
+        total,
+        "every acknowledged append has its own sequence"
+    );
+    let mut events = database
+        .event(branch("default"), space("default"))
+        .expect("event service opens");
+    assert_eq!(events.len().expect("the length reads").count(), total);
+    for (sequence, writer, index) in &acknowledged {
+        let stored = events
+            .get(*sequence)
+            .expect("the read succeeds")
+            .expect("an acknowledged event is stored");
+        assert_eq!(
+            stored.record().payload().as_inner(),
+            &json!({"writer": writer, "index": index}),
+            "sequence {} holds the append acknowledged with it",
+            sequence.as_u64()
+        );
+    }
+    assert!(events
+        .verify_chain()
+        .expect("the chain verifies")
+        .is_valid());
+}
+
+#[test]
 fn event_reads_return_none_for_tombstoned_rows_after_forced_space_delete() {
     run_database_modes(|database| {
         // Append an event into a non-default space, then force-delete the space

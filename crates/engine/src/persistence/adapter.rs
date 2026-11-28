@@ -9,15 +9,15 @@ use strata_storage::api::{
     BranchAction, BranchCleanupSummary as StorageBranchCleanupSummary,
     BranchGeneration as StorageBranchGeneration, BranchOutcome as StorageBranchOutcome,
     BranchRequest, BranchScanSnapshot, BranchStatus as StorageBranchStatus,
-    BranchSummary as StorageBranchSummary, CommitBatch, CommitDurabilitySummary,
-    CommitInstantsRequest, CommitMutation, CommitOptions, CommitTimelineEdge, HistoryReadRequest,
-    ImmutableSourceScanReadRequest, PointReadRequest, PrefixScanReadRequest, ReadBound, ReadLimit,
-    ScanRange, ScanReadOutcome, ScanReadRequest, StorageApiError, StorageApiErrorClass,
-    StorageBudgetPolicy, StorageBudgetSource, StorageCachePreheatPolicy, StorageCloseSummary,
-    StorageDurabilityPolicy, StorageImmutableSource, StorageKey, StorageMemoryBudget,
-    StorageOpenDisposition, StorageOpenOptions, StorageReadRow, StorageRuntime,
-    StorageRuntimeState, StorageSpaceId, StorageValue, TimelineBoundsRequest,
-    WallClockLookupRequest,
+    BranchSummary as StorageBranchSummary, CommitBatch, CommitCondition as StorageCommitCondition,
+    CommitDurabilitySummary, CommitInstantsRequest, CommitMutation, CommitOptions,
+    CommitTimelineEdge, HistoryReadRequest, ImmutableSourceScanReadRequest, PointReadRequest,
+    PrefixScanReadRequest, ReadBound, ReadLimit, ScanRange, ScanReadOutcome, ScanReadRequest,
+    StorageApiError, StorageApiErrorClass, StorageBudgetPolicy, StorageBudgetSource,
+    StorageCachePreheatPolicy, StorageCloseSummary, StorageDurabilityPolicy,
+    StorageImmutableSource, StorageKey, StorageMemoryBudget, StorageOpenDisposition,
+    StorageOpenOptions, StorageReadRow, StorageRuntime, StorageRuntimeState, StorageSpaceId,
+    StorageValue, TimelineBoundsRequest, WallClockLookupRequest,
 };
 use strata_storage::api::{
     DiagnosticsDetail, DiagnosticsOutcome, DiagnosticsRequest, DiagnosticsScope,
@@ -34,7 +34,7 @@ use crate::time_compat::{SystemTime, UNIX_EPOCH};
 use super::fault::FaultOp;
 #[cfg(any(test, feature = "testkit"))]
 use super::fault::{CorruptionSchedule, FaultSchedule, RowCorruption, StorageFaultKind};
-use super::{CommitPlan, ReadSelector, RowAddress, RowClass, RowMutation};
+use super::{CommitCondition, CommitPlan, ReadSelector, RowAddress, RowClass, RowMutation};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PersistenceOpenTarget {
@@ -228,6 +228,15 @@ pub(crate) struct StoragePersistence {
     /// value so structural writes never advance the floor past the content
     /// that replays next. Not consumed; cleared explicitly. See #3070.
     replay_structural_timestamp: Mutex<Option<Timestamp>>,
+    /// #3776: in-process serialization of read-modify-write writes. A write
+    /// that derives its commit from one shared row (an event log's metadata)
+    /// holds the stripe that row hashes to from its read through its
+    /// commit, so writers of one row queue instead of racing. Racing writers
+    /// would all be correct, since each commit is conditioned on the row it
+    /// read, but under saturation one writer can lose every race. A fixed
+    /// array keeps the state bounded; two rows that share a stripe only
+    /// queue, never deadlock, because a write holds one stripe at a time.
+    write_stripes: [Mutex<()>; WRITE_STRIPES],
     #[cfg(any(test, feature = "testkit"))]
     faults: FaultSchedule,
     #[cfg(any(test, feature = "testkit"))]
@@ -504,7 +513,47 @@ fn replay(cell: &Mutex<Option<Timestamp>>) -> MutexGuard<'_, Option<Timestamp>> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Stripes of [`StoragePersistence`]'s read-modify-write lock (#3776).
+const WRITE_STRIPES: usize = 256;
+
+/// The stripe `row` serializes on: a stable hash of its branch, class and
+/// key, so every writer of one row takes the same stripe.
+fn write_stripe(row: &RowAddress) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    row.branch_id().hash(&mut hasher);
+    row.row_class().storage_space_id().hash(&mut hasher);
+    row.key().hash(&mut hasher);
+    // The modulus is below `WRITE_STRIPES`, so the narrowing cannot lose it.
+    usize::try_from(hasher.finish() % WRITE_STRIPES as u64).unwrap_or(0)
+}
+
 impl StoragePersistence {
+    /// Runs `write`, a read-modify-write write whose commit is derived from
+    /// the row at `row`, holding the stripe that row serializes on (#3776).
+    /// Every in-process writer of `row` that goes through here runs one at a
+    /// time, so none of them loses a race to another. `write` must not
+    /// serialize on a second row: a write holds one stripe at a time. A
+    /// writer that panicked while holding the stripe leaves nothing for the
+    /// next one to distrust, since the stripe guards no data.
+    pub(crate) fn serialize_writes_to<T>(&self, row: &RowAddress, write: impl FnOnce() -> T) -> T {
+        let _turn = self.write_stripes[write_stripe(row)]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        write()
+    }
+
+    /// Whether the stripe `row` serializes on is held right now (#3776): by
+    /// a write of `row`, or of another row that shares its stripe. A stripe
+    /// that is free but poisoned is not held.
+    #[cfg(test)]
+    pub(crate) fn write_turn_is_held_for_test(&self, row: &RowAddress) -> bool {
+        matches!(
+            self.write_stripes[write_stripe(row)].try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn open(
         target: PersistenceOpenTarget,
@@ -571,6 +620,7 @@ impl StoragePersistence {
                 durable,
                 replay_commit_timestamp: Mutex::new(None),
                 replay_structural_timestamp: Mutex::new(None),
+                write_stripes: std::array::from_fn(|_| Mutex::new(())),
                 #[cfg(any(test, feature = "testkit"))]
                 faults: FaultSchedule::default(),
                 #[cfg(any(test, feature = "testkit"))]
@@ -906,8 +956,20 @@ impl StoragePersistence {
                 options = options.with_committed_at(committed_at);
             }
         }
-        let batch =
+        let mut batch =
             CommitBatch::new(plan.branch_id(), mutations, options).map_err(map_storage_error)?;
+        // #3776: a read-modify-write commit lands only if the rows it was
+        // derived from are still as they were read.
+        if !plan.conditions().is_empty() {
+            let conditions = plan
+                .conditions()
+                .iter()
+                .map(storage_commit_condition)
+                .collect::<Result<Vec<_>, _>>()?;
+            batch = batch
+                .with_conditions(conditions)
+                .map_err(map_storage_error)?;
+        }
         let summary = match replay_timestamp {
             Some(timestamp) => self
                 .runtime
@@ -1352,6 +1414,19 @@ fn storage_space_for_class(row_class: RowClass) -> Result<StorageSpaceId, Engine
 
 fn storage_key(address: &RowAddress) -> Result<StorageKey, EngineError> {
     storage_key_from_bytes(address.key().to_vec())
+}
+
+/// The storage condition for one engine [`CommitCondition`]: the row must be
+/// present at the version it was read at, or still absent (#3776).
+fn storage_commit_condition(
+    condition: &CommitCondition,
+) -> Result<StorageCommitCondition, EngineError> {
+    let storage_space = storage_space(condition.address())?;
+    let key = storage_key(condition.address())?;
+    Ok(match condition.read_version() {
+        Some(version) => StorageCommitCondition::expected_present(storage_space, key, version),
+        None => StorageCommitCondition::expected_absent(storage_space, key),
+    })
 }
 
 fn storage_key_from_bytes(bytes: Vec<u8>) -> Result<StorageKey, EngineError> {
@@ -2515,5 +2590,48 @@ mod tests {
             CommitOutcomeStatus::DefinitelyNotCommitted,
         );
         assert!(error.source_arc().is_some());
+    }
+
+    /// #3776: a row's writers all take one stripe, and distinct rows spread
+    /// over the stripes, so writers of unrelated rows rarely queue behind
+    /// each other. A stripe chosen without the row would serialize every
+    /// read-modify-write write in the database.
+    #[test]
+    fn write_stripe_is_stable_per_row_and_spreads_distinct_rows() {
+        use super::{write_stripe, WRITE_STRIPES};
+        use crate::persistence::{RowAddress, RowClass};
+        use strata_core::BranchId;
+
+        let branch = BranchId::from_bytes([3; 16]);
+        let row =
+            |key: u32| RowAddress::new(branch, RowClass::EventMetadata, key.to_be_bytes().to_vec());
+        assert_eq!(
+            write_stripe(&row(7)),
+            write_stripe(&row(7)),
+            "one row, one stripe"
+        );
+        let stripes = (0..4096_u32)
+            .map(|key| write_stripe(&row(key)))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(stripes.iter().all(|stripe| *stripe < WRITE_STRIPES));
+        assert!(
+            stripes.len() > WRITE_STRIPES * 9 / 10,
+            "4096 rows reach {} of {WRITE_STRIPES} stripes",
+            stripes.len()
+        );
+        // The branch and the row class are part of the row: the same key on
+        // another branch or in another class is another row.
+        let other_branch = RowAddress::new(
+            BranchId::from_bytes([4; 16]),
+            RowClass::EventMetadata,
+            vec![7],
+        );
+        let other_class = RowAddress::new(branch, RowClass::GraphMetadata, vec![7]);
+        let same = RowAddress::new(branch, RowClass::EventMetadata, vec![7]);
+        assert!(
+            write_stripe(&other_branch) != write_stripe(&same)
+                || write_stripe(&other_class) != write_stripe(&same),
+            "branch and class take part in the stripe"
+        );
     }
 }

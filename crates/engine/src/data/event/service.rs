@@ -13,8 +13,9 @@ use crate::data::kv::ProductSpace;
 use crate::diagnostics::EngineError;
 use crate::persistence::{
     decode_event_key_sequence, encode_event_key, encode_event_meta_key, encode_event_space_prefix,
-    encode_event_type_index_key, encode_event_type_index_space_prefix, CommitPlan, OrderedTextScan,
-    PersistenceReadRow, ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
+    encode_event_type_index_key, encode_event_type_index_space_prefix, retry_lost_commit_race,
+    CommitCondition, CommitPlan, OrderedTextScan, PersistenceReadRow, ReadSelector, RowAddress,
+    RowClass, RowMutation, StoragePersistence, COMMIT_CONFLICT_ATTEMPTS,
 };
 
 use super::{
@@ -103,45 +104,54 @@ impl<'a> EventService<'a> {
                 None,
             ));
         }
-        let mut metadata = self.read_metadata(&record, ReadSelector::Latest)?;
-        let mut mutations =
-            Vec::with_capacity(valid_entries.len().saturating_mul(2).saturating_add(1));
-        let mut appended = Vec::with_capacity(valid_entries.len());
-        for (position, event_type, payload) in valid_entries {
-            let sequence = metadata.next_sequence();
-            let timestamp = next_event_timestamp(&metadata);
-            let previous_hash = metadata.head_hash();
-            let hash = compute_event_hash(
-                sequence,
-                &event_type,
-                &payload,
-                timestamp.as_micros(),
-                &previous_hash,
-            )?;
-            let event = EventRecordEnvelope::new(
-                EventSequence::new(sequence),
-                event_type,
-                payload,
-                timestamp,
-                previous_hash,
-                hash,
-            );
-            metadata.push(&event);
-            mutations.push(RowMutation::put(
-                self.event_address(&record, event.sequence()),
-                encode_event_record(&event)?,
-            ));
-            mutations.push(RowMutation::put(
-                self.type_index_address(&record, event.event_type(), event.sequence()),
-                TYPE_INDEX_VALUE.to_vec(),
-            ));
-            appended.push((position, event));
-        }
-        mutations.push(RowMutation::put(
-            self.metadata_address(&record),
-            encode_event_metadata(&metadata),
-        ));
-        let commit = self.commit_batch(&record, mutations)?;
+        let mut appended = valid_entries
+            .into_iter()
+            .map(|(position, event_type, payload)| {
+                (position, EventRecordEnvelope::unplaced(event_type, payload))
+            })
+            .collect::<Vec<_>>();
+        // #3776: the events are placed from the log's metadata. Appends to
+        // one log take turns from that read through their commit, and the
+        // commit lands only if no other append moved the metadata since it
+        // was read: an append that still loses the race (a writer that took
+        // no turn) reads the log again and places its events after the
+        // winner's.
+        let persistence = self.persistence;
+        let metadata_row = self.metadata_address(&record);
+        let commit = persistence.serialize_writes_to(&metadata_row, || {
+            retry_lost_commit_race(COMMIT_CONFLICT_ATTEMPTS, || {
+                let (mut metadata, read) = self.read_metadata_for_update(&record)?;
+                let mut mutations =
+                    Vec::with_capacity(appended.len().saturating_mul(2).saturating_add(1));
+                for (_, event) in &mut appended {
+                    let sequence = metadata.next_sequence();
+                    let timestamp = next_event_timestamp(&metadata);
+                    let previous_hash = metadata.head_hash();
+                    let hash = compute_event_hash(
+                        sequence,
+                        event.event_type(),
+                        event.payload(),
+                        timestamp.as_micros(),
+                        &previous_hash,
+                    )?;
+                    event.place(EventSequence::new(sequence), timestamp, previous_hash, hash);
+                    metadata.push(event);
+                    mutations.push(RowMutation::put(
+                        self.event_address(&record, event.sequence()),
+                        encode_event_record(event)?,
+                    ));
+                    mutations.push(RowMutation::put(
+                        self.type_index_address(&record, event.event_type(), event.sequence()),
+                        TYPE_INDEX_VALUE.to_vec(),
+                    ));
+                }
+                mutations.push(RowMutation::put(
+                    self.metadata_address(&record),
+                    encode_event_metadata(&metadata),
+                ));
+                self.commit_batch(&record, mutations, vec![read])
+            })
+        })?;
         for (position, event) in appended {
             items[position] = Some(EventBatchAppendItemOutcome::success(
                 event.sequence(),
@@ -170,7 +180,7 @@ impl<'a> EventService<'a> {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut metadata = self.read_metadata(&record, ReadSelector::Latest)?;
+        let (mut metadata, read) = self.read_metadata_for_update(&record)?;
         let mut mutations = Vec::with_capacity(entries.len().saturating_mul(2).saturating_add(1));
         for (event_type, payload, timestamp) in entries {
             let floor = metadata
@@ -213,7 +223,11 @@ impl<'a> EventService<'a> {
             self.metadata_address(&record),
             encode_event_metadata(&metadata),
         ));
-        self.commit_batch(&record, mutations)?;
+        // #3776: artifact import replays into a log it owns alone, so it
+        // takes no turn and does not retry. Its commit is still conditioned
+        // on the metadata it read, so if anything ever does race it, the
+        // replay fails instead of overwriting an acknowledged event.
+        self.commit_batch(&record, mutations, vec![read])?;
         Ok(())
     }
 
@@ -574,12 +588,35 @@ impl<'a> EventService<'a> {
         selector: ReadSelector,
     ) -> Result<EventLogMetadata, EngineError> {
         let address = self.metadata_address(record);
-        let Some(row) = self.persistence.read_row(address, selector)? else {
+        Self::metadata_from_row(self.persistence.read_row(address, selector)?.as_ref())
+    }
+
+    /// The latest metadata an append derives its events from, with the
+    /// condition its commit carries: the metadata row must still be as read
+    /// (#3776).
+    fn read_metadata_for_update(
+        &mut self,
+        record: &BranchCatalogRecord,
+    ) -> Result<(EventLogMetadata, CommitCondition), EngineError> {
+        let address = self.metadata_address(record);
+        let row = self
+            .persistence
+            .read_row(address.clone(), ReadSelector::Latest)?;
+        let metadata = Self::metadata_from_row(row.as_ref())?;
+        Ok((
+            metadata,
+            CommitCondition::unchanged_since(address, row.as_ref()),
+        ))
+    }
+
+    /// The metadata a stored row holds: the empty log's when there is no
+    /// live row.
+    fn metadata_from_row(
+        row: Option<&PersistenceReadRow>,
+    ) -> Result<EventLogMetadata, EngineError> {
+        let Some(row) = row.filter(|row| !row.is_tombstone()) else {
             return Ok(EventLogMetadata::default());
         };
-        if row.is_tombstone() {
-            return Ok(EventLogMetadata::default());
-        }
         let value = row.value().ok_or_else(|| {
             EngineError::corruption(
                 "data_loss.engine.event_metadata",
@@ -664,10 +701,13 @@ impl<'a> EventService<'a> {
         )
     }
 
+    /// Commits `mutations`, landing only if every row in `conditions` is
+    /// still as it was read (#3776).
     fn commit_batch(
         &mut self,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
+        conditions: Vec<CommitCondition>,
     ) -> Result<CommitOutcome, EngineError> {
         let mut mutations = mutations;
         if mutations.is_empty() {
@@ -694,7 +734,8 @@ impl<'a> EventService<'a> {
             record.storage_branch_id(),
             mutations,
             Some(record.generation()),
-        );
+        )
+        .with_conditions(conditions);
         Ok(self
             .persistence
             .commit(&plan)?
@@ -850,6 +891,18 @@ fn unix_timestamp() -> Timestamp {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default(),
     )
+}
+
+// Test-only accessors sit here, after all product code, because the
+// error-code ratchet (`error_code_assertion_guard.rs`) reads everything after
+// a file's first `#[cfg(test)]` as test content.
+#[cfg(test)]
+impl EventService<'_> {
+    /// The row this log's appends take turns on (#3776).
+    pub(crate) fn metadata_row_for_test(&self) -> RowAddress {
+        let record = self.branch_record().expect("the branch exists");
+        self.metadata_address(&record)
+    }
 }
 
 #[cfg(test)]
@@ -1083,6 +1136,7 @@ mod tests {
             .commit_batch(
                 &record,
                 vec![RowMutation::put(events.metadata_address(&record), v1_bytes)],
+                Vec::new(),
             )
             .expect("v1 head");
         assert_eq!(
