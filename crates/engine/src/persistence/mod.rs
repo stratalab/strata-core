@@ -8,6 +8,7 @@ mod plan;
 mod row;
 mod scan_ordered;
 mod space;
+mod writer;
 
 pub(crate) use adapter::storage_test_seams;
 pub use adapter::MemoryBudgetSource;
@@ -46,12 +47,11 @@ pub(crate) use key::{
     remote_origin_key, reserved_space_key, space_catalog_key, space_index_key,
     storage_registry_key, vector_index_manifest_key, vector_index_manifest_prefix,
 };
-pub(crate) use plan::{
-    retry_lost_commit_race, CommitCondition, CommitPlan, COMMIT_CONFLICT_ATTEMPTS,
-};
+pub(crate) use plan::CommitPlan;
 pub(crate) use row::{ReadSelector, RowAddress, RowMutation};
 pub(crate) use scan_ordered::OrderedTextScan;
 pub(crate) use space::RowClass;
+pub(crate) use writer::BranchWriter;
 
 #[cfg(any(test, feature = "testkit"))]
 pub(crate) use space::row_class_storage_id_for_test;

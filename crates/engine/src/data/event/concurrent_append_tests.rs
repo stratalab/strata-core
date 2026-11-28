@@ -1,15 +1,14 @@
-//! Two appends to one log never land at one sequence (#3776).
+//! Two appends to one log never land at one sequence (#3776, #3782).
 //!
 //! An append reads the log's metadata (the next sequence and the chain's
 //! head hash) and commits its event at that sequence together with the
 //! advanced metadata. Services are `&self`, so two threads can append to the
-//! same log at once. Appends to one log take turns from that read through
-//! their commit, and each commit is conditioned on the metadata it read, so
-//! a writer that takes no turn still cannot be overwritten. These tests hold
-//! an append between its read and its commit while such a writer (artifact
-//! replay) commits, and hold the log to its contract: every acknowledged
-//! append keeps its own sequence, its payload reads back, and the chain
-//! verifies.
+//! same log at once. An append holds its branch's writer from that read
+//! through its commit, so a second write of the branch waits for it and then
+//! reads the metadata the first one left. These tests hold an append at its
+//! commit while a second write of the branch arrives, and hold the log to its
+//! contract: every acknowledged append keeps its own sequence, its payload
+//! reads back, and the chain verifies.
 //!
 //! They live in the crate, not under `tests/`, so the test-only commit hook
 //! they pause on is built under default features: the mutation lane
@@ -40,10 +39,10 @@ fn open_cache_database() -> Database {
         .into_database()
 }
 
-/// Appends one event labelled `label` and returns its sequence.
-fn append(database: &Database, label: &str) -> EventSequence {
+/// Appends one event labelled `label` to `branch` and returns its sequence.
+fn append_to(database: &Database, branch: BranchName, label: &str) -> EventSequence {
     database
-        .event(branch(), space())
+        .event(branch, space())
         .expect("event service opens")
         .append(
             EventType::new("note").expect("valid event type"),
@@ -51,6 +50,11 @@ fn append(database: &Database, label: &str) -> EventSequence {
         )
         .expect("the append is acknowledged")
         .sequence()
+}
+
+/// Appends one event labelled `label` to the default branch.
+fn append(database: &Database, label: &str) -> EventSequence {
+    append_to(database, branch(), label)
 }
 
 /// The label of the event stored at `sequence`.
@@ -87,48 +91,98 @@ fn an_hour_from_now() -> Timestamp {
     Timestamp::from_micros(u64::try_from(now.as_micros()).expect("fits") + 3_600_000_000)
 }
 
-/// Holds an append between its metadata read and its commit, after
-/// `seeded` earlier appends, while artifact replay commits one event.
-/// Replay stands in for a writer that takes no turn: in production it runs
-/// only under an exclusive handle, so this interleaving is the one way to
-/// make the commit condition, not the turn, decide the race. The append's commit then finds the metadata moved: it
-/// must read the log again and land after the replayed event, never over it.
-fn an_append_that_loses_the_race_lands_after_the_winner(database: &Database, seeded: u64) {
+/// The second write of the branch in [`a_second_write_waits_and_lands_after_the_held_append`].
+#[derive(Clone, Copy)]
+enum SecondWrite {
+    /// Another append to the same log.
+    Append,
+    /// Artifact replay into the same log, which writes the branch like any
+    /// other write.
+    Replay,
+}
+
+impl SecondWrite {
+    fn run(self, database: &Database) -> EventSequence {
+        match self {
+            Self::Append => append(database, "second"),
+            Self::Replay => {
+                database
+                    .event(branch(), space())
+                    .expect("event service opens")
+                    .replay_append(vec![(
+                        EventType::new("note").expect("valid event type"),
+                        EventPayload::new(json!({ "label": "second" })).expect("valid payload"),
+                        an_hour_from_now(),
+                    )])
+                    .expect("the replay commits");
+                // Replay reports no sequence; the replayed event is the log's
+                // last, and nothing else writes the log by now.
+                let len = database
+                    .event(branch(), space())
+                    .expect("event service opens")
+                    .len()
+                    .expect("the length reads")
+                    .count();
+                EventSequence::new(len - 1)
+            }
+        }
+    }
+}
+
+/// Holds an append at its commit, after `seeded` earlier appends, while a
+/// second write of the branch arrives. The second write must wait for the
+/// branch's writer (the turn-wait counter shows it queued, not timed), and
+/// once the append lands it must read the metadata the append left and land
+/// after it, never over it.
+fn a_second_write_waits_and_lands_after_the_held_append(
+    database: &Database,
+    seeded: u64,
+    second: SecondWrite,
+) {
     for index in 0..seeded {
         append(database, &format!("seed-{index}"));
     }
     let pause = pause_at_next_commit(database);
-    let late = std::thread::scope(|scope| {
+    let (held, later) = std::thread::scope(|scope| {
         // Owned by the scope, so a failed step drops the resume handle and
         // the paused append fails instead of waiting forever.
         let (paused, resume) = pause;
-        let writer = scope.spawn(|| append(database, "late"));
+        let held = scope.spawn(|| append(database, "held"));
         paused
             .recv_timeout(Duration::from_secs(30))
             .expect("the append pauses before its commit");
-        // The hook fired once, on the append, so the replay commits while the
-        // append still holds the metadata it read before it.
-        database
-            .event(branch(), space())
-            .expect("event service opens")
-            .replay_append(vec![(
-                EventType::new("note").expect("valid event type"),
-                EventPayload::new(json!({ "label": "replayed" })).expect("valid payload"),
-                an_hour_from_now(),
-            )])
-            .expect("the replay commits");
+        let waits_before = database.writer_waits_for_test();
+        let later = scope.spawn(move || second.run(database));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !later.is_finished()
+            && database.writer_waits_for_test() == waits_before
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert!(
+            database.writer_waits_for_test() > waits_before,
+            "the second write queued on the branch writer"
+        );
+        assert!(
+            !later.is_finished(),
+            "the second write waits for the held append's branch writer"
+        );
         resume.send(()).expect("the append is waiting");
-        writer.join().expect("the writer thread")
+        (
+            held.join().expect("the held append"),
+            later.join().expect("the second write"),
+        )
     });
 
-    let replayed = EventSequence::new(seeded);
-    assert_eq!(label_at(database, replayed), "replayed");
+    assert_eq!(held.as_u64(), seeded, "the held append keeps its sequence");
+    assert_eq!(label_at(database, held), "held");
     assert_eq!(
-        late.as_u64(),
+        later.as_u64(),
         seeded + 1,
-        "the append lands after the winner"
+        "the second write lands after the held append"
     );
-    assert_eq!(label_at(database, late), "late");
+    assert_eq!(label_at(database, later), "second");
     let mut events = database
         .event(branch(), space())
         .expect("event service opens");
@@ -147,38 +201,54 @@ fn an_append_that_loses_the_race_lands_after_the_winner(database: &Database, see
 }
 
 #[test]
-fn test_an_append_on_a_new_log_that_loses_the_race_lands_after_the_winner() {
-    an_append_that_loses_the_race_lands_after_the_winner(&open_cache_database(), 0);
+fn test_a_second_append_to_a_new_log_waits_for_the_held_one_and_lands_after_it() {
+    a_second_write_waits_and_lands_after_the_held_append(
+        &open_cache_database(),
+        0,
+        SecondWrite::Append,
+    );
 }
 
 #[test]
-fn test_an_append_on_a_written_log_that_loses_the_race_lands_after_the_winner() {
-    an_append_that_loses_the_race_lands_after_the_winner(&open_cache_database(), 2);
+fn test_a_second_append_to_a_written_log_waits_for_the_held_one_and_lands_after_it() {
+    a_second_write_waits_and_lands_after_the_held_append(
+        &open_cache_database(),
+        2,
+        SecondWrite::Append,
+    );
 }
 
 #[test]
-fn test_an_append_that_loses_the_race_lands_after_the_winner_in_durable_mode() {
+fn test_a_second_append_waits_for_the_held_one_and_lands_after_it_in_durable_mode() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let database = Database::open_local(tempdir.path(), DurableLocalOpenOptions::new())
         .expect("durable open succeeds")
         .into_database();
-    an_append_that_loses_the_race_lands_after_the_winner(&database, 1);
+    a_second_write_waits_and_lands_after_the_held_append(&database, 1, SecondWrite::Append);
 }
 
-/// Appends to one log take turns: an append holds its log's turn from its
-/// metadata read through its commit, so no other append to that log can
-/// read the metadata it is about to change.
 #[test]
-fn test_an_append_holds_its_logs_turn_from_its_read_through_its_commit() {
+fn test_a_replay_into_a_log_waits_for_a_held_append_and_lands_after_it() {
+    a_second_write_waits_and_lands_after_the_held_append(
+        &open_cache_database(),
+        1,
+        SecondWrite::Replay,
+    );
+}
+
+/// An append holds its branch's writer through its commit and lets it go
+/// once it lands.
+#[test]
+fn test_an_append_holds_its_branch_writer_through_its_commit() {
     let database = open_cache_database();
     append(&database, "seed");
-    let row = database
+    let branch_id = database
         .event(branch(), space())
         .expect("event service opens")
-        .metadata_row_for_test();
+        .storage_branch_id_for_test();
     assert!(
-        !database.write_turn_is_held_for_test(&row),
-        "no append is in flight"
+        !database.branch_writer_is_held_for_test(branch_id),
+        "no write is in flight"
     );
     let pause = pause_at_next_commit(&database);
     std::thread::scope(|scope| {
@@ -190,73 +260,50 @@ fn test_an_append_holds_its_logs_turn_from_its_read_through_its_commit() {
             .recv_timeout(Duration::from_secs(30))
             .expect("the append pauses before its commit");
         assert!(
-            database.write_turn_is_held_for_test(&row),
-            "the append holds its log's turn at its commit"
+            database.branch_writer_is_held_for_test(branch_id),
+            "the append holds its branch's writer at its commit"
         );
         resume.send(()).expect("the append is waiting");
         writer.join().expect("the writer thread");
     });
     assert!(
-        !database.write_turn_is_held_for_test(&row),
-        "the turn is released once the append lands"
+        !database.branch_writer_is_held_for_test(branch_id),
+        "the writer is released once the append lands"
     );
 }
 
-/// Turns are per log, not one for the database: while an append holds its
-/// log's turn, appends to other logs are not made to wait. Two logs may
-/// share a stripe, so of several other logs at least one must be free.
+/// The writer is per branch, not one for the database: while an append
+/// holds its branch, an append to another branch runs to completion.
 #[test]
-fn test_an_append_holds_only_its_own_logs_turn() {
-    let database = open_cache_database();
-    let other_logs = (0..8)
-        .map(|index| {
-            database
-                .event(
-                    branch(),
-                    ProductSpace::new(format!("other-{index}")).expect("valid product space"),
-                )
-                .expect("event service opens")
-                .metadata_row_for_test()
-        })
-        .collect::<Vec<_>>();
-    let pause = pause_at_next_commit(&database);
-    std::thread::scope(|scope| {
-        // Owned by the scope, so a failed check drops the resume handle and
-        // the paused append fails instead of waiting forever.
-        let (paused, resume) = pause;
-        let writer = scope.spawn(|| append(&database, "held"));
-        paused
-            .recv_timeout(Duration::from_secs(30))
-            .expect("the append pauses before its commit");
-        assert!(
-            other_logs
-                .iter()
-                .any(|row| !database.write_turn_is_held_for_test(row)),
-            "an append to one log leaves other logs' turns free"
-        );
-        resume.send(()).expect("the append is waiting");
-        writer.join().expect("the writer thread");
-    });
-}
-
-/// The retry itself, without a second thread: a commit refused as a lost
-/// race applies nothing, so the retried append lands exactly once, at the
-/// next sequence, and the log holds no ghost of the refused attempt.
-#[test]
-fn test_an_append_refused_as_a_lost_race_lands_once_on_retry() {
+fn test_an_append_does_not_hold_other_branches_writers() {
     let mut database = open_cache_database();
-    let first = append(&database, "first");
-    database.inject_commit_fault_for_test(crate::persistence::StorageFaultKind::Conflict);
-    let second = append(&database, "second");
-
-    assert_eq!(second.as_u64(), first.as_u64() + 1);
-    assert_eq!(label_at(&database, second), "second");
-    let mut events = database
-        .event(branch(), space())
-        .expect("event service opens");
-    assert_eq!(events.len().expect("the length reads").count(), 2);
-    assert!(events
-        .verify_chain()
-        .expect("the chain verifies")
-        .is_valid());
+    let other = BranchName::new("other").expect("valid branch name");
+    database
+        .branches()
+        .expect("branch service opens")
+        .create(other.clone())
+        .expect("the branch is created");
+    let pause = pause_at_next_commit(&database);
+    std::thread::scope(|scope| {
+        // Owned by the scope, so a failed check drops the resume handle and
+        // the paused append fails instead of waiting forever.
+        let (paused, resume) = pause;
+        let held = scope.spawn(|| append(&database, "held"));
+        paused
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the append pauses before its commit");
+        let (done_tx, done_rx) = mpsc::channel();
+        let database = &database;
+        let elsewhere = scope.spawn(move || {
+            let sequence = append_to(database, other, "elsewhere");
+            done_tx.send(()).expect("the test is listening");
+            sequence
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("an append to another branch lands while this one is held");
+        resume.send(()).expect("the append is waiting");
+        assert_eq!(held.join().expect("the held append").as_u64(), 0);
+        assert_eq!(elsewhere.join().expect("the other append").as_u64(), 0);
+    });
 }

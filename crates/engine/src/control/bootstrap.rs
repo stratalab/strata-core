@@ -181,7 +181,10 @@ impl ControlPlane {
                 encode_pending_branch_record(record, kind),
             ),
         ];
-        persistence.commit(&CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
+        // Control rows live on the system branch; its writer is uncontended
+        // (branch operations run under `&mut Database`) and commits require it (#3782).
+        let writer = persistence.begin_write(SYSTEM_BRANCH_ID);
+        persistence.commit(&writer, &CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
         Ok(())
     }
 
@@ -199,7 +202,10 @@ impl ControlPlane {
                 branch_pending_key(record.name().as_str()),
             )),
         ];
-        persistence.commit(&CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
+        // Control rows live on the system branch; its writer is uncontended
+        // (branch operations run under `&mut Database`) and commits require it (#3782).
+        let writer = persistence.begin_write(SYSTEM_BRANCH_ID);
+        persistence.commit(&writer, &CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
         Ok(())
     }
 
@@ -238,17 +244,21 @@ impl ControlPlane {
                 branch_pending_key(record.name().as_str()),
             )),
         ];
-        persistence.commit(&CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
+        // Control rows live on the system branch; its writer is uncontended
+        // (branch operations run under `&mut Database`) and commits require it (#3782).
+        let writer = persistence.begin_write(SYSTEM_BRANCH_ID);
+        persistence.commit(&writer, &CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
         self.insert_branch(record);
         Ok(())
     }
 
     pub(crate) fn space_registration_mutations(
         persistence: &StoragePersistence,
+        writer: &crate::persistence::BranchWriter,
         record: &BranchCatalogRecord,
         space: &crate::data::kv::ProductSpace,
     ) -> Result<Vec<RowMutation>, EngineError> {
-        super::space::registration_mutations(persistence, record, space)
+        super::space::registration_mutations(persistence, writer, record, space)
     }
 }
 
@@ -325,7 +335,10 @@ fn bootstrap_new_database(
         ),
     ];
     super::space::seed_required_space_rows(persistence, &default_record)?;
-    persistence.commit(&CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
+    // Control rows live on the system branch; its writer is uncontended
+    // (branch operations run under `&mut Database`) and commits require it (#3782).
+    let writer = persistence.begin_write(SYSTEM_BRANCH_ID);
+    persistence.commit(&writer, &CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
 
     Ok(ControlPlane {
         default_branch: default_record.name().clone(),
@@ -601,8 +614,28 @@ fn clear_pending_branch_marker(
             encode_branch_record(record),
         ));
     }
-    persistence.commit(&CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
+    // Control rows live on the system branch; its writer is uncontended
+    // (branch operations run under `&mut Database`) and commits require it (#3782).
+    let writer = persistence.begin_write(SYSTEM_BRANCH_ID);
+    persistence.commit(&writer, &CommitPlan::new(SYSTEM_BRANCH_ID, mutations, None))?;
     Ok(())
+}
+
+#[cfg(test)]
+impl ControlPlane {
+    /// The branch operations whose pending marker is still recorded, so a
+    /// branch-service test can see a marker before reload recovery clears it.
+    pub(crate) fn pending_branch_operations_for_test(
+        persistence: &mut StoragePersistence,
+    ) -> Vec<BranchName> {
+        let row = read_required(
+            persistence,
+            RowClass::BranchControl,
+            branch_pending_index_key(),
+        )
+        .expect("the pending index reads");
+        decode_pending_branch_index(&row).expect("the pending index decodes")
+    }
 }
 
 #[cfg(test)]
@@ -1006,7 +1039,7 @@ mod tests {
             .expect("default branch loaded")
             .clone();
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 default_record.storage_branch_id(),
                 vec![RowMutation::put(
                     crate::persistence::RowAddress::new(
@@ -1035,7 +1068,7 @@ mod tests {
             StoragePersistence::open(PersistenceOpenTarget::Cache).expect("cache opens");
         bootstrap_default(&mut persistence);
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 SYSTEM_BRANCH_ID,
                 vec![RowMutation::put(
                     control_address(
@@ -1062,7 +1095,7 @@ mod tests {
         let default = BranchName::new("default").expect("valid branch");
         let names = [default.clone(), default];
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 SYSTEM_BRANCH_ID,
                 vec![RowMutation::put(
                     control_address(RowClass::BranchControl, branch_index_key()),
@@ -1087,7 +1120,7 @@ mod tests {
         let feature = BranchName::new("feature").expect("valid branch");
         let names = [default.name().clone(), feature.clone()];
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 SYSTEM_BRANCH_ID,
                 vec![
                     RowMutation::put(
@@ -1118,7 +1151,7 @@ mod tests {
 
     fn delete_control_row(persistence: &mut StoragePersistence, row_class: RowClass, key: Vec<u8>) {
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 SYSTEM_BRANCH_ID,
                 vec![RowMutation::delete(control_address(row_class, key))],
                 None,
@@ -1133,7 +1166,7 @@ mod tests {
         value: Vec<u8>,
     ) {
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 SYSTEM_BRANCH_ID,
                 vec![RowMutation::put(control_address(row_class, key), value)],
                 None,
@@ -1150,7 +1183,7 @@ mod tests {
         value: &[u8],
     ) -> CommitVersion {
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 target.storage_branch_id(),
                 vec![RowMutation::put(
                     RowAddress::new(target.storage_branch_id(), RowClass::Kv, key.to_vec()),

@@ -130,7 +130,7 @@ fn to_usize(value: u64) -> usize {
 const STUCK: Duration = Duration::from_secs(30);
 
 /// Runs `first` held at `window`, runs `second` to completion (or until it
-/// queues behind `first`'s turn), then resumes `first`. `None` when `first`
+/// queues behind `first`'s branch writer), then resumes `first`. `None` when `first`
 /// never reaches the window.
 fn run_interleaved(catalog: &Catalog, first: &Op, second: &Op, window: Window) -> Option<Outcome> {
     let mut database = open_cache_database();
@@ -157,10 +157,10 @@ fn run_interleaved(catalog: &Catalog, first: &Op, second: &Op, window: Window) -
                 first.label
             );
         }
-        let waits_before = shared.turn_waits_for_test();
+        let waits_before = shared.writer_waits_for_test();
         let racing = scope.spawn(|| (second.run)(shared));
         let started = Instant::now();
-        while !racing.is_finished() && shared.turn_waits_for_test() == waits_before {
+        while !racing.is_finished() && shared.writer_waits_for_test() == waits_before {
             assert!(
                 started.elapsed() < STUCK,
                 "{} neither finished nor queued behind {}",

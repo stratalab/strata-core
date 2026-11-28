@@ -16,8 +16,8 @@ use crate::diagnostics::{EngineError, EngineResult};
 use crate::persistence::{
     decode_vector_collection_name, decode_vector_key, encode_vector_collection_entry_prefix,
     encode_vector_collection_key, encode_vector_collection_prefix, encode_vector_key,
-    vector_index_manifest_key, CommitPlan, PersistenceImmutableSource, PersistenceReadRow,
-    ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
+    vector_index_manifest_key, BranchWriter, CommitPlan, PersistenceImmutableSource,
+    PersistenceReadRow, ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
 };
 
 use super::{
@@ -148,6 +148,8 @@ impl<'a> VectorService<'a> {
         config: VectorConfig,
     ) -> Result<VectorCollectionInfo, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let address = self.collection_address(&record, &name);
         if self
             .persistence
@@ -160,6 +162,7 @@ impl<'a> VectorService<'a> {
             ));
         }
         let commit = self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(
                 address,
@@ -182,6 +185,8 @@ impl<'a> VectorService<'a> {
         force: bool,
     ) -> Result<bool, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let Some(_) = self.collection_config_row(&record, name, ReadSelector::Latest)? else {
             return Ok(false);
         };
@@ -210,7 +215,7 @@ impl<'a> VectorService<'a> {
                 row.key().to_vec(),
             )));
         }
-        self.commit_batch(&record, mutations)?;
+        self.commit_batch(&writer, &record, mutations)?;
         Ok(true)
     }
 
@@ -330,8 +335,10 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         model: EmbeddingModelId,
     ) -> Result<VectorCollectionInfo, EngineError> {
-        self.require_embedding_model(collection, &model)?;
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
+        self.require_embedding_model(collection, &model)?;
         let row = self
             .collection_config_row(&record, collection, ReadSelector::Latest)?
             .ok_or_else(|| {
@@ -346,6 +353,7 @@ impl<'a> VectorService<'a> {
         }
         let config = current.config().clone().with_embedding_model(model);
         let commit = self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(
                 self.collection_address(&record, collection),
@@ -447,6 +455,8 @@ impl<'a> VectorService<'a> {
         metadata: Option<VectorMetadata>,
     ) -> Result<VectorWriteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let config = self.require_collection_config(&record, &collection)?;
         embedding.validate_dimension(config.dimension())?;
         let visible = self.visible_vector_exists(&record, &collection, &key)?;
@@ -457,6 +467,7 @@ impl<'a> VectorService<'a> {
         let address = self.vector_address(&record, &collection, &key);
         let vector = VectorRecord::new(collection, key, embedding, metadata, revision);
         let commit = self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(address, encode_vector_record(&vector)?)],
         )?;
@@ -719,6 +730,8 @@ impl<'a> VectorService<'a> {
         patch: &VectorMetadataPatch,
     ) -> Result<VectorMetadataUpdateOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_collection_config(&record, collection)?;
         let address = self.vector_address(&record, collection, &key);
         let Some(row) = self
@@ -754,6 +767,7 @@ impl<'a> VectorService<'a> {
             revision,
         );
         let commit = self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(address, encode_vector_record(&vector)?)],
         )?;
@@ -781,6 +795,8 @@ impl<'a> VectorService<'a> {
         embedding: VectorEmbedding,
     ) -> Result<VectorEmbeddingUpdateOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let config = self.require_collection_config(&record, collection)?;
         embedding.validate_dimension(config.dimension())?;
         let address = self.vector_address(&record, collection, &key);
@@ -803,6 +819,7 @@ impl<'a> VectorService<'a> {
             revision,
         );
         let commit = self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(address, encode_vector_record(&vector)?)],
         )?;
@@ -855,6 +872,8 @@ impl<'a> VectorService<'a> {
         entries: &[VectorUpsertEntry],
     ) -> Result<VectorBatchUpsertOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let config = self.require_collection_config(&record, collection)?;
         if entries.is_empty() {
             return Ok(VectorBatchUpsertOutcome::new(Vec::new(), Vec::new(), None));
@@ -905,7 +924,7 @@ impl<'a> VectorService<'a> {
                 ))
             })
             .collect::<EngineResult<Vec<_>>>()?;
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(VectorBatchUpsertOutcome::new(
             revisions,
             created,
@@ -940,6 +959,8 @@ impl<'a> VectorService<'a> {
         keys: &[VectorKey],
     ) -> Result<VectorBatchDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_collection_config(&record, collection)?;
         if keys.is_empty() {
             return Ok(VectorBatchDeleteOutcome::new(Vec::new(), None));
@@ -965,7 +986,7 @@ impl<'a> VectorService<'a> {
         if mutations.is_empty() {
             return Ok(VectorBatchDeleteOutcome::new(deleted, None));
         }
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(VectorBatchDeleteOutcome::new(deleted, Some(commit)))
     }
 
@@ -1603,14 +1624,19 @@ impl<'a> VectorService<'a> {
         collection: &VectorCollectionName,
         bytes: Vec<u8>,
     ) -> Result<(), EngineError> {
-        self.persistence.commit(&CommitPlan::new(
-            record.storage_branch_id(),
-            vec![RowMutation::put(
-                self.index_manifest_address(record, collection),
-                bytes,
-            )],
-            Some(record.generation()),
-        ))?;
+        // Reached only from testkit entry points that hold no writer (#3782).
+        let writer = self.persistence.begin_write(record.storage_branch_id());
+        self.persistence.commit(
+            &writer,
+            &CommitPlan::new(
+                record.storage_branch_id(),
+                vec![RowMutation::put(
+                    self.index_manifest_address(record, collection),
+                    bytes,
+                )],
+                Some(record.generation()),
+            ),
+        )?;
         Ok(())
     }
 
@@ -1779,6 +1805,8 @@ impl<'a> VectorService<'a> {
         predicate: impl Fn(&VectorEntry) -> bool,
     ) -> Result<VectorBulkDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_collection_config(&record, collection)?;
         let rows = self.visible_vector_entries(&record, collection, ReadSelector::Latest)?;
         let mut mutations = Vec::new();
@@ -1795,7 +1823,7 @@ impl<'a> VectorService<'a> {
             return Ok(VectorBulkDeleteOutcome::new(0, None));
         }
         let deleted_count = u64::try_from(mutations.len()).unwrap_or(u64::MAX);
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(VectorBulkDeleteOutcome::new(deleted_count, Some(commit)))
     }
 
@@ -3115,6 +3143,7 @@ impl<'a> VectorService<'a> {
 
     fn commit_batch(
         &mut self,
+        writer: &BranchWriter,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
     ) -> Result<CommitOutcome, EngineError> {
@@ -3133,8 +3162,12 @@ impl<'a> VectorService<'a> {
             .iter()
             .filter(|mutation| mutation.is_delete())
             .count();
-        let mut space_mutations =
-            ControlPlane::space_registration_mutations(self.persistence, record, &self.space)?;
+        let mut space_mutations = ControlPlane::space_registration_mutations(
+            self.persistence,
+            writer,
+            record,
+            &self.space,
+        )?;
         if !space_mutations.is_empty() {
             space_mutations.extend(mutations);
             mutations = space_mutations;
@@ -3146,7 +3179,7 @@ impl<'a> VectorService<'a> {
         );
         Ok(self
             .persistence
-            .commit(&plan)?
+            .commit(writer, &plan)?
             .with_counts(user_put_count, user_delete_count))
     }
 }

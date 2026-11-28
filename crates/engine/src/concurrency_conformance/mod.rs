@@ -11,8 +11,8 @@
 //! - both serial orders, which are the references;
 //! - `first` held before each of its persistence calls in turn (every point
 //!   read, scan and commit it makes), with `second` run to completion while
-//!   `first` is held. A `second` that has to wait for `first`'s turn
-//!   (ACID-008) queues there instead, and `first` is resumed.
+//!   `first` is held. A `second` that writes `first`'s branch waits for its
+//!   branch writer (ACID-008) instead, and `first` is resumed.
 //!
 //! A run whose answers and digest match neither reference is a
 //! counterexample.

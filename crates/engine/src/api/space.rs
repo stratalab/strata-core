@@ -273,17 +273,23 @@ impl<'a> SpaceService<'a> {
     /// Creates a product space catalog entry.
     pub fn create(&mut self, space: ProductSpace) -> Result<SpaceCreateOutcome, EngineError> {
         let record = self.branch_record()?;
-        let mutations = control_space::registration_mutations(self.persistence, &record, &space)?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
+        let mutations =
+            control_space::registration_mutations(self.persistence, &writer, &record, &space)?;
         if mutations.is_empty() {
             return Ok(SpaceCreateOutcome::new(space, false, None));
         }
         let commit = self
             .persistence
-            .commit(&CommitPlan::new(
-                record.storage_branch_id(),
-                mutations,
-                Some(record.generation()),
-            ))?
+            .commit(
+                &writer,
+                &CommitPlan::new(
+                    record.storage_branch_id(),
+                    mutations,
+                    Some(record.generation()),
+                ),
+            )?
             .with_counts(1, 0);
         Ok(SpaceCreateOutcome::new(space, true, Some(commit)))
     }
@@ -323,25 +329,25 @@ impl<'a> SpaceService<'a> {
         }
 
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let Some(remaining) = control_space::index_without(self.persistence, &record, space)?
         else {
             // Not registered. #3574: an interrupted deletion leaves a marked
             // row and its rows behind; the space is already gone to every
             // observer, so finish the sweep and report it deleted.
-            let outcome =
-                match control_space::finish_pending_deletion(self.persistence, &record, space)? {
-                    Some(last) => {
-                        let deleted_rows = u64::try_from(last.delete_count()).unwrap_or(u64::MAX);
-                        SpaceDeleteOutcome::new(
-                            space.clone(),
-                            true,
-                            force,
-                            deleted_rows,
-                            Some(last),
-                        )
-                    }
-                    None => SpaceDeleteOutcome::new(space.clone(), false, force, 0, None),
-                };
+            let outcome = match control_space::finish_pending_deletion(
+                self.persistence,
+                &writer,
+                &record,
+                space,
+            )? {
+                Some(last) => {
+                    let deleted_rows = u64::try_from(last.delete_count()).unwrap_or(u64::MAX);
+                    SpaceDeleteOutcome::new(space.clone(), true, force, deleted_rows, Some(last))
+                }
+                None => SpaceDeleteOutcome::new(space.clone(), false, force, 0, None),
+            };
             return Ok(outcome);
         };
 
@@ -365,11 +371,14 @@ impl<'a> SpaceService<'a> {
             )?);
             let commit = self
                 .persistence
-                .commit(&CommitPlan::new(
-                    record.storage_branch_id(),
-                    mutations,
-                    Some(record.generation()),
-                ))?
+                .commit(
+                    &writer,
+                    &CommitPlan::new(
+                        record.storage_branch_id(),
+                        mutations,
+                        Some(record.generation()),
+                    ),
+                )?
                 .with_counts(0, usize::try_from(deleted_rows).unwrap_or(usize::MAX));
             return Ok(SpaceDeleteOutcome::new(
                 space.clone(),
@@ -384,12 +393,16 @@ impl<'a> SpaceService<'a> {
         // in commits the budget admits, and tombstone the marked row last.
         // An interruption leaves a marked row, which the next `delete`,
         // `create` or registering write of this name finishes.
-        self.persistence.commit(&CommitPlan::new(
-            record.storage_branch_id(),
-            control_space::unregister_mutations(&record, space, &remaining, true)?,
-            Some(record.generation()),
-        ))?;
-        let last = control_space::sweep_space_rows(self.persistence, &record, space, rows)?;
+        self.persistence.commit(
+            &writer,
+            &CommitPlan::new(
+                record.storage_branch_id(),
+                control_space::unregister_mutations(&record, space, &remaining, true)?,
+                Some(record.generation()),
+            ),
+        )?;
+        let last =
+            control_space::sweep_space_rows(self.persistence, &writer, &record, space, rows)?;
         Ok(SpaceDeleteOutcome::new(
             space.clone(),
             true,
@@ -409,6 +422,7 @@ impl<'a> SpaceService<'a> {
         space: &ProductSpace,
     ) -> Result<CommitOutcome, EngineError> {
         let record = self.branch_record()?;
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let remaining = control_space::index_without(self.persistence, &record, space)?
             .ok_or_else(|| {
                 EngineError::invalid_input(
@@ -416,11 +430,14 @@ impl<'a> SpaceService<'a> {
                     "space is not registered",
                 )
             })?;
-        self.persistence.commit(&CommitPlan::new(
-            record.storage_branch_id(),
-            control_space::unregister_mutations(&record, space, &remaining, true)?,
-            Some(record.generation()),
-        ))
+        self.persistence.commit(
+            &writer,
+            &CommitPlan::new(
+                record.storage_branch_id(),
+                control_space::unregister_mutations(&record, space, &remaining, true)?,
+                Some(record.generation()),
+            ),
+        )
     }
 
     fn branch_record(&self) -> Result<BranchCatalogRecord, EngineError> {

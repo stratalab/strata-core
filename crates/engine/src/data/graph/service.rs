@@ -24,8 +24,8 @@ use crate::persistence::{
     encode_graph_outgoing_edge_type_prefix, encode_graph_reverse_edge_key,
     encode_graph_reverse_edge_prefix, encode_graph_type_index_graph_prefix,
     encode_graph_type_index_key, encode_graph_type_index_type_prefix, encode_json_key,
-    encode_kv_key_bytes, CommitPlan, OrderedTextScan, PersistenceReadRow, ReadSelector, RowAddress,
-    RowClass, RowMutation, StoragePersistence,
+    encode_kv_key_bytes, BranchWriter, CommitPlan, OrderedTextScan, PersistenceReadRow,
+    ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
 };
 
 use super::{
@@ -78,13 +78,15 @@ impl<'a> GraphService<'a> {
         name: GraphName,
     ) -> Result<(GraphInfo, CommitOutcome), EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let address = self.metadata_address(&record, &name);
         if let Some(row) = self.stored_graph_metadata_row(&record, &name, ReadSelector::Latest)? {
             if Self::graph_metadata_from_row(&name, &row)?.deleting() {
                 // #3477: a deletion interrupted before its sweep finished.
                 // Finish it first, so no row of the old graph survives under
                 // the new one's name.
-                self.sweep_deleted_graph(&record, &name)?;
+                self.sweep_deleted_graph(&writer, &record, &name)?;
             } else {
                 return Err(EngineError::conflict(
                     "already_exists.engine.graph",
@@ -94,6 +96,7 @@ impl<'a> GraphService<'a> {
         }
         let metadata = super::GraphMetadataRecord::new(name.clone());
         let commit = self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(
                 address,
@@ -120,6 +123,8 @@ impl<'a> GraphService<'a> {
         force: bool,
     ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let Some(row) = self.stored_graph_metadata_row(&record, name, ReadSelector::Latest)? else {
             return Ok(GraphDeleteOutcome::new(name.clone(), false, None));
         };
@@ -127,7 +132,7 @@ impl<'a> GraphService<'a> {
         if metadata.deleting() {
             // #3477: a deletion interrupted before its sweep finished. The
             // graph is already gone to every observer; finish the sweep.
-            let last = self.sweep_deleted_graph(&record, name)?;
+            let last = self.sweep_deleted_graph(&writer, &record, name)?;
             return Ok(GraphDeleteOutcome::new(name.clone(), true, Some(last)));
         }
 
@@ -156,7 +161,7 @@ impl<'a> GraphService<'a> {
             let mut mutations = Vec::with_capacity(rows.len() + 1);
             mutations.push(RowMutation::delete(self.metadata_address(&record, name)));
             mutations.extend(rows);
-            let commit = self.commit_batch(&record, mutations)?;
+            let commit = self.commit_batch(&writer, &record, mutations)?;
             return Ok(GraphDeleteOutcome::new(name.clone(), true, Some(commit)));
         }
         // #3477: too many rows for the storage commit budget. Mark first —
@@ -165,13 +170,14 @@ impl<'a> GraphService<'a> {
         // marked row last. An interruption leaves a marked row, which the
         // next `delete_graph` or `create_graph` of this name finishes.
         self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(
                 self.metadata_address(&record, name),
                 encode_graph_metadata_record(&metadata.marked_deleting()),
             )],
         )?;
-        let last = self.sweep_deleted_graph_rows(&record, name, rows)?;
+        let last = self.sweep_deleted_graph_rows(&writer, &record, name, rows)?;
         Ok(GraphDeleteOutcome::new(name.clone(), true, Some(last)))
     }
 
@@ -243,11 +249,12 @@ impl<'a> GraphService<'a> {
     /// whatever rows remain, then the row. Returns the final commit.
     fn sweep_deleted_graph(
         &self,
+        writer: &BranchWriter,
         record: &BranchCatalogRecord,
         name: &GraphName,
     ) -> Result<CommitOutcome, EngineError> {
         let rows = self.graph_row_tombstones(record, name)?;
-        self.sweep_deleted_graph_rows(record, name, rows)
+        self.sweep_deleted_graph_rows(writer, record, name, rows)
     }
 
     /// Tombstones `rows` in commits of at most [`Self::DELETE_CHUNK_ROWS`],
@@ -258,6 +265,7 @@ impl<'a> GraphService<'a> {
     /// sweep, so the acknowledgement reads like a single-commit deletion's.
     fn sweep_deleted_graph_rows(
         &self,
+        writer: &BranchWriter,
         record: &BranchCatalogRecord,
         name: &GraphName,
         mut rows: Vec<RowMutation>,
@@ -265,10 +273,12 @@ impl<'a> GraphService<'a> {
         let mut deleted = 0_usize;
         while !rows.is_empty() {
             let rest = rows.split_off(rows.len().min(Self::DELETE_CHUNK_ROWS));
-            deleted = deleted.saturating_add(self.commit_batch(record, rows)?.delete_count());
+            deleted =
+                deleted.saturating_add(self.commit_batch(writer, record, rows)?.delete_count());
             rows = rest;
         }
         let last = self.commit_batch(
+            writer,
             record,
             vec![RowMutation::delete(self.metadata_address(record, name))],
         )?;
@@ -286,6 +296,8 @@ impl<'a> GraphService<'a> {
         name: &GraphName,
     ) -> Result<CommitOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let row = self
             .graph_metadata_row(&record, name, ReadSelector::Latest)?
             .ok_or_else(|| {
@@ -293,6 +305,7 @@ impl<'a> GraphService<'a> {
             })?;
         let metadata = Self::graph_metadata_from_row(name, &row)?;
         self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(
                 self.metadata_address(&record, name),
@@ -408,8 +421,11 @@ impl<'a> GraphService<'a> {
         node_ids: &[GraphNodeId],
     ) -> Result<(CommitOutcome, Option<CommitOutcome>), EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, name)?;
         let metadata = self.commit_batch(
+            &writer,
             &record,
             vec![RowMutation::put(
                 self.metadata_address(&record, name),
@@ -424,6 +440,7 @@ impl<'a> GraphService<'a> {
                 super::GraphNodeData::default(),
             );
             last_node = Some(self.commit_batch(
+                &writer,
                 &record,
                 vec![RowMutation::put(
                     self.node_address(&record, name, node_id),
@@ -505,6 +522,8 @@ impl<'a> GraphService<'a> {
         policy: GraphDeletePolicy,
     ) -> Result<GraphDeletePolicyOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.validate_binding_target(target)?;
 
         let verified = self.verified_binding_candidates(&record, target)?;
@@ -581,7 +600,7 @@ impl<'a> GraphService<'a> {
         let commit = if mutations.is_empty() {
             None
         } else {
-            Some(self.commit_batch_maintaining(&record, mutations, touched.len())?)
+            Some(self.commit_batch_maintaining(&writer, &record, mutations, touched.len())?)
         };
         Ok(GraphDeletePolicyOutcome::new(
             policy,
@@ -706,6 +725,8 @@ impl<'a> GraphService<'a> {
         data: super::GraphNodeData,
     ) -> Result<GraphWriteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         if let Some(binding) = data.binding() {
             self.validate_binding_target(binding.target())?;
@@ -765,7 +786,7 @@ impl<'a> GraphService<'a> {
         let (metadata_address, metadata_value) =
             self.metadata_mutation(&record, graph, i64::from(created), 0)?;
         mutations.push(RowMutation::put(metadata_address, metadata_value));
-        let commit = self.commit_batch_maintaining(&record, mutations, 1)?;
+        let commit = self.commit_batch_maintaining(&writer, &record, mutations, 1)?;
         Ok(GraphWriteOutcome::new(
             graph.clone(),
             node_id,
@@ -827,6 +848,8 @@ impl<'a> GraphService<'a> {
         node_id: &GraphNodeId,
     ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         let Some(current) = self.node_record(&record, graph, node_id)? else {
             return Ok(GraphDeleteOutcome::new(graph.clone(), false, None));
@@ -847,7 +870,8 @@ impl<'a> GraphService<'a> {
         let (metadata_address, metadata_value) =
             self.metadata_mutation(&record, graph, -1, -removed_edges)?;
         mutations.put(metadata_address, metadata_value);
-        let commit = self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?;
+        let commit =
+            self.commit_batch_maintaining(&writer, &record, mutations.into_mutations(), 1)?;
         Ok(GraphDeleteOutcome::new(graph.clone(), true, Some(commit)))
     }
 
@@ -979,6 +1003,8 @@ impl<'a> GraphService<'a> {
         data: super::GraphEdgeData,
     ) -> Result<GraphEdgeWriteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         let src_record = self
             .node_record(&record, graph, &src)?
@@ -1002,6 +1028,7 @@ impl<'a> GraphService<'a> {
         let (metadata_address, metadata_value) =
             self.metadata_mutation(&record, graph, 0, i64::from(created))?;
         let commit = self.commit_batch_maintaining(
+            &writer,
             &record,
             vec![
                 RowMutation::put(
@@ -1120,6 +1147,8 @@ impl<'a> GraphService<'a> {
         max_commits: Option<u64>,
     ) -> Result<GraphBulkInsertOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         if nodes.is_empty() && edges.is_empty() {
             return Ok(GraphBulkInsertOutcome::new(graph.clone(), 0, 0, 0, None));
@@ -1210,8 +1239,12 @@ impl<'a> GraphService<'a> {
                     Some(chunk_index + 1 < total_chunks),
                 )?;
                 mutations.put(metadata_address, metadata_value);
-                last_commit =
-                    Some(self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?);
+                last_commit = Some(self.commit_batch_maintaining(
+                    &writer,
+                    &record,
+                    mutations.into_mutations(),
+                    1,
+                )?);
                 commits += 1;
                 chunk_index += 1;
             }
@@ -1254,8 +1287,12 @@ impl<'a> GraphService<'a> {
                     Some(chunk_index + 1 < total_chunks),
                 )?;
                 mutations.put(metadata_address, metadata_value);
-                last_commit =
-                    Some(self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?);
+                last_commit = Some(self.commit_batch_maintaining(
+                    &writer,
+                    &record,
+                    mutations.into_mutations(),
+                    1,
+                )?);
                 commits += 1;
                 chunk_index += 1;
             }
@@ -1388,6 +1425,8 @@ impl<'a> GraphService<'a> {
         dst: &GraphNodeId,
     ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         let Some(edge) = self.edge_record(&record, graph, src, edge_type, dst)? else {
             return Ok(GraphDeleteOutcome::new(graph.clone(), false, None));
@@ -1396,7 +1435,8 @@ impl<'a> GraphService<'a> {
         self.delete_edge_mutations(&record, &mut mutations, &edge);
         let (metadata_address, metadata_value) = self.metadata_mutation(&record, graph, 0, -1)?;
         mutations.put(metadata_address, metadata_value);
-        let commit = self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?;
+        let commit =
+            self.commit_batch_maintaining(&writer, &record, mutations.into_mutations(), 1)?;
         Ok(GraphDeleteOutcome::new(graph.clone(), true, Some(commit)))
     }
 
@@ -1867,6 +1907,8 @@ impl<'a> GraphService<'a> {
         batch: &GraphBatchWrite,
     ) -> Result<GraphBatchWriteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         if batch.is_empty() {
             return Ok(GraphBatchWriteOutcome::new(graph.clone(), Vec::new(), None));
@@ -2063,7 +2105,8 @@ impl<'a> GraphService<'a> {
         let (metadata_address, metadata_value) =
             self.metadata_mutation(&record, graph, node_delta, edge_delta)?;
         mutations.put(metadata_address, metadata_value);
-        let commit = self.commit_batch_maintaining(&record, mutations.into_mutations(), 1)?;
+        let commit =
+            self.commit_batch_maintaining(&writer, &record, mutations.into_mutations(), 1)?;
         Ok(GraphBatchWriteOutcome::new(
             graph.clone(),
             outcomes,
@@ -2124,11 +2167,13 @@ impl<'a> GraphService<'a> {
         def: GraphObjectTypeDef,
     ) -> Result<GraphOntologyWriteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
         let type_name = def.name().clone();
         let created = ontology.put_object_type(def);
-        let commit = self.write_ontology(&record, graph, &ontology)?;
+        let commit = self.write_ontology(&writer, &record, graph, &ontology)?;
         Ok(GraphOntologyWriteOutcome::new(
             graph.clone(),
             type_name,
@@ -2145,11 +2190,13 @@ impl<'a> GraphService<'a> {
         def: GraphLinkTypeDef,
     ) -> Result<GraphOntologyWriteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
         let type_name = def.name().clone();
         let created = ontology.put_link_type(def);
-        let commit = self.write_ontology(&record, graph, &ontology)?;
+        let commit = self.write_ontology(&writer, &record, graph, &ontology)?;
         Ok(GraphOntologyWriteOutcome::new(
             graph.clone(),
             type_name,
@@ -2167,12 +2214,14 @@ impl<'a> GraphService<'a> {
         name: &GraphTypeName,
     ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
         if !ontology.remove_object_type(name) {
             return Ok(GraphDeleteOutcome::new(graph.clone(), false, None));
         }
-        let commit = self.write_ontology(&record, graph, &ontology)?;
+        let commit = self.write_ontology(&writer, &record, graph, &ontology)?;
         Ok(GraphDeleteOutcome::new(graph.clone(), true, Some(commit)))
     }
 
@@ -2183,12 +2232,14 @@ impl<'a> GraphService<'a> {
         name: &GraphTypeName,
     ) -> Result<GraphDeleteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
         if !ontology.remove_link_type(name) {
             return Ok(GraphDeleteOutcome::new(graph.clone(), false, None));
         }
-        let commit = self.write_ontology(&record, graph, &ontology)?;
+        let commit = self.write_ontology(&writer, &record, graph, &ontology)?;
         Ok(GraphDeleteOutcome::new(graph.clone(), true, Some(commit)))
     }
 
@@ -2202,6 +2253,8 @@ impl<'a> GraphService<'a> {
         graph: &GraphName,
     ) -> Result<GraphOntologyFreezeOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         self.require_graph(&record, graph)?;
         let mut ontology = self.mutable_ontology(&record, graph)?;
         ontology.validate_for_freeze().map_err(|detail| {
@@ -2213,7 +2266,7 @@ impl<'a> GraphService<'a> {
         ontology.freeze();
         let object_types = ontology.object_types().len();
         let link_types = ontology.link_types().len();
-        let commit = self.write_ontology(&record, graph, &ontology)?;
+        let commit = self.write_ontology(&writer, &record, graph, &ontology)?;
         Ok(GraphOntologyFreezeOutcome::new(
             graph.clone(),
             object_types,
@@ -2609,12 +2662,14 @@ impl<'a> GraphService<'a> {
 
     fn write_ontology(
         &self,
+        writer: &BranchWriter,
         record: &BranchCatalogRecord,
         graph: &GraphName,
         ontology: &GraphOntologyRecord,
     ) -> Result<CommitOutcome, EngineError> {
         debug_assert_eq!(ontology.graph(), graph);
         self.commit_batch(
+            writer,
             record,
             vec![RowMutation::put(
                 self.ontology_address(record, graph),
@@ -3362,10 +3417,11 @@ impl<'a> GraphService<'a> {
 
     fn commit_batch(
         &self,
+        writer: &BranchWriter,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
     ) -> Result<CommitOutcome, EngineError> {
-        self.commit_batch_maintaining(record, mutations, 0)
+        self.commit_batch_maintaining(writer, record, mutations, 0)
     }
 
     /// Commits a batch that carries `maintained_puts` engine-maintained
@@ -3376,6 +3432,7 @@ impl<'a> GraphService<'a> {
     /// through [`Self::commit_batch`] unsubtracted.
     fn commit_batch_maintaining(
         &self,
+        writer: &BranchWriter,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
         maintained_puts: usize,
@@ -3406,8 +3463,12 @@ impl<'a> GraphService<'a> {
                 mutation.is_delete() && is_authored_graph_row(mutation.address().row_class())
             })
             .count();
-        let mut space_mutations =
-            ControlPlane::space_registration_mutations(self.persistence, record, &self.space)?;
+        let mut space_mutations = ControlPlane::space_registration_mutations(
+            self.persistence,
+            writer,
+            record,
+            &self.space,
+        )?;
         if !space_mutations.is_empty() {
             space_mutations.extend(mutations);
             mutations = space_mutations;
@@ -3419,7 +3480,7 @@ impl<'a> GraphService<'a> {
         );
         Ok(self
             .persistence
-            .commit(&plan)?
+            .commit(writer, &plan)?
             .with_counts(user_put_count, user_delete_count))
     }
 }

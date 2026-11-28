@@ -141,9 +141,9 @@ distinct KV keys):
 
 | Slice | Content | Ledger effect |
 |---|---|---|
-| C1 | The branch writer guard + `begin_write` / `BranchWriter`. `commit` takes `&BranchWriter`, and every write method acquires its branch once at its public boundary and passes the guard down (no re-entry). The compiler finds every site. Events fold #3780 in: the guard replaces its per-log turn, and the condition and retry are dropped. The harness learns to detect a writer queued on the guard. | **−238** (every writer gap) |
+| C1 | The branch writer guard + `begin_write` / `BranchWriter`. `commit` takes `&BranchWriter`, and every write method acquires its branch once at its public boundary and passes the guard down (no re-entry). The compiler finds every site. Events fold #3780 in: the guard replaces its per-log turn, and the condition and retry are dropped. The harness learns to detect a writer queued on the guard. ACID-008 is rewritten as "a write holds its branch's writer from its first read to its last commit", since the mechanism it described is gone. | **−238** (every writer gap) |
 | C2 | Read views (`read_view(branch)`: one snapshot, point reads and scans), and multi-read readers moved onto them: kv / json `batch_exists`, paged scans, event `verify_chain` / `list_types`, graph readers | **−12** |
-| C3 | Rewrite ACID-008 as "a write holds its branch from first read to last commit; a read answers from one snapshot". Harness in durable mode. Randomized linearizability checker (A3) as the nightly net. Close #3776–#3783 and #3774. | ledger **empty** |
+| C3 | Extend ACID-008 with the read rule: "a read answers from one snapshot". Harness in durable mode. Randomized linearizability checker (A3) as the nightly net. Close #3776–#3783 and #3774. | ledger **empty** |
 
 C1 is one mechanical, compiler-driven change: `commit` gains a parameter, and every
 write site acquires the guard. It replaces the first draft's eight family-by-family PRs.

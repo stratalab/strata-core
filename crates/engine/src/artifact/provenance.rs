@@ -150,3 +150,51 @@ pub(crate) fn decode_remote_origin(bytes: &[u8]) -> Result<RemoteOrigin, crate::
     }
     Ok(origin)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{RemoteOrigin, RemoteOriginFrontierEntry};
+    use crate::{Database, DurableLocalOpenOptions};
+
+    fn open(path: &std::path::Path) -> Database {
+        Database::open_local(path, DurableLocalOpenOptions::new())
+            .expect("durable open succeeds")
+            .into_database()
+    }
+
+    /// Clone orchestration records where a database came from; the record
+    /// is durable, so a later open reads back exactly what was recorded.
+    #[test]
+    fn test_a_recorded_remote_origin_reads_back_after_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let origin = RemoteOrigin::new(
+            "https://hub.example.com".to_owned(),
+            "titanic".to_owned(),
+            "default".to_owned(),
+            "blake3:9102042536aa000000000000000000000000000000000000000000000000aaaa".to_owned(),
+            1_780_000_000_000_000,
+            vec![RemoteOriginFrontierEntry::new(
+                "default".to_owned(),
+                "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_owned(),
+                Some(7),
+            )],
+        );
+        {
+            let mut database = open(dir.path());
+            assert_eq!(
+                database.remote_origin().expect("the origin reads"),
+                None,
+                "a database that was never cloned has no origin"
+            );
+            database
+                .set_remote_origin(&origin)
+                .expect("the origin is recorded");
+            database.close().expect("close succeeds");
+        }
+        assert_eq!(
+            open(dir.path()).remote_origin().expect("the origin reads"),
+            Some(origin)
+        );
+    }
+}

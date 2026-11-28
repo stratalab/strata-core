@@ -350,12 +350,21 @@ impl<'a> BranchService<'a> {
         // commits of its own and cannot ride the atomic promotion commit; a
         // failure between them leaves a space already gone to every observer
         // with fewer rows to sweep, never a half-promoted target.
-        for space in &plan.pending_space_sweeps {
-            crate::control::space::finish_pending_deletion(
-                self.persistence,
-                &target_record,
-                space,
-            )?;
+        {
+            // Promotion runs under `&mut Database`, so the target's writer is
+            // uncontended; commits require it (#3782). Scoped to the sweeps:
+            // the promotion commit below takes it again.
+            let writer = self
+                .persistence
+                .begin_write(target_record.storage_branch_id());
+            for space in &plan.pending_space_sweeps {
+                crate::control::space::finish_pending_deletion(
+                    self.persistence,
+                    &writer,
+                    &target_record,
+                    space,
+                )?;
+            }
         }
 
         let (target_version, target_timestamp) = if plan.mutations.is_empty() {
@@ -440,14 +449,23 @@ impl<'a> BranchService<'a> {
             BranchOperationKind::Promote,
         )?;
 
-        let outcome = match self.persistence.commit(&CommitPlan::new(
-            target_record.storage_branch_id(),
-            mutations,
-            Some(target_record.generation()),
-        )) {
+        let writer = self
+            .persistence
+            .begin_write(target_record.storage_branch_id());
+        let outcome = match self.persistence.commit(
+            &writer,
+            &CommitPlan::new(
+                target_record.storage_branch_id(),
+                mutations,
+                Some(target_record.generation()),
+            ),
+        ) {
             Ok(outcome) => outcome,
             Err(error) => return Err(self.clear_pending_after_storage_error(&intent, error)),
         };
+        // The catalog publish below seeds the target's space rows under the
+        // target's writer of its own.
+        drop(writer);
         // Publish the authoritative promotion lineage with the real target commit
         // version, atomically clearing the pending intent.
         let merge = BranchMergeRecord::new(
@@ -739,11 +757,17 @@ impl<'a> BranchService<'a> {
         if mutations.is_empty() {
             return Ok(());
         }
-        self.persistence.commit(&CommitPlan::new(
-            child_record.storage_branch_id(),
-            mutations,
-            Some(child_record.generation()),
-        ))?;
+        let writer = self
+            .persistence
+            .begin_write(child_record.storage_branch_id());
+        self.persistence.commit(
+            &writer,
+            &CommitPlan::new(
+                child_record.storage_branch_id(),
+                mutations,
+                Some(child_record.generation()),
+            ),
+        )?;
         Ok(())
     }
 
@@ -822,9 +846,13 @@ mod tests {
     use super::BranchService;
     use crate::branch::catalog::{BranchCatalogRecord, BranchStatus, DEFAULT_BRANCH_GENERATION};
     use crate::branch::BranchName;
-    use crate::control::bootstrap_or_load;
+    use crate::control::{bootstrap_or_load, ControlPlane};
     use crate::diagnostics::{EngineError, EngineErrorClass};
     use crate::persistence::{PersistenceOpenTarget, StoragePersistence};
+    use crate::{
+        CacheOpenOptions, Database, ProductSpace, VectorCollectionName, VectorConfig,
+        VectorDistanceMetric, VectorEmbedding, VectorKey, VectorUpsertEntry,
+    };
     use strata_core::BranchId;
 
     #[test]
@@ -852,6 +880,10 @@ mod tests {
         assert_eq!(error.class(), EngineErrorClass::NotFound);
         assert_eq!(error.code(), "not_found.engine.persistence");
         assert!(!control.contains_branch(&feature));
+        assert!(
+            ControlPlane::pending_branch_operations_for_test(&mut persistence).is_empty(),
+            "the failed fork clears its own pending marker; reload recovery would hide one left behind"
+        );
 
         let loaded = bootstrap_or_load(&mut persistence, false, None)
             .expect("control plane reloads cleanly");
@@ -879,10 +911,81 @@ mod tests {
         assert_eq!(error.class(), EngineErrorClass::Conflict);
         assert_eq!(error.code(), "already_exists.engine.persistence");
         assert!(!control.contains_branch(&feature));
+        assert!(
+            ControlPlane::pending_branch_operations_for_test(&mut persistence).is_empty(),
+            "the failed fork clears its own pending marker; reload recovery would hide one left behind"
+        );
 
         let loaded = bootstrap_or_load(&mut persistence, false, None)
             .expect("control plane reloads cleanly");
         assert!(!loaded.contains_branch(&feature));
+    }
+
+    /// A fork carries its source's sealed vector index: the child's manifest
+    /// is materialized at the fork, so the child's queries search the
+    /// inherited artifact instead of falling back to scanning every row. The
+    /// child inherits the source's manifest row through copy-on-write either
+    /// way; only a materialized one is keyed to the child, so the query
+    /// diagnostics, not the row, show whether the fork did its part.
+    #[test]
+    fn a_fork_materializes_its_sources_vector_index_for_the_child() {
+        let mut database = Database::open_cache(CacheOpenOptions::new())
+            .expect("cache open succeeds")
+            .into_database();
+        let space = ProductSpace::new("default").expect("valid product space");
+        let feature = BranchName::new("feature").expect("valid branch");
+        let docs = VectorCollectionName::new("docs").expect("valid collection");
+        {
+            let mut parent = database
+                .vector(BranchName::default_branch(), space.clone())
+                .expect("vector service opens");
+            parent
+                .create_collection(
+                    docs.clone(),
+                    VectorConfig::new(2, VectorDistanceMetric::DotProduct).expect("valid config"),
+                )
+                .expect("collection create succeeds");
+            let entries = (0_u16..72)
+                .map(|index| {
+                    let offset = f32::from(index);
+                    VectorUpsertEntry::new(
+                        VectorKey::new(format!("doc-{index:03}")).expect("valid key"),
+                        VectorEmbedding::new([100.0 - offset, offset]).expect("valid embedding"),
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>();
+            parent
+                .batch_upsert(&docs, &entries)
+                .expect("batch upsert succeeds");
+            parent
+                .seed_flat_index_manifest_from_visible_rows_for_test(&docs, "source-a")
+                .expect("flat artifact seed succeeds");
+        }
+        database
+            .branches()
+            .expect("branch service opens")
+            .fork_current(&BranchName::default_branch(), feature.clone())
+            .expect("fork succeeds");
+
+        let (_, diagnostics) = database
+            .vector(feature, space)
+            .expect("vector service opens")
+            .query_with_index_diagnostics_for_test(
+                &docs,
+                &VectorEmbedding::new([1.0, 0.0]).expect("valid embedding"),
+                6,
+                None,
+            )
+            .expect("indexed query succeeds");
+        assert_eq!(diagnostics.manifest_status(), "loaded");
+        assert_eq!(diagnostics.manifest_inherited_ref_count(), 1);
+        assert_eq!(diagnostics.flat_source_count(), 1);
+        assert_eq!(diagnostics.exact_source_count(), 0);
+        assert!(
+            diagnostics.last_query_used_index(),
+            "the child searches the inherited index"
+        );
     }
 
     #[test]
