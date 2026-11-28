@@ -14,8 +14,8 @@ use crate::persistence::{
     encode_graph_type_index_space_prefix, encode_json_index_entry_space_prefix,
     encode_json_index_meta_prefix, encode_json_space_prefix, encode_kv_space_prefix,
     encode_vector_collection_prefix, encode_vector_space_prefix, reserved_space_key,
-    space_catalog_key, space_index_key, vector_index_manifest_prefix, CommitPlan, ReadSelector,
-    RowAddress, RowClass, RowMutation, StoragePersistence,
+    space_catalog_key, space_index_key, vector_index_manifest_prefix, BranchWriter, CommitPlan,
+    ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
 };
 
 use super::records::{
@@ -36,20 +36,27 @@ pub(crate) fn seed_required_space_rows(
     persistence: &mut StoragePersistence,
     record: &BranchCatalogRecord,
 ) -> Result<(), EngineError> {
+    // Reached only from exclusive (`&mut Database`) branch setup, so the
+    // writer is uncontended; taken before the reads all the same (#3782).
+    let writer = persistence.begin_write(record.storage_branch_id());
     let mutations = required_space_mutations(persistence, record)?;
     if mutations.is_empty() {
         return Ok(());
     }
-    persistence.commit(&CommitPlan::new(
-        record.storage_branch_id(),
-        mutations,
-        Some(record.generation()),
-    ))?;
+    persistence.commit(
+        &writer,
+        &CommitPlan::new(
+            record.storage_branch_id(),
+            mutations,
+            Some(record.generation()),
+        ),
+    )?;
     Ok(())
 }
 
 pub(crate) fn registration_mutations(
     persistence: &StoragePersistence,
+    writer: &BranchWriter,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
 ) -> Result<Vec<RowMutation>, EngineError> {
@@ -61,7 +68,7 @@ pub(crate) fn registration_mutations(
     // #3574: a name whose last deletion was interrupted still owns rows
     // behind a marked catalog row. Finish that sweep before registering, so
     // no row of the old space surfaces under the new one.
-    finish_pending_deletion(persistence, record, space)?;
+    finish_pending_deletion(persistence, writer, record, space)?;
 
     spaces.push(space.clone());
     spaces.sort();
@@ -343,6 +350,7 @@ fn data_delete_prefixes(space: &ProductSpace) -> Vec<(RowClass, Vec<u8>)> {
 /// single-commit deletion's.
 pub(crate) fn sweep_space_rows(
     persistence: &StoragePersistence,
+    writer: &BranchWriter,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
     mut rows: Vec<RowMutation>,
@@ -350,11 +358,12 @@ pub(crate) fn sweep_space_rows(
     let deleted = rows.len();
     while !rows.is_empty() {
         let rest = rows.split_off(rows.len().min(DELETE_CHUNK_ROWS));
-        commit_rows(persistence, record, rows)?;
+        commit_rows(persistence, writer, record, rows)?;
         rows = rest;
     }
     let last = commit_rows(
         persistence,
+        writer,
         record,
         vec![RowMutation::delete(space_address(
             record,
@@ -369,6 +378,7 @@ pub(crate) fn sweep_space_rows(
 /// pending — the row is absent, or registered and unmarked.
 pub(crate) fn finish_pending_deletion(
     persistence: &StoragePersistence,
+    writer: &BranchWriter,
     record: &BranchCatalogRecord,
     space: &ProductSpace,
 ) -> Result<Option<CommitOutcome>, EngineError> {
@@ -376,7 +386,13 @@ pub(crate) fn finish_pending_deletion(
         return Ok(None);
     }
     let rows = space_row_tombstones(persistence, record, space)?;
-    Ok(Some(sweep_space_rows(persistence, record, space, rows)?))
+    Ok(Some(sweep_space_rows(
+        persistence,
+        writer,
+        record,
+        space,
+        rows,
+    )?))
 }
 
 /// The spaces among `candidates` whose catalog row on `record` carries the
@@ -425,14 +441,18 @@ pub(crate) fn pending_deletion_at(
 
 fn commit_rows(
     persistence: &StoragePersistence,
+    writer: &BranchWriter,
     record: &BranchCatalogRecord,
     mutations: Vec<RowMutation>,
 ) -> Result<CommitOutcome, EngineError> {
-    persistence.commit(&CommitPlan::new(
-        record.storage_branch_id(),
-        mutations,
-        Some(record.generation()),
-    ))
+    persistence.commit(
+        writer,
+        &CommitPlan::new(
+            record.storage_branch_id(),
+            mutations,
+            Some(record.generation()),
+        ),
+    )
 }
 
 pub(crate) fn validate_required_space_rows(
@@ -629,19 +649,29 @@ mod tests {
         seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
         let tenant = ProductSpace::new("tenant").expect("valid space");
 
-        let mutations = registration_mutations(&persistence, &record, &tenant)
-            .expect("tenant registration mutations");
+        let mutations = registration_mutations(
+            &persistence,
+            &persistence.begin_write(record.storage_branch_id()),
+            &record,
+            &tenant,
+        )
+        .expect("tenant registration mutations");
         assert_eq!(mutations.len(), 2);
 
         persistence
-            .commit(&crate::persistence::CommitPlan::new(
+            .commit_for_test(&crate::persistence::CommitPlan::new(
                 record.storage_branch_id(),
                 mutations,
                 Some(record.generation()),
             ))
             .expect("space registration commits");
-        let mutations = registration_mutations(&persistence, &record, &tenant)
-            .expect("tenant already registered");
+        let mutations = registration_mutations(
+            &persistence,
+            &persistence.begin_write(record.storage_branch_id()),
+            &record,
+            &tenant,
+        )
+        .expect("tenant already registered");
         assert!(mutations.is_empty());
     }
 
@@ -664,10 +694,15 @@ mod tests {
         let record = create_branch(&mut persistence, "space-test");
         seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
         let tenant = ProductSpace::new("tenant").expect("valid space");
-        let mutations = registration_mutations(&persistence, &record, &tenant)
-            .expect("tenant registration mutations");
+        let mutations = registration_mutations(
+            &persistence,
+            &persistence.begin_write(record.storage_branch_id()),
+            &record,
+            &tenant,
+        )
+        .expect("tenant registration mutations");
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 mutations,
                 Some(record.generation()),
@@ -675,7 +710,7 @@ mod tests {
             .expect("space registration commits");
 
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 vec![RowMutation::delete(RowAddress::new(
                     record.storage_branch_id(),
@@ -700,10 +735,15 @@ mod tests {
         seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
         let tenant = ProductSpace::new("tenant").expect("valid space");
         let other = ProductSpace::new("other").expect("valid space");
-        let mutations = registration_mutations(&persistence, &record, &tenant)
-            .expect("tenant registration mutations");
+        let mutations = registration_mutations(
+            &persistence,
+            &persistence.begin_write(record.storage_branch_id()),
+            &record,
+            &tenant,
+        )
+        .expect("tenant registration mutations");
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 mutations,
                 Some(record.generation()),
@@ -711,7 +751,7 @@ mod tests {
             .expect("space registration commits");
 
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 vec![RowMutation::put(
                     RowAddress::new(
@@ -739,7 +779,7 @@ mod tests {
         seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
 
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 vec![RowMutation::put(
                     RowAddress::new(
@@ -767,7 +807,7 @@ mod tests {
         seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
 
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 vec![RowMutation::delete(RowAddress::new(
                     record.storage_branch_id(),
@@ -794,7 +834,7 @@ mod tests {
         *reserved.last_mut().expect("reserved flag exists") = 1;
 
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 vec![RowMutation::put(
                     RowAddress::new(
@@ -838,7 +878,7 @@ mod tests {
         )
         .expect("seed spaces");
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 seed,
                 Some(record.generation()),
@@ -856,7 +896,7 @@ mod tests {
         )
         .expect("reconcile");
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 mutations,
                 Some(record.generation()),
@@ -948,7 +988,7 @@ mod tests {
         mutations: Vec<RowMutation>,
     ) -> CommitVersion {
         persistence
-            .commit(&CommitPlan::new(
+            .commit_for_test(&CommitPlan::new(
                 record.storage_branch_id(),
                 mutations,
                 Some(record.generation()),
@@ -974,8 +1014,13 @@ mod tests {
         let record = create_branch(&mut persistence, "space-test");
         seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
         let tenant = ProductSpace::new("tenant").expect("valid space");
-        let mutations =
-            registration_mutations(&persistence, &record, &tenant).expect("registration");
+        let mutations = registration_mutations(
+            &persistence,
+            &persistence.begin_write(record.storage_branch_id()),
+            &record,
+            &tenant,
+        )
+        .expect("registration");
         let registered = commit_on(&persistence, &record, mutations);
         let remaining = index_without(&persistence, &record, &tenant)
             .expect("index reads")
@@ -1001,8 +1046,13 @@ mod tests {
         seed_required_space_rows(&mut persistence, &record).expect("space rows seed");
         let tenant = ProductSpace::new("tenant").expect("valid space");
         let other = ProductSpace::new("other").expect("valid space");
-        let mutations =
-            registration_mutations(&persistence, &record, &tenant).expect("registration");
+        let mutations = registration_mutations(
+            &persistence,
+            &persistence.begin_write(record.storage_branch_id()),
+            &record,
+            &tenant,
+        )
+        .expect("registration");
         commit_on(&persistence, &record, mutations);
         let corrupt = commit_on(
             &persistence,

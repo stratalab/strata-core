@@ -715,57 +715,74 @@ checkpoint, and close (`service/wal.rs`); verify no time-based fsync mechanism e
 shed-prefix direction is pinned by the process-crash testkit
 (`sigkilled_child_recovers_a_prefix_of_acknowledged_history`).
 
-### ACID-008: A read-modify-write commit carries the row it read, and takes that row's turn
+### ACID-008: A write holds its branch's writer from its first read to its last commit
 
-The engine's capability services borrow `&self`, so threads sharing one `Database` write at
-once. A write that derives its commit from a row it read MUST NOT overwrite a commit that
-landed after that read. The case that matters most is an event append, which places its
-events from the log's metadata row: next sequence, head hash. Two guards hold this, and
-neither replaces the other:
+The engine's capability services borrow `&self`, so threads sharing one `Database` run
+operations at once. Strata's model is that reads are concurrent and writes are exclusive per
+branch (`docs/architecture/engine/write-isolation-contract.md`). Every engine write operation
+takes its branch's `BranchWriter` (`persistence/writer.rs`) at its public boundary, before its
+first read of the branch, and keeps it through its last commit. `StoragePersistence::commit`
+requires `&BranchWriter`, so no commit reaches storage without one, and it debug-asserts that
+the plan's branch is the writer's.
 
-- **Correctness: the commit condition.** The commit carries the row as a
-  `CommitCondition` (`persistence/plan.rs`): present at the version read, or absent. Storage
-  validates it under the per-branch commit guard (ACID-003) and refuses a moved row with
-  `conflict.engine.persistence`, applying nothing. `retry_lost_commit_race` re-runs the
-  whole write, reads included, up to `COMMIT_CONFLICT_ATTEMPTS` times.
-- **Liveness: the turn.** The write holds the stripe its row hashes to
-  (`StoragePersistence::serialize_writes_to`, a fixed array of per-database mutexes) from
-  its read through its commit. In-process writers of one row then queue instead of racing.
-  Under saturation, retrying alone lets one writer lose hundreds of races in a row. A write
-  holds one stripe at a time, so stripes cannot deadlock.
+So nothing commits to the branch between a write's reads and its commit. A value derived
+from what the write read cannot overwrite a commit it never saw: an event log's next sequence
+and head hash, a JSON document under a path write, the space index, graph counts and
+adjacency. A multi-commit operation (a chunked graph or space deletion, `bulk_insert`, the
+pending-deletion sweep) holds the writer across all its commits, so no other write lands
+between them.
 
-The costs, accepted for correctness:
-- **The turn spans the commit.** In `Always` mode that includes the covering fsync, so two
-  logs that share one of the 256 stripes append one after the other. One log's appends are
-  serial regardless, since each places its events from the last one's metadata.
-- **A conditioned commit builds a conflict source.** That is one point read of the
-  conditioned row under the branch's commit guard (ACID-004), where a blind write skips
-  it.
+The rules:
+- Writers on different branches never wait for each other.
+- A write takes its branch once. Helpers receive the writer as `&BranchWriter`, and a
+  public write that another public write calls is split so that only the outer one takes
+  it. The lock records its holding thread and panics on same-thread re-entry ("re-entered"),
+  so a nested acquisition fails a test instead of deadlocking.
+- No caller code runs under a writer. A batch write drains the caller's iterator before it
+  takes its branch, because the iterator may itself write the branch: drained under the
+  writer, it would re-enter on one thread or deadlock against a producer on another.
+- A write that hands off to another write of the same branch drops its writer first (the
+  promotion commit before the catalog publish seeds the target's space rows).
+- Paths that run only under `&mut Database` take the writer too, uncontended: bootstrap,
+  branch operations, space administration, vector. Control rows commit under the system
+  branch's writer. Promotion plans from the target's rows before it takes the target's
+  writer, and drops it between the pending-sweep commits and the promotion commit; that is
+  sound only because the `&mut` borrow already excludes every other writer, and it must
+  take the writer before planning if branch operations ever move to `&self`.
+- Reads take no writer. A reader that reads more than once can still straddle a commit
+  until it reads from one view (#3782, C2). Those pairs are the harness ledger's remaining
+  `KNOWN_GAPS`.
 
-A write path that skips the condition can silently lose an acknowledged write (#3776: 400
-acknowledged appends, 200 stored). One that skips the turn makes a saturated log fail
-appends with retryable conflicts. Either is the regression.
+The cost, accepted: same-branch writes are serial, covering fsync included, so under
+`Always` durability concurrent writers of one branch no longer share an fsync (the #3782
+measurement put that sharing at 2.0–3.3× for eight threads; cache and `Standard` modes
+gained nothing from it). Cross-branch writers keep group commit.
 
-**Audit**: For every engine write that reads a row and commits a value derived from it,
-verify that:
-- the commit carries that row as a condition;
-- the write runs inside `serialize_writes_to` on that row, wrapping `retry_lost_commit_race`.
+A write path that reads before taking its writer, or commits under another branch's, can
+silently lose an acknowledged write (#3776: 400 acknowledged appends, 200 stored). That is
+the regression.
 
-Today that is `EventService::batch_append` (`data/event/service.rs`). Three sites the #3776
-audit found are not converted yet, and each is a known regression:
-- JSON path writes, which rewrite the whole document (#3777);
-- the space index rewritten by a first write to a new space (#3778);
-- the graph metadata counts (#3474, tracked in #3779).
+**Audit**: For every `StoragePersistence::commit` call site, verify that:
+- the writer it passes was taken at the operation's public boundary, before the operation's
+  first read of that branch, and stays alive through the operation's last commit;
+- it is the writer of the plan's branch;
+- no path reachable while it is held takes the same branch's writer again, or runs caller
+  code (an iterator or closure the caller passed in).
 
-`replay_append` (artifact import) owns its log alone. It carries the condition but takes no
-turn and does not retry, so a race it never expects fails the import instead of overwriting.
+Verify that `commit` still requires `&BranchWriter`, and that the conformance harness
+(`concurrency_conformance/`) lists no writer pair in `KNOWN_GAPS`.
 
 Tests:
-- `a_conditioned_commit_lands_only_while_the_row_is_as_it_was_read` and
-  `retry_lost_commit_race_retries_only_a_lost_race_and_only_up_to_its_bound`
-  (`persistence/plan.rs`);
-- the `concurrent_append_tests` module (`data/event/`), whose replay race shows a real
-  conflict, and `test_an_append_holds_its_logs_turn_from_its_read_through_its_commit`;
+- `a_branch_has_one_writer_at_a_time_and_branches_do_not_wait_for_each_other` and
+  `a_write_that_takes_its_branch_twice_panics_instead_of_waiting_for_itself`
+  (`persistence/writer.rs`);
+- the `caller_iterator_tests` module (`data/`): kv and json batch writes whose iterator
+  appends to the same branch land both writes;
+- the `concurrent_append_tests` module (`data/event/`): a second append, and a replay, wait
+  for a held append and land after it, in cache and durable mode; the writer is held through
+  the commit; an append to another branch is not held up;
+- the concurrency conformance harness: every ordered pair of kv, json, event, graph and
+  space-registration writers is serializable at every window;
 - `concurrent_appenders_through_one_handle_keep_every_acknowledged_event`
   (`tests/engine_event.rs`).
 

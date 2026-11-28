@@ -267,12 +267,17 @@ impl Database {
             ),
             crate::artifact::encode_remote_origin(origin),
         );
-        self.persistence
-            .commit(&crate::persistence::CommitPlan::new(
+        let writer = self
+            .persistence
+            .begin_write(crate::branch::catalog::SYSTEM_BRANCH_ID);
+        self.persistence.commit(
+            &writer,
+            &crate::persistence::CommitPlan::new(
                 crate::branch::catalog::SYSTEM_BRANCH_ID,
                 vec![mutation],
                 None,
-            ))?;
+            ),
+        )?;
         Ok(())
     }
 
@@ -797,15 +802,14 @@ fn vector_artifact_store_for_target(target: &PersistenceOpenTarget) -> VectorArt
 // `#[cfg(test)]` as test content.
 #[cfg(test)]
 impl Database {
-    /// Whether the turn `row` serializes on is held right now (#3776): by a
-    /// write of `row`, or of another row that shares its stripe.
-    pub(crate) fn write_turn_is_held_for_test(&self, row: &crate::persistence::RowAddress) -> bool {
-        self.persistence.write_turn_is_held_for_test(row)
+    /// Whether some thread holds `branch_id`'s writer right now (#3782).
+    pub(crate) fn branch_writer_is_held_for_test(&self, branch_id: strata_core::BranchId) -> bool {
+        self.persistence.branch_writer_is_held_for_test(branch_id)
     }
 
-    /// Writes that have waited for a held turn so far.
-    pub(crate) fn turn_waits_for_test(&self) -> u64 {
-        self.persistence.turn_waits_for_test()
+    /// Writes that have waited for a held branch writer so far.
+    pub(crate) fn writer_waits_for_test(&self) -> u64 {
+        self.persistence.writer_waits_for_test()
     }
 
     /// Persistence calls that have reached the fault seam so far, as

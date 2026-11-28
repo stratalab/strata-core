@@ -11,8 +11,8 @@ use crate::control::ControlPlane;
 use crate::diagnostics::{EngineError, EngineResult};
 use crate::persistence::{
     decode_kv_key, encode_kv_key, encode_kv_key_bytes, encode_kv_space_prefix, exclusive_after_key,
-    next_prefix, CommitPlan, PersistenceReadRow, ReadSelector, RowAddress, RowClass, RowMutation,
-    StoragePersistence,
+    next_prefix, BranchWriter, CommitPlan, PersistenceReadRow, ReadSelector, RowAddress, RowClass,
+    RowMutation, StoragePersistence,
 };
 
 use super::{
@@ -65,12 +65,16 @@ impl<'a> KvService<'a> {
     where
         I: IntoIterator<Item = (KvKey, KvValue)>,
     {
+        // The caller's iterator is drained before the writer is taken: it is
+        // the caller's code, and may itself write this branch (#3782).
+        let entries = entries.into_iter().collect::<Vec<_>>();
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let mut seen = BTreeSet::new();
-        let iterator = entries.into_iter();
-        let mut mutations = Vec::with_capacity(iterator.size_hint().0);
-        let mut created = Vec::with_capacity(iterator.size_hint().0);
-        for (key, value) in iterator {
+        let mut mutations = Vec::with_capacity(entries.len());
+        let mut created = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
             let encoded_key = self.encode_batch_key(key, &mut seen)?;
             let address = RowAddress::new(record.storage_branch_id(), RowClass::Kv, encoded_key);
             let existed = self
@@ -80,7 +84,7 @@ impl<'a> KvService<'a> {
             created.push(!existed);
             mutations.push(RowMutation::put(address, value.into_bytes()));
         }
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(KvBatchPutOutcome::new(commit, created))
     }
 
@@ -492,12 +496,16 @@ impl<'a> KvService<'a> {
     where
         I: IntoIterator<Item = KvKey>,
     {
+        // The caller's iterator is drained before the writer is taken: it is
+        // the caller's code, and may itself write this branch (#3782).
+        let keys = keys.into_iter().collect::<Vec<_>>();
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let mut seen = BTreeSet::new();
-        let iterator = keys.into_iter();
-        let mut mutations = Vec::with_capacity(iterator.size_hint().0);
-        let mut deleted = Vec::with_capacity(iterator.size_hint().0);
-        for key in iterator {
+        let mut mutations = Vec::with_capacity(keys.len());
+        let mut deleted = Vec::with_capacity(keys.len());
+        for key in keys {
             let encoded_key = self.encode_batch_key(key, &mut seen)?;
             let address = RowAddress::new(record.storage_branch_id(), RowClass::Kv, encoded_key);
             let exists = self
@@ -518,7 +526,7 @@ impl<'a> KvService<'a> {
         if mutations.is_empty() {
             return Ok(KvBatchDeleteOutcome::new(deleted, None));
         }
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(KvBatchDeleteOutcome::new(deleted, Some(commit)))
     }
 
@@ -685,6 +693,7 @@ impl<'a> KvService<'a> {
 
     fn commit_batch(
         &mut self,
+        writer: &BranchWriter,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
     ) -> Result<CommitOutcome, EngineError> {
@@ -703,8 +712,12 @@ impl<'a> KvService<'a> {
             .iter()
             .filter(|mutation| mutation.is_delete())
             .count();
-        let mut space_mutations =
-            ControlPlane::space_registration_mutations(self.persistence, record, &self.space)?;
+        let mut space_mutations = ControlPlane::space_registration_mutations(
+            self.persistence,
+            writer,
+            record,
+            &self.space,
+        )?;
         if !space_mutations.is_empty() {
             space_mutations.extend(mutations);
             mutations = space_mutations;
@@ -716,7 +729,7 @@ impl<'a> KvService<'a> {
         );
         Ok(self
             .persistence
-            .commit(&plan)?
+            .commit(writer, &plan)?
             .with_counts(user_put_count, user_delete_count))
     }
 }

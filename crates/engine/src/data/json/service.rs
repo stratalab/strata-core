@@ -14,8 +14,8 @@ use crate::diagnostics::{EngineError, EngineResult};
 use crate::persistence::{
     decode_json_document_id, decode_json_index_name, encode_json_index_entry_key,
     encode_json_index_entry_prefix, encode_json_index_meta_key, encode_json_index_meta_prefix,
-    encode_json_key, encode_json_space_prefix, CommitPlan, PersistenceReadRow, ReadSelector,
-    RowAddress, RowClass, RowMutation, StoragePersistence,
+    encode_json_key, encode_json_space_prefix, BranchWriter, CommitPlan, PersistenceReadRow,
+    ReadSelector, RowAddress, RowClass, RowMutation, StoragePersistence,
 };
 
 use super::{
@@ -102,6 +102,8 @@ impl<'a> JsonService<'a> {
         value: JsonValue,
     ) -> Result<JsonWriteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let address = self.row_address(&record, &id);
         if self
             .persistence
@@ -127,7 +129,7 @@ impl<'a> JsonService<'a> {
             Some(document.value()),
             &indexes,
         ));
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         // `create` refuses to overwrite an existing document, so a successful
         // commit here always installed a brand-new document.
         Ok(JsonWriteOutcome::new(
@@ -381,6 +383,8 @@ impl<'a> JsonService<'a> {
             return self.delete_document(id);
         }
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let address = self.row_address(&record, &id);
         let Some(row) = self
             .persistence
@@ -410,7 +414,7 @@ impl<'a> JsonService<'a> {
             Some(document.value()),
             &indexes,
         ));
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(JsonDeleteOutcome::new(true, Some(commit)))
     }
 
@@ -429,9 +433,13 @@ impl<'a> JsonService<'a> {
     where
         I: IntoIterator<Item = JsonSetEntry>,
     {
-        let record = self.branch_record()?;
-        let indexes = self.load_indexes(&record)?;
+        // The caller's iterator is drained before the writer is taken: it is
+        // the caller's code, and may itself write this branch (#3782).
         let entries = entries.into_iter().collect::<Vec<_>>();
+        let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
+        let indexes = self.load_indexes(&record)?;
         let mut documents: BTreeMap<JsonDocumentId, (JsonDocument, Option<JsonValue>)> =
             BTreeMap::new();
         let mut results = Vec::with_capacity(entries.len());
@@ -489,7 +497,7 @@ impl<'a> JsonService<'a> {
             ));
         }
 
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(JsonBatchSetOutcome::new(results, Some(commit)))
     }
 
@@ -498,13 +506,17 @@ impl<'a> JsonService<'a> {
     where
         I: IntoIterator<Item = JsonDocumentId>,
     {
+        // The caller's iterator is drained before the writer is taken: it is
+        // the caller's code, and may itself write this branch (#3782).
+        let ids = ids.into_iter().collect::<Vec<_>>();
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let indexes = self.load_indexes(&record)?;
-        let iterator = ids.into_iter();
         let mut seen = BTreeSet::new();
-        let mut mutations = Vec::with_capacity(iterator.size_hint().0);
-        let mut deleted = Vec::with_capacity(iterator.size_hint().0);
-        for id in iterator {
+        let mut mutations = Vec::with_capacity(ids.len());
+        let mut deleted = Vec::with_capacity(ids.len());
+        for id in ids {
             if !seen.insert(id.clone()) {
                 return Err(EngineError::invalid_input(
                     "invalid_argument.engine.json_batch_duplicate_document",
@@ -535,7 +547,7 @@ impl<'a> JsonService<'a> {
         if mutations.is_empty() {
             return Ok(JsonBatchDeleteOutcome::new(deleted, None));
         }
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(JsonBatchDeleteOutcome::new(deleted, Some(commit)))
     }
 
@@ -553,6 +565,8 @@ impl<'a> JsonService<'a> {
         }
 
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let indexes = self.load_indexes(&record)?;
         let mut states: BTreeMap<JsonDocumentId, BatchDeleteState> = BTreeMap::new();
         let mut deleted = Vec::with_capacity(entries.len());
@@ -601,7 +615,7 @@ impl<'a> JsonService<'a> {
         if mutations.is_empty() {
             return Ok(JsonBatchDeleteOutcome::new(deleted, None));
         }
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(JsonBatchDeleteOutcome::new(deleted, Some(commit)))
     }
 
@@ -742,6 +756,8 @@ impl<'a> JsonService<'a> {
         index_type: JsonIndexType,
     ) -> Result<JsonIndexDefinition, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let meta_address = self.index_meta_address(&record, &name);
         if self
             .persistence
@@ -778,7 +794,7 @@ impl<'a> JsonService<'a> {
                 ));
             }
         }
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(JsonIndexDefinition::new(
             name,
             self.space.clone(),
@@ -792,6 +808,8 @@ impl<'a> JsonService<'a> {
     /// Drops a JSON secondary index and its entries.
     pub fn drop_index(&mut self, name: &JsonIndexName) -> Result<bool, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let meta_address = self.index_meta_address(&record, name);
         let exists = self
             .persistence
@@ -819,7 +837,7 @@ impl<'a> JsonService<'a> {
                 row.key().to_vec(),
             )));
         }
-        self.commit_batch(&record, mutations)?;
+        self.commit_batch(&writer, &record, mutations)?;
         Ok(true)
     }
 
@@ -837,6 +855,8 @@ impl<'a> JsonService<'a> {
         create_if_missing: bool,
     ) -> Result<JsonWriteOutcome, EngineError> {
         let record = self.branch_record()?;
+        // #3782: one writer per branch, held from the first read to the last commit.
+        let writer = self.persistence.begin_write(record.storage_branch_id());
         let indexes = self.load_indexes(&record)?;
         let (document, old_value) = self.apply_set(&record, id, path, value, create_if_missing)?;
         // `apply_set` returns `None` for the prior value only when it created the
@@ -853,7 +873,7 @@ impl<'a> JsonService<'a> {
             Some(document.value()),
             &indexes,
         ));
-        let commit = self.commit_batch(&record, mutations)?;
+        let commit = self.commit_batch(&writer, &record, mutations)?;
         Ok(JsonWriteOutcome::new(
             commit,
             document.document_version(),
@@ -1221,6 +1241,7 @@ impl<'a> JsonService<'a> {
 
     fn commit_batch(
         &mut self,
+        writer: &BranchWriter,
         record: &BranchCatalogRecord,
         mutations: Vec<RowMutation>,
     ) -> Result<CommitOutcome, EngineError> {
@@ -1239,8 +1260,12 @@ impl<'a> JsonService<'a> {
             .iter()
             .filter(|mutation| mutation.is_delete())
             .count();
-        let mut space_mutations =
-            ControlPlane::space_registration_mutations(self.persistence, record, &self.space)?;
+        let mut space_mutations = ControlPlane::space_registration_mutations(
+            self.persistence,
+            writer,
+            record,
+            &self.space,
+        )?;
         if !space_mutations.is_empty() {
             space_mutations.extend(mutations);
             mutations = space_mutations;
@@ -1252,7 +1277,7 @@ impl<'a> JsonService<'a> {
         );
         Ok(self
             .persistence
-            .commit(&plan)?
+            .commit(writer, &plan)?
             .with_counts(user_put_count, user_delete_count))
     }
 }
